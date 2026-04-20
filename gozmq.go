@@ -316,10 +316,15 @@ type Socket struct {
 	lastEndpoint   string
 	listeners      []iface.Listener
 	sessions       []iface.Session
-	reconnectors   []*session.Reconnector
+	reconnectors   []reconnectEntry
 	streamAdapters []*stream.Adapter // STREAM-only: one per raw-bytes peer
 	acceptWG       sync.WaitGroup
 	connectWG      sync.WaitGroup
+}
+
+type reconnectEntry struct {
+	endpoint string
+	rc       *session.Reconnector
 }
 
 // Subscribe adds prefix to a SUB socket's filter. Returns an error on
@@ -458,11 +463,54 @@ func (s *Socket) Connect(endpoint string) error {
 		s.mu.Unlock()
 		return ErrSocketClosed
 	}
-	s.reconnectors = append(s.reconnectors, rc)
+	s.reconnectors = append(s.reconnectors, reconnectEntry{
+		endpoint: endpoint,
+		rc:       rc,
+	})
 	s.mu.Unlock()
 
 	rc.Start(s.runCtx)
 	return nil
+}
+
+// Disconnect tears down every previously-established outbound connection
+// whose Connect target exactly matches endpoint and prevents future
+// reconnect attempts to that endpoint. It applies only to non-STREAM
+// sockets; Bind-created server-side sessions are unaffected.
+func (s *Socket) Disconnect(endpoint string) error {
+	if s.closed.Load() {
+		return ErrSocketClosed
+	}
+	if s.socketType == Stream {
+		return fmt.Errorf("gozmq: Disconnect is not implemented for STREAM sockets: %w", ErrFSMViolation)
+	}
+
+	s.mu.Lock()
+	var (
+		matched []*session.Reconnector
+		kept    = s.reconnectors[:0]
+	)
+	for _, entry := range s.reconnectors {
+		if entry.endpoint == endpoint {
+			matched = append(matched, entry.rc)
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	if len(matched) == 0 {
+		s.mu.Unlock()
+		return fmt.Errorf("gozmq: endpoint %q not connected: %w", endpoint, ErrEndpointInvalid)
+	}
+	s.reconnectors = kept
+	s.mu.Unlock()
+
+	var errs []error
+	for _, rc := range matched {
+		if err := rc.Stop(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // watchClientHandshake spawns a goroutine that waits for the given
@@ -801,7 +849,7 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 	}
 
 	s.mu.Lock()
-	reconnectors := s.reconnectors
+	reconnectors := append([]reconnectEntry(nil), s.reconnectors...)
 	s.reconnectors = nil
 	listeners := s.listeners
 	s.listeners = nil
@@ -821,8 +869,8 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 
 	// 1. Quiesce reconnectors so loop() does not dial a new session after
 	// the current one drains.
-	for _, rc := range reconnectors {
-		rc.Quiesce()
+	for _, entry := range reconnectors {
+		entry.rc.Quiesce()
 	}
 	// 2. Close listeners so acceptLoop exits.
 	for _, l := range listeners {
@@ -832,8 +880,8 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 	// 3. Collect every live session (server-accept + client-reconnect).
 	sessions := make([]iface.Session, 0, len(acceptSessions)+len(reconnectors))
 	sessions = append(sessions, acceptSessions...)
-	for _, rc := range reconnectors {
-		if sess := rc.CurrentSession(); sess != nil {
+	for _, entry := range reconnectors {
+		if sess := entry.rc.CurrentSession(); sess != nil {
 			sessions = append(sessions, sess)
 		}
 	}
@@ -872,8 +920,8 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 	// exit → full cleanup. Teardown continues even if the linger drain
 	// was cancelled — callers observe a fully-closed Socket on return.
 	s.runCancel()
-	for _, rc := range reconnectors {
-		addErr(rc.Stop())
+	for _, entry := range reconnectors {
+		addErr(entry.rc.Stop())
 	}
 	for _, sess := range sessions {
 		addErr(sess.Stop())

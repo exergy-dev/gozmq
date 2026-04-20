@@ -17,7 +17,7 @@ var (
 	ErrContextClosed = zmqerr.ErrContextClosed
 
 	// ErrSocketClosed is returned by every Socket method (Send, Recv,
-	// Bind, Connect, Subscribe, SetOption, Monitor, Close) once the
+	// Bind, Connect, Disconnect, Subscribe, SetOption, Monitor, Close) once the
 	// socket has been closed. Close itself returns ErrSocketClosed on
 	// double-close.
 	ErrSocketClosed = zmqerr.ErrSocketClosed

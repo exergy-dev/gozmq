@@ -59,9 +59,13 @@ func (s *sessionImpl) runHeartbeat() {
 				}
 			}
 			// Fire a PING. If sendCommand fails the writer/reader
-			// shutdown path will fire shortly; we just exit our loop.
+			// shutdown path may never fire (for example, if the peer
+			// vanished in a way that only surfaces on write), so treat
+			// a heartbeat write failure as terminal and tear the session
+			// down here.
 			if err := s.sendCommand("PING", pingBody); err != nil {
 				s.cfg.Logger.Debug("gozmq/session: heartbeat send failed", "err", err)
+				s.shutdown()
 				return
 			}
 		}

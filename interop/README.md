@@ -100,6 +100,10 @@ Current heartbeat coverage includes:
 - Idle-session survival for at least five heartbeat intervals in both directions.
 - `EventDisconnected` on the monitored gozmq peer after the libzmq side closes mid-idle.
 
+Current lifecycle coverage includes:
+
+- Client-side `Disconnect` teardown in both directions.
+
 ## Conventions
 
 - Errors surfaced from libzmq use the prefix `libzmq: <op>: <strerror>`

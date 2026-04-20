@@ -81,6 +81,9 @@ var (
 	ZMQ_RCVMORE           = int(C.ZMQ_RCVMORE)
 	ZMQ_LAST_ENDPOINT     = int(C.ZMQ_LAST_ENDPOINT)
 	ZMQ_SNDMORE           = int(C.ZMQ_SNDMORE)
+
+	ZMQ_EVENT_ACCEPTED     = int(C.ZMQ_EVENT_ACCEPTED)
+	ZMQ_EVENT_DISCONNECTED = int(C.ZMQ_EVENT_DISCONNECTED)
 )
 
 // lastError wraps the current libzmq errno into a Go error with the

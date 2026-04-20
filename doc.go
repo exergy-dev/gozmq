@@ -108,7 +108,8 @@
 // Applying those same options to a live socket via [Socket.SetOption]
 // therefore returns an error rather than silently accepting a partial
 // or no-op mutation. Use the dedicated live APIs instead:
-// [Socket.Monitor], [Socket.Subscribe], and [Socket.Unsubscribe].
+// [Socket.Monitor], [Socket.Subscribe], [Socket.Unsubscribe], and
+// [Socket.Disconnect].
 //
 // # Subscription refcount
 //
