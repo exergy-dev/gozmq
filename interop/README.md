@@ -92,6 +92,7 @@ Current transport coverage beyond `tcp://` includes:
 
 - `ipc://` filesystem-namespace PAIR interop both directions.
 - `ipc://@name` abstract-namespace PAIR interop both directions on Linux.
+- `STREAM` raw-TCP framing interop both directions over `tcp://`.
 
 ## Conventions
 
