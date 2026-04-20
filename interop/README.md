@@ -88,6 +88,11 @@ Current payload-edge coverage includes:
 - Large frames at 1 MiB and 16 MiB.
 - 32-frame multipart messages.
 
+Current transport coverage beyond `tcp://` includes:
+
+- `ipc://` filesystem-namespace PAIR interop both directions.
+- `ipc://@name` abstract-namespace PAIR interop both directions on Linux.
+
 ## Conventions
 
 - Errors surfaced from libzmq use the prefix `libzmq: <op>: <strerror>`
