@@ -35,7 +35,8 @@ func TestNullHandshakeEndToEnd(t *testing.T) {
 		t.Fatalf("Name: client=%q server=%q", client.Name(), server.Name())
 	}
 
-	// Step 1: each side emits its READY (seed call, in=nil).
+	// Step 1: the client emits READY; the server is passive on seed so it can
+	// authorize the peer before sending its own READY.
 	clientOut, clientDone, err := client.NextHandshake(nil)
 	if err != nil {
 		t.Fatalf("client seed: %v", err)
@@ -54,38 +55,43 @@ func TestNullHandshakeEndToEnd(t *testing.T) {
 	if serverDone {
 		t.Fatal("server seed: done=true, want false")
 	}
+	if len(serverOut) != 0 {
+		t.Fatalf("server seed: out=%x, want empty", serverOut)
+	}
+
+	// Sanity-check the client's READY command shape: [5]"READY"[meta...].
+	if len(clientOut) < 6 {
+		t.Fatalf("READY body too short: %d bytes", len(clientOut))
+	}
+	if clientOut[0] != 5 {
+		t.Fatalf("READY name-length byte: got %d, want 5", clientOut[0])
+	}
+	if string(clientOut[1:6]) != "READY" {
+		t.Fatalf("READY name: got %q, want %q", clientOut[1:6], "READY")
+	}
+
+	// Step 2: the server ingests the client's READY and emits its own READY.
+	serverOut, serverDone, err = server.NextHandshake(clientOut)
+	if err != nil {
+		t.Fatalf("server ingest: %v", err)
+	}
+	if !serverDone {
+		t.Fatal("server ingest: done=false, want true")
+	}
 	if len(serverOut) == 0 {
-		t.Fatal("server seed: empty out")
+		t.Fatal("server ingest: empty READY out")
+	}
+	if serverOut[0] != 5 || string(serverOut[1:6]) != "READY" {
+		t.Fatalf("server READY malformed: %x", serverOut)
 	}
 
-	// Sanity-check the READY command shape: [5]"READY"[meta...].
-	for _, out := range [][]byte{clientOut, serverOut} {
-		if len(out) < 6 {
-			t.Fatalf("READY body too short: %d bytes", len(out))
-		}
-		if out[0] != 5 {
-			t.Fatalf("READY name-length byte: got %d, want 5", out[0])
-		}
-		if string(out[1:6]) != "READY" {
-			t.Fatalf("READY name: got %q, want %q", out[1:6], "READY")
-		}
-	}
-
-	// Step 2: each side ingests the other's READY body.
+	// Step 3: client ingests the server's READY body.
 	_, clientDone, err = client.NextHandshake(serverOut)
 	if err != nil {
 		t.Fatalf("client ingest: %v", err)
 	}
 	if !clientDone {
 		t.Fatal("client ingest: done=false, want true")
-	}
-
-	_, serverDone, err = server.NextHandshake(clientOut)
-	if err != nil {
-		t.Fatalf("server ingest: %v", err)
-	}
-	if !serverDone {
-		t.Fatal("server ingest: done=false, want true")
 	}
 
 	// Peer metadata round-tripped through the handshake. We cast to the

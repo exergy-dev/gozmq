@@ -72,6 +72,15 @@ Current PLAIN coverage includes:
 - Oversized-credential rejection.
 - REQ/REP, DEALER/ROUTER, and PUB/SUB transparency over authenticated links.
 
+Current ZAP coverage includes:
+
+- NULL accept/reject with libzmq as the authoritative server.
+- NULL accept/reject with gozmq as the authoritative server.
+- PLAIN accept/reject with libzmq as the authoritative server.
+- PLAIN accept/reject with gozmq as the authoritative server.
+- CURVE accept/reject with libzmq as the authoritative server.
+- CURVE accept/reject with gozmq as the authoritative server.
+
 ## Conventions
 
 - Errors surfaced from libzmq use the prefix `libzmq: <op>: <strerror>`

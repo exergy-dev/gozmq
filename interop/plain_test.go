@@ -4,13 +4,11 @@ package interop
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/rkm/gozmq"
-	"github.com/rkm/gozmq/security"
 )
 
 func TestPlain_LibzmqClient_GozmqServer(t *testing.T) {
@@ -126,9 +124,15 @@ func TestPlain_LibzmqClient_GozmqServer_BadPassword(t *testing.T) {
 
 func TestPlain_GozmqClient_LibzmqServer(t *testing.T) {
 	libCtx := newLibCtx(t)
-	zapDone := serveLibzmqZAP(t, libCtx, func(user, pass string) bool {
-		return user == "alice" && pass == "hunter2"
-	})
+	zapDone := startLibzmqZAPHandler(t, libCtx, zapDecisionFunc(func(_domain, _address, mech string, credentials [][]byte) (string, map[string]string, error) {
+		if mech != "PLAIN" || len(credentials) != 2 {
+			return "", nil, gozmq.ErrAuthFailed
+		}
+		if string(credentials[0]) != "alice" || string(credentials[1]) != "hunter2" {
+			return "", nil, gozmq.ErrAuthFailed
+		}
+		return "alice", nil, nil
+	}))
 
 	server := libCtx.NewSocket(ZMQ_PAIR)
 	t.Cleanup(func() { _ = server.Close() })
@@ -201,9 +205,15 @@ func TestPlain_GozmqClient_LibzmqServer(t *testing.T) {
 
 func TestPlain_GozmqClient_LibzmqServer_BadPassword(t *testing.T) {
 	libCtx := newLibCtx(t)
-	zapDone := serveLibzmqZAP(t, libCtx, func(user, pass string) bool {
-		return user == "alice" && pass == "hunter2"
-	})
+	zapDone := startLibzmqZAPHandler(t, libCtx, zapDecisionFunc(func(_domain, _address, mech string, credentials [][]byte) (string, map[string]string, error) {
+		if mech != "PLAIN" || len(credentials) != 2 {
+			return "", nil, gozmq.ErrAuthFailed
+		}
+		if string(credentials[0]) != "alice" || string(credentials[1]) != "hunter2" {
+			return "", nil, gozmq.ErrAuthFailed
+		}
+		return "alice", nil, nil
+	}))
 
 	server := libCtx.NewSocket(ZMQ_PAIR)
 	t.Cleanup(func() { _ = server.Close() })
@@ -307,9 +317,15 @@ func TestPlain_LibzmqClient_GozmqServer_EmptyUsername(t *testing.T) {
 
 func TestPlain_GozmqClient_LibzmqServer_EmptyUsername(t *testing.T) {
 	libCtx := newLibCtx(t)
-	zapDone := serveLibzmqZAP(t, libCtx, func(user, pass string) bool {
-		return user == "" && pass == "hunter2"
-	})
+	zapDone := startLibzmqZAPHandler(t, libCtx, zapDecisionFunc(func(_domain, _address, mech string, credentials [][]byte) (string, map[string]string, error) {
+		if mech != "PLAIN" || len(credentials) != 2 {
+			return "", nil, gozmq.ErrAuthFailed
+		}
+		if string(credentials[0]) != "" || string(credentials[1]) != "hunter2" {
+			return "", nil, gozmq.ErrAuthFailed
+		}
+		return "anonymous", nil, nil
+	}))
 
 	server := libCtx.NewSocket(ZMQ_PAIR)
 	t.Cleanup(func() { _ = server.Close() })
@@ -406,9 +422,15 @@ func TestPlain_LibzmqClient_GozmqServer_TooLongUsername(t *testing.T) {
 func TestPlain_ReqRep_Transparent(t *testing.T) {
 	t.Run("gozmq-req-libzmq-rep", func(t *testing.T) {
 		libCtx := newLibCtx(t)
-		zapDone := serveLibzmqZAP(t, libCtx, func(user, pass string) bool {
-			return user == "alice" && pass == "hunter2"
-		})
+		zapDone := startLibzmqZAPHandler(t, libCtx, zapDecisionFunc(func(_domain, _address, mech string, credentials [][]byte) (string, map[string]string, error) {
+			if mech != "PLAIN" || len(credentials) != 2 {
+				return "", nil, gozmq.ErrAuthFailed
+			}
+			if string(credentials[0]) != "alice" || string(credentials[1]) != "hunter2" {
+				return "", nil, gozmq.ErrAuthFailed
+			}
+			return "alice", nil, nil
+		}))
 		rep := libCtx.NewSocket(ZMQ_REP)
 		t.Cleanup(func() { _ = rep.Close() })
 		if err := rep.SetOption(ZMQ_PLAIN_SERVER, 1); err != nil {
@@ -530,9 +552,15 @@ func TestPlain_ReqRep_Transparent(t *testing.T) {
 func TestPlain_DealerRouter_Transparent(t *testing.T) {
 	t.Run("gozmq-dealer-libzmq-router", func(t *testing.T) {
 		libCtx := newLibCtx(t)
-		zapDone := serveLibzmqZAP(t, libCtx, func(user, pass string) bool {
-			return user == "alice" && pass == "hunter2"
-		})
+		zapDone := startLibzmqZAPHandler(t, libCtx, zapDecisionFunc(func(_domain, _address, mech string, credentials [][]byte) (string, map[string]string, error) {
+			if mech != "PLAIN" || len(credentials) != 2 {
+				return "", nil, gozmq.ErrAuthFailed
+			}
+			if string(credentials[0]) != "alice" || string(credentials[1]) != "hunter2" {
+				return "", nil, gozmq.ErrAuthFailed
+			}
+			return "alice", nil, nil
+		}))
 		router := libCtx.NewSocket(ZMQ_ROUTER)
 		t.Cleanup(func() { _ = router.Close() })
 		if err := router.SetOption(ZMQ_PLAIN_SERVER, 1); err != nil {
@@ -720,9 +748,15 @@ func TestPlain_PubSub_Transparent(t *testing.T) {
 
 	t.Run("libzmq-pub-gozmq-sub", func(t *testing.T) {
 		libCtx := newLibCtx(t)
-		zapDone := serveLibzmqZAP(t, libCtx, func(user, pass string) bool {
-			return user == "alice" && pass == "hunter2"
-		})
+		zapDone := startLibzmqZAPHandler(t, libCtx, zapDecisionFunc(func(_domain, _address, mech string, credentials [][]byte) (string, map[string]string, error) {
+			if mech != "PLAIN" || len(credentials) != 2 {
+				return "", nil, gozmq.ErrAuthFailed
+			}
+			if string(credentials[0]) != "alice" || string(credentials[1]) != "hunter2" {
+				return "", nil, gozmq.ErrAuthFailed
+			}
+			return "alice", nil, nil
+		}))
 		pub := libCtx.NewSocket(ZMQ_PUB)
 		t.Cleanup(func() { _ = pub.Close() })
 		if err := pub.SetOption(ZMQ_PLAIN_SERVER, 1); err != nil {
@@ -785,50 +819,4 @@ func TestPlain_PubSub_Transparent(t *testing.T) {
 			}
 		}
 	})
-}
-
-func serveLibzmqZAP(t *testing.T, ctx *Ctx, allow func(user, pass string) bool) <-chan error {
-	t.Helper()
-
-	handler := security.NewZapHandler(zapPolicyFunc(func(_domain, _address, mech string, credentials [][]byte) (string, map[string]string, error) {
-		if mech != "PLAIN" {
-			return "", nil, errors.New("unexpected mechanism")
-		}
-		if len(credentials) != 2 {
-			return "", nil, errors.New("unexpected credential count")
-		}
-		user := string(credentials[0])
-		pass := string(credentials[1])
-		if !allow(user, pass) {
-			return "", nil, gozmq.ErrAuthFailed
-		}
-		return user, nil, nil
-	}))
-
-	sock := ctx.NewSocket(ZMQ_REP)
-	if err := sock.Bind("inproc://zeromq.zap.01"); err != nil {
-		t.Fatalf("libzmq ZAP bind: %v", err)
-	}
-	t.Cleanup(func() { _ = sock.Close() })
-
-	done := make(chan error, 1)
-	go func() {
-		req, err := sock.Recv()
-		if err != nil {
-			done <- err
-			return
-		}
-		if err := sock.Send(handler.ServeRequest(req)); err != nil {
-			done <- err
-			return
-		}
-		done <- nil
-	}()
-	return done
-}
-
-type zapPolicyFunc func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error)
-
-func (f zapPolicyFunc) Authenticate(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
-	return f(domain, address, mech, credentials)
 }

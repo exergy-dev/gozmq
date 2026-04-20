@@ -43,6 +43,10 @@ type nullMech struct {
 	sentReady bool
 	peerReady bool
 	metaCodec iface.MetadataCodec
+	zapAuth   iface.ZAPAuthorizer
+	zapDomain string
+	zapAddr   string
+	zapMeta   map[string]string
 }
 
 // NewNull returns a NULL security mechanism configured for role and
@@ -80,6 +84,9 @@ func (m *nullMech) AsServer() bool { return m.role == iface.RoleServer }
 // property-list bytes. The session layer is responsible for wrapping this
 // in a COMMAND-flagged frame (flags bit 0x04 + length + this body).
 func (m *nullMech) NextHandshake(in []byte) ([]byte, bool, error) {
+	if m.role == iface.RoleServer {
+		return m.nextServer(in)
+	}
 	// First direction: emit our READY command body.
 	if !m.sentReady {
 		if in != nil {
@@ -108,6 +115,41 @@ func (m *nullMech) NextHandshake(in []byte) ([]byte, bool, error) {
 	}
 
 	// Post-handshake: the session layer must not call us again.
+	return nil, true, nil
+}
+
+func (m *nullMech) nextServer(in []byte) ([]byte, bool, error) {
+	if !m.peerReady {
+		if !m.sentReady && in == nil {
+			// Passive seed: wait for the client's READY so authorization can
+			// happen before the server emits its READY.
+			return nil, false, nil
+		}
+		if in == nil {
+			return nil, false, fmt.Errorf("gozmq/security/null: nil peer input on server handshake step: %w", zmqerr.ErrMalformedFrame)
+		}
+		props, err := m.decodeReady(in)
+		if err != nil {
+			return nil, false, err
+		}
+		if m.zapAuth != nil {
+			_, meta, err := m.zapAuth(m.zapDomain, m.zapAddr, nullMechName, nil)
+			if err != nil {
+				return nil, false, fmt.Errorf("gozmq/security/null: ZAP rejected peer: %w", err)
+			}
+			m.zapMeta = copyNullMeta(meta)
+		}
+		m.peerMeta = mergeNullMeta(props, m.zapMeta)
+		m.peerReady = true
+	}
+	if !m.sentReady {
+		out, err := m.encodeReady()
+		if err != nil {
+			return nil, false, err
+		}
+		m.sentReady = true
+		return out, true, nil
+	}
 	return nil, true, nil
 }
 
@@ -159,6 +201,17 @@ func (m *nullMech) PeerMetadata() map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// ConfigureZAP wires a server-side RFC 27 authorizer into the mechanism.
+// Client-side NULL ignores the hook.
+func (m *nullMech) ConfigureZAP(authorizer iface.ZAPAuthorizer, domain, address string) {
+	if m.role != iface.RoleServer {
+		return
+	}
+	m.zapAuth = authorizer
+	m.zapDomain = domain
+	m.zapAddr = address
 }
 
 // encodeReady builds a ZMTP READY command BODY: a single-byte name length,
@@ -255,4 +308,29 @@ func (nullMetaCodec) Decode(raw []byte) (map[string]string, error) {
 		out[name] = value
 	}
 	return out, nil
+}
+
+func copyNullMeta(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]string, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func mergeNullMeta(base, overlay map[string]string) map[string]string {
+	if len(base) == 0 {
+		return copyNullMeta(overlay)
+	}
+	if len(overlay) == 0 {
+		return copyNullMeta(base)
+	}
+	out := copyNullMeta(base)
+	for k, v := range overlay {
+		out[k] = v
+	}
+	return out
 }
