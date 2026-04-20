@@ -105,6 +105,7 @@ Current lifecycle coverage includes:
 - Client-side `Disconnect` teardown in both directions.
 - Receiver-enforced max-message-size teardown in both directions.
 - Reconnect after close/rebind in both directions.
+- `LINGER` drain-vs-drop semantics in both directions.
 
 ## Conventions
 

@@ -57,6 +57,8 @@ var (
 	ZMQ_SUBSCRIBE         = int(C.ZMQ_SUBSCRIBE)
 	ZMQ_UNSUBSCRIBE       = int(C.ZMQ_UNSUBSCRIBE)
 	ZMQ_LINGER            = int(C.ZMQ_LINGER)
+	ZMQ_SNDHWM            = int(C.ZMQ_SNDHWM)
+	ZMQ_RCVHWM            = int(C.ZMQ_RCVHWM)
 	ZMQ_IDENTITY          = int(C.ZMQ_IDENTITY)
 	ZMQ_ROUTING_ID        = int(C.ZMQ_IDENTITY) // alias used by newer libzmq
 	ZMQ_PLAIN_SERVER      = int(C.ZMQ_PLAIN_SERVER)
@@ -150,8 +152,9 @@ func (c *Ctx) Close() error {
 type Sock struct {
 	ptr unsafe.Pointer
 
-	mu     sync.Mutex
-	closed bool
+	mu             sync.Mutex
+	closed         bool
+	lingerExplicit bool
 }
 
 // NewSocket creates a socket of the given type on this Ctx.
@@ -169,7 +172,9 @@ func (c *Ctx) NewSocket(typ int) *Sock {
 	return &Sock{ptr: ptr}
 }
 
-// Close destroys the socket. Subsequent calls are no-ops.
+// Close destroys the socket. Subsequent calls are no-ops. By default we
+// force LINGER=0 so a misbehaved test cannot hang ctx_term; if the test
+// explicitly configured ZMQ_LINGER via SetOption, Close preserves it.
 func (s *Sock) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -177,10 +182,10 @@ func (s *Sock) Close() error {
 		return nil
 	}
 	s.closed = true
-	// Force LINGER=0 so a misbehaved test cannot hang ctx_term. Callers
-	// who want to exercise LINGER set it before Close via SetOption.
-	linger := C.int(0)
-	C.zmq_setsockopt(s.ptr, C.int(ZMQ_LINGER), unsafe.Pointer(&linger), C.size_t(unsafe.Sizeof(linger)))
+	if !s.lingerExplicit {
+		linger := C.int(0)
+		C.zmq_setsockopt(s.ptr, C.int(ZMQ_LINGER), unsafe.Pointer(&linger), C.size_t(unsafe.Sizeof(linger)))
+	}
 	if rc := C.zmq_close(s.ptr); rc != 0 {
 		return lastError("zmq_close")
 	}
@@ -310,6 +315,9 @@ func (s *Sock) SetOption(opt int, val interface{}) error {
 		cv := C.int(v)
 		if rc := C.zmq_setsockopt(s.ptr, C.int(opt), unsafe.Pointer(&cv), C.size_t(unsafe.Sizeof(cv))); rc != 0 {
 			return lastError(fmt.Sprintf("zmq_setsockopt %d", opt))
+		}
+		if opt == ZMQ_LINGER {
+			s.lingerExplicit = true
 		}
 	case int64:
 		cv := C.int64_t(v)
