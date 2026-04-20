@@ -94,6 +94,11 @@ Current transport coverage beyond `tcp://` includes:
 - `ipc://@name` abstract-namespace PAIR interop both directions on Linux.
 - `STREAM` raw-TCP framing interop both directions over `tcp://`.
 
+Current heartbeat coverage includes:
+
+- Idle-session survival for at least five heartbeat intervals in both directions.
+- `EventDisconnected` on the monitored gozmq peer after the libzmq side closes mid-idle.
+
 ## Conventions
 
 - Errors surfaced from libzmq use the prefix `libzmq: <op>: <strerror>`
