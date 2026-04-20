@@ -81,6 +81,13 @@ Current ZAP coverage includes:
 - CURVE accept/reject with libzmq as the authoritative server.
 - CURVE accept/reject with gozmq as the authoritative server.
 
+Current payload-edge coverage includes:
+
+- Zero-length frames, including an empty middle frame in multipart.
+- Frame-size boundaries at 255, 256, and 257 bytes.
+- Large frames at 1 MiB and 16 MiB.
+- 32-frame multipart messages.
+
 ## Conventions
 
 - Errors surfaced from libzmq use the prefix `libzmq: <op>: <strerror>`
