@@ -90,6 +90,7 @@ Current payload-edge coverage includes:
 
 Current transport coverage beyond `tcp://` includes:
 
+- `tcp6://` PAIR interop both directions. On the libzmq side this uses `tcp://` plus `ZMQ_IPV6=1`, which is libzmq's native IPv6 model.
 - `ipc://` filesystem-namespace PAIR interop both directions.
 - `ipc://@name` abstract-namespace PAIR interop both directions on Linux.
 - `STREAM` raw-TCP framing interop both directions over `tcp://`.

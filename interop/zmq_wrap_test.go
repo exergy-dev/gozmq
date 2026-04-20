@@ -69,6 +69,52 @@ func TestWrap_PairSmoke(t *testing.T) {
 	}
 }
 
+// TestWrap_TCP6Smoke proves the wrapper can drive libzmq over IPv6 loopback:
+// enable IPv6 on a tcp:// socket (libzmq's native model), recover the
+// resolved endpoint, and round-trip a multipart message. If this fails the
+// higher-level gozmq tcp6 interop test is chasing the wrong layer.
+func TestWrap_TCP6Smoke(t *testing.T) {
+	ctx := NewCtx()
+	t.Cleanup(func() { _ = ctx.Close() })
+
+	server := ctx.NewSocket(ZMQ_PAIR)
+	t.Cleanup(func() { _ = server.Close() })
+	if err := server.SetOption(ZMQ_IPV6, 1); err != nil {
+		t.Fatalf("server IPV6: %v", err)
+	}
+	if err := server.Bind("tcp://[::1]:0"); err != nil {
+		t.Skipf("tcp6 not available: %v", err)
+	}
+	ep, err := server.LastEndpoint()
+	if err != nil {
+		t.Fatalf("server LastEndpoint: %v", err)
+	}
+	if ep == "" {
+		t.Fatal("server LastEndpoint empty")
+	}
+
+	client := ctx.NewSocket(ZMQ_PAIR)
+	t.Cleanup(func() { _ = client.Close() })
+	if err := client.SetOption(ZMQ_IPV6, 1); err != nil {
+		t.Fatalf("client IPV6: %v", err)
+	}
+	if err := client.Connect(libzmqTCP6Endpoint(ep)); err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	frames := [][]byte{[]byte("hello6"), []byte("world6")}
+	if err := client.Send(frames); err != nil {
+		t.Fatalf("client send: %v", err)
+	}
+	got, err := server.Recv()
+	if err != nil {
+		t.Fatalf("server recv: %v", err)
+	}
+	assertFramesEqual(t, got, frames)
+}
+
 // TestWrap_SetOption_IntAndBytes covers the reflection-style option
 // dispatcher for both int and []byte values.
 func TestWrap_SetOption_IntAndBytes(t *testing.T) {
