@@ -177,6 +177,9 @@ func (c *Context) NewSocket(t SocketType, opts ...Option) (*Socket, error) {
 			return nil, err
 		}
 	}
+	if err := validateSocketConfig(t, cfg); err != nil {
+		return nil, err
+	}
 	engine, subHandle, err := newEngineFor(t, cfg)
 	if err != nil {
 		return nil, err
@@ -367,7 +370,15 @@ func (s *Socket) Connect(endpoint string) error {
 	}
 	rc := session.NewReconnector(session.ReconnectConfig{
 		Dial: func(ctx context.Context) (iface.Conn, error) {
-			return tr.Dial(ctx, endpoint)
+			conn, err := tr.Dial(ctx, endpoint)
+			if err != nil {
+				return nil, err
+			}
+			if err := s.applyConnSocketOptions(conn); err != nil {
+				_ = conn.Close()
+				return nil, err
+			}
+			return conn, nil
 		},
 		NewSession: func(conn iface.Conn) iface.Session {
 			sess := s.buildSession(conn, iface.RoleClient)
@@ -520,6 +531,11 @@ func (s *Socket) acceptLoop(l iface.Listener) {
 			}
 			return
 		}
+		if err := s.applyConnSocketOptions(conn); err != nil {
+			s.emit(EventAcceptFailed, bound, err.Error())
+			_ = conn.Close()
+			continue
+		}
 		s.emit(EventAccepted, conn.RemoteEndpoint(), "")
 		if s.socketType == Stream {
 			s.startStreamAdapter(conn)
@@ -632,6 +648,10 @@ func (s *Socket) connectStream(tr iface.Transport, endpoint string) error {
 		s.emit(EventConnectDelayed, endpoint, err.Error())
 		return err
 	}
+	if err := s.applyConnSocketOptions(conn); err != nil {
+		_ = conn.Close()
+		return err
+	}
 	s.emit(EventConnected, endpoint, "")
 	s.startStreamAdapter(conn)
 	return nil
@@ -669,12 +689,19 @@ func (s *Socket) RecvMsg(ctx context.Context) (*Msg, error) {
 	return s.engine.Recv(ctx)
 }
 
-// SetOption applies an Option after construction.
+// SetOption is intentionally strict on live sockets: options that affect
+// engine/session/transport construction are rejected after NewSocket so the
+// API never silently accepts a no-op mutation. Use dedicated live methods
+// such as Monitor, Subscribe, and Unsubscribe instead.
 func (s *Socket) SetOption(o Option) error {
 	if s.closed.Load() {
 		return ErrSocketClosed
 	}
-	return o.apply(s.cfg)
+	name := "option"
+	if meta, ok := o.(socketOptionMeta); ok {
+		name = meta.optionName()
+	}
+	return fmt.Errorf("gozmq: %s is construction-only on live sockets; use dedicated methods such as Monitor, Subscribe, and Unsubscribe instead", name)
 }
 
 // Monitor registers ch to receive Events matching mask. Wired fully in
@@ -929,6 +956,25 @@ func (s *Socket) logger() *slog.Logger {
 		return s.cfg.logger
 	}
 	return slog.Default()
+}
+
+type socketTuner interface {
+	SetTCPKeepAlive(enabled bool, period time.Duration) error
+	SetTCPNoDelay(enabled bool) error
+}
+
+func (s *Socket) applyConnSocketOptions(conn iface.Conn) error {
+	tuner, ok := conn.(socketTuner)
+	if !ok {
+		return nil
+	}
+	if err := tuner.SetTCPKeepAlive(s.cfg.tcpKeepalive, 30*time.Second); err != nil {
+		return err
+	}
+	if err := tuner.SetTCPNoDelay(s.cfg.tcpNoDelay); err != nil {
+		return err
+	}
+	return nil
 }
 
 // classifyHandshakeEvent maps a handshake error to the appropriate

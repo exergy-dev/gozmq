@@ -158,6 +158,19 @@ func (e *end) Recv(ctx context.Context) (*msg.Msg, error) {
 	}
 }
 
+// TryRecv returns one buffered message if available without blocking.
+// It is intentionally not part of iface.Pipe; the session writer uses
+// it opportunistically via a local type assertion during linger drains
+// to avoid racing a pre-cancelled context against a ready receive.
+func (e *end) TryRecv() (*msg.Msg, bool) {
+	select {
+	case m := <-e.recvCh:
+		return m, true
+	default:
+		return nil, false
+	}
+}
+
 func (e *end) Close() error {
 	e.closeOnce.Do(func() { close(e.myClosed()) })
 	return nil

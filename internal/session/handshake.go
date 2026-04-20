@@ -4,10 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
-	"github.com/rkm/gozmq/internal/zmqerr"
 	"github.com/rkm/gozmq/internal/iface"
+	"github.com/rkm/gozmq/internal/zmqerr"
 )
 
 // Greeting layout constants. Duplicated from zmtp/greeting.go on purpose:
@@ -15,14 +16,14 @@ import (
 // (so A4 can land in parallel with A1). The byte layout is fixed by ZMTP
 // 3.1 §2.1 and will not drift.
 const (
-	greetingSize       = 64
-	greetingMechOff    = 12
-	greetingMechLen    = 20
+	greetingSize        = 64
+	greetingMechOff     = 12
+	greetingMechLen     = 20
 	greetingAsServerOff = 32
-	greetingVersionMaj = 0x03
-	greetingVersionMin = 0x01
-	greetingSigPrefix  = 0xFF
-	greetingSigTerm    = 0x7F
+	greetingVersionMaj  = 0x03
+	greetingVersionMin  = 0x01
+	greetingSigPrefix   = 0xFF
+	greetingSigTerm     = 0x7F
 )
 
 // doHandshake drives greeting + security handshake under HandshakeTimeout.
@@ -50,6 +51,10 @@ func (s *sessionImpl) doHandshake() error {
 	}
 
 	if err := s.runSecurityHandshake(); err != nil {
+		return s.classifyHandshakeErr(err)
+	}
+
+	if err := s.finalizePeerMetadata(); err != nil {
 		return s.classifyHandshakeErr(err)
 	}
 
@@ -196,6 +201,91 @@ func (s *sessionImpl) runSecurityHandshake() error {
 		// Handshake command bodies are delivered raw to NextHandshake,
 		// which owns any per-step cryptographic unwrapping.
 		in = body
+	}
+}
+
+func (s *sessionImpl) finalizePeerMetadata() error {
+	props, err := peerMetadataFromMechanism(s.cfg.Mech)
+	if err != nil {
+		return err
+	}
+	if err := s.cfg.Mech.SetPeerMetadata(props); err != nil {
+		return fmt.Errorf("gozmq/session: set peer metadata: %w", err)
+	}
+	if err := validateSocketTypeCompatibility(s.cfg.Mech.Metadata(), props); err != nil {
+		return err
+	}
+	return nil
+}
+
+func peerMetadataFromMechanism(m iface.SecurityMech) (map[string]string, error) {
+	type peerMetaReader interface {
+		PeerMetadata() map[string]string
+	}
+	pm, ok := m.(peerMetaReader)
+	if !ok {
+		return nil, fmt.Errorf("gozmq/session: mechanism %q does not expose peer metadata", m.Name())
+	}
+	props := pm.PeerMetadata()
+	if props == nil {
+		return nil, fmt.Errorf("gozmq/session: mechanism %q finished handshake without peer metadata", m.Name())
+	}
+	return props, nil
+}
+
+func validateSocketTypeCompatibility(localMeta, peerMeta map[string]string) error {
+	localType, ok := metadataValue(localMeta, "Socket-Type")
+	if !ok {
+		return nil
+	}
+	peerType, ok := metadataValue(peerMeta, "Socket-Type")
+	if !ok {
+		return nil
+	}
+	if localType == "STREAM" || peerType == "STREAM" {
+		return fmt.Errorf("gozmq/session: STREAM sockets do not negotiate ZMTP sessions (local=%s peer=%s)", localType, peerType)
+	}
+	if !socketTypesCompatible(localType, peerType) {
+		return fmt.Errorf("gozmq/session: incompatible Socket-Type pairing local=%s peer=%s", localType, peerType)
+	}
+	return nil
+}
+
+func metadataValue(props map[string]string, name string) (string, bool) {
+	for key, value := range props {
+		if strings.EqualFold(key, name) {
+			return strings.ToUpper(value), true
+		}
+	}
+	return "", false
+}
+
+func socketTypesCompatible(localType, peerType string) bool {
+	switch localType {
+	case "REQ":
+		return peerType == "REP" || peerType == "ROUTER"
+	case "REP":
+		return peerType == "REQ" || peerType == "DEALER"
+	case "DEALER":
+		return peerType == "REP" || peerType == "DEALER" || peerType == "ROUTER"
+	case "ROUTER":
+		return peerType == "REQ" || peerType == "DEALER" || peerType == "ROUTER"
+	case "PUB":
+		return peerType == "SUB" || peerType == "XSUB"
+	case "SUB":
+		return peerType == "PUB" || peerType == "XPUB"
+	case "XPUB":
+		return peerType == "SUB" || peerType == "XSUB"
+	case "XSUB":
+		return peerType == "PUB" || peerType == "XPUB"
+	case "PUSH":
+		return peerType == "PULL"
+	case "PULL":
+		return peerType == "PUSH"
+	case "PAIR":
+		return peerType == "PAIR"
+	default:
+		return false
 	}
 }
 

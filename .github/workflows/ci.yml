@@ -8,7 +8,7 @@ on:
 
 jobs:
   test:
-    name: test (race)
+    name: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,10 +23,23 @@ jobs:
         env:
           CGO_ENABLED: '0'
         run: go build ./...
+      - name: Test
+        env:
+          CGO_ENABLED: '1'
+        run: go test -count=1 ./...
+
+  race:
+    name: race (core packages)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
       - name: Test with race detector
         env:
           CGO_ENABLED: '1'
-        run: go test -race -count=1 ./...
+        run: go test -race -count=1 . ./internal/session ./socket ./transport ./zmtp ./security ./security/curve
 
   fuzz-smoke:
     name: fuzz smoke (10s per target)

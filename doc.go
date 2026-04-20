@@ -10,6 +10,8 @@
 // for TLS-wrapped TCP). Wire compatibility with libzmq >= 4.2 is a first-class
 // goal: a gozmq socket interoperates bit-for-bit with libzmq over ZMTP 3.1
 // and negotiates down to 3.0 when the peer predates heartbeats.
+// Peers whose advertised Socket-Type is incompatible with the local socket
+// are rejected during the handshake before traffic phase begins.
 //
 // See design.md at the repository root for architecture, protocol, security,
 // and testing specifications. The public API is stable only after the v1.0.0
@@ -96,6 +98,15 @@
 // dropped rather than blocking the socket's hot path. Dropped events are
 // counted in the MonitorChanDropped expvar counter. Monitor channels must
 // be buffered; 64-256 is a reasonable default for most applications.
+//
+// # Live Reconfiguration
+//
+// Most With* options are construction-time only because they shape the
+// engine, session, or transport wiring created by [Context.NewSocket].
+// Applying those same options to a live socket via [Socket.SetOption]
+// therefore returns an error rather than silently accepting a partial
+// or no-op mutation. Use the dedicated live APIs instead:
+// [Socket.Monitor], [Socket.Subscribe], and [Socket.Unsubscribe].
 //
 // # Subscription refcount
 //

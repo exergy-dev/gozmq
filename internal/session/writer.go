@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"time"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
@@ -27,6 +28,13 @@ const (
 	// writev. Primary guard against pathological large-payload bursts
 	// pinning megabytes in the writer's buffer list.
 	maxBatchBytes = 1 << 20 // 1 MiB
+
+	// writerDrainSettleTime keeps the conn open briefly after a
+	// CancelWriter-driven drain completes. Socket.Close currently waits on
+	// WriterFlushed, then hard-stops the session; without a small settle
+	// window the final burst can race directly into conn.Close on fast
+	// teardown paths.
+	writerDrainSettleTime = 10 * time.Millisecond
 )
 
 // runWriter is the pipe->wire traffic-phase goroutine. It pulls *msg.Msg
@@ -48,7 +56,6 @@ const (
 // sess.Stop() closes the conn.
 func (s *sessionImpl) runWriter() {
 	defer s.wg.Done()
-	defer s.shutdown()
 	defer close(s.writerExited)
 
 	// Reusable batch buffers; recycled each loop iteration.
@@ -62,11 +69,27 @@ func (s *sessionImpl) runWriter() {
 		m, err := s.sessionPipe.Recv(s.writerCtx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				// writerCtx was cancelled (LINGER drain signal). Drain
-				// remaining buffered messages non-blocking before exit.
-				s.drainSessionPipe()
-			} else if !isWriterShutdownErr(err) {
-				s.cfg.Logger.Debug("gozmq/session: writer recv exit", "err", err)
+				// writerCtx was cancelled by the socket-level linger path.
+				// Drain whatever is already queued, then exit WITHOUT
+				// tearing down the conn. Socket.Close waits on
+				// WriterFlushed, then calls sess.Stop() to close the conn
+				// in a coordinated order.
+				if drainErr := s.drainSessionPipe(); drainErr != nil && !isWriterShutdownErr(drainErr) {
+					s.cfg.Logger.Debug("gozmq/session: writer drain exit", "err", drainErr)
+					s.shutdown()
+				} else if writerDrainSettleTime > 0 {
+					timer := time.NewTimer(writerDrainSettleTime)
+					select {
+					case <-timer.C:
+					case <-s.ctx.Done():
+					}
+					timer.Stop()
+				}
+			} else {
+				if !isWriterShutdownErr(err) {
+					s.cfg.Logger.Debug("gozmq/session: writer recv exit", "err", err)
+				}
+				s.shutdown()
 			}
 			return
 		}
@@ -82,6 +105,7 @@ func (s *sessionImpl) runWriter() {
 		if encErr != nil {
 			if !isWriterShutdownErr(encErr) {
 				s.cfg.Logger.Debug("gozmq/session: writer encode exit", "err", encErr)
+				s.shutdown()
 			}
 			return
 		}
@@ -99,6 +123,7 @@ func (s *sessionImpl) runWriter() {
 			if encErr != nil {
 				if !isWriterShutdownErr(encErr) {
 					s.cfg.Logger.Debug("gozmq/session: writer encode exit", "err", encErr)
+					s.shutdown()
 				}
 				return
 			}
@@ -112,6 +137,7 @@ func (s *sessionImpl) runWriter() {
 		if err := s.flushBatch(&buffers); err != nil {
 			if !isWriterShutdownErr(err) {
 				s.cfg.Logger.Debug("gozmq/session: writer send exit", "err", err)
+				s.shutdown()
 			}
 			return
 		}
@@ -128,12 +154,19 @@ var cancelledCtx = func() context.Context {
 	return ctx
 }()
 
+type nonBlockingPipe interface {
+	TryRecv() (*msg.Msg, bool)
+}
+
 // recvNonBlocking attempts to pull one more message from the pipe
 // without blocking. Returns (nil, false) when the pipe is empty or
 // closed. The pre-cancelled context makes Pipe.Recv fall through to
 // the fast path: it returns the buffered message if any, otherwise
 // ctx.Err().
 func recvNonBlocking(p iface.Pipe) (*msg.Msg, bool) {
+	if nb, ok := p.(nonBlockingPipe); ok {
+		return nb.TryRecv()
+	}
 	m, err := p.Recv(cancelledCtx)
 	if err != nil {
 		return nil, false
@@ -239,7 +272,7 @@ func (s *sessionImpl) flushBatch(buffers *net.Buffers) error {
 //
 // Uses the batching path so large queued bursts drain in as few
 // syscalls as possible without violating the bounded-batch invariants.
-func (s *sessionImpl) drainSessionPipe() {
+func (s *sessionImpl) drainSessionPipe() error {
 	var (
 		buffers  net.Buffers
 		scratch  bytes.Buffer
@@ -248,7 +281,7 @@ func (s *sessionImpl) drainSessionPipe() {
 	for {
 		m, ok := recvNonBlocking(s.sessionPipe)
 		if !ok {
-			return
+			return nil
 		}
 
 		frameBuf = frameBuf[:0]
@@ -258,7 +291,7 @@ func (s *sessionImpl) drainSessionPipe() {
 		var encErr error
 		frameBuf, batchBytes, encErr = encodeMessageFrames(s.cfg.Mech, s.cfg.Codec, &scratch, m, frameBuf, batchBytes)
 		if encErr != nil {
-			return
+			return encErr
 		}
 		for msgCount < maxBatchMessages && batchBytes < maxBatchBytes {
 			next, more := recvNonBlocking(s.sessionPipe)
@@ -267,13 +300,13 @@ func (s *sessionImpl) drainSessionPipe() {
 			}
 			frameBuf, batchBytes, encErr = encodeMessageFrames(s.cfg.Mech, s.cfg.Codec, &scratch, next, frameBuf, batchBytes)
 			if encErr != nil {
-				return
+				return encErr
 			}
 			msgCount++
 		}
 		buffers = append(buffers[:0], frameBuf...)
 		if err := s.flushBatch(&buffers); err != nil {
-			return
+			return err
 		}
 	}
 }

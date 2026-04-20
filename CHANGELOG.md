@@ -10,6 +10,15 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
 - Removed `WithDraftTypes`, `Socket.Join`, `Socket.Leave`, and the `socket/draft` package.
 - `SocketType` now enumerates only stable ZMTP patterns: Req, Rep, Dealer, Router, Pub, Sub, XPub, XSub, Push, Pull, Pair, Stream.
 
+### API truthfulness
+
+- `Socket.SetOption` now rejects construction-time options on live sockets instead of silently accepting mutations that do not fully reconfigure the active engine/session/transport graph.
+- `WithTCPKeepalive` now applies to the actual TCP/TLS connections a socket dials or accepts, rather than only mutating socket config state.
+
+### Handshake compatibility
+
+- Session handshakes now propagate peer READY metadata through `SetPeerMetadata` and reject incompatible advertised `Socket-Type` pairings before traffic phase begins.
+
 ### LINGER drain fix
 
 - Per-writer cancel context so `Socket.Close` no longer tears down the TCP conn before the writer has flushed queued outbound frames (`internal/session/writer.go`, `internal/session/session.go`).

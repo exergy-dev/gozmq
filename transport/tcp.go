@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/rkm/gozmq/internal/zmqerr"
 	"github.com/rkm/gozmq/internal/iface"
+	"github.com/rkm/gozmq/internal/zmqerr"
 )
 
 // Defaults that match design §7.1 and the socketConfig defaults in
@@ -224,6 +224,30 @@ func (c *tcpConn) SetLinger(sec int) error {
 		return tc.SetLinger(sec)
 	}
 	return nil
+}
+
+func (c *tcpConn) SetTCPKeepAlive(enabled bool, period time.Duration) error {
+	tc, ok := c.Conn.(*net.TCPConn)
+	if !ok {
+		return nil
+	}
+	if err := tc.SetKeepAlive(enabled); err != nil {
+		return err
+	}
+	if enabled && period > 0 {
+		if err := tc.SetKeepAlivePeriod(period); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *tcpConn) SetTCPNoDelay(enabled bool) error {
+	tc, ok := c.Conn.(*net.TCPConn)
+	if !ok {
+		return nil
+	}
+	return tc.SetNoDelay(enabled)
 }
 
 func formatTCPEndpoint(scheme string, a net.Addr) string {

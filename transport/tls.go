@@ -8,6 +8,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/zmqerr"
@@ -194,6 +195,30 @@ func (c *tlsConn) LocalEndpoint() string {
 
 func (c *tlsConn) RemoteEndpoint() string {
 	return formatTCPEndpoint(tlsScheme, c.RemoteAddr())
+}
+
+func (c *tlsConn) SetTCPKeepAlive(enabled bool, period time.Duration) error {
+	tc, ok := c.Conn.NetConn().(*net.TCPConn)
+	if !ok {
+		return nil
+	}
+	if err := tc.SetKeepAlive(enabled); err != nil {
+		return err
+	}
+	if enabled && period > 0 {
+		if err := tc.SetKeepAlivePeriod(period); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *tlsConn) SetTCPNoDelay(enabled bool) error {
+	tc, ok := c.Conn.NetConn().(*net.TCPConn)
+	if !ok {
+		return nil
+	}
+	return tc.SetNoDelay(enabled)
 }
 
 // --------------------------------------------------------------------------

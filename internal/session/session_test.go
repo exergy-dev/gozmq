@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -30,12 +31,14 @@ func newFakeConnPair() (a, b *fakeConn) {
 		w:      aWriter,
 		local:  "fake://a",
 		remote: "fake://b",
+		closed: make(chan struct{}),
 	}
 	b = &fakeConn{
 		r:      bReader,
 		w:      bWriter,
 		local:  "fake://b",
 		remote: "fake://a",
+		closed: make(chan struct{}),
 	}
 	return a, b
 }
@@ -48,6 +51,7 @@ type fakeConn struct {
 	remote string
 
 	closeOnce sync.Once
+	closed    chan struct{}
 }
 
 func (c *fakeConn) Read(p []byte) (int, error)  { return c.r.Read(p) }
@@ -56,6 +60,7 @@ func (c *fakeConn) Close() error {
 	c.closeOnce.Do(func() {
 		_ = c.r.Close()
 		_ = c.w.Close()
+		close(c.closed)
 	})
 	return nil
 }
@@ -64,6 +69,7 @@ func (c *fakeConn) RemoteEndpoint() string           { return c.remote }
 func (c *fakeConn) SetDeadline(time.Time) error      { return nil }
 func (c *fakeConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *fakeConn) SetWriteDeadline(time.Time) error { return nil }
+func (c *fakeConn) Closed() <-chan struct{}          { return c.closed }
 
 // --------------------------------------------------------------------------
 // fakeCodec: trivial length-prefixed wire format.
@@ -126,16 +132,18 @@ func newFakeMech(name string, asServer bool, props map[string]string) *fakeMech 
 	if props == nil {
 		props = map[string]string{}
 	}
-	return &fakeMech{name: name, asServer: asServer, props: props}
+	return &fakeMech{name: name, asServer: asServer, props: copyProps(props)}
 }
 
 type fakeMech struct {
-	name     string
-	asServer bool
-	props    map[string]string
+	name      string
+	asServer  bool
+	props     map[string]string
+	peerProps map[string]string
 
-	step int
-	mu   sync.Mutex
+	step         int
+	mu           sync.Mutex
+	setPeerCalls int
 }
 
 func (m *fakeMech) Name() string   { return m.name }
@@ -146,22 +154,37 @@ func (m *fakeMech) EncodeFrame(flags uint8, b []byte) (uint8, []byte, error) {
 func (m *fakeMech) DecodeFrame(flags uint8, b []byte) (uint8, []byte, error) {
 	return flags, b, nil
 }
-func (m *fakeMech) Metadata() map[string]string             { return m.props }
-func (m *fakeMech) SetPeerMetadata(map[string]string) error { return nil }
+func (m *fakeMech) Metadata() map[string]string { return copyProps(m.props) }
+func (m *fakeMech) SetPeerMetadata(props map[string]string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.setPeerCalls++
+	m.peerProps = copyProps(props)
+	return nil
+}
+func (m *fakeMech) PeerMetadata() map[string]string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return copyProps(m.peerProps)
+}
 
 // NextHandshake is a one-round exchange: emit a single READY-equivalent
-// blob ("HELLO"), then expect one back, then declare done. Both sides
-// run identically because asServer is symmetric for our test.
+// blob containing local metadata, then expect one back, then declare
+// done. Both sides run identically because asServer is symmetric for
+// our test.
 func (m *fakeMech) NextHandshake(in []byte) ([]byte, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	switch m.step {
 	case 0:
 		m.step++
-		return []byte("HELLO"), false, nil
+		return encodeFakeProps(m.props), false, nil
 	case 1:
-		// in is the peer's HELLO; we don't validate contents, we just
-		// declare done.
+		props, err := decodeFakeProps(in)
+		if err != nil {
+			return nil, false, err
+		}
+		m.peerProps = props
 		m.step++
 		return nil, true, nil
 	default:
@@ -178,7 +201,7 @@ func TestSession_Handshake_AndRoundTrip(t *testing.T) {
 
 	sA := New(Config{
 		Conn:    connA,
-		Mech:    newFakeMech("NULL", false, map[string]string{"Identity": "A"}),
+		Mech:    newFakeMech("NULL", false, map[string]string{"Socket-Type": "PAIR", "Identity": "A"}),
 		Codec:   fakeCodec{},
 		Role:    iface.RoleClient,
 		SendHWM: 4,
@@ -186,7 +209,7 @@ func TestSession_Handshake_AndRoundTrip(t *testing.T) {
 	})
 	sB := New(Config{
 		Conn:    connB,
-		Mech:    newFakeMech("NULL", true, map[string]string{"Identity": "B"}),
+		Mech:    newFakeMech("NULL", true, map[string]string{"Socket-Type": "PAIR", "Identity": "B"}),
 		Codec:   fakeCodec{},
 		Role:    iface.RoleServer,
 		SendHWM: 4,
@@ -208,14 +231,26 @@ func TestSession_Handshake_AndRoundTrip(t *testing.T) {
 	waitHandshake(t, sB, "B")
 
 	// Verify the engine-facing pipe surfaces the peer's identity from
-	// metadata propagation (which here is local — fakeMech publishes
-	// its own metadata; the session's pipe attaches our local
-	// identity, since SetPeerMetadata is a no-op stub).
+	// metadata propagated through SetPeerMetadata after the handshake.
 	if got := sA.Pipe().PeerEndpoint(); got != "fake://b" {
 		t.Errorf("A pipe peer endpoint = %q, want fake://b", got)
 	}
 	if got := sB.Pipe().PeerEndpoint(); got != "fake://a" {
 		t.Errorf("B pipe peer endpoint = %q, want fake://a", got)
+	}
+	mechA := sA.(*sessionImpl).cfg.Mech.(*fakeMech)
+	mechB := sB.(*sessionImpl).cfg.Mech.(*fakeMech)
+	if mechA.setPeerCalls != 1 {
+		t.Fatalf("A SetPeerMetadata calls = %d, want 1", mechA.setPeerCalls)
+	}
+	if mechB.setPeerCalls != 1 {
+		t.Fatalf("B SetPeerMetadata calls = %d, want 1", mechB.setPeerCalls)
+	}
+	if got := string(sA.Pipe().PeerIdentity()); got != "B" {
+		t.Fatalf("A pipe peer identity = %q, want B", got)
+	}
+	if got := string(sB.Pipe().PeerIdentity()); got != "A" {
+		t.Fatalf("B pipe peer identity = %q, want A", got)
 	}
 
 	// Push a multipart message A→B and verify it surfaces verbatim.
@@ -281,6 +316,48 @@ func TestSession_Handshake_AndRoundTrip(t *testing.T) {
 	if err := sB.Stop(); err != nil {
 		t.Errorf("B.Stop second call: %v", err)
 	}
+}
+
+func encodeFakeProps(props map[string]string) []byte {
+	const header = "META\n"
+	lines := make([]string, 0, len(props))
+	for k, v := range props {
+		lines = append(lines, k+"="+v)
+	}
+	return []byte(header + strings.Join(lines, "\n"))
+}
+
+func decodeFakeProps(in []byte) (map[string]string, error) {
+	const header = "META\n"
+	props := map[string]string{}
+	if string(in) == header {
+		return props, nil
+	}
+	if !strings.HasPrefix(string(in), header) {
+		return nil, fmt.Errorf("invalid fake metadata header %q", in)
+	}
+	for _, line := range strings.Split(strings.TrimPrefix(string(in), header), "\n") {
+		if line == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			return nil, fmt.Errorf("invalid fake metadata line %q", line)
+		}
+		props[key] = value
+	}
+	return props, nil
+}
+
+func copyProps(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 // TestSession_StopBeforeHandshake ensures Stop on a partially-started
@@ -357,6 +434,78 @@ func TestSession_StopWithoutStart(t *testing.T) {
 	case <-s.Handshaked():
 	case <-time.After(time.Second):
 		t.Fatal("Handshaked not closed by Stop-without-Start")
+	}
+}
+
+func TestSession_CancelWriter_DoesNotCloseConnUntilStop(t *testing.T) {
+	connA, connB := newFakeConnPair()
+
+	sA := New(Config{
+		Conn:    connA,
+		Mech:    newFakeMech("NULL", false, map[string]string{"Identity": "A"}),
+		Codec:   fakeCodec{},
+		Role:    iface.RoleClient,
+		SendHWM: 8,
+		RecvHWM: 8,
+	})
+	sB := New(Config{
+		Conn:    connB,
+		Mech:    newFakeMech("NULL", true, map[string]string{"Identity": "B"}),
+		Codec:   fakeCodec{},
+		Role:    iface.RoleServer,
+		SendHWM: 8,
+		RecvHWM: 8,
+	})
+
+	sA.Start()
+	sB.Start()
+	defer func() {
+		_ = sA.Stop()
+		_ = sB.Stop()
+	}()
+
+	waitHandshake(t, sA, "A")
+	waitHandshake(t, sB, "B")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	for i := 0; i < 4; i++ {
+		if err := sA.Pipe().Send(ctx, msg.FromBytes([]byte(fmt.Sprintf("linger-%d", i)))); err != nil {
+			t.Fatalf("Send[%d]: %v", i, err)
+		}
+	}
+
+	sA.CancelWriter()
+	select {
+	case <-sA.WriterFlushed():
+	case <-time.After(2 * time.Second):
+		t.Fatal("WriterFlushed did not fire after CancelWriter")
+	}
+
+	select {
+	case <-connA.Closed():
+		t.Fatal("CancelWriter closed the conn before Stop")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	for i := 0; i < 4; i++ {
+		m, err := sB.Pipe().Recv(ctx)
+		if err != nil {
+			t.Fatalf("Recv[%d]: %v", i, err)
+		}
+		want := fmt.Sprintf("linger-%d", i)
+		if string(m.Bytes()) != want {
+			t.Fatalf("Recv[%d] = %q, want %q", i, m.Bytes(), want)
+		}
+	}
+
+	if err := sA.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	select {
+	case <-connA.Closed():
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not close the conn")
 	}
 }
 
