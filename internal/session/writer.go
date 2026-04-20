@@ -96,7 +96,7 @@ func (s *sessionImpl) runWriter() {
 		msgCount := 1
 
 		var encErr error
-		batchBytes, encErr = batch.appendMessage(s.cfg.Mech, s.cfg.Codec, m, batchBytes)
+		batchBytes, encErr = batch.appendMessage(s, m, batchBytes)
 		if encErr != nil {
 			batch.release()
 			if !isWriterShutdownErr(encErr) {
@@ -115,7 +115,7 @@ func (s *sessionImpl) runWriter() {
 			if !ok {
 				break
 			}
-			batchBytes, encErr = batch.appendMessage(s.cfg.Mech, s.cfg.Codec, next, batchBytes)
+			batchBytes, encErr = batch.appendMessage(s, next, batchBytes)
 			if encErr != nil {
 				batch.release()
 				if !isWriterShutdownErr(encErr) {
@@ -174,9 +174,10 @@ func recvNonBlocking(p iface.Pipe) (*msg.Msg, bool) {
 }
 
 type writerBatch struct {
-	buffers  net.Buffers
-	scratch  bytes.Buffer
-	releases []func()
+	buffers      net.Buffers
+	scratch      bytes.Buffer
+	releases     []func()
+	ownedBuffers [][]byte
 }
 
 func (b *writerBatch) reset() {
@@ -191,12 +192,16 @@ func (b *writerBatch) release() {
 		}
 	}
 	b.releases = b.releases[:0]
+	for _, owned := range b.ownedBuffers {
+		msg.PoolPut(owned)
+	}
+	b.ownedBuffers = b.ownedBuffers[:0]
 }
 
-func (b *writerBatch) appendMessage(mech iface.SecurityMech, codec iface.FrameCodec, m *msg.Msg, sizeSoFar int) (int, error) {
+func (b *writerBatch) appendMessage(s *sessionImpl, m *msg.Msg, sizeSoFar int) (int, error) {
 	frames := m.Frames()
 	if len(frames) == 0 {
-		return b.appendFrame(mech, codec, 0, nil, sizeSoFar)
+		return b.appendFrame(s, 0, nil, sizeSoFar)
 	}
 	last := len(frames) - 1
 	for i, body := range frames {
@@ -205,7 +210,7 @@ func (b *writerBatch) appendMessage(mech iface.SecurityMech, codec iface.FrameCo
 			flags |= iface.FlagMore
 		}
 		var err error
-		sizeSoFar, err = b.appendFrame(mech, codec, flags, body, sizeSoFar)
+		sizeSoFar, err = b.appendFrame(s, flags, body, sizeSoFar)
 		if err != nil {
 			return sizeSoFar, err
 		}
@@ -213,48 +218,35 @@ func (b *writerBatch) appendMessage(mech iface.SecurityMech, codec iface.FrameCo
 	return sizeSoFar, nil
 }
 
-func (b *writerBatch) appendFrame(mech iface.SecurityMech, codec iface.FrameCodec, flags uint8, body []byte, sizeSoFar int) (int, error) {
-	if appender := directFrameAppender(mech, codec); appender != nil {
-		release, frameBytes, err := appender.AppendFrameBuffers(&b.buffers, flags, body)
+func (b *writerBatch) appendFrame(s *sessionImpl, flags uint8, body []byte, sizeSoFar int) (int, error) {
+	if s.direct != nil {
+		release, frameBytes, err := s.direct.AppendFrameBuffers(&b.buffers, flags, body)
 		if err != nil {
 			return sizeSoFar, fmt.Errorf("gozmq/session: serialize frame: %w", err)
 		}
 		b.releases = append(b.releases, release)
 		return sizeSoFar + frameBytes, nil
 	}
-	blob, sz, err := encodeOneFrame(mech, codec, &b.scratch, flags, body)
+	blob, sz, err := encodeOneFrame(s.encode, s.cfg.Codec, &b.scratch, flags, body)
 	if err != nil {
 		return sizeSoFar, err
 	}
 	b.buffers = append(b.buffers, blob)
+	b.ownedBuffers = append(b.ownedBuffers, blob)
 	return sizeSoFar + sz, nil
-}
-
-func directFrameAppender(mech iface.SecurityMech, codec iface.FrameCodec) iface.FrameBufferAppender {
-	if mech == nil || codec == nil {
-		return nil
-	}
-	switch mech.Name() {
-	case "NULL", "PLAIN":
-		appender, ok := codec.(iface.FrameBufferAppender)
-		if ok {
-			return appender
-		}
-	}
-	return nil
 }
 
 // encodeOneFrame applies the mechanism's body/flag rewrite, then the codec
 // WriteFrame into scratch, returning a freshly-allocated []byte of the full
 // header+body serialization.
 func encodeOneFrame(
-	mech iface.SecurityMech,
+	encode frameEncoder,
 	codec iface.FrameCodec,
 	scratch *bytes.Buffer,
 	flags uint8,
 	body []byte,
 ) ([]byte, int, error) {
-	wireFlags, encoded, err := mech.EncodeFrame(flags, body)
+	wireFlags, encoded, err := encode(flags, body)
 	if err != nil {
 		return nil, 0, fmt.Errorf("gozmq/session: encode frame: %w", err)
 	}
@@ -263,7 +255,8 @@ func encodeOneFrame(
 		return nil, 0, fmt.Errorf("gozmq/session: serialize frame: %w", err)
 	}
 	// Copy out so scratch can be reused for the next frame.
-	blob := append([]byte(nil), scratch.Bytes()...)
+	blob := msg.PoolGet(len(scratch.Bytes()))
+	copy(blob, scratch.Bytes())
 	return blob, len(blob), nil
 }
 
@@ -317,7 +310,7 @@ func (s *sessionImpl) drainSessionPipe() error {
 		msgCount := 1
 
 		var encErr error
-		batchBytes, encErr = batch.appendMessage(s.cfg.Mech, s.cfg.Codec, m, batchBytes)
+		batchBytes, encErr = batch.appendMessage(s, m, batchBytes)
 		if encErr != nil {
 			batch.release()
 			return encErr
@@ -327,7 +320,7 @@ func (s *sessionImpl) drainSessionPipe() error {
 			if !more {
 				break
 			}
-			batchBytes, encErr = batch.appendMessage(s.cfg.Mech, s.cfg.Codec, next, batchBytes)
+			batchBytes, encErr = batch.appendMessage(s, next, batchBytes)
 			if encErr != nil {
 				batch.release()
 				return encErr
@@ -351,7 +344,7 @@ func (s *sessionImpl) drainSessionPipe() error {
 // the frame-blob slice.
 func (s *sessionImpl) writeMessage(m *msg.Msg) error {
 	var batch writerBatch
-	_, err := batch.appendMessage(s.cfg.Mech, s.cfg.Codec, m, 0)
+	_, err := batch.appendMessage(s, m, 0)
 	if err != nil {
 		batch.release()
 		return err
@@ -366,7 +359,23 @@ func (s *sessionImpl) writeMessage(m *msg.Msg) error {
 // multipart user message. Used for single-frame COMMAND writes
 // (heartbeat PING, PONG reply) where batching is not applicable.
 func (s *sessionImpl) writeFrame(flags uint8, body []byte) error {
-	wireFlags, encoded, err := s.cfg.Mech.EncodeFrame(flags, body)
+	if s.direct != nil {
+		var buffers net.Buffers
+		release, _, err := s.direct.AppendFrameBuffers(&buffers, flags, body)
+		if err != nil {
+			return fmt.Errorf("gozmq/session: serialize frame: %w", err)
+		}
+		defer func() {
+			if release != nil {
+				release()
+			}
+		}()
+		if err := s.flushBatch(&buffers); err != nil {
+			return fmt.Errorf("gozmq/session: write frame: %w", err)
+		}
+		return nil
+	}
+	wireFlags, encoded, err := s.encode(flags, body)
 	if err != nil {
 		return fmt.Errorf("gozmq/session: encode frame: %w", err)
 	}

@@ -124,6 +124,11 @@ func (e *end) Send(ctx context.Context, m *msg.Msg) error {
 	select {
 	case e.sendCh <- m:
 		return nil
+	default:
+	}
+	select {
+	case e.sendCh <- m:
+		return nil
 	case <-e.myClosed():
 		return io.ErrClosedPipe
 	case <-e.peerClosed():

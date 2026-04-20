@@ -61,7 +61,7 @@ func (s *sessionImpl) runReader() {
 		// Decode the body through the security mechanism. For NULL this
 		// is identity but we never short-circuit the call — Wave 2
 		// CURVE integration relies on the call site existing.
-		plainFlags, decoded, err := s.cfg.Mech.DecodeFrame(flags, body)
+		plainFlags, decoded, err := s.decode(flags, body)
 		if err != nil {
 			s.cfg.Logger.Warn("gozmq/session: decode frame failed", "err", err)
 			// decoded may alias body; it goes out of scope with the
@@ -230,19 +230,7 @@ func (s *sessionImpl) sendCommand(name string, body []byte) error {
 	buf = append(buf, name...)
 	buf = append(buf, body...)
 
-	wireFlags, encoded, err := s.cfg.Mech.EncodeFrame(iface.FlagCommand, buf)
-	if err != nil {
-		return fmt.Errorf("gozmq/session: encode command %s: %w", name, err)
-	}
-	// Note: we serialise command writes by funneling everything through
-	// the writer goroutine path would be ideal, but PONG must be replied
-	// inline from the reader. The conn's underlying io.Writer isn't
-	// guaranteed concurrent-safe; we mitigate by ensuring command writes
-	// from the reader and user-message writes from the writer never
-	// race on the wire by using a small write-side mutex.
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	if err := s.cfg.Codec.WriteFrame(s.cfg.Conn, wireFlags, encoded); err != nil {
+	if err := s.writeFrame(iface.FlagCommand, buf); err != nil {
 		return fmt.Errorf("gozmq/session: write command %s: %w", name, err)
 	}
 	return nil

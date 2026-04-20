@@ -62,11 +62,15 @@ func New(cfg Config) iface.Session {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	wctx, wcancel := context.WithCancel(ctx) // child of session ctx
+	encode, decode, direct := sessionFramePaths(cfg.Mech, cfg.Codec)
 	s := &sessionImpl{
 		cfg:          cfg,
 		ctx:          ctx,
 		cancel:       cancel,
 		reader:       sessionReader(cfg.Conn),
+		encode:       encode,
+		decode:       decode,
+		direct:       direct,
 		writerCtx:    wctx,
 		writerCancel: wcancel,
 		handshaked:   make(chan struct{}),
@@ -87,6 +91,9 @@ type sessionImpl struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	reader io.Reader
+	encode frameEncoder
+	decode frameDecoder
+	direct iface.FrameBufferAppender
 
 	// startOnce guards Start; stopOnce guards Stop.
 	startOnce sync.Once
@@ -143,6 +150,33 @@ type sessionImpl struct {
 }
 
 const sessionReadBufferSize = 32 * 1024
+
+type frameEncoder func(flags uint8, body []byte) (uint8, []byte, error)
+type frameDecoder func(flags uint8, body []byte) (uint8, []byte, error)
+
+func sessionFramePaths(mech iface.SecurityMech, codec iface.FrameCodec) (frameEncoder, frameDecoder, iface.FrameBufferAppender) {
+	if mech == nil {
+		return nil, nil, nil
+	}
+	switch mech.Name() {
+	case "NULL", "PLAIN":
+		var direct iface.FrameBufferAppender
+		if appender, ok := codec.(iface.FrameBufferAppender); ok {
+			direct = appender
+		}
+		return identityEncodeFrame, identityDecodeFrame, direct
+	default:
+		return mech.EncodeFrame, mech.DecodeFrame, nil
+	}
+}
+
+func identityEncodeFrame(flags uint8, body []byte) (uint8, []byte, error) {
+	return flags, body, nil
+}
+
+func identityDecodeFrame(flags uint8, body []byte) (uint8, []byte, error) {
+	return flags, body, nil
+}
 
 func sessionReader(conn iface.Conn) io.Reader {
 	if conn == nil {
