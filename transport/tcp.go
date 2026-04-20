@@ -21,8 +21,10 @@ const (
 	defaultTCPKeepAlive       = true
 	defaultTCPKeepAliveIdle   = 30 * time.Second
 	defaultTCPNoDelay         = true
-	tcpAcceptPollInterval     = 50 * time.Millisecond
+	tcpAcceptPollInterval     = 5 * time.Millisecond
 	tcpDialContextDefaultWait = 0 // unlimited; ctx supplies the deadline
+	defaultTCPReadBuffer      = 8 << 20
+	defaultTCPWriteBuffer     = 8 << 20
 )
 
 // TCPTransport implements iface.Transport over the standard library's
@@ -133,6 +135,12 @@ func (t *TCPTransport) applySocketOptions(c net.Conn) error {
 		return nil
 	}
 	if err := tc.SetNoDelay(t.NoDelay); err != nil {
+		return err
+	}
+	if err := tc.SetReadBuffer(defaultTCPReadBuffer); err != nil {
+		return err
+	}
+	if err := tc.SetWriteBuffer(defaultTCPWriteBuffer); err != nil {
 		return err
 	}
 	if t.KeepAlive {
@@ -248,6 +256,10 @@ func (c *tcpConn) SetTCPNoDelay(enabled bool) error {
 		return nil
 	}
 	return tc.SetNoDelay(enabled)
+}
+
+func (c *tcpConn) WriteBuffers(buffers *net.Buffers) (int64, error) {
+	return buffers.WriteTo(c.Conn)
 }
 
 func formatTCPEndpoint(scheme string, a net.Addr) string {

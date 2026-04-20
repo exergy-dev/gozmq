@@ -5,11 +5,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"net"
 	"strings"
 	"testing"
 
-	"github.com/rkm/gozmq/internal/zmqerr"
 	"github.com/rkm/gozmq/internal/iface"
+	"github.com/rkm/gozmq/internal/zmqerr"
 )
 
 func TestFrameRoundTrip(t *testing.T) {
@@ -90,6 +91,54 @@ func TestFrameWireFormat(t *testing.T) {
 			t.Fatalf("body mismatch")
 		}
 	})
+}
+
+func TestFrameAppendBuffersMatchesWriteFrame(t *testing.T) {
+	t.Parallel()
+	codec := NewFrameCodec(MaxBodyUnlimited)
+	appender, ok := codec.(iface.FrameBufferAppender)
+	if !ok {
+		t.Fatalf("codec does not implement FrameBufferAppender")
+	}
+
+	cases := []struct {
+		name  string
+		flags uint8
+		body  []byte
+	}{
+		{name: "short", flags: iface.FlagCommand, body: []byte("READY")},
+		{name: "long", flags: iface.FlagMore, body: bytes.Repeat([]byte{0xAB}, 300)},
+		{name: "empty", flags: 0, body: nil},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			var want bytes.Buffer
+			if err := codec.WriteFrame(&want, tc.flags, tc.body); err != nil {
+				t.Fatalf("WriteFrame: %v", err)
+			}
+
+			var buffers net.Buffers
+			release, _, err := appender.AppendFrameBuffers(&buffers, tc.flags, tc.body)
+			if err != nil {
+				t.Fatalf("AppendFrameBuffers: %v", err)
+			}
+			t.Cleanup(func() {
+				if release != nil {
+					release()
+				}
+			})
+
+			var got bytes.Buffer
+			if _, err := buffers.WriteTo(&got); err != nil {
+				t.Fatalf("WriteTo: %v", err)
+			}
+			if !bytes.Equal(got.Bytes(), want.Bytes()) {
+				t.Fatalf("wire mismatch: got %x want %x", got.Bytes(), want.Bytes())
+			}
+		})
+	}
 }
 
 func TestFrameReuseDst(t *testing.T) {

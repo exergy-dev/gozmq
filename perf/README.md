@@ -55,6 +55,8 @@ Each benchmark's teardown is leak-checked by `go.uber.org/goleak` via
 The four CLIs are exactly the four libzmq `perf/` binaries, one process
 on each end of the wire. They take the same three flags — `-endpoint`,
 `-size`, `-count` — and print a libzmq-compatible banner plus a summary.
+`local_thr` and `remote_thr` also accept `-cpuprofile` and `-memprofile`
+for baseline capture.
 
 ### Latency example (REQ/REP, TCP loopback)
 
@@ -127,6 +129,39 @@ go run ./perf/local_lat -endpoint tcp://*:5555 -size 32 -count 100000
 
 Use this to validate that any gozmq regression is *ours* and not a
 property of the benchmark setup.
+
+## Baseline capture
+
+The throughput CLIs can emit pprof artifacts directly:
+
+```bash
+mkdir -p perf/baselines/$(date +%F)
+
+go run ./perf/local_thr \
+  -endpoint tcp://*:5555 \
+  -size 64 \
+  -count 500000 \
+  -cpuprofile perf/baselines/$(date +%F)/local-64.cpu.pprof \
+  -memprofile perf/baselines/$(date +%F)/local-64.mem.pprof
+
+go run ./perf/remote_thr \
+  -endpoint tcp://127.0.0.1:5555 \
+  -size 64 \
+  -count 500000 \
+  -cpuprofile perf/baselines/$(date +%F)/remote-64.cpu.pprof \
+  -memprofile perf/baselines/$(date +%F)/remote-64.mem.pprof
+```
+
+Recommended capture sequence for a fresh baseline:
+
+```bash
+mkdir -p perf/baselines/$(date +%F)
+
+go test -bench=. -benchmem -benchtime=3s -count=5 ./perf/ \
+  | tee perf/baselines/$(date +%F)/bench.txt
+
+/tmp/bench.sh | tee perf/baselines/$(date +%F)/matrix.txt
+```
 
 ## Targets
 

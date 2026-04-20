@@ -15,6 +15,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime/pprof"
 	"time"
 
 	"github.com/rkm/gozmq"
@@ -24,6 +25,8 @@ func main() {
 	endpoint := flag.String("endpoint", "tcp://*:5555", "bind endpoint")
 	size := flag.Int("size", 32, "message size in bytes (must match remote_thr)")
 	count := flag.Int("count", 1_000_000, "message count (must match remote_thr)")
+	cpuProfile := flag.String("cpuprofile", "", "write CPU profile to file")
+	memProfile := flag.String("memprofile", "", "write heap profile to file")
 	flag.Parse()
 
 	if *size < 0 {
@@ -38,7 +41,12 @@ func main() {
 	ctxZmq := gozmq.NewContext()
 	defer ctxZmq.Close()
 
-	sock, err := ctxZmq.NewSocket(gozmq.Pull)
+	const benchHWM = 1_000_000
+
+	sock, err := ctxZmq.NewSocket(gozmq.Pull,
+		gozmq.WithSendHWM(benchHWM),
+		gozmq.WithRecvHWM(benchHWM),
+	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "new socket: %v\n", err)
 		os.Exit(1)
@@ -69,6 +77,21 @@ func main() {
 		fmt.Fprintf(os.Stderr, "message of incorrect size %d (expected %d)\n", len(first.Bytes()), *size)
 		os.Exit(1)
 	}
+	first.Release()
+
+	var cpuFile *os.File
+	if *cpuProfile != "" {
+		cpuFile, err = os.Create(*cpuProfile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "create cpuprofile %s: %v\n", *cpuProfile, err)
+			os.Exit(1)
+		}
+		if err := pprof.StartCPUProfile(cpuFile); err != nil {
+			_ = cpuFile.Close()
+			fmt.Fprintf(os.Stderr, "start cpu profile: %v\n", err)
+			os.Exit(1)
+		}
+	}
 
 	start := time.Now()
 	for i := 1; i < *count; i++ {
@@ -81,8 +104,26 @@ func main() {
 			fmt.Fprintf(os.Stderr, "message of incorrect size %d (expected %d)\n", len(m.Bytes()), *size)
 			os.Exit(1)
 		}
+		m.Release()
 	}
 	elapsed := time.Since(start)
+	if cpuFile != nil {
+		pprof.StopCPUProfile()
+		_ = cpuFile.Close()
+	}
+	if *memProfile != "" {
+		memFile, err := os.Create(*memProfile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "create memprofile %s: %v\n", *memProfile, err)
+			os.Exit(1)
+		}
+		if err := pprof.WriteHeapProfile(memFile); err != nil {
+			_ = memFile.Close()
+			fmt.Fprintf(os.Stderr, "write heap profile: %v\n", err)
+			os.Exit(1)
+		}
+		_ = memFile.Close()
+	}
 
 	if elapsed == 0 {
 		elapsed = time.Nanosecond

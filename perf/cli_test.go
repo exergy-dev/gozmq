@@ -76,12 +76,23 @@ func TestCLI_LocalLat_RemoteLat(t *testing.T) {
 // messages. local_thr reports mean throughput; remote_thr exits silently.
 func TestCLI_LocalThr_RemoteThr(t *testing.T) {
 	bin := buildCLIs(t, "local_thr", "remote_thr")
+	profiles := t.TempDir()
 	port := freeTCPPort(t)
 	endpoint := fmt.Sprintf("tcp://127.0.0.1:%d", port)
 	bindEndpoint := fmt.Sprintf("tcp://*:%d", port)
+	localCPU := filepath.Join(profiles, "local.cpu")
+	localMem := filepath.Join(profiles, "local.mem")
+	remoteCPU := filepath.Join(profiles, "remote.cpu")
+	remoteMem := filepath.Join(profiles, "remote.mem")
 
 	serverOut := &bytes.Buffer{}
-	server := exec.Command(bin["local_thr"], "-endpoint", bindEndpoint, "-size", "32", "-count", "100")
+	server := exec.Command(bin["local_thr"],
+		"-endpoint", bindEndpoint,
+		"-size", "32",
+		"-count", "100",
+		"-cpuprofile", localCPU,
+		"-memprofile", localMem,
+	)
 	server.Stdout = serverOut
 	server.Stderr = serverOut
 	if err := server.Start(); err != nil {
@@ -93,7 +104,13 @@ func TestCLI_LocalThr_RemoteThr(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	clientOut := &bytes.Buffer{}
-	client := exec.Command(bin["remote_thr"], "-endpoint", endpoint, "-size", "32", "-count", "100")
+	client := exec.Command(bin["remote_thr"],
+		"-endpoint", endpoint,
+		"-size", "32",
+		"-count", "100",
+		"-cpuprofile", remoteCPU,
+		"-memprofile", remoteMem,
+	)
 	client.Stdout = clientOut
 	client.Stderr = clientOut
 	if err := client.Run(); err != nil {
@@ -121,6 +138,15 @@ func TestCLI_LocalThr_RemoteThr(t *testing.T) {
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("local_thr output missing %q:\n%s", want, out)
+		}
+	}
+	for _, path := range []string{localCPU, localMem, remoteCPU, remoteMem} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("profile %s not created: %v", path, err)
+		}
+		if info.Size() == 0 {
+			t.Fatalf("profile %s is empty", path)
 		}
 	}
 }

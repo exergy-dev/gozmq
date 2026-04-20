@@ -10,10 +10,12 @@
 package session
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -64,6 +66,7 @@ func New(cfg Config) iface.Session {
 		cfg:          cfg,
 		ctx:          ctx,
 		cancel:       cancel,
+		reader:       sessionReader(cfg.Conn),
 		writerCtx:    wctx,
 		writerCancel: wcancel,
 		handshaked:   make(chan struct{}),
@@ -83,6 +86,7 @@ type sessionImpl struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+	reader io.Reader
 
 	// startOnce guards Start; stopOnce guards Stop.
 	startOnce sync.Once
@@ -136,6 +140,27 @@ type sessionImpl struct {
 
 	// stopErr is the cumulative error from Stop (e.g. Conn.Close failure).
 	stopErr atomic.Pointer[error]
+}
+
+const sessionReadBufferSize = 32 * 1024
+
+func sessionReader(conn iface.Conn) io.Reader {
+	if conn == nil {
+		return nil
+	}
+	ep := conn.RemoteEndpoint()
+	if ep == "" {
+		ep = conn.LocalEndpoint()
+	}
+	switch {
+	case strings.HasPrefix(ep, "tcp://"),
+		strings.HasPrefix(ep, "tcp6://"),
+		strings.HasPrefix(ep, "tls+tcp://"),
+		strings.HasPrefix(ep, "ipc://"):
+		return bufio.NewReaderSize(conn, sessionReadBufferSize)
+	default:
+		return conn
+	}
 }
 
 // Start launches the handshake + traffic goroutines. Subsequent calls are

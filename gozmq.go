@@ -74,7 +74,8 @@ func socketTypeName(t SocketType) string {
 	return ""
 }
 
-// Msg is a ZMTP multipart message.
+// Msg is a ZMTP multipart message. Messages returned by RecvMsg may hold
+// pooled frame buffers; call Release when the message is no longer needed.
 type Msg = msg.Msg
 
 // NewMsg returns an empty message.
@@ -770,7 +771,9 @@ func (s *Socket) SendMsg(ctx context.Context, m *Msg) error {
 	return s.engine.Send(ctx, m)
 }
 
-// RecvMsg blocks until a message arrives or ctx cancels.
+// RecvMsg blocks until a message arrives or ctx cancels. Call Release on the
+// returned message when it is no longer needed so any pooled frame buffers can
+// be reused.
 func (s *Socket) RecvMsg(ctx context.Context) (*Msg, error) {
 	if s.closed.Load() {
 		return nil, ErrSocketClosed

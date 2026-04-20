@@ -292,6 +292,10 @@ func newIPCConn(c net.Conn, local, remote string) *ipcConn {
 func (c *ipcConn) LocalEndpoint() string  { return c.local }
 func (c *ipcConn) RemoteEndpoint() string { return c.remote }
 
+func (c *ipcConn) WriteBuffers(buffers *net.Buffers) (int64, error) {
+	return buffers.WriteTo(c.Conn)
+}
+
 // Compile-time interface checks.
 var (
 	_ iface.Transport = (*IPCTransport)(nil)

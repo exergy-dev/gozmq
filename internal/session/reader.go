@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"time"
+	"unsafe"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
@@ -25,6 +26,11 @@ func (s *sessionImpl) runReader() {
 	defer s.shutdown()
 
 	var current *msg.Msg
+	defer func() {
+		if current != nil {
+			current.Release()
+		}
+	}()
 	for {
 		// Honor cancellation between frames. The blocking io.Read will
 		// be interrupted by Conn.Close (called from shutdown/Stop).
@@ -34,7 +40,7 @@ func (s *sessionImpl) runReader() {
 		default:
 		}
 
-		flags, body, err := s.cfg.Codec.ReadFrame(s.cfg.Conn, nil)
+		flags, body, err := s.cfg.Codec.ReadFrame(s.reader, nil)
 		if err != nil {
 			if !isExpectedShutdownErr(err) {
 				s.cfg.Logger.Debug("gozmq/session: reader exit", "err", err)
@@ -83,15 +89,18 @@ func (s *sessionImpl) runReader() {
 		if current == nil {
 			current = msg.New()
 		}
-		// Decoded may alias the codec's internal buffer; copy so the
-		// pipe consumer can retain the frame across the next ReadFrame.
-		frame := append([]byte(nil), decoded...)
-		current.AppendFrame(frame)
-		// The copy above severs every reference into body (decoded
-		// either aliased body or was a fresh mech-owned slice); the
-		// pooled buffer is now safe to release even though the *Msg
-		// lives on in the pipe.
-		msg.PoolPut(body)
+		switch {
+		case decodedAliasesBody(body, decoded):
+			current.AppendOwnedFrame(decoded, body)
+		case len(decoded) == 0:
+			current.AppendFrame(decoded)
+			msg.PoolPut(body)
+		default:
+			frame := msg.PoolGet(len(decoded))
+			copy(frame, decoded)
+			current.AppendOwnedFrame(frame, frame)
+			msg.PoolPut(body)
+		}
 
 		if plainFlags&iface.FlagMore != 0 {
 			continue
@@ -106,6 +115,16 @@ func (s *sessionImpl) runReader() {
 		}
 		current = nil
 	}
+}
+
+func decodedAliasesBody(body, decoded []byte) bool {
+	if len(body) == 0 || len(decoded) == 0 {
+		return len(body) == 0 && len(decoded) == 0
+	}
+	bodyStart := uintptr(unsafe.Pointer(&body[0]))
+	bodyEnd := bodyStart + uintptr(len(body))
+	decodedStart := uintptr(unsafe.Pointer(&decoded[0]))
+	return decodedStart >= bodyStart && decodedStart < bodyEnd
 }
 
 // publishInbound enqueues a fully-assembled message on the session-side

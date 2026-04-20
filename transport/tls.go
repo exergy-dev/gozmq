@@ -221,6 +221,10 @@ func (c *tlsConn) SetTCPNoDelay(enabled bool) error {
 	return tc.SetNoDelay(enabled)
 }
 
+func (c *tlsConn) WriteBuffers(buffers *net.Buffers) (int64, error) {
+	return buffers.WriteTo(c.Conn)
+}
+
 // --------------------------------------------------------------------------
 // tlsListener — iface.Listener that performs the TLS handshake inside
 // Accept, honoring ctx/deadline and Close-wakes-Accept semantics.

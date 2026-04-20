@@ -98,7 +98,7 @@ func (s *sessionImpl) exchangeGreeting() error {
 	}()
 
 	var buf [greetingSize]byte
-	if _, err := io.ReadFull(s.cfg.Conn, buf[:]); err != nil {
+	if _, err := io.ReadFull(s.reader, buf[:]); err != nil {
 		// Drain the write goroutine before returning so we don't leak
 		// it on a read failure.
 		<-writeErrCh
@@ -183,7 +183,7 @@ func (s *sessionImpl) runSecurityHandshake() error {
 		}
 
 		// Read the peer's next handshake message.
-		flags, body, rerr := s.cfg.Codec.ReadFrame(s.cfg.Conn, nil)
+		flags, body, rerr := s.cfg.Codec.ReadFrame(s.reader, nil)
 		// Always reap the writer before propagating either error.
 		werr := <-writeErrCh
 		if werr != nil {

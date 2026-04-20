@@ -15,6 +15,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime/pprof"
 	"time"
 
 	"github.com/rkm/gozmq"
@@ -24,6 +25,8 @@ func main() {
 	endpoint := flag.String("endpoint", "tcp://127.0.0.1:5555", "connect endpoint")
 	size := flag.Int("size", 32, "message size in bytes (must match local_thr)")
 	count := flag.Int("count", 1_000_000, "message count (must match local_thr)")
+	cpuProfile := flag.String("cpuprofile", "", "write CPU profile to file")
+	memProfile := flag.String("memprofile", "", "write heap profile to file")
 	flag.Parse()
 
 	if *size < 0 {
@@ -43,7 +46,13 @@ func main() {
 	// same infinite-linger default (zmq_setsockopt ZMQ_LINGER = -1 is
 	// libzmq's historical default); we match it explicitly since our
 	// default is 1s (design §6.4).
-	sock, err := ctxZmq.NewSocket(gozmq.Push, gozmq.WithLinger(-1))
+	const benchHWM = 1_000_000
+
+	sock, err := ctxZmq.NewSocket(gozmq.Push,
+		gozmq.WithLinger(-1),
+		gozmq.WithSendHWM(benchHWM),
+		gozmq.WithRecvHWM(benchHWM),
+	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "new socket: %v\n", err)
 		os.Exit(1)
@@ -69,6 +78,20 @@ func main() {
 	callCtx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
+	var cpuFile *os.File
+	if *cpuProfile != "" {
+		cpuFile, err = os.Create(*cpuProfile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "create cpuprofile %s: %v\n", *cpuProfile, err)
+			os.Exit(1)
+		}
+		if err := pprof.StartCPUProfile(cpuFile); err != nil {
+			_ = cpuFile.Close()
+			fmt.Fprintf(os.Stderr, "start cpu profile: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
 	sendStart := time.Now()
 	for i := 0; i < *count; i++ {
 		if err := sock.SendMsg(callCtx, gozmq.NewMsgFromBytes(payload)); err != nil {
@@ -77,6 +100,23 @@ func main() {
 		}
 	}
 	fmt.Fprintf(os.Stderr, "remote_thr: all %d sends returned in %v\n", *count, time.Since(sendStart))
+	if cpuFile != nil {
+		pprof.StopCPUProfile()
+		_ = cpuFile.Close()
+	}
+	if *memProfile != "" {
+		memFile, err := os.Create(*memProfile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "create memprofile %s: %v\n", *memProfile, err)
+			os.Exit(1)
+		}
+		if err := pprof.WriteHeapProfile(memFile); err != nil {
+			_ = memFile.Close()
+			fmt.Fprintf(os.Stderr, "write heap profile: %v\n", err)
+			os.Exit(1)
+		}
+		_ = memFile.Close()
+	}
 
 	// Graceful close: wait up to LINGER (default 1s per options.go) for
 	// the outbound queue to drain, otherwise the final burst of messages

@@ -133,6 +133,27 @@ func (e *end) Send(ctx context.Context, m *msg.Msg) error {
 	}
 }
 
+// TrySend attempts an immediate send without blocking. It preserves the same
+// close checks as Send and returns false when the pipe is full or closed.
+func (e *end) TrySend(m *msg.Msg) bool {
+	if m == nil {
+		return false
+	}
+	select {
+	case <-e.myClosed():
+		return false
+	case <-e.peerClosed():
+		return false
+	default:
+	}
+	select {
+	case e.sendCh <- m:
+		return true
+	default:
+		return false
+	}
+}
+
 func (e *end) Recv(ctx context.Context) (*msg.Msg, error) {
 	// Fast path: something already buffered.
 	select {

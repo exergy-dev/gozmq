@@ -10,6 +10,7 @@ package iface
 import (
 	"context"
 	"io"
+	"net"
 	"time"
 
 	"github.com/rkm/gozmq/internal/msg"
@@ -102,6 +103,14 @@ type FrameCodec interface {
 	// batch via net.Buffers; callers should not assume one write = one
 	// socket operation.
 	WriteFrame(w io.Writer, flags uint8, body []byte) error
+}
+
+// FrameBufferAppender is an optional fast path for codecs that can append
+// one fully-encoded frame directly into a net.Buffers batch without first
+// materializing a contiguous header+body blob. Callers must invoke the
+// returned release hook after the batch has been written (or abandoned).
+type FrameBufferAppender interface {
+	AppendFrameBuffers(dst *net.Buffers, flags uint8, body []byte) (release func(), frameBytes int, err error)
 }
 
 // MetadataCodec encodes and decodes the ZMTP READY property list (ZMTP 3.1

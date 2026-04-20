@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rkm/gozmq/internal/zmqerr"
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
 	"github.com/rkm/gozmq/internal/pipe"
+	"github.com/rkm/gozmq/internal/zmqerr"
 	"github.com/rkm/gozmq/socket"
 )
 
@@ -303,6 +303,34 @@ func TestFairQueue_RecvWakesOnAttach(t *testing.T) {
 	}
 }
 
+func TestFairQueue_DetachCancelsBlockedForwarder(t *testing.T) {
+	t.Parallel()
+	fq := socket.NewFairQueue()
+
+	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(a, b)
+
+	if err := fq.Attach(a); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+
+	if err := fq.Detach(a); err != nil {
+		t.Fatalf("detach: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- fq.Close() }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return after Detach canceled forwarder")
+	}
+}
+
 func TestFairQueue_CloseUnblocksRecv(t *testing.T) {
 	t.Parallel()
 	fq := socket.NewFairQueue()
@@ -435,4 +463,3 @@ func TestFairQueue_AttachAfterClose(t *testing.T) {
 		t.Fatalf("attach after close = %v, want ErrSocketClosed", err)
 	}
 }
-

@@ -169,6 +169,30 @@ func TestCtx_Cancel_Wakes_Send(t *testing.T) {
 	}
 }
 
+func TestTrySend_FastPath(t *testing.T) {
+	a, b := NewPair(1, 1, PeerInfo{}, PeerInfo{})
+	defer a.Close()
+	defer b.Close()
+
+	endA, ok := a.(*end)
+	if !ok {
+		t.Fatalf("pipe end type = %T, want *end", a)
+	}
+	if !endA.TrySend(msg.FromBytes([]byte("one"))) {
+		t.Fatal("TrySend on empty pipe = false, want true")
+	}
+	if endA.TrySend(msg.FromBytes([]byte("two"))) {
+		t.Fatal("TrySend on full pipe = true, want false")
+	}
+	got, err := b.Recv(context.Background())
+	if err != nil {
+		t.Fatalf("Recv: %v", err)
+	}
+	if string(got.Bytes()) != "one" {
+		t.Fatalf("Recv = %q, want one", got.Bytes())
+	}
+}
+
 // TestDoubleClose_Idempotent ensures Close is safe to call repeatedly.
 func TestDoubleClose_Idempotent(t *testing.T) {
 	a, b := NewPair(1, 1, PeerInfo{}, PeerInfo{})

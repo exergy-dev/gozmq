@@ -70,6 +70,7 @@ func main() {
 		// Echo the exact body back. Copy so we don't race the session's
 		// pooled recv buffer with the send path.
 		body := append([]byte(nil), m.Bytes()...)
+		m.Release()
 		if err := sock.SendMsg(callCtx, gozmq.NewMsgFromBytes(body)); err != nil {
 			fmt.Fprintf(os.Stderr, "send[%d]: %v\n", i, err)
 			os.Exit(1)

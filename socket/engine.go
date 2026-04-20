@@ -66,9 +66,9 @@ import (
 	"io"
 	"sync"
 
-	"github.com/rkm/gozmq/internal/zmqerr"
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
+	"github.com/rkm/gozmq/internal/zmqerr"
 )
 
 // --------------------------------------------------------------------------
@@ -95,6 +95,10 @@ type LoadBalancer struct {
 	notify  chan struct{} // signalled by Attach/Detach
 	closeCh chan struct{}
 	closed  bool
+}
+
+type nonBlockingSender interface {
+	TrySend(*msg.Msg) bool
 }
 
 // NewLoadBalancer returns an empty LoadBalancer.
@@ -187,6 +191,15 @@ func (lb *LoadBalancer) Send(ctx context.Context, m *msg.Msg) error {
 		default:
 		}
 		lb.mu.Unlock()
+
+		if nb, ok := p.(nonBlockingSender); ok && nb.TrySend(m) {
+			lb.mu.Lock()
+			if idx < len(lb.pipes) && lb.pipes[idx] == p {
+				lb.cursor = (idx + 1) % len(lb.pipes)
+			}
+			lb.mu.Unlock()
+			return nil
+		}
 
 		// Race the blocking Send against close and the notify (peer-set
 		// change). We need cancellation, so use a child context that we
@@ -310,8 +323,13 @@ type FairQueue struct {
 	closed  bool
 	closeCh chan struct{}
 	inbound chan fairItem
-	pipes   map[iface.Pipe]chan struct{} // pipe → its forwarder's stop channel
+	pipes   map[iface.Pipe]*fairForwarder
 	wg      sync.WaitGroup
+}
+
+type fairForwarder struct {
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // fairItem pairs an inbound message with the pipe that produced it. ROUTER
@@ -331,7 +349,7 @@ func NewFairQueue() *FairQueue {
 		// blocked the moment the receiver pulls. Larger buffers would
 		// undermine HWM, since HWM lives in the Pipe itself.
 		inbound: make(chan fairItem, 1),
-		pipes:   make(map[iface.Pipe]chan struct{}),
+		pipes:   make(map[iface.Pipe]*fairForwarder),
 	}
 }
 
@@ -346,27 +364,31 @@ func (fq *FairQueue) Attach(p iface.Pipe) error {
 	if _, ok := fq.pipes[p]; ok {
 		return nil
 	}
-	stop := make(chan struct{})
-	fq.pipes[p] = stop
+	ctx, cancel := context.WithCancel(context.Background())
+	fwd := &fairForwarder{ctx: ctx, cancel: cancel}
+	fq.pipes[p] = fwd
 	fq.wg.Add(1)
-	go fq.forward(p, stop)
+	go fq.forward(p, fwd)
 	return nil
 }
 
-// Detach removes p and signals its forwarder to stop. The forwarder may
-// still be parked in Pipe.Recv at the time of Detach; it will exit when
-// the pipe yields a message (which is dropped) or when the pipe closes.
-// To guarantee prompt exit in tests, Close the FairQueue.
+// Detach removes p and signals its forwarder to stop promptly.
 func (fq *FairQueue) Detach(p iface.Pipe) error {
 	fq.mu.Lock()
-	stop, ok := fq.pipes[p]
+	fwd, ok := fq.pipes[p]
 	if !ok {
 		fq.mu.Unlock()
 		return nil
 	}
 	delete(fq.pipes, p)
 	fq.mu.Unlock()
-	close(stop)
+	select {
+	case <-p.Closed():
+		// Let a closed pipe drain any already-buffered messages to EOF.
+		return nil
+	default:
+	}
+	fwd.cancel()
 	return nil
 }
 
@@ -413,61 +435,43 @@ func (fq *FairQueue) Close() error {
 	}
 	fq.closed = true
 	close(fq.closeCh)
-	stops := make([]chan struct{}, 0, len(fq.pipes))
-	for _, s := range fq.pipes {
-		stops = append(stops, s)
+	forwarders := make([]*fairForwarder, 0, len(fq.pipes))
+	for _, fwd := range fq.pipes {
+		forwarders = append(forwarders, fwd)
 	}
 	fq.pipes = nil
 	fq.mu.Unlock()
-	for _, s := range stops {
-		select {
-		case <-s:
-			// already closed (raced with Detach)
-		default:
-			close(s)
-		}
+	for _, fwd := range forwarders {
+		fwd.cancel()
 	}
 	fq.wg.Wait()
 	return nil
 }
 
-// forward pumps p.Recv into fq.inbound until p closes, stop fires, or the
+// forward pumps p.Recv into fq.inbound until p closes, the forwarder is
+// cancelled, or the
 // FairQueue closes.
-func (fq *FairQueue) forward(p iface.Pipe, stop <-chan struct{}) {
+func (fq *FairQueue) forward(p iface.Pipe, fwd *fairForwarder) {
 	defer fq.wg.Done()
+	defer func() {
+		fq.mu.Lock()
+		if cur, ok := fq.pipes[p]; ok && cur == fwd {
+			delete(fq.pipes, p)
+		}
+		fq.mu.Unlock()
+	}()
 	for {
-		// Use a context that cancels when stop or close fires so
-		// Pipe.Recv unblocks promptly. The unblock-watcher goroutine
-		// terminates either when its watched channel fires or when Recv
-		// returns and we close watcherDone.
-		ctx, cancel := context.WithCancel(context.Background())
-		watcherDone := make(chan struct{})
-		var watcherWg sync.WaitGroup
-		watcherWg.Add(1)
-		go func() {
-			defer watcherWg.Done()
-			select {
-			case <-stop:
-				cancel()
-			case <-fq.closeCh:
-				cancel()
-			case <-watcherDone:
-			}
-		}()
-		m, err := p.Recv(ctx)
-		close(watcherDone)
-		watcherWg.Wait()
-		cancel()
+		m, err := p.Recv(fwd.ctx)
 		if err != nil {
-			// ctx cancelled (stop/close), pipe EOF, or other terminal
-			// error — forwarder is done.
+			// ctx cancelled, pipe EOF, or other terminal error —
+			// forwarder is done.
 			return
 		}
 		// Hand off the message; race against stop and close so we never
 		// block forever holding a message no one will consume.
 		select {
 		case fq.inbound <- fairItem{m: m, p: p}:
-		case <-stop:
+		case <-fwd.ctx.Done():
 			return
 		case <-fq.closeCh:
 			return

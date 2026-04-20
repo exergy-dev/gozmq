@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"sync"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
@@ -33,6 +35,11 @@ const validFlagBits uint8 = iface.FlagMore | iface.FlagLong | iface.FlagCommand
 type frameCodec struct {
 	maxBody int64
 }
+
+var (
+	shortFrameHeaderPool = sync.Pool{New: func() any { return new([2]byte) }}
+	longFrameHeaderPool  = sync.Pool{New: func() any { return new([9]byte) }}
+)
 
 // NewFrameCodec returns a ZMTP 3.1 frame codec. maxBody bounds the size of
 // any body the codec will accept on the read side; bodies larger than maxBody
@@ -105,15 +112,10 @@ func (c *frameCodec) ReadFrame(r io.Reader, dst []byte) (uint8, []byte, error) {
 // is forced by the caller. The caller-provided flags are written verbatim,
 // except LONG is forced on for bodies that don't fit in a single byte.
 func (c *frameCodec) WriteFrame(w io.Writer, flags uint8, body []byte) error {
-	if flags&^validFlagBits != 0 {
-		return fmt.Errorf("gozmq/zmtp: reserved flag bits set: 0x%02x: %w", flags, zmqerr.ErrMalformedFrame)
+	useLong, n, err := c.validateWriteFrame(flags, body)
+	if err != nil {
+		return err
 	}
-	n := len(body)
-	if c.maxBody > 0 && int64(n) > c.maxBody {
-		return fmt.Errorf("gozmq/zmtp: body length %d exceeds max %d: %w", n, c.maxBody, zmqerr.ErrMalformedFrame)
-	}
-
-	useLong := flags&iface.FlagLong != 0 || n > 255
 	if useLong {
 		flags |= iface.FlagLong
 		var hdr [9]byte
@@ -134,6 +136,46 @@ func (c *frameCodec) WriteFrame(w io.Writer, flags uint8, body []byte) error {
 		}
 	}
 	return nil
+}
+
+// AppendFrameBuffers implements iface.FrameBufferAppender for the native
+// ZMTP framing codec. It appends a borrowed header plus the caller-owned
+// body slice directly into dst so the writer can issue one writev without
+// first copying header+body into a temporary blob.
+func (c *frameCodec) AppendFrameBuffers(dst *net.Buffers, flags uint8, body []byte) (func(), int, error) {
+	useLong, n, err := c.validateWriteFrame(flags, body)
+	if err != nil {
+		return nil, 0, err
+	}
+	if useLong {
+		hdr := longFrameHeaderPool.Get().(*[9]byte)
+		hdr[0] = flags | iface.FlagLong
+		binary.BigEndian.PutUint64(hdr[1:], uint64(n))
+		*dst = append(*dst, hdr[:])
+		if n > 0 {
+			*dst = append(*dst, body)
+		}
+		return func() { longFrameHeaderPool.Put(hdr) }, len(hdr) + n, nil
+	}
+	hdr := shortFrameHeaderPool.Get().(*[2]byte)
+	hdr[0] = flags
+	hdr[1] = byte(n)
+	*dst = append(*dst, hdr[:])
+	if n > 0 {
+		*dst = append(*dst, body)
+	}
+	return func() { shortFrameHeaderPool.Put(hdr) }, len(hdr) + n, nil
+}
+
+func (c *frameCodec) validateWriteFrame(flags uint8, body []byte) (useLong bool, n int, err error) {
+	if flags&^validFlagBits != 0 {
+		return false, 0, fmt.Errorf("gozmq/zmtp: reserved flag bits set: 0x%02x: %w", flags, zmqerr.ErrMalformedFrame)
+	}
+	n = len(body)
+	if c.maxBody > 0 && int64(n) > c.maxBody {
+		return false, 0, fmt.Errorf("gozmq/zmtp: body length %d exceeds max %d: %w", n, c.maxBody, zmqerr.ErrMalformedFrame)
+	}
+	return flags&iface.FlagLong != 0 || n > 255, n, nil
 }
 
 // reuseOrAllocate returns dst[:n] when dst has the capacity, otherwise a
