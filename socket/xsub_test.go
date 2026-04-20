@@ -54,6 +54,42 @@ func TestXSub_SendSubscribeViaMessage(t *testing.T) {
 	}
 }
 
+// TestXSub_SendDuplicateSubscribeForwardsTwice verifies that app-driven
+// synthetic subscribe messages are always forwarded, even when the local
+// filter already contains the prefix. Verbose XPUB peers rely on seeing each
+// duplicate command.
+func TestXSub_SendDuplicateSubscribeForwardsTwice(t *testing.T) {
+	t.Parallel()
+	eng, _ := socket.NewXSubEngine()
+	defer eng.Close()
+
+	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(a, b)
+	if err := eng.AttachPipe(a); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	sub := subscribeMsg(true, []byte("topic"))
+	if err := eng.Send(ctx, sub); err != nil {
+		t.Fatalf("xsub send #1: %v", err)
+	}
+	if err := eng.Send(ctx, sub); err != nil {
+		t.Fatalf("xsub send #2: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		m, err := b.Recv(ctx)
+		if err != nil {
+			t.Fatalf("peer recv #%d: %v", i+1, err)
+		}
+		body := m.Frames()[0]
+		if body[0] != socket.SubscribeByte || string(body[1:]) != "topic" {
+			t.Fatalf("peer got %v, want subscribe-topic", body)
+		}
+	}
+}
+
 // TestXSub_SendNonSubscribeRejected: XSUB Send must be a subscription
 // command; anything else is an FSM violation.
 func TestXSub_SendNonSubscribeRejected(t *testing.T) {

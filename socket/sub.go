@@ -237,22 +237,50 @@ func (e *SubEngine) Send(ctx context.Context, m *msg.Msg) error {
 // subscribe/unsubscribe message, which we both update our local filter
 // with and forward to every peer.
 func (e *SubEngine) xsubSend(ctx context.Context, m *msg.Msg) error {
+	_ = ctx // XSUB forwarding uses the same bounded best-effort semantics as Subscribe.
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
 		return fmt.Errorf("xsub send: %w", zmqerr.ErrSocketClosed)
 	}
-	e.mu.Unlock()
-
 	isSub, subscribe, prefix := isSubscriptionMsg(m)
 	if !isSub {
+		e.mu.Unlock()
 		// XSUB accepts only subscription commands from the app.
 		return fmt.Errorf("xsub send: %w: not a subscription message", zmqerr.ErrFSMViolation)
 	}
+	key := string(prefix)
 	if subscribe {
-		return e.Subscribe(prefix)
+		e.subs[key]++
+		e.tree.Add(prefix)
+		if e.subs[key] == 1 {
+			cp := make([]byte, len(prefix))
+			copy(cp, prefix)
+			e.subList = append(e.subList, cp)
+		}
+	} else if e.subs[key] > 0 {
+		e.subs[key]--
+		e.tree.Remove(prefix)
+		if e.subs[key] == 0 {
+			delete(e.subs, key)
+			for i, s := range e.subList {
+				if string(s) == key {
+					e.subList = append(e.subList[:i], e.subList[i+1:]...)
+					break
+				}
+			}
+		}
 	}
-	return e.Unsubscribe(prefix)
+	peers := make([]iface.Pipe, 0, len(e.peers))
+	for p := range e.peers {
+		peers = append(peers, p)
+	}
+	e.mu.Unlock()
+
+	for _, p := range peers {
+		e.forwardSubscription(p, subscribe, prefix)
+	}
+	return nil
 }
 
 // Recv fair-queues across attached pipes and applies the local
