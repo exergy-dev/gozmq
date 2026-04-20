@@ -1,0 +1,313 @@
+package socket
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/rkm/gozmq/internal/iface"
+	"github.com/rkm/gozmq/internal/msg"
+	"github.com/rkm/gozmq/internal/zmqerr"
+)
+
+// Synthetic subscription message format: a single-frame message whose
+// first byte is SubscribeByte (0x01) or UnsubscribeByte (0x00), followed
+// by the subscription prefix bytes. This is the same on-wire shape
+// libzmq XPUB surfaces to its application and the same shape XSUB
+// accepts from its application; we reuse it internally to carry
+// subscription commands between the session reader and the PUB/XPUB
+// engine without extending iface.Pipe.
+//
+// See internal/session/reader.go (handleCommand) for how incoming ZMTP
+// SUBSCRIBE/CANCEL commands are converted to synthetic messages on the
+// inbound pipe.
+const (
+	SubscribeByte   byte = 0x01
+	UnsubscribeByte byte = 0x00
+)
+
+// isSubscriptionMsg reports whether m looks like a synthetic subscription
+// message (single frame, first byte 0x00 or 0x01). The second return is
+// the parsed (subscribe, prefix) pair when the first is true.
+func isSubscriptionMsg(m *msg.Msg) (bool, bool, []byte) {
+	if m == nil || m.NumFrames() != 1 {
+		return false, false, nil
+	}
+	f := m.Frames()[0]
+	if len(f) < 1 {
+		return false, false, nil
+	}
+	switch f[0] {
+	case SubscribeByte:
+		return true, true, f[1:]
+	case UnsubscribeByte:
+		return true, false, f[1:]
+	}
+	return false, false, nil
+}
+
+// pubPeer bundles a pipe with its SubTree and the goroutine reading
+// subscription commands from that peer.
+type pubPeer struct {
+	pipe iface.Pipe
+	tree *SubTree
+
+	stop     chan struct{}
+	stopOnce sync.Once
+	done     chan struct{}
+}
+
+// pubEngine implements iface.SocketEngine for the PUB socket type.
+//
+// PUB is a fan-out publisher. Every successful Send is replicated to each
+// attached peer whose per-peer SubTree has at least one prefix matching
+// the first frame of the message (the topic). Subscription state is
+// maintained per-peer: incoming ZMTP SUBSCRIBE/CANCEL commands are
+// surfaced by the session layer as synthetic single-frame messages
+// (leading byte 0x01 / 0x00 + prefix) on the inbound side of the pipe,
+// and a small reader goroutine per peer feeds those commands into that
+// peer's SubTree. PUB silently drops all other inbound traffic (peers
+// have no data to send to a PUB); XPUB (see xpub.go) additionally
+// surfaces subscription events to the application via Recv.
+//
+// Send is non-blocking per-peer best-effort: if a peer's pipe is at HWM
+// the message is dropped for that peer and fan-out continues to others.
+// This matches libzmq's default PUB behaviour — a slow subscriber must
+// not back-pressure the publisher. Recv on a plain PUB always returns
+// zmqerr.ErrFSMViolation (wrapped); XPUB overrides Recv to return
+// subscription events.
+type pubEngine struct {
+	mu     sync.Mutex
+	peers  map[iface.Pipe]*pubPeer
+	closed bool
+	// surfaceSubs controls whether subscription commands are surfaced to
+	// the application via Recv. PUB=false, XPUB=true. XPUB embeds a PUB
+	// engine via newPubEngineBase so we share the fanout + subscription
+	// bookkeeping.
+	surfaceSubs bool
+	subInbound  chan *msg.Msg // XPUB-only; nil for PUB
+	closeCh     chan struct{}
+}
+
+// NewPubEngine returns a new PUB socket engine.
+func NewPubEngine() iface.SocketEngine {
+	return newPubEngineBase(false)
+}
+
+// newPubEngineBase is the shared constructor used by PUB (surface=false)
+// and XPUB (surface=true).
+func newPubEngineBase(surface bool) *pubEngine {
+	e := &pubEngine{
+		peers:       make(map[iface.Pipe]*pubPeer),
+		surfaceSubs: surface,
+		closeCh:     make(chan struct{}),
+	}
+	if surface {
+		// Capacity-1 handoff buffer. HWM-style backpressure on the
+		// application isn't expressed here — XPUB applications are
+		// expected to drain promptly. A bigger buffer doesn't help
+		// because the synthetic messages are rare relative to data
+		// traffic.
+		e.subInbound = make(chan *msg.Msg, 16)
+	}
+	return e
+}
+
+func (e *pubEngine) AttachPipe(p iface.Pipe) error {
+	e.mu.Lock()
+	if e.closed {
+		e.mu.Unlock()
+		return fmt.Errorf("pub attach: %w", zmqerr.ErrSocketClosed)
+	}
+	if _, ok := e.peers[p]; ok {
+		e.mu.Unlock()
+		return nil
+	}
+	peer := &pubPeer{
+		pipe: p,
+		tree: NewSubTree(),
+		stop: make(chan struct{}),
+		done: make(chan struct{}),
+	}
+	e.peers[p] = peer
+	e.mu.Unlock()
+
+	go e.runPeerReader(peer)
+	return nil
+}
+
+func (e *pubEngine) DetachPipe(p iface.Pipe) error {
+	e.mu.Lock()
+	peer, ok := e.peers[p]
+	if !ok {
+		e.mu.Unlock()
+		return nil
+	}
+	delete(e.peers, p)
+	e.mu.Unlock()
+	peer.stopOnce.Do(func() { close(peer.stop) })
+	<-peer.done
+	return nil
+}
+
+// runPeerReader consumes messages from a single peer pipe. For PUB we
+// silently apply any synthetic subscription messages to the peer's
+// SubTree and drop everything else (PUB doesn't read data from peers).
+// For XPUB we additionally forward subscription messages to the
+// application via subInbound.
+func (e *pubEngine) runPeerReader(peer *pubPeer) {
+	defer close(peer.done)
+	for {
+		// Cancel the Recv as soon as peer stops or the engine closes, so
+		// Pipe.Recv unblocks and we don't leak this goroutine.
+		ctx, cancel := context.WithCancel(context.Background())
+		watcherDone := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case <-peer.stop:
+				cancel()
+			case <-e.closeCh:
+				cancel()
+			case <-watcherDone:
+			}
+		}()
+		m, err := peer.pipe.Recv(ctx)
+		close(watcherDone)
+		wg.Wait()
+		cancel()
+		if err != nil {
+			return
+		}
+		isSub, subscribe, prefix := isSubscriptionMsg(m)
+		if !isSub {
+			// PUB/XPUB ignore non-subscription inbound traffic.
+			continue
+		}
+		if subscribe {
+			peer.tree.Add(prefix)
+		} else {
+			peer.tree.Remove(prefix)
+		}
+		if e.surfaceSubs {
+			// Forward the subscription event to the application. Drop
+			// on close; drop silently on overflow rather than block
+			// the peer reader indefinitely.
+			select {
+			case e.subInbound <- m:
+			case <-peer.stop:
+				return
+			case <-e.closeCh:
+				return
+			}
+		}
+	}
+}
+
+// Send fans out m to every attached peer whose SubTree matches the first
+// frame of m. Per libzmq, the first frame is the topic; multipart
+// messages match only on that first frame, and the entire multipart
+// message goes to every matching peer.
+//
+// HWM handling: if a peer's pipe is at HWM, we do a non-blocking
+// try-send and drop the message for that peer. This matches libzmq's
+// default PUB behavior (the conflate-off non-blocking send; PUB never
+// backpressures the publisher on slow subscribers).
+func (e *pubEngine) Send(ctx context.Context, m *msg.Msg) error {
+	e.mu.Lock()
+	if e.closed {
+		e.mu.Unlock()
+		return fmt.Errorf("pub send: %w", zmqerr.ErrSocketClosed)
+	}
+	if m == nil || m.NumFrames() == 0 {
+		e.mu.Unlock()
+		return nil
+	}
+	topic := m.Frames()[0]
+
+	// Snapshot the matching peers under the lock, then do the actual
+	// non-blocking sends outside the lock to avoid a slow pipe blocking
+	// unrelated engine operations (Attach/Detach).
+	targets := make([]iface.Pipe, 0, len(e.peers))
+	for p, peer := range e.peers {
+		if peer.tree.Match(topic) {
+			targets = append(targets, p)
+		}
+	}
+	e.mu.Unlock()
+
+	for _, p := range targets {
+		// Non-blocking try-send per libzmq PUB default: if the peer's
+		// pipe is at HWM, we drop the message for that peer rather
+		// than back-pressuring the publisher across all subscribers.
+		// We can't strictly "try" on iface.Pipe (no non-blocking Send
+		// primitive), so we give the send a very short deadline. A
+		// peer with free buffer completes in <1µs; a peer at HWM
+		// times out and we continue. Using a deadline rather than a
+		// pre-cancelled context avoids a race between Go's select
+		// randomly picking ctx.Done() over a ready send channel, which
+		// would spuriously drop messages that would have fit.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		tryCtx, cancel := context.WithTimeout(ctx, pubTryTimeout)
+		_ = p.Send(tryCtx, m)
+		cancel()
+	}
+	return nil
+}
+
+// pubTryTimeout is the per-peer HWM-drop deadline for PUB fanout. Long
+// enough that an un-blocked peer's send completes reliably; short enough
+// that a slow peer doesn't delay publishing to faster ones. Tuned by
+// benchmarking the pipe's channel send path — 10ms is >>1000× the typical
+// send latency and is comparable to libzmq's lb_t flush cycle.
+const pubTryTimeout = 10 * time.Millisecond
+
+// Recv: PUB is send-only → FSM violation. XPUB overrides this via
+// xpubEngine.Recv.
+func (e *pubEngine) Recv(ctx context.Context) (*msg.Msg, error) {
+	if !e.surfaceSubs {
+		return nil, fmt.Errorf("pub recv: %w", zmqerr.ErrFSMViolation)
+	}
+	// XPUB path: block until a subscription event is available or the
+	// engine closes.
+	select {
+	case m := <-e.subInbound:
+		return m, nil
+	case <-e.closeCh:
+		// Drain any straggler before reporting closed.
+		select {
+		case m := <-e.subInbound:
+			return m, nil
+		default:
+			return nil, fmt.Errorf("pub recv: %w", zmqerr.ErrSocketClosed)
+		}
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (e *pubEngine) Close() error {
+	e.mu.Lock()
+	if e.closed {
+		e.mu.Unlock()
+		return nil
+	}
+	e.closed = true
+	close(e.closeCh)
+	peers := make([]*pubPeer, 0, len(e.peers))
+	for _, peer := range e.peers {
+		peers = append(peers, peer)
+	}
+	e.peers = nil
+	e.mu.Unlock()
+	for _, peer := range peers {
+		peer.stopOnce.Do(func() { close(peer.stop) })
+		<-peer.done
+	}
+	return nil
+}

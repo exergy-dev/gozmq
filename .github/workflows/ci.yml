@@ -1,0 +1,73 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: test (race)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+      - name: Verify go.mod
+        run: go mod tidy && git diff --exit-code go.mod go.sum
+      - name: Vet
+        run: go vet ./...
+      - name: Build (CGO off — the whole point of this project)
+        env:
+          CGO_ENABLED: '0'
+        run: go build ./...
+      - name: Test with race detector
+        env:
+          CGO_ENABLED: '1'
+        run: go test -race -count=1 ./...
+
+  fuzz-smoke:
+    name: fuzz smoke (10s per target)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+      - name: Fuzz smoke
+        # Discover every Fuzz* target via go test -list and run each for 10s.
+        # Until Wave 1 A1 lands the ZMTP fuzz targets this is effectively a
+        # no-op that still catches any accidentally-added but broken target.
+        run: |
+          set -euo pipefail
+          pkgs=$(go list ./...)
+          for pkg in $pkgs; do
+            targets=$(go test -list '^Fuzz' "$pkg" 2>/dev/null | grep '^Fuzz' || true)
+            for t in $targets; do
+              echo "::group::$pkg $t"
+              go test -run '^$' -fuzz "^${t}$" -fuzztime=10s "$pkg"
+              echo "::endgroup::"
+            done
+          done
+
+  interop:
+    name: interop (libzmq, build-tagged)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+      - name: Install libzmq (for CGO interop harness — Wave 1 A7+)
+        run: sudo apt-get update && sudo apt-get install -y libzmq3-dev
+      - name: Run interop tests (no-op until Wave 1 A7)
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          if [ -d interop ] && find interop -name '*_test.go' -print -quit | grep -q .; then
+            go test -tags interop -race ./interop/...
+          else
+            echo "interop test bodies not yet present (pre-Wave-1-A7) — skipping"
+          fi

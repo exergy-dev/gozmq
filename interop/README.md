@@ -1,0 +1,64 @@
+# gozmq ↔ libzmq interop tests
+
+This package holds the cross-implementation tests that prove `gozmq`
+is wire-compatible with libzmq. Everything here is gated behind the
+`interop` build tag so that the default `gozmq` build stays free of CGO
+and any C-side dependencies.
+
+Only these tests bring CGO into the module. The rest of `gozmq` must
+continue to build and test with `CGO_ENABLED=0`.
+
+## Prerequisites
+
+- `libzmq` development headers and shared library (≥ 4.2, 4.3.x
+  exercised in CI). On Debian/Ubuntu: `apt-get install libzmq3-dev`.
+- `pkg-config libzmq` must succeed. The CGO preamble relies on
+  `#cgo pkg-config: libzmq` to pick up `-lzmq` and the header path.
+
+Verify locally:
+
+```
+pkg-config --modversion libzmq
+pkg-config --cflags --libs libzmq
+```
+
+## Running
+
+```
+go test -tags interop -race ./interop/...
+```
+
+The `-race` flag is required per design §10.5. `go vet` and the default
+`CGO_ENABLED=0 go build ./...` must continue to pass on the rest of the
+module; the `interop` tag guarantees those builds never pull in this
+directory's CGO sources.
+
+## Scope
+
+Wave 1 (A7) ships the scaffolding plus the patterns whose gozmq engines
+exist today:
+
+- `zmq_wrap.go` — thin CGO wrapper over libzmq (context, socket,
+  bind/connect, multipart send/recv, subscribe, last-endpoint).
+- `zmq_wrap_test.go` — smoke test that the wrapper itself works
+  (libzmq PAIR ↔ libzmq PAIR round-trip).
+- `pair_test.go` — `gozmq` PAIR ↔ `libzmq` PAIR, both directions.
+- `push_pull_test.go` — `gozmq` PUSH/PULL ↔ `libzmq` PULL/PUSH, both
+  directions, plus a load-balance assertion (one gozmq PUSH fanning 9
+  messages across three libzmq PULL peers, expecting 3 per peer).
+
+Wave 2 (B5) extends this directory with cross-tests for the engines
+landed by B1/B2: DEALER/ROUTER, REQ/REP, PUB/SUB, XPUB/XSUB. Wave 3
+(C4) layers CURVE interop on top.
+
+## Conventions
+
+- Errors surfaced from libzmq use the prefix `libzmq: <op>: <strerror>`
+  per the design-wide rule.
+- Every test uses `t.Cleanup` to close both contexts and all sockets, so
+  goleak can enforce no-leak on exit via the package `TestMain`.
+- libzmq spawns pthreads for its I/O reactor; those are outside the Go
+  runtime and invisible to goleak, so no whitelist is needed in Wave 1.
+  If a future test blocks a Go goroutine inside a long-running cgocall
+  past `TestMain`, add an explicit `goleak.IgnoreTopFunction` with a
+  comment documenting which function and why.

@@ -1,0 +1,8 @@
+*.test
+*.out
+*.prof
+coverage.*
+/dist/
+/.idea/
+/.vscode/
+*.swp
