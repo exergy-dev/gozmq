@@ -101,6 +101,10 @@ type curveMech struct {
 	role      iface.Role
 	localMeta map[string]string
 	peerMeta  map[string]string
+	zapAuth   iface.ZAPAuthorizer
+	zapDomain string
+	zapAddr   string
+	zapMeta   map[string]string
 
 	// Long-term keys.
 	ourPublic  Key // C on client, S on server
@@ -314,6 +318,17 @@ func (m *curveMech) PeerMetadata() map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// ConfigureZAP wires a server-side RFC 27 authorizer into the mechanism.
+// Client-side CURVE ignores the hook.
+func (m *curveMech) ConfigureZAP(authorizer iface.ZAPAuthorizer, domain, address string) {
+	if m.role != iface.RoleServer {
+		return
+	}
+	m.zapAuth = authorizer
+	m.zapDomain = domain
+	m.zapAddr = address
 }
 
 // PeerLongTermPublic returns the peer's long-term public key. On the client
@@ -770,7 +785,14 @@ func (m *curveMech) parseInitiate(body []byte) error {
 	if err != nil {
 		return err
 	}
-	m.peerMeta = props
+	if m.zapAuth != nil {
+		_, meta, err := m.zapAuth(m.zapDomain, m.zapAddr, mechName, [][]byte{clientLongPub[:]})
+		if err != nil {
+			return fmt.Errorf("gozmq/security/curve: ZAP rejected client key: %w", err)
+		}
+		m.zapMeta = copyMeta(meta)
+	}
+	m.peerMeta = mergeMeta(props, m.zapMeta)
 	m.peerShortNonce = counter + 1
 	return nil
 }
@@ -1139,4 +1161,26 @@ func decodeMeta(raw []byte) (map[string]string, error) {
 		out[name] = value
 	}
 	return out, nil
+}
+
+func copyMeta(src map[string]string) map[string]string {
+	dst := make(map[string]string, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func mergeMeta(base, overlay map[string]string) map[string]string {
+	if len(base) == 0 {
+		return copyMeta(overlay)
+	}
+	if len(overlay) == 0 {
+		return copyMeta(base)
+	}
+	out := copyMeta(base)
+	for k, v := range overlay {
+		out[k] = v
+	}
+	return out
 }

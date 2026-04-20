@@ -49,7 +49,28 @@ exist today:
 
 Wave 2 (B5) extends this directory with cross-tests for the engines
 landed by B1/B2: DEALER/ROUTER, REQ/REP, PUB/SUB, XPUB/XSUB. Wave 3
-(C4) layers CURVE interop on top.
+(C4) layers CURVE and PLAIN interop on top.
+
+## Coverage Snapshot
+
+Current tagged coverage over `tcp://` looks like this:
+
+| Pattern | NULL | PLAIN | CURVE |
+| --- | --- | --- | --- |
+| PAIR | yes | yes | yes |
+| REQ/REP | yes | yes | no |
+| DEALER/ROUTER | yes | yes | no |
+| PUB/SUB | yes | yes | no |
+| XPUB/XSUB | yes | no | no |
+| PUSH/PULL | yes | no | no |
+
+Current PLAIN coverage includes:
+
+- PAIR round-trips both directions.
+- Bad-password rejection both directions.
+- Empty-username acceptance both directions.
+- Oversized-credential rejection.
+- REQ/REP, DEALER/ROUTER, and PUB/SUB transparency over authenticated links.
 
 ## Conventions
 

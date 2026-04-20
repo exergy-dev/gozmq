@@ -36,6 +36,7 @@ type socketConfig struct {
 	xpubVerbose          bool
 	subscriptions        [][]byte
 	handshakeTimeout     time.Duration
+	zapDomain            string
 
 	plainAuth       func(user, pass string) bool
 	plainClientUser string
@@ -259,6 +260,16 @@ func WithPlainClient(username, password string) Option {
 		c.plainClient = true
 		c.plainClientUser = username
 		c.plainClientPass = password
+		return nil
+	})
+}
+
+// WithZapDomain sets the RFC 27 ZAP domain presented to the context-level
+// ZAP handler for server-side PLAIN or CURVE authorization. The default is
+// the empty domain, matching libzmq.
+func WithZapDomain(domain string) Option {
+	return newOption("WithZapDomain", func(c *socketConfig) error {
+		c.zapDomain = domain
 		return nil
 	})
 }

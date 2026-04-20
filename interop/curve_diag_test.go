@@ -41,9 +41,9 @@ func libzmqClient_libzmqServer(t *testing.T) {
 	libCtx := newLibCtx(t)
 	server := libCtx.NewSocket(ZMQ_PAIR)
 	t.Cleanup(func() { _ = server.Close() })
-	_ = server.SetOption(optCurveServer, 1)
-	_ = server.SetOption(optCurveSecretKey, serverSec[:])
-	_ = server.SetOption(optCurvePublicKey, serverPub[:])
+	_ = server.SetOption(ZMQ_CURVE_SERVER, 1)
+	_ = server.SetOption(ZMQ_CURVE_SECRETKEY, serverSec[:])
+	_ = server.SetOption(ZMQ_CURVE_PUBLICKEY, serverPub[:])
 	if err := server.Bind("tcp://127.0.0.1:0"); err != nil {
 		t.Fatal(err)
 	}
@@ -55,9 +55,9 @@ func libzmqClient_libzmqServer(t *testing.T) {
 
 	client := libCtx.NewSocket(ZMQ_PAIR)
 	t.Cleanup(func() { _ = client.Close() })
-	_ = client.SetOption(optCurveServerKey, serverPub[:])
-	_ = client.SetOption(optCurvePublicKey, clientPub[:])
-	_ = client.SetOption(optCurveSecretKey, clientSec[:])
+	_ = client.SetOption(ZMQ_CURVE_SERVERKEY, serverPub[:])
+	_ = client.SetOption(ZMQ_CURVE_PUBLICKEY, clientPub[:])
+	_ = client.SetOption(ZMQ_CURVE_SECRETKEY, clientSec[:])
 	if err := client.Connect(proxy.Endpoint()); err != nil {
 		t.Fatal(err)
 	}
@@ -110,9 +110,9 @@ func gozmqClient_libzmqServer(t *testing.T) {
 	libCtx := newLibCtx(t)
 	server := libCtx.NewSocket(ZMQ_PAIR)
 	t.Cleanup(func() { _ = server.Close() })
-	_ = server.SetOption(optCurveServer, 1)
-	_ = server.SetOption(optCurveSecretKey, serverSec[:])
-	_ = server.SetOption(optCurvePublicKey, serverPub[:])
+	_ = server.SetOption(ZMQ_CURVE_SERVER, 1)
+	_ = server.SetOption(ZMQ_CURVE_SECRETKEY, serverSec[:])
+	_ = server.SetOption(ZMQ_CURVE_PUBLICKEY, serverPub[:])
 	if err := server.Bind("tcp://127.0.0.1:0"); err != nil {
 		t.Fatal(err)
 	}

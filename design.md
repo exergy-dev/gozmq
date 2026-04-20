@@ -264,7 +264,7 @@ Trivial: after the greeting, each side sends a `READY` command with metadata. No
 
 ### 8.2 PLAIN
 
-Client sends `HELLO` with `username` and `password`. Server responds with `WELCOME` (on success) or `ERROR` (on failure), then both sides exchange `READY` with metadata. Credentials are validated via a user-supplied callback:
+Client sends `HELLO` with `username` and `password`. Server responds with `WELCOME` (on success) or `ERROR` (on failure), then the client sends `INITIATE` with metadata and the server finishes with `READY` metadata. Credentials are validated via a user-supplied callback:
 
 ```go
 gozmq.WithPlainAuth(func(user, pass string) bool { ... })

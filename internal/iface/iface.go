@@ -115,6 +115,18 @@ type MetadataCodec interface {
 // Security layer
 // --------------------------------------------------------------------------
 
+// ZAPAuthorizer is the server-side authorization hook for mechanisms that
+// delegate policy to RFC 27 ZAP. On success it returns a user-id plus
+// optional metadata to merge into the peer properties. On rejection it
+// should return an error wrapping zmqerr.ErrAuthFailed.
+type ZAPAuthorizer func(domain, address, mech string, credentials [][]byte) (userID string, metadata map[string]string, err error)
+
+// ZapConfigurable is an optional extension implemented by security
+// mechanisms that support server-side ZAP authorization.
+type ZapConfigurable interface {
+	ConfigureZAP(authorizer ZAPAuthorizer, domain, address string)
+}
+
 // SecurityMech drives a single handshake exchange and, for mechanisms that
 // require it (CURVE), wraps/unwraps every subsequent frame body.
 //

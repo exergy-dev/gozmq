@@ -5,14 +5,12 @@
 //
 //	Client -> Server : HELLO [username][password]
 //	Server -> Client : WELCOME  (or ERROR on auth failure)
-//	Client -> Server : INITIATE  (no payload beyond the command name)
+//	Client -> Server : INITIATE  metadata
 //	Server -> Client : READY  metadata
-//	Client -> Server : READY  metadata  (if not yet sent)
 //
-// RFC 24 mandates an INITIATE command between WELCOME and the first READY so
-// both peers agree that authentication succeeded before any metadata is
-// exchanged. We follow that sequencing here so the wire is bit-for-bit
-// interoperable with libzmq.
+// RFC 24 carries the client's metadata in INITIATE and the server's metadata
+// in READY. The server completes the PLAIN handshake as soon as it emits
+// READY; there is no trailing client READY exchange.
 //
 // As with NULL, NextHandshake produces command BODIES (name-length prefix +
 // name + payload). The session layer wraps each body in a COMMAND-flagged
@@ -22,6 +20,7 @@
 package security
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 
@@ -52,7 +51,6 @@ const (
 	plainClientRecvWelcome
 	plainClientSendInitiate
 	plainClientRecvReady
-	plainClientSendReady
 
 	// Server-side states. plainServerSeed is the passive initial state:
 	// the session driver calls NextHandshake(nil) first on every mechanism
@@ -62,7 +60,6 @@ const (
 	plainServerRecvHello
 	plainServerRecvInitiate
 	plainServerSendReady
-	plainServerRecvReady
 
 	// Terminal.
 	plainDone
@@ -81,19 +78,23 @@ type plainMech struct {
 	localMeta map[string]string
 	peerMeta  map[string]string
 	metaCodec iface.MetadataCodec
+	zapAuth   iface.ZAPAuthorizer
+	zapDomain string
+	zapAddr   string
+	zapMeta   map[string]string
 
-	// readySent tracks whether our own READY has been emitted. The server
-	// sends READY first (after validating INITIATE); the client sends READY
-	// last, after receiving the server's READY.
-	readySent bool
-	// readyRecv tracks whether the peer's READY has been parsed.
-	readyRecv bool
+	// metaSent tracks whether our metadata-bearing command has been emitted:
+	// INITIATE on the client, READY on the server.
+	metaSent bool
+	// metaRecv tracks whether the peer's metadata-bearing command has been
+	// parsed: READY on the client, INITIATE on the server.
+	metaRecv bool
 }
 
 // NewPlainClient returns a PLAIN mechanism configured as the initiator. It
-// advertises localMeta in its outbound READY. username and password are sent
-// verbatim in HELLO, per RFC 24 §4 (length-prefixed, max 255 each). localMeta
-// may be nil.
+// advertises localMeta in its outbound INITIATE. username and password are
+// sent verbatim in HELLO, per RFC 24 §4 (length-prefixed, max 255 each).
+// localMeta may be nil.
 func NewPlainClient(username, password string, localMeta map[string]string) iface.SecurityMech {
 	return &plainMech{
 		role:      iface.RoleClient,
@@ -137,11 +138,14 @@ func (*plainMech) DecodeFrame(flags uint8, wire []byte) (uint8, []byte, error) {
 	return flags, wire, nil
 }
 
-// Metadata returns a copy of the local metadata properties sent in READY.
+// Metadata returns a copy of the local metadata properties sent in the
+// metadata-bearing handshake command: INITIATE on the client, READY on the
+// server.
 func (m *plainMech) Metadata() map[string]string { return copyMeta(m.localMeta) }
 
-// SetPeerMetadata stores the peer's parsed READY properties. PLAIN performs
-// no additional validation; Socket-Type compatibility lives in the engine.
+// SetPeerMetadata stores the peer's parsed metadata-bearing command
+// properties. PLAIN performs no additional validation; Socket-Type
+// compatibility lives in the engine.
 func (m *plainMech) SetPeerMetadata(props map[string]string) error {
 	if props == nil {
 		m.peerMeta = nil
@@ -151,14 +155,25 @@ func (m *plainMech) SetPeerMetadata(props map[string]string) error {
 	return nil
 }
 
-// PeerMetadata returns the parsed peer READY properties, or nil before the
-// handshake completes. Exposed (like NULL's version) for testability; not part
-// of iface.SecurityMech.
+// PeerMetadata returns the parsed peer metadata-bearing command properties,
+// or nil before the handshake completes. Exposed (like NULL's version) for
+// testability; not part of iface.SecurityMech.
 func (m *plainMech) PeerMetadata() map[string]string {
 	if m.peerMeta == nil {
 		return nil
 	}
 	return copyMeta(m.peerMeta)
+}
+
+// ConfigureZAP wires a server-side RFC 27 authorizer into the mechanism.
+// Client-side PLAIN ignores the hook.
+func (m *plainMech) ConfigureZAP(authorizer iface.ZAPAuthorizer, domain, address string) {
+	if m.role != iface.RoleServer {
+		return
+	}
+	m.zapAuth = authorizer
+	m.zapDomain = domain
+	m.zapAddr = address
 }
 
 // NextHandshake drives the PLAIN handshake state machine. See the package
@@ -181,9 +196,9 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		if in == nil {
 			return nil, false, fmt.Errorf("gozmq/security/plain: nil peer input awaiting WELCOME: %w", zmqerr.ErrMalformedFrame)
 		}
-		name, payload, err := parseCommand(in)
+		name, payload, err := parseServerCommand(in)
 		if err != nil {
-			return nil, false, err
+			return nil, false, fmt.Errorf("gozmq/security/plain: parse WELCOME/ERROR body %x: %w", in, err)
 		}
 		switch name {
 		case plainCmdWelcome:
@@ -204,9 +219,8 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		}
 
 	case plainClientSendInitiate:
-		// INITIATE is emitted with an empty payload; it just signals the
-		// client has accepted the server's WELCOME.
-		out := encodeCommand(plainCmdInitiate, nil)
+		out := encodeCommand(plainCmdInitiate, m.metaCodec.Encode(m.localMeta))
+		m.metaSent = true
 		m.state = plainClientRecvReady
 		return out, false, nil
 
@@ -214,27 +228,29 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		if in == nil {
 			return nil, false, fmt.Errorf("gozmq/security/plain: nil peer input awaiting READY: %w", zmqerr.ErrMalformedFrame)
 		}
-		name, payload, err := parseCommand(in)
+		name, payload, err := parseServerCommand(in)
 		if err != nil {
-			return nil, false, err
+			return nil, false, fmt.Errorf("gozmq/security/plain: parse READY body %x: %w", in, err)
 		}
-		if name != plainCmdReady {
-			return nil, false, fmt.Errorf("gozmq/security/plain: expected READY, got %q: %w", name, zmqerr.ErrMalformedFrame)
+		switch name {
+		case plainCmdError:
+			reason, perr := parseErrorReason(payload)
+			if perr != nil {
+				return nil, false, perr
+			}
+			return nil, false, fmt.Errorf("gozmq/security/plain: server rejected INITIATE: %q: %w", reason, zmqerr.ErrAuthFailed)
+		case plainCmdReady:
+			props, err := m.metaCodec.Decode(payload)
+			if err != nil {
+				return nil, false, err
+			}
+			m.peerMeta = props
+			m.metaRecv = true
+			m.state = plainDone
+			return nil, true, nil
+		default:
+			return nil, false, fmt.Errorf("gozmq/security/plain: expected READY or ERROR, got %q: %w", name, zmqerr.ErrMalformedFrame)
 		}
-		props, err := m.metaCodec.Decode(payload)
-		if err != nil {
-			return nil, false, err
-		}
-		m.peerMeta = props
-		m.readyRecv = true
-		m.state = plainClientSendReady
-		return m.NextHandshake(nil)
-
-	case plainClientSendReady:
-		out := encodeCommand(plainCmdReady, m.metaCodec.Encode(m.localMeta))
-		m.readySent = true
-		m.state = plainDone
-		return out, true, nil
 
 	// ------------------------------------------------------------------ Server
 	case plainServerSeed:
@@ -262,7 +278,16 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		}
 		m.username = user
 		m.password = pass
-		if m.authFn == nil || !m.authFn(user, pass) {
+		switch {
+		case m.zapAuth != nil:
+			_, meta, err := m.zapAuth(m.zapDomain, m.zapAddr, plainMechName, [][]byte{[]byte(user), []byte(pass)})
+			if err != nil {
+				out := encodeCommand(plainCmdError, encodeErrorReason("Invalid username or password"))
+				m.state = plainDone
+				return out, false, fmt.Errorf("gozmq/security/plain: ZAP rejected user %q: %w", user, err)
+			}
+			m.zapMeta = copyMeta(meta)
+		case m.authFn == nil || !m.authFn(user, pass):
 			// Emit ERROR and tear down. The reason text is short and
 			// opaque per RFC 24's guidance not to leak authentication
 			// detail.
@@ -279,41 +304,27 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		if in == nil {
 			return nil, false, fmt.Errorf("gozmq/security/plain: nil peer input awaiting INITIATE: %w", zmqerr.ErrMalformedFrame)
 		}
-		name, _, err := parseCommand(in)
+		name, payload, err := parseCommand(in)
 		if err != nil {
 			return nil, false, err
 		}
 		if name != plainCmdInitiate {
 			return nil, false, fmt.Errorf("gozmq/security/plain: expected INITIATE, got %q: %w", name, zmqerr.ErrMalformedFrame)
 		}
+		props, err := m.metaCodec.Decode(payload)
+		if err != nil {
+			return nil, false, err
+		}
+		m.peerMeta = mergeMeta(props, m.zapMeta)
+		m.metaRecv = true
 		m.state = plainServerSendReady
 		return m.NextHandshake(nil)
 
 	case plainServerSendReady:
 		out := encodeCommand(plainCmdReady, m.metaCodec.Encode(m.localMeta))
-		m.readySent = true
-		m.state = plainServerRecvReady
-		return out, false, nil
-
-	case plainServerRecvReady:
-		if in == nil {
-			return nil, false, fmt.Errorf("gozmq/security/plain: nil peer input awaiting client READY: %w", zmqerr.ErrMalformedFrame)
-		}
-		name, payload, err := parseCommand(in)
-		if err != nil {
-			return nil, false, err
-		}
-		if name != plainCmdReady {
-			return nil, false, fmt.Errorf("gozmq/security/plain: expected READY, got %q: %w", name, zmqerr.ErrMalformedFrame)
-		}
-		props, err := m.metaCodec.Decode(payload)
-		if err != nil {
-			return nil, false, err
-		}
-		m.peerMeta = props
-		m.readyRecv = true
+		m.metaSent = true
 		m.state = plainDone
-		return nil, true, nil
+		return out, true, nil
 
 	case plainDone:
 		return nil, true, nil
@@ -352,6 +363,27 @@ func parseCommand(body []byte) (string, []byte, error) {
 	// emits them uppercase; accept either to be robust.
 	name := strings.ToUpper(string(body[1 : 1+nameLen]))
 	return name, body[1+nameLen:], nil
+}
+
+// parseServerCommand accepts the canonical length-prefixed PLAIN command
+// bodies and two auth-failure forms observed in libzmq interop:
+//   - a bare "ERROR" command body without the leading name-length byte
+//   - a malformed "?RROR" variant carrying the same short-string payload
+//
+// The malformed variant is only tolerated for ERROR because it is specific to
+// negative-path interop; all other commands must use the canonical encoding.
+func parseServerCommand(body []byte) (string, []byte, error) {
+	name, payload, err := parseCommand(body)
+	if err == nil {
+		return name, payload, nil
+	}
+	if bytes.HasPrefix(body, []byte(plainCmdError)) {
+		return plainCmdError, body[len(plainCmdError):], nil
+	}
+	if len(body) >= len(plainCmdError) && bytes.Equal(body[1:len(plainCmdError)], []byte(plainCmdError[1:])) {
+		return plainCmdError, body[len(plainCmdError):], nil
+	}
+	return "", nil, err
 }
 
 // encodeHello builds the HELLO payload per RFC 24 §4:
@@ -434,4 +466,18 @@ func copyMeta(src map[string]string) map[string]string {
 		dst[k] = v
 	}
 	return dst
+}
+
+func mergeMeta(base, overlay map[string]string) map[string]string {
+	if len(base) == 0 {
+		return copyMeta(overlay)
+	}
+	if len(overlay) == 0 {
+		return copyMeta(base)
+	}
+	out := copyMeta(base)
+	for k, v := range overlay {
+		out[k] = v
+	}
+	return out
 }

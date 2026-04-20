@@ -97,6 +97,7 @@ type Context struct {
 	cancel context.CancelFunc
 
 	registry iface.Registry
+	zapAuth  iface.ZAPAuthorizer
 
 	mu      sync.Mutex
 	sockets []*Socket
@@ -108,6 +109,41 @@ type ContextOption interface{ applyContext(*Context) }
 type contextOptionFunc func(*Context)
 
 func (f contextOptionFunc) applyContext(c *Context) { f(c) }
+
+// WithZapHandler installs a context-level RFC 27 ZAP handler used by
+// server-side PLAIN and CURVE handshakes.
+func WithZapHandler(handler *security.ZapHandler) ContextOption {
+	return contextOptionFunc(func(c *Context) {
+		if handler == nil {
+			c.zapAuth = nil
+			return
+		}
+		c.zapAuth = func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
+			req := &security.ZapRequest{
+				Domain:      domain,
+				Address:     address,
+				Mechanism:   mech,
+				Credentials: credentials,
+			}
+			resp, err := security.DecodeZapResponse(handler.ServeRequest(security.EncodeZapRequest(req)))
+			if err != nil {
+				return "", nil, fmt.Errorf("gozmq: decode ZAP response: %w", err)
+			}
+			switch resp.StatusCode {
+			case security.ZapStatusOK:
+				return resp.UserID, resp.Metadata, nil
+			case security.ZapStatusTempError:
+				return "", nil, fmt.Errorf("gozmq: ZAP temporary failure: %s: %w", resp.StatusText, security.ErrZapTemporary)
+			case security.ZapStatusClientError:
+				return "", nil, fmt.Errorf("gozmq: ZAP rejected %s peer: %s: %w", mech, resp.StatusText, zmqerr.ErrAuthFailed)
+			case security.ZapStatusServerError:
+				return "", nil, fmt.Errorf("gozmq: ZAP server error: %s", resp.StatusText)
+			default:
+				return "", nil, fmt.Errorf("gozmq: unknown ZAP status code %q", resp.StatusCode)
+			}
+		}
+	})
+}
 
 // NewContext creates a new Context. Call Close to release resources.
 func NewContext(opts ...ContextOption) *Context {
@@ -465,6 +501,11 @@ func (s *Socket) watchClientHandshake(sess iface.Session, endpoint string) {
 // this Socket.
 func (s *Socket) buildSession(conn iface.Conn, role iface.Role) iface.Session {
 	mech := s.newMechanism(role)
+	if role == iface.RoleServer {
+		if cfg, ok := mech.(iface.ZapConfigurable); ok && s.ctx.zapAuth != nil {
+			cfg.ConfigureZAP(s.ctx.zapAuth, s.cfg.zapDomain, conn.RemoteEndpoint())
+		}
+	}
 	codec := zmtp.NewFrameCodec(s.cfg.maxMessageSize)
 	return session.New(session.Config{
 		Conn:              conn,

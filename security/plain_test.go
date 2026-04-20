@@ -114,12 +114,13 @@ func TestPlainHandshakeSuccess(t *testing.T) {
 		t.Fatalf("server peer metadata: got %v, want %v", serverImpl.PeerMetadata(), clientMeta)
 	}
 
-	// Both sides must have sent and received READY.
-	if !clientImpl.readySent || !clientImpl.readyRecv {
-		t.Fatalf("client ready flags: sent=%v recv=%v", clientImpl.readySent, clientImpl.readyRecv)
+	// The client sends metadata in INITIATE and receives it in READY; the
+	// server receives metadata in INITIATE and sends it in READY.
+	if !clientImpl.metaSent || !clientImpl.metaRecv {
+		t.Fatalf("client metadata flags: sent=%v recv=%v", clientImpl.metaSent, clientImpl.metaRecv)
 	}
-	if !serverImpl.readySent || !serverImpl.readyRecv {
-		t.Fatalf("server ready flags: sent=%v recv=%v", serverImpl.readySent, serverImpl.readyRecv)
+	if !serverImpl.metaSent || !serverImpl.metaRecv {
+		t.Fatalf("server metadata flags: sent=%v recv=%v", serverImpl.metaSent, serverImpl.metaRecv)
 	}
 }
 
@@ -267,6 +268,57 @@ func TestPlainClientRejectsWelcomeWithPayload(t *testing.T) {
 	}
 	if !errors.Is(err, zmqerr.ErrMalformedFrame) {
 		t.Fatalf("want ErrMalformedFrame, got %v", err)
+	}
+}
+
+func TestPlainClientAcceptsErrorAfterInitiate(t *testing.T) {
+	client := NewPlainClient("alice", "hunter2", map[string]string{"Socket-Type": "PAIR"})
+
+	out, done, err := client.NextHandshake(nil)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if done || len(out) == 0 {
+		t.Fatalf("seed: out=%x done=%v", out, done)
+	}
+
+	out, done, err = client.NextHandshake([]byte{0x07, 'W', 'E', 'L', 'C', 'O', 'M', 'E'})
+	if err != nil {
+		t.Fatalf("WELCOME: %v", err)
+	}
+	if done || len(out) == 0 {
+		t.Fatalf("INITIATE: out=%x done=%v", out, done)
+	}
+
+	_, _, err = client.NextHandshake([]byte{0x05, 'E', 'R', 'R', 'O', 'R', 0x03, '4', '0', '0'})
+	if err == nil {
+		t.Fatal("ERROR after INITIATE: want error")
+	}
+	if !errors.Is(err, zmqerr.ErrAuthFailed) {
+		t.Fatalf("ERROR after INITIATE: want ErrAuthFailed, got %v", err)
+	}
+}
+
+func TestPlainClientAcceptsCompatErrorAfterInitiate(t *testing.T) {
+	client := NewPlainClient("alice", "hunter2", nil)
+
+	if _, _, err := client.NextHandshake(nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	out, done, err := client.NextHandshake([]byte{0x07, 'W', 'E', 'L', 'C', 'O', 'M', 'E'})
+	if err != nil {
+		t.Fatalf("WELCOME: %v", err)
+	}
+	if done || len(out) == 0 {
+		t.Fatalf("INITIATE: out=%x done=%v", out, done)
+	}
+
+	_, _, err = client.NextHandshake([]byte{0x5e, 'R', 'R', 'O', 'R', 0x03, '4', '0', '0'})
+	if err == nil {
+		t.Fatal("compat ERROR after INITIATE: want error")
+	}
+	if !errors.Is(err, zmqerr.ErrAuthFailed) {
+		t.Fatalf("compat ERROR after INITIATE: want ErrAuthFailed, got %v", err)
 	}
 }
 

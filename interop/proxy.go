@@ -11,57 +11,67 @@ import (
 	"time"
 )
 
-// flagSniffingProxy is a minimal in-process TCP splicer that sits between
-// two peers and records the ZMTP flags byte of every frame it forwards in
-// each direction. It exists purely to diagnose wire-format disagreements
-// in the CURVE cross-tests; it does not belong to any product path.
+// SniffingProxy is a minimal in-process TCP splicer that sits between two
+// peers and records the ZMTP flags byte of every frame it forwards in each
+// direction. It exists purely for interop diagnostics and fault injection.
 //
 // The splicer trusts that both sides speak ZMTP 3.1 framing after the
 // greeting. It forwards the 64-byte greeting verbatim, then shifts into
-// frame-by-frame mode: read flags + length, log flags, forward header and
-// body. No decoding of bodies occurs.
-type flagSniffingProxy struct {
-	t       *testing.T
+// frame-by-frame mode: read flags + length, optionally mutate or delay the
+// body, then forward the header and body.
+type SniffingProxy struct {
+	t       testing.TB
 	listen  net.Listener
 	upstrm  string
 	stopped chan struct{}
 
+	startOnce sync.Once
+	stopOnce  sync.Once
+
 	mu        sync.Mutex
-	clientOut []byte // flags bytes observed on client→server frames
-	serverOut []byte // flags bytes observed on server→client frames
+	clientOut []byte
+	serverOut []byte
 	active    []net.Conn
 
-	// bodies keyed by (direction, frame index) — diagnostic aid, not
-	// part of the main test path.
 	clientBodies [][]byte
 	serverBodies [][]byte
 
-	// mutator, if non-nil, is invoked once per post-greeting frame body
-	// before it is forwarded. The returned slice replaces the body on the
-	// wire. It MUST preserve length — the length header has already been
-	// forwarded by the time this fires. Use SetMutator to install.
 	mutator func(clientToServer bool, frameIdx int, body []byte) []byte
+
+	dropAfter  int
+	delayAfter int
+	delay      time.Duration
 }
 
-func newFlagSniffingProxy(t *testing.T, upstream string) *flagSniffingProxy {
+// NewSniffingProxy constructs a proxy bound to a random loopback port. Call
+// Start before connecting a peer, and Stop to tear it down.
+func NewSniffingProxy(t testing.TB, upstream string) *SniffingProxy {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("proxy listen: %v", err)
 	}
-	p := &flagSniffingProxy{
-		t:       t,
-		listen:  ln,
-		upstrm:  upstream,
-		stopped: make(chan struct{}),
+	return &SniffingProxy{
+		t:          t,
+		listen:     ln,
+		upstrm:     upstream,
+		stopped:    make(chan struct{}),
+		dropAfter:  -1,
+		delayAfter: -1,
 	}
-	go p.accept()
-	t.Cleanup(func() {
-		_ = ln.Close()
-		// Forcibly tear down the active conns so the pipe loops unblock
-		// even if the peer sockets haven't closed yet. Without this the
-		// cleanup deadlocks waiting for p.stopped because the server-side
-		// pipe is still blocked in ReadFull on a still-open libzmq conn.
+}
+
+// Start begins accepting the single proxied connection.
+func (p *SniffingProxy) Start() {
+	p.startOnce.Do(func() {
+		go p.accept()
+	})
+}
+
+// Stop tears the proxy down and waits for its goroutines to exit.
+func (p *SniffingProxy) Stop() {
+	p.stopOnce.Do(func() {
+		_ = p.listen.Close()
 		p.mu.Lock()
 		for _, c := range p.active {
 			_ = c.Close()
@@ -69,28 +79,46 @@ func newFlagSniffingProxy(t *testing.T, upstream string) *flagSniffingProxy {
 		p.mu.Unlock()
 		<-p.stopped
 	})
-	return p
 }
 
-// Endpoint returns the tcp:// endpoint callers should connect to so that
-// traffic routes through the proxy.
-func (p *flagSniffingProxy) Endpoint() string {
+// Addr returns the tcp:// endpoint callers should connect to so that traffic
+// routes through the proxy.
+func (p *SniffingProxy) Addr() string {
 	return "tcp://" + p.listen.Addr().String()
 }
 
+// Endpoint is a compatibility alias for Addr.
+func (p *SniffingProxy) Endpoint() string { return p.Addr() }
+
 // SetMutator installs a per-frame body mutator. The mutator is called for
 // every post-greeting frame body in both directions before the body is
-// forwarded; the returned slice replaces the body on the wire and MUST be
-// the same length as the input (the length header has already been
-// written). Frame indices are per-direction and start at zero. Passing
-// nil clears the mutator.
-func (p *flagSniffingProxy) SetMutator(fn func(clientToServer bool, frameIdx int, body []byte) []byte) {
+// forwarded; the returned slice replaces the body on the wire and must be the
+// same length as the input.
+func (p *SniffingProxy) SetMutator(fn func(clientToServer bool, frameIdx int, body []byte) []byte) {
 	p.mu.Lock()
 	p.mutator = fn
 	p.mu.Unlock()
 }
 
-func (p *flagSniffingProxy) accept() {
+// SetDropAfter stops forwarding after the specified post-greeting frame index
+// in each direction. Pass a negative value to disable dropping.
+func (p *SniffingProxy) SetDropAfter(frameIdx int) {
+	p.mu.Lock()
+	p.dropAfter = frameIdx
+	p.mu.Unlock()
+}
+
+// SetDelayAfter sleeps for d after forwarding the specified post-greeting
+// frame index in each direction. Pass a negative frame index or a non-positive
+// duration to disable delaying.
+func (p *SniffingProxy) SetDelayAfter(frameIdx int, d time.Duration) {
+	p.mu.Lock()
+	p.delayAfter = frameIdx
+	p.delay = d
+	p.mu.Unlock()
+}
+
+func (p *SniffingProxy) accept() {
 	defer close(p.stopped)
 	conn, err := p.listen.Accept()
 	if err != nil {
@@ -98,7 +126,6 @@ func (p *flagSniffingProxy) accept() {
 	}
 	defer conn.Close()
 
-	// upstream is "tcp://host:port"; trim the scheme.
 	addr := p.upstrm[len("tcp://"):]
 	up, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
@@ -114,25 +141,16 @@ func (p *flagSniffingProxy) accept() {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		p.pipe(conn, up, true) // client→server
+		p.pipe(conn, up, true)
 	}()
 	go func() {
 		defer wg.Done()
-		p.pipe(up, conn, false) // server→client
+		p.pipe(up, conn, false)
 	}()
 	wg.Wait()
 }
 
-// pipe forwards bytes from r to w, after the 64-byte greeting switches
-// into frame mode and records the flags byte on each post-greeting frame.
-//
-// The greeting is sent by libzmq in two parts (11-byte signature, then
-// 53-byte remainder) and the peer often withholds its second half until
-// ours is forwarded. Stream forward byte-by-byte (small reads) until we
-// have forwarded 64 bytes total, THEN switch to frame mode.
-func (p *flagSniffingProxy) pipe(r, w net.Conn, clientToServer bool) {
-	// Forward greeting, streaming small chunks so the peer's reply can
-	// interleave with our forwarding.
+func (p *SniffingProxy) pipe(r, w net.Conn, clientToServer bool) {
 	forwarded := 0
 	buf := make([]byte, 64)
 	for forwarded < 64 {
@@ -146,7 +164,6 @@ func (p *flagSniffingProxy) pipe(r, w net.Conn, clientToServer bool) {
 		forwarded += n
 	}
 
-	// Frame mode.
 	frameIdx := 0
 	for {
 		hdr := make([]byte, 2)
@@ -164,7 +181,7 @@ func (p *flagSniffingProxy) pipe(r, w net.Conn, clientToServer bool) {
 
 		var size uint64
 		var full []byte
-		if flags&0x02 != 0 { // LONG form
+		if flags&0x02 != 0 {
 			more := make([]byte, 7)
 			if _, err := io.ReadFull(r, more); err != nil {
 				return
@@ -191,7 +208,11 @@ func (p *flagSniffingProxy) pipe(r, w net.Conn, clientToServer bool) {
 			p.serverBodies = append(p.serverBodies, snap)
 		}
 		mutator := p.mutator
+		dropAfter := p.dropAfter
+		delayAfter := p.delayAfter
+		delay := p.delay
 		p.mu.Unlock()
+
 		if _, err := w.Write(full); err != nil {
 			return
 		}
@@ -210,12 +231,18 @@ func (p *flagSniffingProxy) pipe(r, w net.Conn, clientToServer bool) {
 				return
 			}
 		}
+		if frameIdx == dropAfter {
+			return
+		}
+		if frameIdx == delayAfter && delay > 0 {
+			time.Sleep(delay)
+		}
 		frameIdx++
 	}
 }
 
 // bodiesSnapshot returns copies of all recorded frame bodies.
-func (p *flagSniffingProxy) bodiesSnapshot() (clientBodies, serverBodies [][]byte) {
+func (p *SniffingProxy) bodiesSnapshot() (clientBodies, serverBodies [][]byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	cb := make([][]byte, len(p.clientBodies))
@@ -229,14 +256,22 @@ func (p *flagSniffingProxy) bodiesSnapshot() (clientBodies, serverBodies [][]byt
 	return cb, sb
 }
 
-func (p *flagSniffingProxy) snapshot() (clientOut, serverOut []byte) {
+func (p *SniffingProxy) snapshot() (clientOut, serverOut []byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]byte(nil), p.clientOut...), append([]byte(nil), p.serverOut...)
 }
 
-// formatFlags renders a byte slice of ZMTP flags as a comma-separated list
-// of their symbolic names for easy test diagnostics.
+func newFlagSniffingProxy(t *testing.T, upstream string) *SniffingProxy {
+	t.Helper()
+	p := NewSniffingProxy(t, upstream)
+	p.Start()
+	t.Cleanup(func() { p.Stop() })
+	return p
+}
+
+// formatFlags renders a byte slice of ZMTP flags as a comma-separated list of
+// their symbolic names for easy test diagnostics.
 func formatFlags(flags []byte) string {
 	out := ""
 	for i, f := range flags {
@@ -247,4 +282,3 @@ func formatFlags(flags []byte) string {
 	}
 	return out
 }
-

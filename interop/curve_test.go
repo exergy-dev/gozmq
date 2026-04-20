@@ -11,16 +11,6 @@ import (
 	"github.com/rkm/gozmq/security/curve"
 )
 
-// libzmq setsockopt option codes for CURVE, fixed by the RFC / zmq.h and
-// pinned here so we do not depend on exposing them from zmq_wrap.go (keeping
-// the wrapper edit surface minimal per C4's scope).
-const (
-	optCurveServer    = 47 // ZMQ_CURVE_SERVER    (int)
-	optCurvePublicKey = 48 // ZMQ_CURVE_PUBLICKEY (32-byte binary)
-	optCurveSecretKey = 49 // ZMQ_CURVE_SECRETKEY (32-byte binary)
-	optCurveServerKey = 50 // ZMQ_CURVE_SERVERKEY (32-byte binary)
-)
-
 // handshakeSettle is the window we sleep after Connect before the first Send
 // to let the 5-step CURVE handshake drive to completion. libzmq's reactor on
 // loopback is fast but not instantaneous; a short settle keeps the tests
@@ -70,13 +60,13 @@ func TestCurve_GozmqClient_LibzmqServer(t *testing.T) {
 	server := libCtx.NewSocket(ZMQ_PAIR)
 	t.Cleanup(func() { _ = server.Close() })
 	// Order matters on libzmq: CURVE options must be set before Bind.
-	if err := server.SetOption(optCurveServer, 1); err != nil {
+	if err := server.SetOption(ZMQ_CURVE_SERVER, 1); err != nil {
 		t.Fatalf("libzmq set CURVE_SERVER: %v", err)
 	}
-	if err := server.SetOption(optCurveSecretKey, serverSec[:]); err != nil {
+	if err := server.SetOption(ZMQ_CURVE_SECRETKEY, serverSec[:]); err != nil {
 		t.Fatalf("libzmq set CURVE_SECRETKEY: %v", err)
 	}
-	if err := server.SetOption(optCurvePublicKey, serverPub[:]); err != nil {
+	if err := server.SetOption(ZMQ_CURVE_PUBLICKEY, serverPub[:]); err != nil {
 		t.Fatalf("libzmq set CURVE_PUBLICKEY: %v", err)
 	}
 	if err := server.Bind("tcp://127.0.0.1:0"); err != nil {
@@ -172,13 +162,13 @@ func TestCurve_LibzmqClient_GozmqServer(t *testing.T) {
 	libCtx := newLibCtx(t)
 	client := libCtx.NewSocket(ZMQ_PAIR)
 	t.Cleanup(func() { _ = client.Close() })
-	if err := client.SetOption(optCurveServerKey, serverPub[:]); err != nil {
+	if err := client.SetOption(ZMQ_CURVE_SERVERKEY, serverPub[:]); err != nil {
 		t.Fatalf("libzmq set CURVE_SERVERKEY: %v", err)
 	}
-	if err := client.SetOption(optCurvePublicKey, clientPub[:]); err != nil {
+	if err := client.SetOption(ZMQ_CURVE_PUBLICKEY, clientPub[:]); err != nil {
 		t.Fatalf("libzmq set CURVE_PUBLICKEY: %v", err)
 	}
-	if err := client.SetOption(optCurveSecretKey, clientSec[:]); err != nil {
+	if err := client.SetOption(ZMQ_CURVE_SECRETKEY, clientSec[:]); err != nil {
 		t.Fatalf("libzmq set CURVE_SECRETKEY: %v", err)
 	}
 	if err := client.Connect(ep); err != nil {
@@ -255,13 +245,13 @@ func TestCurve_LibzmqClient_GozmqServer_Multipart(t *testing.T) {
 	libCtx := newLibCtx(t)
 	client := libCtx.NewSocket(ZMQ_PAIR)
 	t.Cleanup(func() { _ = client.Close() })
-	if err := client.SetOption(optCurveServerKey, serverPub[:]); err != nil {
+	if err := client.SetOption(ZMQ_CURVE_SERVERKEY, serverPub[:]); err != nil {
 		t.Fatalf("libzmq set CURVE_SERVERKEY: %v", err)
 	}
-	if err := client.SetOption(optCurvePublicKey, clientPub[:]); err != nil {
+	if err := client.SetOption(ZMQ_CURVE_PUBLICKEY, clientPub[:]); err != nil {
 		t.Fatalf("libzmq set CURVE_PUBLICKEY: %v", err)
 	}
-	if err := client.SetOption(optCurveSecretKey, clientSec[:]); err != nil {
+	if err := client.SetOption(ZMQ_CURVE_SECRETKEY, clientSec[:]); err != nil {
 		t.Fatalf("libzmq set CURVE_SECRETKEY: %v", err)
 	}
 	if err := client.Connect(ep); err != nil {
@@ -327,13 +317,13 @@ func TestCurve_WrongServerKey_Rejected(t *testing.T) {
 	libCtx := newLibCtx(t)
 	server := libCtx.NewSocket(ZMQ_PAIR)
 	t.Cleanup(func() { _ = server.Close() })
-	if err := server.SetOption(optCurveServer, 1); err != nil {
+	if err := server.SetOption(ZMQ_CURVE_SERVER, 1); err != nil {
 		t.Fatalf("libzmq set CURVE_SERVER: %v", err)
 	}
-	if err := server.SetOption(optCurveSecretKey, serverSec[:]); err != nil {
+	if err := server.SetOption(ZMQ_CURVE_SECRETKEY, serverSec[:]); err != nil {
 		t.Fatalf("libzmq set CURVE_SECRETKEY: %v", err)
 	}
-	if err := server.SetOption(optCurvePublicKey, serverPubActual[:]); err != nil {
+	if err := server.SetOption(ZMQ_CURVE_PUBLICKEY, serverPubActual[:]); err != nil {
 		t.Fatalf("libzmq set CURVE_PUBLICKEY: %v", err)
 	}
 	if err := server.Bind("tcp://127.0.0.1:0"); err != nil {
@@ -394,13 +384,13 @@ func TestCurve_MalformedHandshake(t *testing.T) {
 	libCtx := newLibCtx(t)
 	server := libCtx.NewSocket(ZMQ_PAIR)
 	t.Cleanup(func() { _ = server.Close() })
-	if err := server.SetOption(optCurveServer, 1); err != nil {
+	if err := server.SetOption(ZMQ_CURVE_SERVER, 1); err != nil {
 		t.Fatalf("libzmq set CURVE_SERVER: %v", err)
 	}
-	if err := server.SetOption(optCurveSecretKey, serverSec[:]); err != nil {
+	if err := server.SetOption(ZMQ_CURVE_SECRETKEY, serverSec[:]); err != nil {
 		t.Fatalf("libzmq set CURVE_SECRETKEY: %v", err)
 	}
-	if err := server.SetOption(optCurvePublicKey, serverPub[:]); err != nil {
+	if err := server.SetOption(ZMQ_CURVE_PUBLICKEY, serverPub[:]); err != nil {
 		t.Fatalf("libzmq set CURVE_PUBLICKEY: %v", err)
 	}
 	if err := server.Bind("tcp://127.0.0.1:0"); err != nil {

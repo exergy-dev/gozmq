@@ -48,19 +48,38 @@ const (
 	ZMQ_PUSH   = 8
 	ZMQ_XPUB   = 9
 	ZMQ_XSUB   = 10
+	ZMQ_STREAM = 11
 )
 
 // Selected zmq_setsockopt / zmq_getsockopt option codes. Sourced from the
 // cgo-resolved zmq.h to stay in sync with whatever libzmq is installed.
 var (
-	ZMQ_SUBSCRIBE     = int(C.ZMQ_SUBSCRIBE)
-	ZMQ_UNSUBSCRIBE   = int(C.ZMQ_UNSUBSCRIBE)
-	ZMQ_LINGER        = int(C.ZMQ_LINGER)
-	ZMQ_IDENTITY      = int(C.ZMQ_IDENTITY)
-	ZMQ_ROUTING_ID    = int(C.ZMQ_IDENTITY) // alias used by newer libzmq
-	ZMQ_RCVMORE       = int(C.ZMQ_RCVMORE)
-	ZMQ_LAST_ENDPOINT = int(C.ZMQ_LAST_ENDPOINT)
-	ZMQ_SNDMORE       = int(C.ZMQ_SNDMORE)
+	ZMQ_SUBSCRIBE         = int(C.ZMQ_SUBSCRIBE)
+	ZMQ_UNSUBSCRIBE       = int(C.ZMQ_UNSUBSCRIBE)
+	ZMQ_LINGER            = int(C.ZMQ_LINGER)
+	ZMQ_IDENTITY          = int(C.ZMQ_IDENTITY)
+	ZMQ_ROUTING_ID        = int(C.ZMQ_IDENTITY) // alias used by newer libzmq
+	ZMQ_PLAIN_SERVER      = int(C.ZMQ_PLAIN_SERVER)
+	ZMQ_PLAIN_USERNAME    = int(C.ZMQ_PLAIN_USERNAME)
+	ZMQ_PLAIN_PASSWORD    = int(C.ZMQ_PLAIN_PASSWORD)
+	ZMQ_CURVE_SERVER      = int(C.ZMQ_CURVE_SERVER)
+	ZMQ_CURVE_PUBLICKEY   = int(C.ZMQ_CURVE_PUBLICKEY)
+	ZMQ_CURVE_SECRETKEY   = int(C.ZMQ_CURVE_SECRETKEY)
+	ZMQ_CURVE_SERVERKEY   = int(C.ZMQ_CURVE_SERVERKEY)
+	ZMQ_ZAP_DOMAIN        = int(C.ZMQ_ZAP_DOMAIN)
+	ZMQ_ROUTER_MANDATORY  = int(C.ZMQ_ROUTER_MANDATORY)
+	ZMQ_XPUB_VERBOSE      = int(C.ZMQ_XPUB_VERBOSE)
+	ZMQ_HEARTBEAT_IVL     = int(C.ZMQ_HEARTBEAT_IVL)
+	ZMQ_HEARTBEAT_TTL     = int(C.ZMQ_HEARTBEAT_TTL)
+	ZMQ_HEARTBEAT_TIMEOUT = int(C.ZMQ_HEARTBEAT_TIMEOUT)
+	ZMQ_RCVTIMEO          = int(C.ZMQ_RCVTIMEO)
+	ZMQ_SNDTIMEO          = int(C.ZMQ_SNDTIMEO)
+	ZMQ_CONNECT_TIMEOUT   = int(C.ZMQ_CONNECT_TIMEOUT)
+	ZMQ_RECONNECT_IVL     = int(C.ZMQ_RECONNECT_IVL)
+	ZMQ_MAXMSGSIZE        = int(C.ZMQ_MAXMSGSIZE)
+	ZMQ_RCVMORE           = int(C.ZMQ_RCVMORE)
+	ZMQ_LAST_ENDPOINT     = int(C.ZMQ_LAST_ENDPOINT)
+	ZMQ_SNDMORE           = int(C.ZMQ_SNDMORE)
 )
 
 // lastError wraps the current libzmq errno into a Go error with the
@@ -81,6 +100,15 @@ type Ctx struct {
 
 	mu     sync.Mutex
 	closed bool
+}
+
+// Version returns the runtime libzmq version as (major, minor, patch). This
+// is a package-level helper rather than a Ctx method because zmq_version does
+// not require a context.
+func Version() (major, minor, patch int) {
+	var maj, min, pat C.int
+	C.zmq_version(&maj, &min, &pat)
+	return int(maj), int(min), int(pat)
 }
 
 // NewCtx allocates a new libzmq context.
@@ -278,12 +306,86 @@ func (s *Sock) SetOption(opt int, val interface{}) error {
 		if rc := C.zmq_setsockopt(s.ptr, C.int(opt), unsafe.Pointer(&cv), C.size_t(unsafe.Sizeof(cv))); rc != 0 {
 			return lastError(fmt.Sprintf("zmq_setsockopt %d", opt))
 		}
+	case int64:
+		cv := C.int64_t(v)
+		if rc := C.zmq_setsockopt(s.ptr, C.int(opt), unsafe.Pointer(&cv), C.size_t(unsafe.Sizeof(cv))); rc != 0 {
+			return lastError(fmt.Sprintf("zmq_setsockopt %d", opt))
+		}
 	case string:
 		return s.setBytesLocked(opt, []byte(v))
 	case []byte:
 		return s.setBytesLocked(opt, v)
 	default:
 		return fmt.Errorf("libzmq: SetOption %d: unsupported value type %T", opt, val)
+	}
+	return nil
+}
+
+// GetOptionInt reads a C-int-sized option from the socket (e.g. ZMQ_RCVMORE,
+// ZMQ_EVENTS). Byte-array options should use a dedicated getter (see
+// LastEndpoint).
+func (s *Sock) GetOptionInt(opt int) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return 0, errors.New("libzmq: GetOptionInt on closed socket")
+	}
+	var v C.int
+	sz := C.size_t(unsafe.Sizeof(v))
+	if rc := C.zmq_getsockopt(s.ptr, C.int(opt), unsafe.Pointer(&v), &sz); rc != 0 {
+		return 0, lastError(fmt.Sprintf("zmq_getsockopt %d", opt))
+	}
+	return int(v), nil
+}
+
+// Disconnect tears down a previously-established outbound connection. libzmq
+// applies the active LINGER to any queued messages for that endpoint.
+func (s *Sock) Disconnect(endpoint string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("libzmq: Disconnect on closed socket")
+	}
+	cep := C.CString(endpoint)
+	defer C.free(unsafe.Pointer(cep))
+	if rc := C.zmq_disconnect(s.ptr, cep); rc != 0 {
+		return lastError("zmq_disconnect " + endpoint)
+	}
+	return nil
+}
+
+// Unbind removes a previously-bound listener endpoint. Existing peer
+// connections remain until they drop.
+func (s *Sock) Unbind(endpoint string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("libzmq: Unbind on closed socket")
+	}
+	cep := C.CString(endpoint)
+	defer C.free(unsafe.Pointer(cep))
+	if rc := C.zmq_unbind(s.ptr, cep); rc != 0 {
+		return lastError("zmq_unbind " + endpoint)
+	}
+	return nil
+}
+
+// Monitor wires the socket's event stream to the given inproc endpoint. A
+// subsequent ZMQ_PAIR socket bound to that endpoint in this Ctx receives
+// ZMQ_EVENT_* frames. Passing 0 for events subscribes to all events.
+func (s *Sock) Monitor(endpoint string, events int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("libzmq: Monitor on closed socket")
+	}
+	if events == 0 {
+		events = int(C.ZMQ_EVENT_ALL)
+	}
+	cep := C.CString(endpoint)
+	defer C.free(unsafe.Pointer(cep))
+	if rc := C.zmq_socket_monitor(s.ptr, cep, C.int(events)); rc != 0 {
+		return lastError("zmq_socket_monitor " + endpoint)
 	}
 	return nil
 }
