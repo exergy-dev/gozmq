@@ -53,11 +53,6 @@ const (
 	// be empty for connect-only sockets).
 	EventClosed
 
-	// EventCloseFailed fires when Close encountered an error tearing
-	// down a listener or session. Event.Reason carries the underlying
-	// error.
-	EventCloseFailed
-
 	// EventDisconnected fires when a previously-connected session is
 	// torn down — peer closed, heartbeat timeout, or local
 	// Socket.Close. Event.Endpoint is the remote peer endpoint.

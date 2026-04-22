@@ -2,7 +2,6 @@ package transport
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -306,88 +305,29 @@ func newTCPListener(l net.Listener, t *TCPTransport) *tcpListener {
 func (l *tcpListener) Endpoint() string { return l.endpoint }
 
 func (l *tcpListener) Accept(ctx context.Context) (iface.Conn, error) {
-	if l.closed.Load() {
-		return nil, fmt.Errorf("%w: listener closed", zmqerr.ErrEndpointInvalid)
-	}
-
-	type acceptResult struct {
-		c   net.Conn
-		err error
-	}
-	resCh := make(chan acceptResult, 1)
-	// Poll loop: a single goroutine drives net.Listener.Accept with a short
-	// SetDeadline so we wake periodically and check ctx / closeCh. This
-	// keeps us from leaking the goroutine if ctx cancels while a peer is
-	// pending. Listener.Close on the parent unblocks the underlying Accept
-	// immediately; the deadline is the fallback.
-	go func() {
-		for {
+	c, err := acceptWithDeadline(
+		ctx,
+		l.l,
+		l.closeCh,
+		l.closed.Load,
+		tcpAcceptPollInterval,
+		func(t time.Time) error {
 			if tl, ok := l.l.(*net.TCPListener); ok {
-				_ = tl.SetDeadline(time.Now().Add(tcpAcceptPollInterval))
+				return tl.SetDeadline(t)
 			}
-			c, err := l.l.Accept()
-			if err != nil {
-				if l.closed.Load() {
-					resCh <- acceptResult{nil, fmt.Errorf("%w: listener closed", zmqerr.ErrEndpointInvalid)}
-					return
-				}
-				if isTimeout(err) {
-					select {
-					case <-ctx.Done():
-						resCh <- acceptResult{nil, ctx.Err()}
-						return
-					case <-l.closeCh:
-						resCh <- acceptResult{nil, fmt.Errorf("%w: listener closed", zmqerr.ErrEndpointInvalid)}
-						return
-					default:
-						continue
-					}
-				}
-				resCh <- acceptResult{nil, err}
-				return
-			}
-			// Clear the deadline on a successful accept so the returned
-			// listener-side socket is not subject to the polling deadline.
-			if tl, ok := l.l.(*net.TCPListener); ok {
-				_ = tl.SetDeadline(time.Time{})
-			}
+			return nil
+		},
+		func(c net.Conn) (net.Conn, error) {
 			if err := l.t.applySocketOptions(c); err != nil {
-				_ = c.Close()
-				resCh <- acceptResult{nil, err}
-				return
+				return nil, err
 			}
-			resCh <- acceptResult{c, nil}
-			return
-		}
-	}()
-
-	select {
-	case r := <-resCh:
-		if r.err != nil {
-			return nil, r.err
-		}
-		return newTCPConn(r.c, l.t.scheme), nil
-	case <-ctx.Done():
-		// Force the goroutine to wake by closing the listener? No — that
-		// would close the listener for everyone. We rely on the deadline
-		// poll to see ctx.Done() and exit on its next tick. Drop the
-		// pending result on the floor.
-		go func() {
-			r := <-resCh
-			if r.c != nil {
-				_ = r.c.Close()
-			}
-		}()
-		return nil, ctx.Err()
-	case <-l.closeCh:
-		go func() {
-			r := <-resCh
-			if r.c != nil {
-				_ = r.c.Close()
-			}
-		}()
-		return nil, fmt.Errorf("%w: listener closed", zmqerr.ErrEndpointInvalid)
+			return c, nil
+		},
+	)
+	if err != nil {
+		return nil, err
 	}
+	return newTCPConn(c, l.t.scheme), nil
 }
 
 func (l *tcpListener) Close() error {
@@ -398,14 +338,4 @@ func (l *tcpListener) Close() error {
 		err = l.l.Close()
 	})
 	return err
-}
-
-// isTimeout reports whether err is a net.Error timeout. Used by the Accept
-// poll loop to distinguish "no peer yet" from real errors.
-func isTimeout(err error) bool {
-	var ne net.Error
-	if errors.As(err, &ne) {
-		return ne.Timeout()
-	}
-	return false
 }

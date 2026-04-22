@@ -47,9 +47,7 @@ func fixedKeyPair(t *testing.T, seed uint64) (Key, Key) {
 
 // TestCurveHandshakeDeterministic proves that identical inputs (long-term
 // keys + RNG seed for ephemerals) produce identical wire bytes across the
-// full handshake. This is the round-trip symmetry the plan's Wave 1
-// "byte-exact agreement" mandate calls out; cross-impl interop against
-// libzmq is deferred to Wave 3 C4 which will read captured fixtures.
+// full handshake.
 //
 // Algorithm:
 //  1. Build two independent (client, server) pairs sharing the same inputs.

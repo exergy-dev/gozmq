@@ -87,9 +87,6 @@ func (p *SniffingProxy) Addr() string {
 	return "tcp://" + p.listen.Addr().String()
 }
 
-// Endpoint is a compatibility alias for Addr.
-func (p *SniffingProxy) Endpoint() string { return p.Addr() }
-
 // SetMutator installs a per-frame body mutator. The mutator is called for
 // every post-greeting frame body in both directions before the body is
 // forwarded; the returned slice replaces the body on the wire and must be the

@@ -5,9 +5,8 @@
 // The Go benchmarks here exercise the public gozmq API — they are the
 // regression bar referenced in design §10.6 and the targets in §11
 // (>1M msg/s inproc, >500k msg/s TCP loopback, <10µs median REQ/REP
-// inproc). Wave 4 D2 is responsible for meeting those numbers; our job in
-// Wave 3 C3 is to report what the implementation actually does today and
-// provide the harness for tracking regressions per-commit.
+// inproc). The benchmarks report what the implementation actually does
+// today and provide the harness for tracking regressions per commit.
 //
 // Run all benchmarks:
 //
@@ -58,7 +57,7 @@ func inprocName(b *testing.B, tag string) string {
 // The first byte is forced to 'A' (0x41) because the SUB engine currently
 // treats a leading 0x00 / 0x01 byte as a synthetic SUBSCRIBE/CANCEL
 // command and drops the message before returning from Recv (see
-// socket/sub.go — isSubscriptionMsg). Until the engine team changes that
+// internal/socket/sub.go — isSubscriptionMsg). Until that
 // discrimination to look at a COMMAND flag instead of data content, any
 // pub/sub benchmark payload must avoid those two bytes in position 0.
 func newPayload(n int) []byte {
@@ -70,12 +69,6 @@ func newPayload(n int) []byte {
 		b[i] = byte(i & 0xff)
 	}
 	return b
-}
-
-func releaseMsg(m *gozmq.Msg) {
-	if m != nil {
-		m.Release()
-	}
 }
 
 // -----------------------------------------------------------------------------
@@ -143,10 +136,7 @@ func benchReqRepRoundTrip(b *testing.B, msgSize int, endpoint string) {
 			if err != nil {
 				return
 			}
-			// Echo the body (copy to decouple from the pooled recv buffer).
-			body := append([]byte(nil), m.Bytes()...)
-			m.Release()
-			if err := rep.SendMsg(runCtx, gozmq.NewMsgFromBytes(body)); err != nil {
+			if err := rep.SendMsg(runCtx, gozmq.NewMsgFromBytes(m.Bytes())); err != nil {
 				return
 			}
 		}
@@ -163,11 +153,9 @@ func benchReqRepRoundTrip(b *testing.B, msgSize int, endpoint string) {
 		if err := req.SendMsg(callCtx, gozmq.NewMsgFromBytes(payload)); err != nil {
 			b.Fatalf("warmup send: %v", err)
 		}
-		reply, err := req.RecvMsg(callCtx)
-		if err != nil {
+		if _, err := req.RecvMsg(callCtx); err != nil {
 			b.Fatalf("warmup recv: %v", err)
 		}
-		reply.Release()
 	}
 
 	b.SetBytes(int64(msgSize))
@@ -178,11 +166,9 @@ func benchReqRepRoundTrip(b *testing.B, msgSize int, endpoint string) {
 		if err := req.SendMsg(callCtx, gozmq.NewMsgFromBytes(payload)); err != nil {
 			b.Fatalf("send[%d]: %v", i, err)
 		}
-		reply, err := req.RecvMsg(callCtx)
-		if err != nil {
+		if _, err := req.RecvMsg(callCtx); err != nil {
 			b.Fatalf("recv[%d]: %v", i, err)
 		}
-		reply.Release()
 	}
 
 	b.StopTimer()
@@ -253,12 +239,10 @@ func benchPushPullThroughput(b *testing.B, msgSize int, endpoint string) {
 		warmCancel()
 		b.Fatalf("warmup send: %v", err)
 	}
-	warmMsg, err := pull.RecvMsg(warmCtx)
-	if err != nil {
+	if _, err := pull.RecvMsg(warmCtx); err != nil {
 		warmCancel()
 		b.Fatalf("warmup recv: %v", err)
 	}
-	warmMsg.Release()
 	warmCancel()
 
 	recvCtx, recvCancel := context.WithCancel(context.Background())
@@ -270,11 +254,9 @@ func benchPushPullThroughput(b *testing.B, msgSize int, endpoint string) {
 	go func() {
 		defer recvWG.Done()
 		for {
-			m, err := pull.RecvMsg(recvCtx)
-			if err != nil {
+			if _, err := pull.RecvMsg(recvCtx); err != nil {
 				return
 			}
-			m.Release()
 			received.Add(1)
 		}
 	}()
@@ -397,8 +379,7 @@ func benchPubSubFanout(b *testing.B, msgSize int, endpoint string, nSub int) {
 		allDrained = true
 		for i, s := range subs {
 			ctxShort, cancelShort := context.WithTimeout(warmCtx, 100*time.Millisecond)
-			if m, err := s.RecvMsg(ctxShort); err == nil {
-				m.Release()
+			if _, err := s.RecvMsg(ctxShort); err == nil {
 				drained[i] = true
 			} else if !drained[i] {
 				allDrained = false
@@ -415,8 +396,7 @@ func benchPubSubFanout(b *testing.B, msgSize int, endpoint string, nSub int) {
 	for _, s := range subs {
 		for {
 			ctxShort, cancelShort := context.WithTimeout(warmCtx, 10*time.Millisecond)
-			m, err := s.RecvMsg(ctxShort)
-			releaseMsg(m)
+			_, err := s.RecvMsg(ctxShort)
 			cancelShort()
 			if err != nil {
 				break
@@ -439,11 +419,9 @@ func benchPubSubFanout(b *testing.B, msgSize int, endpoint string, nSub int) {
 		go func() {
 			defer recvWG.Done()
 			for {
-				m, err := s.RecvMsg(recvCtx)
-				if err != nil {
+				if _, err := s.RecvMsg(recvCtx); err != nil {
 					return
 				}
-				m.Release()
 				subCounts[i].Add(1)
 			}
 		}()

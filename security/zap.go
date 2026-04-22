@@ -60,7 +60,7 @@ import (
 	"fmt"
 
 	"github.com/rkm/gozmq/internal/zmqerr"
-	"github.com/rkm/gozmq/zmtp"
+	"github.com/rkm/gozmq/internal/zmtp"
 )
 
 // ZAP protocol version token (RFC 27 §3.1).
@@ -77,8 +77,8 @@ const (
 // ZapRequest is the decoded form of a RFC 27 §3.1 request. All frames are
 // kept as []byte because the identity and credentials are opaque binary.
 type ZapRequest struct {
-	Version     string   // must be "1.0"
-	RequestID   []byte   // opaque, echoed in response
+	Version     string // must be "1.0"
+	RequestID   []byte // opaque, echoed in response
 	Domain      string
 	Address     string
 	Identity    []byte
@@ -117,8 +117,7 @@ type ZapPolicy interface {
 // via fmt.Errorf("...: %w", security.ErrZapTemporary).
 var ErrZapTemporary = errors.New("gozmq/security/zap: temporary authentication failure")
 
-// ZapHandler is the handler-side runtime. In Wave 1 it exposes only the pure
-// request/response codec + ServeRequest; Wave 3 will add Start(ctx)/Stop().
+// ZapHandler is the handler-side runtime for request/response ZAP policy.
 type ZapHandler struct {
 	policy ZapPolicy
 }

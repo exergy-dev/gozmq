@@ -12,9 +12,8 @@ import (
 )
 
 // Greeting layout constants. Duplicated from zmtp/greeting.go on purpose:
-// the session package is forbidden by the Wave-1 plan from importing zmtp
-// (so A4 can land in parallel with A1). The byte layout is fixed by ZMTP
-// 3.1 §2.1 and will not drift.
+// the session package does not import zmtp directly. The byte layout is
+// fixed by ZMTP 3.1 §2.1 and will not drift.
 const (
 	greetingSize        = 64
 	greetingMechOff     = 12

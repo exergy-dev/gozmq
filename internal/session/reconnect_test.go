@@ -16,8 +16,8 @@ import (
 // --------------------------------------------------------------------------
 // Reconnect test doubles. We don't exercise the real Session machinery
 // here — the goal is to verify Reconnector's state flow (dial → handshake
-// → attach → detach → backoff → reconnect) in isolation. Wave-2 interop
-// tests exercise reconnection end-to-end against a real peer.
+// → attach → detach → backoff → reconnect) in isolation. Interop tests
+// exercise reconnection end-to-end against a real peer.
 // --------------------------------------------------------------------------
 
 // stubSession is an iface.Session stub whose lifecycle is driven by test
@@ -79,27 +79,27 @@ func (s *stubSession) Stop() error {
 	})
 	return nil
 }
-func (s *stubSession) Handshaked() <-chan struct{} { return s.handshaked }
-func (s *stubSession) HandshakeErr() error         { return s.hsErr }
-func (s *stubSession) Pipe() iface.Pipe            { return s.enginePipe }
-func (s *stubSession) Endpoint() string            { return "stub://peer" }
-func (s *stubSession) Role() iface.Role            { return iface.RoleClient }
-func (s *stubSession) Done() <-chan struct{}       { return s.done }
+func (s *stubSession) Handshaked() <-chan struct{}    { return s.handshaked }
+func (s *stubSession) HandshakeErr() error            { return s.hsErr }
+func (s *stubSession) Pipe() iface.Pipe               { return s.enginePipe }
+func (s *stubSession) Endpoint() string               { return "stub://peer" }
+func (s *stubSession) Role() iface.Role               { return iface.RoleClient }
+func (s *stubSession) Done() <-chan struct{}          { return s.done }
 func (s *stubSession) WriterFlushed() <-chan struct{} { return s.done } // stub: same as Done
-func (s *stubSession) CancelWriter()                 {}                 // stub: no-op
+func (s *stubSession) CancelWriter()                  {}                // stub: no-op
 
 // stubConn is a no-op iface.Conn: Reconnector never touches its data
 // methods; it just passes the value to NewSession.
 type stubConn struct{}
 
 func (stubConn) Read([]byte) (int, error)         { return 0, errors.New("stub") }
-func (stubConn) Write(p []byte) (int, error)       { return len(p), nil }
-func (stubConn) Close() error                      { return nil }
-func (stubConn) LocalEndpoint() string             { return "stub://local" }
-func (stubConn) RemoteEndpoint() string            { return "stub://remote" }
-func (stubConn) SetDeadline(time.Time) error       { return nil }
-func (stubConn) SetReadDeadline(time.Time) error   { return nil }
-func (stubConn) SetWriteDeadline(time.Time) error  { return nil }
+func (stubConn) Write(p []byte) (int, error)      { return len(p), nil }
+func (stubConn) Close() error                     { return nil }
+func (stubConn) LocalEndpoint() string            { return "stub://local" }
+func (stubConn) RemoteEndpoint() string           { return "stub://remote" }
+func (stubConn) SetDeadline(time.Time) error      { return nil }
+func (stubConn) SetReadDeadline(time.Time) error  { return nil }
+func (stubConn) SetWriteDeadline(time.Time) error { return nil }
 
 // --------------------------------------------------------------------------
 // Tests
@@ -407,18 +407,6 @@ func TestApplyJitter_ZeroFractionIsIdentity(t *testing.T) {
 	}
 }
 
-// TestApplyJitter_Zero: fraction=0 must return base exactly (identity).
-// Duplicate of the legacy ZeroFractionIsIdentity test, kept under the
-// new naming scheme from the 3B audit.
-func TestApplyJitter_Zero(t *testing.T) {
-	base := 500 * time.Millisecond
-	for i := 0; i < 1000; i++ {
-		if got := applyJitter(base, 0); got != base {
-			t.Fatalf("applyJitter(base, 0) = %v, want %v", got, base)
-		}
-	}
-}
-
 // TestApplyJitter_ClampedExtreme: a wildly out-of-range JitterFraction
 // (5.0) must be clamped by ReconnectConfig.normalize to 1.0. After
 // normalize, applyJitter samples are bounded by [0, 2*base].
@@ -590,10 +578,10 @@ func TestReconnect_OnRetryPanic_DoesNotStall(t *testing.T) {
 // TestNextBackoff covers the exponential-doubling and cap logic.
 func TestNextBackoff(t *testing.T) {
 	cases := []struct {
-		name      string
-		base      time.Duration
-		maxCap    time.Duration
-		wantNext  time.Duration
+		name     string
+		base     time.Duration
+		maxCap   time.Duration
+		wantNext time.Duration
 	}{
 		{"below cap", 10 * time.Millisecond, 100 * time.Millisecond, 20 * time.Millisecond},
 		{"at cap", 60 * time.Millisecond, 100 * time.Millisecond, 100 * time.Millisecond},

@@ -13,11 +13,8 @@ import (
 
 func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }
 
-// TestPairRoundTrip_TCP is the Wave-1 M1 acceptance gate: two PAIR
-// sockets round-trip a multipart Msg over TCP with -race clean and no
-// goroutine leaks. Per the plan this is the convergence point of agents
-// A1 (framing) + A2 (transport) + A3 (NULL) + A4 (session) + A5 (PAIR
-// engine).
+// TestPairRoundTrip_TCP proves that two PAIR sockets can round-trip a
+// multipart Msg over TCP with -race clean and no goroutine leaks.
 func TestPairRoundTrip_TCP(t *testing.T) {
 	ctxZmq := gozmq.NewContext()
 	defer ctxZmq.Close()
@@ -186,8 +183,8 @@ func TestPushSendRejected(t *testing.T) {
 	}
 }
 
-// TestReqRep_TCP exercises the REQ/REP lock-step FSM over real session +
-// transport. Part of the Wave-2 B1 integration gate.
+// TestReqRep_TCP exercises the REQ/REP lock-step FSM over a real session
+// and transport.
 func TestReqRep_TCP(t *testing.T) {
 	ctxZmq := gozmq.NewContext()
 	defer ctxZmq.Close()
@@ -239,7 +236,6 @@ func TestReqRep_TCP(t *testing.T) {
 }
 
 // TestPubSub_Inproc exercises PUB/SUB with topic filtering over inproc.
-// Part of the Wave-2 B2 integration gate.
 func TestPubSub_Inproc(t *testing.T) {
 	ctxZmq := gozmq.NewContext()
 	defer ctxZmq.Close()
@@ -394,9 +390,8 @@ func TestPlainAuth_Success(t *testing.T) {
 	}
 }
 
-// TestCurveAuth_Success: a CURVE client with the correct server key
-// completes the 5-step handshake and round-trips. Integration gate for
-// Wave-1 A6 CURVE codec plugged into the session layer (Wave-2 B4).
+// TestCurveAuth_Success verifies that a CURVE client with the correct
+// server key completes the handshake and round-trips.
 func TestCurveAuth_Success(t *testing.T) {
 	ctxZmq := gozmq.NewContext()
 	defer ctxZmq.Close()
@@ -504,10 +499,7 @@ func TestMaxMessageSize_AtLimit(t *testing.T) {
 // ErrMalformedFrame, and that the failed send does not tear down the
 // session — a subsequent in-limit SendMsg succeeds on the same socket.
 //
-// Contract change vs. Wave 1A: prior to Wave 4A the oversize rejection
-// happened on the writer goroutine's wire path, which tore the session
-// down and was surfaced only via EventDisconnected on a monitor channel.
-// The Wave 4A synchronous check returns immediately from SendMsg with
+// Oversize messages are rejected synchronously by SendMsg with
 // ErrMalformedFrame so callers don't need a monitor to observe the error.
 func TestMaxMessageSize_OverLimit(t *testing.T) {
 	const limit = 1024
@@ -559,8 +551,8 @@ func TestMaxMessageSize_OverLimit(t *testing.T) {
 	}
 }
 
-// TestSendMsg_OversizeSynchronousError verifies the Wave 4A synchronous
-// size check: SendMsg with a payload exceeding MaxMessageSize returns
+// TestSendMsg_OversizeSynchronousError verifies the synchronous size
+// check: SendMsg with a payload exceeding MaxMessageSize returns
 // immediately with an error wrapping ErrMalformedFrame, without needing
 // a monitor channel and without tearing down the session. A subsequent
 // in-limit SendMsg must succeed on the same socket.
@@ -661,8 +653,8 @@ func TestSendMsg_AtLimitBoundary(t *testing.T) {
 }
 
 // TestSendMsg_CollectsMultipartSizeCorrectly exercises the per-frame
-// semantics of the synchronous check: the Wave 4A check mirrors the
-// codec's per-frame body-length enforcement (zmtp/framing.go WriteFrame),
+// semantics of the synchronous check: it mirrors the codec's per-frame
+// body-length enforcement (zmtp/framing.go WriteFrame),
 // so a multipart message where every frame is <= MaxMessageSize passes
 // even if the sum exceeds the cap; a multipart message with any single
 // frame > MaxMessageSize is rejected.
@@ -717,8 +709,8 @@ func TestSendMsg_CollectsMultipartSizeCorrectly(t *testing.T) {
 	}
 }
 
-// TestCloseCtx_CancellationBreaksLingerDrain verifies the core Wave 4A
-// bug fix: under WithLinger(time.Hour) (effectively infinite for a test),
+// TestCloseCtx_CancellationBreaksLingerDrain verifies that under
+// WithLinger(time.Hour) (effectively infinite for a test),
 // a stalled outbound queue would previously block Close for an hour; the
 // new CloseCtx honors ctx cancellation and returns ctx.Err() after the
 // linger wait is interrupted, while still completing the rest of
@@ -872,9 +864,9 @@ func TestCloseCtx_NormalDrainStillWorks(t *testing.T) {
 
 	// Give messages time to flow through before closing — this is the
 	// "responsive peer" scenario, not the "drain at Close" scenario.
-	// The Wave 4A contract for CloseCtx(Background()) is: return nil,
-	// not leak, not ctx-error. We do NOT mandate that queued messages
-	// always arrive — that's the separate WithLinger contract.
+	// CloseCtx(Background()) should return nil, not leak, and not surface
+	// a context error. This does not mandate that queued messages always
+	// arrive; that is the separate WithLinger contract.
 	time.Sleep(200 * time.Millisecond)
 
 	if err := sender.CloseCtx(context.Background()); err != nil {
@@ -892,10 +884,9 @@ func TestCloseCtx_NormalDrainStillWorks(t *testing.T) {
 	}
 }
 
-// TestClose_StillBackwardsCompatible confirms that the zero-ctx Close()
-// wrapper still works: existing callers that never knew about CloseCtx
-// observe identical semantics (subject to the default-linger wait).
-func TestClose_StillBackwardsCompatible(t *testing.T) {
+// TestClose_DelegatesToCloseCtx confirms that Close uses the same teardown
+// path as CloseCtx with a background context.
+func TestClose_DelegatesToCloseCtx(t *testing.T) {
 	ctxZmq := gozmq.NewContext()
 	defer ctxZmq.Close()
 
@@ -904,7 +895,7 @@ func TestClose_StillBackwardsCompatible(t *testing.T) {
 		t.Fatalf("new receiver: %v", err)
 	}
 	defer receiver.Close()
-	endpoint := "inproc://close-backcompat"
+	endpoint := "inproc://close-delegates"
 	if err := receiver.Bind(endpoint); err != nil {
 		t.Fatalf("bind: %v", err)
 	}

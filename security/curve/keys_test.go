@@ -111,9 +111,9 @@ func TestZ85DecodeRejectsBadInputs(t *testing.T) {
 		name string
 		s    string
 	}{
-		{"wrong-length", "abcd"},                             // 4 chars; must be multiple of 5
-		{"invalid-char", "   ab"},                            // spaces not in alphabet
-		{"overflow", "#####"},                                // highest-digit run, value > 2^32
+		{"wrong-length", "abcd"},                               // 4 chars; must be multiple of 5
+		{"invalid-char", "   ab"},                              // spaces not in alphabet
+		{"overflow", "#####"},                                  // highest-digit run, value > 2^32
 		{"nonascii", string([]byte{0xFF, 'a', 'b', 'c', 'd'})}, // 0xFF is 0xFF in the decoder table -> invalid
 	}
 	for _, c := range cases {

@@ -304,10 +304,10 @@ func TestIPC_AcceptHonorsCtx(t *testing.T) {
 func TestIPC_BadEndpoint(t *testing.T) {
 	tr := NewIPCTransport()
 	cases := []string{
-		"tcp://x:1",  // wrong scheme
-		"ipc://",     // empty path
-		"ipc://@",    // empty abstract name
-		"no-scheme",  // missing ://
+		"tcp://x:1", // wrong scheme
+		"ipc://",    // empty path
+		"ipc://@",   // empty abstract name
+		"no-scheme", // missing ://
 	}
 	for _, ep := range cases {
 		if _, err := tr.Listen(context.Background(), ep); !errors.Is(err, zmqerr.ErrEndpointInvalid) {

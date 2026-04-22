@@ -215,9 +215,7 @@ func TestAdapter_CtxCancel_ExitsBothGoroutines(t *testing.T) {
 
 // TestAdapter_TCPRoundTrip brings up two real *net.TCPConn endpoints,
 // wraps each in an Adapter, and round-trips an HTTP-style payload to
-// confirm the raw-bytes path works over a live socket (not just in-mem
-// net.Pipe). This is the integration end of Wave-6 before the gozmq.go
-// wiring catches the rest.
+// confirm the raw-bytes path works over a live socket, not just net.Pipe.
 func TestAdapter_TCPRoundTrip(t *testing.T) {
 	t.Parallel()
 

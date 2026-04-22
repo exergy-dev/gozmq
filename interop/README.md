@@ -35,8 +35,8 @@ directory's CGO sources.
 
 ## Scope
 
-Wave 1 (A7) ships the scaffolding plus the patterns whose gozmq engines
-exist today:
+The interop suite covers the wrapper plus the gozmq engines that exist
+today:
 
 - `zmq_wrap.go` — thin CGO wrapper over libzmq (context, socket,
   bind/connect, multipart send/recv, subscribe, last-endpoint).
@@ -47,9 +47,8 @@ exist today:
   directions, plus a load-balance assertion (one gozmq PUSH fanning 9
   messages across three libzmq PULL peers, expecting 3 per peer).
 
-Wave 2 (B5) extends this directory with cross-tests for the engines
-landed by B1/B2: DEALER/ROUTER, REQ/REP, PUB/SUB, XPUB/XSUB. Wave 3
-(C4) layers CURVE and PLAIN interop on top.
+The suite also covers DEALER/ROUTER, REQ/REP, PUB/SUB, XPUB/XSUB, CURVE,
+PLAIN, ZAP, lifecycle behavior, and transport-specific edge cases.
 
 ## Coverage Snapshot
 
@@ -114,7 +113,7 @@ Current lifecycle coverage includes:
 - Every test uses `t.Cleanup` to close both contexts and all sockets, so
   goleak can enforce no-leak on exit via the package `TestMain`.
 - libzmq spawns pthreads for its I/O reactor; those are outside the Go
-  runtime and invisible to goleak, so no whitelist is needed in Wave 1.
+  runtime and invisible to goleak, so no whitelist is needed.
   If a future test blocks a Go goroutine inside a long-running cgocall
   past `TestMain`, add an explicit `goleak.IgnoreTopFunction` with a
   comment documenting which function and why.

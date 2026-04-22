@@ -6,12 +6,19 @@ import (
 	"fmt"
 	"io"
 	"time"
-	"unsafe"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
 	"github.com/rkm/gozmq/internal/zmqerr"
 )
+
+// largeFrameThreshold picks the boundary between the always-copy receive
+// path (simple, cheap) and the finalizer-backed zero-copy path (worth its
+// fixed overhead only for frames whose memcpy cost clearly exceeds it).
+// 4 KiB is ~6× the measured runtime.SetFinalizer+finalize cost on this
+// codebase; memcpy at 20 GB/s crosses the same budget around 6 KiB, so
+// 4 KiB gives a comfortable margin without starving the fast path.
+const largeFrameThreshold = 4 * 1024
 
 // runReader is the wire->pipe traffic-phase goroutine. It loops reading
 // frames; user-message frames accumulate into a *msg.Msg until MORE
@@ -26,11 +33,6 @@ func (s *sessionImpl) runReader() {
 	defer s.shutdown()
 
 	var current *msg.Msg
-	defer func() {
-		if current != nil {
-			current.Release()
-		}
-	}()
 	for {
 		// Honor cancellation between frames. The blocking io.Read will
 		// be interrupted by Conn.Close (called from shutdown/Stop).
@@ -45,10 +47,9 @@ func (s *sessionImpl) runReader() {
 			if !isExpectedShutdownErr(err) {
 				s.cfg.Logger.Debug("gozmq/session: reader exit", "err", err)
 			}
-			// body is either nil on the mid-header error paths or a
+			// body is either nil on the header-error paths or a
 			// partially-filled pool buffer on the body-read path; in
-			// the latter case we can still return it since it is no
-			// longer referenced by anyone.
+			// the latter case we can return it since no one holds it.
 			msg.PoolPut(body)
 			return
 		}
@@ -58,24 +59,22 @@ func (s *sessionImpl) runReader() {
 		// PONG (or any traffic) keeps the link alive.
 		s.lastInboundUnix.Store(time.Now().UnixNano())
 
-		// Decode the body through the security mechanism. For NULL this
-		// is identity but we never short-circuit the call — Wave 2
-		// CURVE integration relies on the call site existing.
+		// Decode the body through the security mechanism. For NULL/PLAIN
+		// (identity) decoded aliases body and the same pool buffer will
+		// back the user Msg; for CURVE decoded is a fresh slice produced
+		// by box.Open and body is scratch to return to the pool now.
 		plainFlags, decoded, err := s.decode(flags, body)
 		if err != nil {
 			s.cfg.Logger.Warn("gozmq/session: decode frame failed", "err", err)
-			// decoded may alias body; it goes out of scope with the
-			// return below so releasing body is safe.
 			msg.PoolPut(body)
 			return
 		}
 
 		if plainFlags&iface.FlagCommand != 0 {
-			// handleCommand consumes decoded synchronously; for
-			// SUBSCRIBE/CANCEL it copies into a fresh slice before
-			// publishing, and other command variants do not retain a
-			// reference past return. Release the pooled body as soon
-			// as handleCommand completes.
+			// handleCommand is synchronous and does not retain decoded
+			// past return (SUBSCRIBE/CANCEL copy into a fresh slice
+			// before publishing), so PoolPut on body is safe whether
+			// decoded aliased body or not.
 			cmdErr := s.handleCommand(decoded)
 			msg.PoolPut(body)
 			if cmdErr != nil {
@@ -86,19 +85,35 @@ func (s *sessionImpl) runReader() {
 		}
 
 		// User-message frame. Accumulate until MORE clears.
+		//
+		// Two delivery paths, chosen by frame size:
+		//
+		//   - Small (<= largeFrameThreshold): always-copy. The decoded
+		//     bytes are copied into a heap-owned frame and the pool
+		//     buffer is returned immediately. The extra memcpy is
+		//     cheaper than the runtime.SetFinalizer overhead (~300 ns)
+		//     for small frames, so this is the fastest path for the
+		//     common case of control-plane / small-payload traffic.
+		//
+		//   - Large (> largeFrameThreshold) with an identity mechanism
+		//     (NULL/PLAIN): attach the pool buffer to the Msg via
+		//     AppendPooledFrame. A finalizer on the Msg returns the
+		//     buffer to the pool at GC time, preserving pool reuse for
+		//     large frames where the avoided memcpy easily pays for
+		//     the finalizer cost.
+		//
+		//   - Large CURVE: decoded is a fresh box.Open slice, not a
+		//     pool buffer. Attach as an ordinary heap frame and PoolPut
+		//     the ciphertext scratch.
 		if current == nil {
 			current = msg.New()
 		}
 		switch {
-		case decodedAliasesBody(body, decoded):
-			current.AppendOwnedFrame(decoded, body)
-		case len(decoded) == 0:
-			current.AppendFrame(decoded)
-			msg.PoolPut(body)
+		case len(decoded) > largeFrameThreshold && s.direct != nil:
+			current.AppendPooledFrame(decoded, body)
 		default:
-			frame := msg.PoolGet(len(decoded))
-			copy(frame, decoded)
-			current.AppendOwnedFrame(frame, frame)
+			frame := append([]byte(nil), decoded...)
+			current.AppendFrame(frame)
 			msg.PoolPut(body)
 		}
 
@@ -115,16 +130,6 @@ func (s *sessionImpl) runReader() {
 		}
 		current = nil
 	}
-}
-
-func decodedAliasesBody(body, decoded []byte) bool {
-	if len(body) == 0 || len(decoded) == 0 {
-		return len(body) == 0 && len(decoded) == 0
-	}
-	bodyStart := uintptr(unsafe.Pointer(&body[0]))
-	bodyEnd := bodyStart + uintptr(len(body))
-	decodedStart := uintptr(unsafe.Pointer(&decoded[0]))
-	return decodedStart >= bodyStart && decodedStart < bodyEnd
 }
 
 // publishInbound enqueues a fully-assembled message on the session-side
@@ -171,13 +176,11 @@ func (s *sessionImpl) handleCommand(body []byte) error {
 		// The lastInbound stamp already records this; nothing else to do.
 		return nil
 	case "SUBSCRIBE", "CANCEL":
-		// Wave-2 B2: surface subscription commands to the engine as a
-		// synthetic single-frame in-band message where the first byte
-		// is 0x01 (SUBSCRIBE) or 0x00 (CANCEL) followed by the prefix
-		// bytes. This is Option C from the Wave-2 B2 plan: it keeps
-		// iface.Pipe frozen (no side-channel interface), and it mirrors
-		// the exact shape libzmq's XPUB surfaces subscription events
-		// to its application, so PUB/XPUB engines can reuse one
+		// Surface subscription commands to the engine as a synthetic
+		// single-frame in-band message where the first byte is 0x01
+		// (SUBSCRIBE) or 0x00 (CANCEL) followed by the prefix bytes. This
+		// mirrors the exact shape libzmq's XPUB surfaces subscription
+		// events to its application, so PUB/XPUB engines can reuse one
 		// intercept path for both wire-origin and test-origin events.
 		var flag byte = 0x01
 		if name == "CANCEL" {

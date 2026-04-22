@@ -1,10 +1,4 @@
-// Package iface freezes the inter-layer contracts of gozmq. Every layer
-// (Transport, Session, Pipe, SocketEngine, SecurityMech, FrameCodec,
-// MetadataCodec) is published here as an interface so Wave 1 agents can
-// mock their upstream dependencies and proceed in parallel.
-//
-// Rule: changes to this file after the Wave 0 freeze require cross-agent
-// re-sync. Add interfaces additively when possible.
+// Package iface holds the inter-layer contracts of gozmq.
 package iface
 
 import (
@@ -94,8 +88,9 @@ const (
 // shared across sessions without synchronization.
 type FrameCodec interface {
 	// ReadFrame reads one frame from r. Returns the flags byte and a body
-	// slice. The body may alias dst if its capacity is sufficient; callers
-	// must not retain across the next ReadFrame on the same reader.
+	// slice. If dst has sufficient capacity the body aliases dst[:n];
+	// otherwise the body is drawn from the size-tiered frame pool and may
+	// be returned via msg.PoolPut once no longer referenced.
 	ReadFrame(r io.Reader, dst []byte) (flags uint8, body []byte, err error)
 
 	// WriteFrame writes flags + length + body as one ZMTP frame. Multi-byte
@@ -313,9 +308,7 @@ type SocketEngine interface {
 // Transport registry
 // --------------------------------------------------------------------------
 
-// Registry resolves an endpoint string to its Transport. Kept small on
-// purpose — Wave 1 A2 provides the concrete implementation; higher layers
-// look up via this interface so they never import transport directly.
+// Registry resolves an endpoint string to its Transport.
 type Registry interface {
 	// Lookup returns the Transport handling endpoint's scheme.
 	Lookup(endpoint string) (Transport, error)

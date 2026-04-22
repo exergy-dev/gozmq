@@ -77,7 +77,6 @@ func main() {
 			fmt.Fprintf(os.Stderr, "message of incorrect size %d (expected %d)\n", len(m.Bytes()), *size)
 			os.Exit(1)
 		}
-		m.Release()
 	}
 	elapsed := time.Since(start)
 

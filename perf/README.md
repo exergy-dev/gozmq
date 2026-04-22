@@ -165,10 +165,9 @@ go test -bench=. -benchmem -benchtime=3s -count=5 ./perf/ \
 
 ## Targets
 
-Design §11 calls out three aspirational numbers. They are aspirational —
-Wave 4 D2 is the perf-tuning wave. The benchmark harness you are reading
-reports actual current numbers, and the Wave-3 gate is just "the harness
-works and produces a number" — not "the number hits the target."
+Design §11 calls out three aspirational numbers. The benchmark harness
+reports actual current numbers; the targets below are reference goals,
+not correctness gates.
 
 | Pattern                | Transport      | Target         |
 |------------------------|----------------|----------------|
@@ -177,4 +176,4 @@ works and produces a number" — not "the number hits the target."
 | REQ/REP round-trip     | inproc, median | < 10 µs           |
 
 Frame pooling, `net.Buffers`-batched writes, and zero-copy inproc pipes
-are the known high-leverage optimisations pending in D2.
+are the known high-leverage optimisations still available.

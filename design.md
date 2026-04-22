@@ -167,18 +167,16 @@ github.com/.../gozmq
 ├── options.go             // typed option structs, defaults
 ├── errors.go              // sentinel errors
 ├── events.go              // monitoring events
-├── socket/
-│   ├── req.go  rep.go  dealer.go  router.go
-│   ├── pub.go  sub.go  xpub.go  xsub.go
-│   └── push.go pull.go pair.go  stream.go
 ├── transport/
 │   ├── tcp.go  ipc.go  inproc.go  tls.go
-├── zmtp/
-│   ├── greeting.go  framing.go  commands.go  metadata.go
-│   └── heartbeat.go
-└── security/
-    ├── null.go  plain.go  curve.go
-    └── curve/             // CurveZMQ codec + test vectors
+├── security/
+│   ├── zap.go
+│   └── curve/             // CurveZMQ public key helpers
+└── internal/
+    ├── socket/            // socket engines
+    ├── zmtp/              // greeting, framing, commands, metadata
+    ├── security/          // NULL and PLAIN mechanisms
+    └── session/           // handshake, reader/writer, heartbeat
 ```
 
 ### 6.3 Sketch
@@ -208,9 +206,9 @@ for {
 
 ### 6.4 Options
 
-Every option is a typed `Option` that a constructor or `sock.SetOption()` consumes. Representative set (non-exhaustive):
+Every option is a typed `Option` passed to a socket constructor. Representative set (non-exhaustive):
 
-`WithIdentity`, `WithSendHWM`, `WithRecvHWM`, `WithLinger`, `WithReconnectInterval`, `WithReconnectIntervalMax`, `WithHeartbeat`, `WithTCPKeepalive`, `WithMaxMessageSize`, `WithImmediate`, `WithConflate`, `WithRouterMandatory`, `WithXPubVerbose`, `WithSubscribe`, `WithUnsubscribe`, `WithPlainAuth`, `WithCurveServer`, `WithCurveClient`, `WithHandshakeTimeout`, `WithMonitor`.
+`WithIdentity`, `WithSendHWM`, `WithRecvHWM`, `WithLinger`, `WithReconnectInterval`, `WithReconnectIntervalMax`, `WithHeartbeat`, `WithMaxMessageSize`, `WithRouterMandatory`, `WithXPubVerbose`, `WithSubscribe`, `WithPlainAuth`, `WithCurveServer`, `WithCurveClient`, `WithHandshakeTimeout`, `WithMonitor`.
 
 Defaults match libzmq defaults unless libzmq's default is hostile (e.g., infinite LINGER on close — we default to 1 second and require explicit opt-in for infinite).
 
@@ -238,7 +236,7 @@ func NewMsgFromFrames(fs ...[]byte) *Msg
 
 Standard `net.Dial` / `net.Listen` on `tcp4` or `tcp6`. Wildcard binding (`tcp://*:port`) listens on all interfaces. Port 0 selects an ephemeral port; the actual bound endpoint is recoverable via `sock.LastEndpoint()`.
 
-Per-connection tuning: `WithTCPKeepalive`, `WithTCPNoDelay` (default true), configurable read and write buffer sizes.
+Per-connection tuning lives in the concrete transport constructors.
 
 ### 7.2 IPC
 

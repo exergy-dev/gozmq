@@ -11,11 +11,11 @@ import (
 	"github.com/rkm/gozmq"
 )
 
-// TestSocketStream_TCP_HTTPEcho validates the Wave-6 end-to-end wiring:
-// Context.NewSocket(Stream) constructs a functional Socket, Bind +
-// accept loop routes new TCP conns through internal/stream.Adapter,
-// and Send/Recv carry raw bytes between the app and a non-ZMQ TCP
-// peer. A matching "STREAM client" dials out via a second Socket.
+// TestSocketStream_TCP_HTTPEcho validates the end-to-end STREAM wiring:
+// Context.NewSocket(Stream) constructs a functional Socket, Bind + accept
+// loop routes new TCP conns through internal/stream.Adapter, and Send/Recv
+// carry raw bytes between the app and a non-ZMQ TCP peer. A matching
+// STREAM client dials out via a second Socket.
 func TestSocketStream_TCP_HTTPEcho(t *testing.T) {
 	zctx := gozmq.NewContext()
 	defer zctx.Close()

@@ -1,10 +1,6 @@
 package gozmq
 
-import (
-	"io"
-	"testing"
-	"time"
-)
+import "testing"
 
 func TestNewSocketRejectsInvalidOptionCombinations(t *testing.T) {
 	ctx := NewContext()
@@ -29,75 +25,4 @@ func TestNewSocketRejectsInvalidOptionCombinations(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestSetOptionRejectedOnLiveSocket(t *testing.T) {
-	ctx := NewContext()
-	defer ctx.Close()
-
-	s, err := ctx.NewSocket(Pair)
-	if err != nil {
-		t.Fatalf("NewSocket: %v", err)
-	}
-	defer s.Close()
-
-	if err := s.SetOption(WithLinger(2 * time.Second)); err == nil {
-		t.Fatal("SetOption unexpectedly succeeded")
-	}
-}
-
-func TestApplyConnSocketOptions(t *testing.T) {
-	s := &Socket{cfg: newSocketConfig()}
-	s.cfg.tcpKeepalive = false
-	s.cfg.tcpNoDelay = true
-
-	conn := &fakeTunedConn{}
-	if err := s.applyConnSocketOptions(conn); err != nil {
-		t.Fatalf("applyConnSocketOptions: %v", err)
-	}
-	if !conn.keepAliveCalled {
-		t.Fatal("SetTCPKeepAlive was not called")
-	}
-	if conn.keepAliveEnabled {
-		t.Fatal("SetTCPKeepAlive called with enabled=true, want false")
-	}
-	if conn.keepAlivePeriod != 30*time.Second {
-		t.Fatalf("SetTCPKeepAlive period=%v, want 30s", conn.keepAlivePeriod)
-	}
-	if !conn.noDelayCalled {
-		t.Fatal("SetTCPNoDelay was not called")
-	}
-	if !conn.noDelayEnabled {
-		t.Fatal("SetTCPNoDelay called with enabled=false, want true")
-	}
-}
-
-type fakeTunedConn struct {
-	keepAliveCalled  bool
-	keepAliveEnabled bool
-	keepAlivePeriod  time.Duration
-	noDelayCalled    bool
-	noDelayEnabled   bool
-}
-
-func (c *fakeTunedConn) Read([]byte) (int, error)         { return 0, io.EOF }
-func (c *fakeTunedConn) Write([]byte) (int, error)        { return 0, nil }
-func (c *fakeTunedConn) Close() error                     { return nil }
-func (c *fakeTunedConn) LocalEndpoint() string            { return "" }
-func (c *fakeTunedConn) RemoteEndpoint() string           { return "" }
-func (c *fakeTunedConn) SetDeadline(time.Time) error      { return nil }
-func (c *fakeTunedConn) SetReadDeadline(time.Time) error  { return nil }
-func (c *fakeTunedConn) SetWriteDeadline(time.Time) error { return nil }
-
-func (c *fakeTunedConn) SetTCPKeepAlive(enabled bool, period time.Duration) error {
-	c.keepAliveCalled = true
-	c.keepAliveEnabled = enabled
-	c.keepAlivePeriod = period
-	return nil
-}
-
-func (c *fakeTunedConn) SetTCPNoDelay(enabled bool) error {
-	c.noDelayCalled = true
-	c.noDelayEnabled = enabled
-	return nil
 }

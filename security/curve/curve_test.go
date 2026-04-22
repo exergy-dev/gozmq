@@ -377,6 +377,62 @@ func TestCurveMessageTampering(t *testing.T) {
 	}
 }
 
+// TestCurveMessageReplayRejected captures a valid MESSAGE envelope, lets the
+// peer accept it once, then re-injects the same bytes. The second DecodeFrame
+// must fail with ErrMalformedFrame because the short-nonce counter has not
+// advanced. Without the requireCounterAdvance guard the ciphertext opens
+// successfully (same nonce, same key, same plaintext) and the replay slips
+// through — the exact attack RFC 26 §3's monotonic counter protects against.
+func TestCurveMessageReplayRejected(t *testing.T) {
+	client, server := runHandshake(t)
+
+	flags, wire, err := client.EncodeFrame(0, []byte("first"))
+	if err != nil {
+		t.Fatalf("EncodeFrame: %v", err)
+	}
+	// Keep a pristine copy — DecodeFrame does not mutate its input but we
+	// want replay to be byte-identical regardless.
+	replay := append([]byte(nil), wire...)
+
+	if _, _, err := server.DecodeFrame(flags, wire); err != nil {
+		t.Fatalf("first DecodeFrame: %v", err)
+	}
+	if _, _, err := server.DecodeFrame(flags, replay); err == nil {
+		t.Fatal("replayed MESSAGE accepted")
+	} else if !errors.Is(err, zmqerr.ErrMalformedFrame) {
+		t.Fatalf("replay: want ErrMalformedFrame, got %v", err)
+	}
+}
+
+// TestCurveMessageReorderRejected: a counter older than peerShortNonce must
+// be rejected even if it carries a not-yet-seen ciphertext. Out-of-order
+// delivery is impossible on the ZMTP transports we support (all stream-
+// ordered) so rejecting is the safe choice and matches libzmq.
+func TestCurveMessageReorderRejected(t *testing.T) {
+	client, server := runHandshake(t)
+
+	_, firstWire, err := client.EncodeFrame(0, []byte("first"))
+	if err != nil {
+		t.Fatalf("EncodeFrame first: %v", err)
+	}
+	flags, secondWire, err := client.EncodeFrame(0, []byte("second"))
+	if err != nil {
+		t.Fatalf("EncodeFrame second: %v", err)
+	}
+
+	// Deliver them out of order. The server accepts "second" (counter n+1),
+	// advancing peerShortNonce to n+2. "first" (counter n) must then be
+	// rejected as non-monotonic.
+	if _, _, err := server.DecodeFrame(flags, secondWire); err != nil {
+		t.Fatalf("deliver second: %v", err)
+	}
+	if _, _, err := server.DecodeFrame(flags, firstWire); err == nil {
+		t.Fatal("reordered MESSAGE accepted")
+	} else if !errors.Is(err, zmqerr.ErrMalformedFrame) {
+		t.Fatalf("reorder: want ErrMalformedFrame, got %v", err)
+	}
+}
+
 // runHandshake drives a fresh client/server pair through the five-step
 // handshake and returns them ready for traffic-phase tests.
 func runHandshake(t *testing.T) (iface.SecurityMech, iface.SecurityMech) {

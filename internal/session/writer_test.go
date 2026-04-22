@@ -139,9 +139,8 @@ func TestWriter_BatchCoalescesMultipleMessages(t *testing.T) {
 	// on a non-TCP io.Writer it falls back to one Write per buffer. The
 	// fakeConn used here is a plain io.Writer, so Write-count coalescing
 	// is not observable. This test will become meaningful once a
-	// writev-emulating fakeConn is introduced in the Wave 7B batching
-	// follow-up (see plan).
-	t.Skip("batching coalescing is not observable on non-TCP fake conn; revisit in Wave 7B")
+	// writev-emulating fakeConn exists.
+	t.Skip("batching coalescing is not observable on non-TCP fake conn")
 	const HWM = 64
 	connA, connB := newFakeConnPair()
 	ccA := newCountingConn(connA)
@@ -303,8 +302,8 @@ func TestWriter_Backpressure(t *testing.T) {
 	// Depends on gating Writes to exert backpressure at the wire boundary,
 	// but the current countingConn gate also blocks the greeting/handshake
 	// writes (no phase distinction). Reworking this to gate only
-	// traffic-phase writes is part of the Wave 7B batching follow-up.
-	t.Skip("gate blocks handshake writes; revisit alongside Wave 7B batching tests")
+	// traffic-phase writes is still pending.
+	t.Skip("gate blocks handshake writes")
 	const HWM = 4
 	connA, connB := newFakeConnPair()
 	ccA := newCountingConn(connA)
@@ -576,6 +575,6 @@ func TestWriter_MultipartBatched(t *testing.T) {
 // --------------------------------------------------------------------------
 
 var (
-	_ io.Writer = (*countingConn)(nil)
+	_ io.Writer        = (*countingConn)(nil)
 	_ binary.ByteOrder = binary.BigEndian
 )

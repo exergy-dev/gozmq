@@ -10,10 +10,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/rkm/gozmq/internal/zmqerr"
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
 	"github.com/rkm/gozmq/internal/pipe"
+	"github.com/rkm/gozmq/internal/zmqerr"
 )
 
 // DefaultInprocQueueWindow is the time a Dial waits for a matching Listen
@@ -25,12 +25,10 @@ const DefaultInprocQueueWindow = 500 * time.Millisecond
 
 // InprocTransport implements iface.Transport for the in-process scheme.
 //
-// Important scope note: the registry of bound names is currently kept on
-// the InprocTransport instance itself. In the final architecture the
-// registry will be scoped to a gozmq.Context (so two Contexts have
-// independent inproc namespaces); Wave 1 A4 (Session) and the public
-// Context wiring will inject a per-Context InprocTransport. See the design
-// doc §4.2 / §7.3.
+// Important scope note: the registry of bound names is kept on the
+// InprocTransport instance itself. The public Context wires one
+// InprocTransport into each registry, so two Contexts have independent
+// inproc namespaces.
 //
 // Concurrency: all exported methods are safe for concurrent use.
 type InprocTransport struct {
@@ -342,25 +340,21 @@ func (l *inprocListener) dialIn(name string) (iface.Conn, error) {
 //     NEVER merge two Writes into one Read).
 //
 // The "Read returns one Write per call (modulo short-buffer re-entry)"
-// contract is documented here so test authors and the Session/Engine
-// agents that ultimately replace the per-byte model with a per-Msg model
-// have an unambiguous reference.
+// contract is documented here so tests and higher layers have an
+// unambiguous reference.
 // --------------------------------------------------------------------------
 
 // inprocConn satisfies iface.Conn by delegating to a pipe.Pipe. Because
-// inproc bypasses ZMTP framing entirely, the Wave-2 inproc session will
-// almost certainly substitute a Msg-shaped path that calls .Send/.Recv
-// directly rather than going through the io.Reader/io.Writer adapter; the
-// adapter exists so the iface.Conn contract remains uniform across all
-// transports for Wave-1 testing.
+// inproc bypasses ZMTP framing entirely, this adapter exists so the
+// iface.Conn contract remains uniform across all transports.
 type inprocConn struct {
-	p              iface.Pipe
-	local, remote  string
-	mu             sync.Mutex
-	leftover       []byte // unread bytes from the last frame
-	readDeadline   time.Time
-	writeDeadline  time.Time
-	closed         bool
+	p             iface.Pipe
+	local, remote string
+	mu            sync.Mutex
+	leftover      []byte // unread bytes from the last frame
+	readDeadline  time.Time
+	writeDeadline time.Time
+	closed        bool
 }
 
 func newInprocConn(p iface.Pipe, local, remote string) *inprocConn {

@@ -6,10 +6,10 @@ import (
 	"time"
 )
 
-// Option configures a Socket. Options are passed to Context.NewSocket and to
-// Socket.SetOption. The option type is opaque; construct via the With*
-// helpers. Applying an option that is inapplicable to the socket type returns
-// an error at Socket construction rather than silently ignoring.
+// Option configures a Socket at construction time. The option type is opaque;
+// construct values via the With* helpers. Applying an option that is
+// inapplicable to the socket type returns an error at Socket construction
+// rather than silently ignoring it.
 type Option interface {
 	apply(*socketConfig) error
 }
@@ -29,8 +29,6 @@ type socketConfig struct {
 	reconnectIntervalMax time.Duration
 	heartbeatInterval    time.Duration
 	heartbeatTimeout     time.Duration
-	tcpKeepalive         bool
-	tcpNoDelay           bool
 	maxMessageSize       int64
 	routerMandatory      bool
 	xpubVerbose          bool
@@ -67,27 +65,9 @@ func newSocketConfig() *socketConfig {
 		reconnectIntervalMax: 0,
 		heartbeatInterval:    30 * time.Second,
 		heartbeatTimeout:     90 * time.Second,
-		tcpKeepalive:         true,
-		tcpNoDelay:           true,
 		maxMessageSize:       64 << 20,
 		handshakeTimeout:     30 * time.Second,
 	}
-}
-
-func (c *socketConfig) clone() *socketConfig {
-	if c == nil {
-		return newSocketConfig()
-	}
-	cp := *c
-	cp.identity = append([]byte(nil), c.identity...)
-	cp.subscriptions = make([][]byte, len(c.subscriptions))
-	for i, prefix := range c.subscriptions {
-		cp.subscriptions[i] = append([]byte(nil), prefix...)
-	}
-	cp.curveServerKey = append([]byte(nil), c.curveServerKey...)
-	cp.curvePublicKey = append([]byte(nil), c.curvePublicKey...)
-	cp.curveSecretKey = append([]byte(nil), c.curveSecretKey...)
-	return &cp
 }
 
 type optionFunc struct {
@@ -179,16 +159,6 @@ func WithHeartbeat(interval, timeout time.Duration) Option {
 		c.heartbeatTimeout = timeout
 		return nil
 	})
-}
-
-// WithTCPKeepalive toggles SO_KEEPALIVE on TCP connections. Default is
-// true. Complements ZMTP heartbeats by catching truly dead TCP flows at
-// the kernel level; both together are belt-and-braces for long-lived
-// sessions across unreliable networks. This is a construction-time
-// option: it is applied to the TCP or TLS connections the socket dials
-// or accepts, and therefore cannot be changed later via [Socket.SetOption].
-func WithTCPKeepalive(enabled bool) Option {
-	return newOption("WithTCPKeepalive", func(c *socketConfig) error { c.tcpKeepalive = enabled; return nil })
 }
 
 // WithMaxMessageSize sets the per-message byte limit. Default is 64 MiB.
@@ -321,9 +291,8 @@ func WithHandshakeTimeout(d time.Duration) Option {
 // Type bit is set in mask. Use [EventAll] to receive every event kind.
 // The channel must be buffered: events are delivered non-blocking, and
 // when the channel is full the event is dropped rather than blocking
-// the socket's hot path. Drops increment the MonitorChanDropped expvar
-// counter. A buffer of 64-256 events is recommended; consumers that lag
-// materially are responsible for their own drops.
+// the socket's hot path. A buffer of 64-256 events is recommended;
+// consumers that lag materially are responsible for their own drops.
 func WithMonitor(ch chan<- Event, mask EventType) Option {
 	return newOption("WithMonitor", func(c *socketConfig) error {
 		c.monitor = ch

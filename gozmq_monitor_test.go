@@ -2,9 +2,6 @@ package gozmq_test
 
 import (
 	"context"
-	"expvar"
-	"fmt"
-	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -237,51 +234,6 @@ func TestMonitor_ConnectRetryOnRefused(t *testing.T) {
 	}
 }
 
-// TestMonitor_DropsWhenChannelFull exercises the non-blocking drop
-// path: a tiny monitor channel (cap 2) is fed more events than it
-// can hold, and we assert MonitorChanDropped went up.
-func TestMonitor_DropsWhenChannelFull(t *testing.T) {
-	ctxZmq := gozmq.NewContext()
-	defer ctxZmq.Close()
-
-	// Pre-fill the monitor channel with a dummy event and never read
-	// it: every subsequent emit will drop.
-	evts := make(chan gozmq.Event, 2)
-	evts <- gozmq.Event{Type: gozmq.EventListening}
-	evts <- gozmq.Event{Type: gozmq.EventListening}
-
-	// Label the socket uniquely so we can look up its expvar map
-	// without racing other tests.
-	label := fmt.Sprintf("PAIR.%d", time.Now().UnixNano())
-	// We can't inject a label directly — internal/metrics derives it
-	// from socketTypeName. Instead we snapshot the PAIR map before
-	// and after and compare deltas by finding the exact SocketMetrics
-	// our socket owns.
-	_ = label // unused — we rely on the latest-registered PAIR below.
-
-	before := sumAllPAIRMonitorDrops()
-
-	srv, err := ctxZmq.NewSocket(gozmq.Pair, gozmq.WithMonitor(evts, gozmq.EventAll))
-	if err != nil {
-		t.Fatalf("new socket: %v", err)
-	}
-	defer srv.Close()
-
-	// Trigger many emits: two bind failures plus one bind success
-	// plus the Close-time event more than exceeds the channel cap.
-	for i := 0; i < 16; i++ {
-		_ = srv.Bind("bogus://nothing") // each fires EventBindFailed
-	}
-
-	// Give the emit goroutines time to enqueue-or-drop.
-	time.Sleep(100 * time.Millisecond)
-
-	after := sumAllPAIRMonitorDrops()
-	if after <= before {
-		t.Errorf("MonitorChanDropped did not increase: before=%d after=%d", before, after)
-	}
-}
-
 // indexOfType returns the position of the first event of type t, or -1.
 func indexOfType(events []gozmq.Event, t gozmq.EventType) int {
 	for i, e := range events {
@@ -300,131 +252,6 @@ func eventTypes(events []gozmq.Event) []uint32 {
 		out[i] = uint32(e.Type)
 	}
 	return out
-}
-
-// sumAllPAIRMonitorDrops walks the expvar namespace looking for every
-// published gozmq.PAIR* map and sums its MonitorChanDropped counter.
-// Using a sum (rather than a single lookup) lets the test work whether
-// or not the collision-fallback path was triggered for prior sockets
-// in this test run.
-func sumAllPAIRMonitorDrops() int64 {
-	return sumMonitorDropsByPrefix("gozmq.PAIR")
-}
-
-// sumMonitorDropsByPrefix generalises sumAllPAIRMonitorDrops to any
-// socket-type key prefix (e.g. "gozmq.ROUTER"). Walks the full expvar
-// namespace because sockets registered under the collision-fallback
-// naming scheme (.<ptrhash>) still match the prefix.
-func sumMonitorDropsByPrefix(prefix string) int64 {
-	var total int64
-	expvar.Do(func(kv expvar.KeyValue) {
-		if len(kv.Key) < len(prefix) {
-			return
-		}
-		if kv.Key[:len(prefix)] != prefix {
-			return
-		}
-		m, ok := kv.Value.(*expvar.Map)
-		if !ok {
-			return
-		}
-		v := m.Get("MonitorChanDropped")
-		if v == nil {
-			return
-		}
-		n, err := strconv.ParseInt(v.String(), 10, 64)
-		if err == nil {
-			total += n
-		}
-	})
-	return total
-}
-
-// TestMonitorOverflow_DropsEventsWhenChannelFull is the Track 2D
-// explicit regression for the non-blocking monitor-drop path. Unlike
-// TestMonitor_DropsWhenChannelFull (which uses a pre-filled channel as
-// a quick smoke test), this test:
-//
-//  1. Uses a realistically tiny buffered channel (cap 1).
-//  2. Drives real lifecycle events via Bind + Connect + handshake so
-//     the emit path is the one a production user would trip, not a
-//     synthetic BindFailed loop.
-//  3. Asserts the test does not deadlock (bounded timeouts everywhere).
-//  4. Asserts MonitorChanDropped strictly increases while the channel
-//     is full.
-//  5. Idempotency: after draining the channel so emits succeed again,
-//     MonitorChanDropped does NOT keep climbing for quiescent events.
-func TestMonitorOverflow_DropsEventsWhenChannelFull(t *testing.T) {
-	ctxZmq := gozmq.NewContext()
-	t.Cleanup(func() { _ = ctxZmq.Close() })
-
-	// Capacity-1 buffered channel with one pre-queued dummy event so the
-	// very first real emit already has to drop. Using a ROUTER socket
-	// (not PAIR) isolates this test's expvar map from the pre-existing
-	// PAIR tests, keeping the delta assertions unambiguous.
-	evts := make(chan gozmq.Event, 1)
-	evts <- gozmq.Event{Type: gozmq.EventListening}
-
-	before := sumMonitorDropsByPrefix("gozmq.ROUTER")
-
-	srv, err := ctxZmq.NewSocket(gozmq.Router, gozmq.WithMonitor(evts, gozmq.EventAll))
-	if err != nil {
-		t.Fatalf("new server: %v", err)
-	}
-	t.Cleanup(func() { _ = srv.Close() })
-
-	if err := srv.Bind("tcp://127.0.0.1:0"); err != nil {
-		t.Fatalf("bind: %v", err)
-	}
-	ep := srv.LastEndpoint()
-
-	// Spin up 3 dealers that connect rapidly. Each client generates a
-	// Connected + HandshakeSucceeded on its own socket, and an Accepted
-	// + HandshakeSucceeded on the server. With cap-1 + one pre-queued
-	// event, the server's monitor channel cannot absorb all four server
-	// events before the test drains it — drops are guaranteed.
-	for i := 0; i < 3; i++ {
-		cli, err := ctxZmq.NewSocket(gozmq.Dealer,
-			gozmq.WithIdentity([]byte(fmt.Sprintf("dealer-%d", i))))
-		if err != nil {
-			t.Fatalf("new client %d: %v", i, err)
-		}
-		t.Cleanup(func() { _ = cli.Close() })
-		if err := cli.Connect(ep); err != nil {
-			t.Fatalf("connect %d: %v", i, err)
-		}
-	}
-
-	// Give the emit goroutines a bounded window to enqueue-or-drop.
-	// A test that deadlocks here would block forever without a bound;
-	// the time.Sleep bounds the wait and the subsequent assertion
-	// catches the failure mode.
-	time.Sleep(300 * time.Millisecond)
-
-	after := sumMonitorDropsByPrefix("gozmq.ROUTER")
-	if after <= before {
-		t.Fatalf("MonitorChanDropped did not increase after cap-1 channel overflow: before=%d after=%d", before, after)
-	}
-
-	// Idempotency check: drain the channel so subsequent emits succeed
-	// rather than drop. Then quiesce — no new drops should accumulate
-	// because the channel has space.
-	drainCtx, drainCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	_ = drainEvents(drainCtx, evts)
-	drainCancel()
-
-	// Sample the counter right after drain, then again after a quiet
-	// window. If the counter keeps climbing without any new events
-	// being emitted (i.e. no new connects), that would indicate the
-	// drop counter is incrementing spuriously for events the channel
-	// COULD now accept.
-	afterDrain := sumMonitorDropsByPrefix("gozmq.ROUTER")
-	time.Sleep(200 * time.Millisecond)
-	afterQuiet := sumMonitorDropsByPrefix("gozmq.ROUTER")
-	if afterQuiet != afterDrain {
-		t.Errorf("MonitorChanDropped incremented after drain with channel idle: afterDrain=%d afterQuiet=%d",
-			afterDrain, afterQuiet)
-	}
 }
 
 // TestMonitor_MaskFiltersEvents verifies WithMonitor's mask argument

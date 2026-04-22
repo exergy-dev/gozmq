@@ -1,5 +1,5 @@
-// Package stream is the Wave-6 raw-bytes transport adapter that lets a
-// Socket(Stream) carry non-ZMTP traffic end-to-end.
+// Package stream is the raw-bytes transport adapter that lets a Socket(Stream)
+// carry non-ZMTP traffic end-to-end.
 //
 // Why this package exists. STREAM is the only ZMTP socket type that does
 // NOT speak ZMTP on the wire: the peer is typically a plain HTTP/SMTP/line-
@@ -17,7 +17,7 @@
 // facing Pipe end — the gozmq.Socket then calls engine.AttachPipe with it,
 // just like it would with session.Pipe() for ZMTP traffic.
 //
-// Boundary contract (pinned by socket/stream.go godoc):
+// Boundary contract (pinned by internal/socket/stream.go godoc):
 //   - Inbound pipe Msg = one body frame = one conn.Read chunk (size is
 //     whatever the OS returned).
 //   - Outbound pipe Msg = one body frame = raw bytes to write verbatim.

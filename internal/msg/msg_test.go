@@ -5,42 +5,42 @@ import (
 	"testing"
 )
 
-func TestMsgRelease_IdempotentOwnedBuffers(t *testing.T) {
+func TestMsgAppendFrame(t *testing.T) {
 	m := New()
-	buf := PoolGet(16)
-	copy(buf, []byte("owned"))
-	m.AppendOwnedFrame(buf[:5], buf)
-
-	if got := string(m.Bytes()); got != "owned" {
-		t.Fatalf("Bytes = %q, want owned", got)
+	m.AppendFrame([]byte("a"))
+	m.AppendFrame([]byte("bb"))
+	if m.NumFrames() != 2 {
+		t.Fatalf("NumFrames = %d, want 2", m.NumFrames())
 	}
-
-	m.Release()
-	m.Release()
-
-	if m.NumFrames() != 0 {
-		t.Fatalf("NumFrames after release = %d, want 0", m.NumFrames())
+	if !bytes.Equal(m.Frames()[0], []byte("a")) || !bytes.Equal(m.Frames()[1], []byte("bb")) {
+		t.Fatalf("frames = %q", m.Frames())
+	}
+	if m.TotalSize() != 3 {
+		t.Fatalf("TotalSize = %d, want 3", m.TotalSize())
 	}
 }
 
-func TestMsgRelease_InvalidatesHeapFrames(t *testing.T) {
-	m := FromBytes([]byte("heap"))
-	m.Release()
-	if m.NumFrames() != 0 {
-		t.Fatalf("NumFrames after release = %d, want 0", m.NumFrames())
+func TestMsgBytesSingleFrame(t *testing.T) {
+	m := FromBytes([]byte("hello"))
+	if got := string(m.Bytes()); got != "hello" {
+		t.Fatalf("Bytes = %q", got)
 	}
 }
 
-func TestMsgCloneIndependentOfRelease(t *testing.T) {
-	m := New()
-	buf := PoolGet(16)
-	copy(buf, []byte("clone"))
-	m.AppendOwnedFrame(buf[:5], buf)
+func TestMsgBytesPanicsOnMultipart(t *testing.T) {
+	m := FromFrames([]byte("a"), []byte("b"))
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic on multipart Bytes")
+		}
+	}()
+	_ = m.Bytes()
+}
 
-	clone := m.Clone()
-	m.Release()
-
-	if !bytes.Equal(clone.Bytes(), []byte("clone")) {
-		t.Fatalf("clone bytes = %q, want clone", clone.Bytes())
+func TestMsgReset(t *testing.T) {
+	m := FromFrames([]byte("x"), []byte("y"))
+	m.Reset()
+	if m.NumFrames() != 0 {
+		t.Fatalf("NumFrames after Reset = %d", m.NumFrames())
 	}
 }

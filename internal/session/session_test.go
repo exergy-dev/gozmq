@@ -76,7 +76,7 @@ func (c *fakeConn) Closed() <-chan struct{}          { return c.closed }
 //
 // Wire layout: 1 byte flags + uvarint length + body. This is NOT ZMTP —
 // it's deliberately the simplest framing that exercises the codec
-// interface, so the session test runs without depending on Wave-1 A1.
+// interface, so the session test runs without depending on ZMTP parsing.
 // --------------------------------------------------------------------------
 
 type fakeCodec struct{}

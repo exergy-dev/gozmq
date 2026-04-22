@@ -9,7 +9,7 @@ package session
 // The Reconnector is intentionally decoupled from the concrete
 // session/transport/options types: it takes factory functions so the
 // Socket.Connect path (and tests) can plug in different dial/session
-// implementations. The main agent's Socket.Connect wires this up.
+// implementations.
 //
 // Session end detection uses iface.Session.Done(): that channel closes
 // when every session goroutine has exited (reader, writer, optional

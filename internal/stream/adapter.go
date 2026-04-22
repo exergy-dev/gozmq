@@ -150,18 +150,6 @@ func (a *Adapter) Close() error {
 	return a.closeErr
 }
 
-// Done returns a channel that closes once both adapter goroutines have
-// exited. Useful for callers that want to observe end-of-life without
-// calling Close themselves (e.g. the gozmq.Socket accept loop).
-func (a *Adapter) Done() <-chan struct{} {
-	ch := make(chan struct{})
-	go func() {
-		a.doneWG.Wait()
-		close(ch)
-	}()
-	return ch
-}
-
 // readerLoop pulls bytes off the conn and forwards each chunk as a
 // single-frame Msg onto the adapter-side pipe. Exits on ctx cancel,
 // conn error, or pipe close.

@@ -67,11 +67,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "message of incorrect size %d (expected %d)\n", len(m.Bytes()), *size)
 			os.Exit(1)
 		}
-		// Echo the exact body back. Copy so we don't race the session's
-		// pooled recv buffer with the send path.
-		body := append([]byte(nil), m.Bytes()...)
-		m.Release()
-		if err := sock.SendMsg(callCtx, gozmq.NewMsgFromBytes(body)); err != nil {
+		// Echo the exact body back.
+		if err := sock.SendMsg(callCtx, gozmq.NewMsgFromBytes(m.Bytes())); err != nil {
 			fmt.Fprintf(os.Stderr, "send[%d]: %v\n", i, err)
 			os.Exit(1)
 		}

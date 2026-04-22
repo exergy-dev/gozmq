@@ -178,72 +178,24 @@ func newIPCListener(l net.Listener, t *IPCTransport, path, display string, abstr
 func (l *ipcListener) Endpoint() string { return l.endpoint }
 
 func (l *ipcListener) Accept(ctx context.Context) (iface.Conn, error) {
-	if l.closed.Load() {
-		return nil, fmt.Errorf("%w: listener closed", zmqerr.ErrEndpointInvalid)
-	}
-
-	type acceptResult struct {
-		c   net.Conn
-		err error
-	}
-	resCh := make(chan acceptResult, 1)
-	go func() {
-		for {
+	c, err := acceptWithDeadline(
+		ctx,
+		l.l,
+		l.closeCh,
+		l.closed.Load,
+		ipcAcceptPollInterval,
+		func(t time.Time) error {
 			if ul, ok := l.l.(*net.UnixListener); ok {
-				_ = ul.SetDeadline(time.Now().Add(ipcAcceptPollInterval))
+				return ul.SetDeadline(t)
 			}
-			c, err := l.l.Accept()
-			if err != nil {
-				if l.closed.Load() {
-					resCh <- acceptResult{nil, fmt.Errorf("%w: listener closed", zmqerr.ErrEndpointInvalid)}
-					return
-				}
-				if isTimeout(err) {
-					select {
-					case <-ctx.Done():
-						resCh <- acceptResult{nil, ctx.Err()}
-						return
-					case <-l.closeCh:
-						resCh <- acceptResult{nil, fmt.Errorf("%w: listener closed", zmqerr.ErrEndpointInvalid)}
-						return
-					default:
-						continue
-					}
-				}
-				resCh <- acceptResult{nil, err}
-				return
-			}
-			if ul, ok := l.l.(*net.UnixListener); ok {
-				_ = ul.SetDeadline(time.Time{})
-			}
-			resCh <- acceptResult{c, nil}
-			return
-		}
-	}()
-
-	select {
-	case r := <-resCh:
-		if r.err != nil {
-			return nil, r.err
-		}
-		return newIPCConn(r.c, l.endpoint, l.endpoint), nil
-	case <-ctx.Done():
-		go func() {
-			r := <-resCh
-			if r.c != nil {
-				_ = r.c.Close()
-			}
-		}()
-		return nil, ctx.Err()
-	case <-l.closeCh:
-		go func() {
-			r := <-resCh
-			if r.c != nil {
-				_ = r.c.Close()
-			}
-		}()
-		return nil, fmt.Errorf("%w: listener closed", zmqerr.ErrEndpointInvalid)
+			return nil
+		},
+		nil,
+	)
+	if err != nil {
+		return nil, err
 	}
+	return newIPCConn(c, l.endpoint, l.endpoint), nil
 }
 
 // Close stops accepting and removes the socket file. Filesystem sockets

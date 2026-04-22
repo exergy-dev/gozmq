@@ -69,8 +69,6 @@
 //	handshakeTimeout     30s          (greeting + security handshake cap)
 //	maxMessageSize       64 MiB       (per-message ceiling; oversize tears session)
 //	reconnectInterval    100ms        (base backoff; exponential with 20% jitter)
-//	tcpKeepalive         true         (SO_KEEPALIVE on TCP)
-//	tcpNoDelay           true         (TCP_NODELAY on TCP)
 //
 // These differ from libzmq where libzmq's defaults are hostile: notably,
 // linger defaults to 1s (not infinite) so a forgotten Close cannot hang the
@@ -97,19 +95,15 @@
 // A channel registered via [WithMonitor] or [Socket.Monitor] receives [Event]
 // values for lifecycle transitions (connect, listen, handshake, disconnect,
 // close). Delivery is best-effort: if the channel is full the event is
-// dropped rather than blocking the socket's hot path. Dropped events are
-// counted in the MonitorChanDropped expvar counter. Monitor channels must
-// be buffered; 64-256 is a reasonable default for most applications.
+// dropped rather than blocking the socket's hot path. Monitor channels
+// must be buffered; 64-256 is a reasonable default for most applications.
 //
 // # Live Reconfiguration
 //
 // Most With* options are construction-time only because they shape the
 // engine, session, or transport wiring created by [Context.NewSocket].
-// Applying those same options to a live socket via [Socket.SetOption]
-// therefore returns an error rather than silently accepting a partial
-// or no-op mutation. Use the dedicated live APIs instead:
-// [Socket.Monitor], [Socket.Subscribe], [Socket.Unsubscribe], and
-// [Socket.Disconnect].
+// Use the dedicated live APIs for mutable behavior: [Socket.Monitor],
+// [Socket.Subscribe], [Socket.Unsubscribe], and [Socket.Disconnect].
 //
 // # Subscription refcount
 //

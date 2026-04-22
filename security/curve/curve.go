@@ -20,8 +20,8 @@
 //     a deterministic reader for testing.
 //   - Metadata is encoded as the ZMTP property list (1-byte name length,
 //     name, 4-byte big-endian value length, value) — identical to what
-//     NULL/PLAIN use. We inline the codec to avoid a cycle on the zmtp
-//     package during parallel development, matching security/null.go.
+//     NULL/PLAIN use. We inline the codec to keep this public package
+//     independent of internal implementation packages.
 
 package curve
 
@@ -222,7 +222,7 @@ func newMech(role iface.Role, ownSecret, ownPublicHint, peerLongTerm Key, localM
 	copy(ephSec[:], ephSecPtr[:])
 
 	// Copy the supplied metadata so caller mutation can't race with the
-	// mechanism. Matches security/null.go's convention.
+	// mechanism.
 	copied := make(map[string]string, len(localMeta))
 	for k, v := range localMeta {
 		copied[k] = v
@@ -510,6 +510,9 @@ func (m *curveMech) parseHello(body []byte) error {
 	// Short nonce counter.
 	counter := binary.BigEndian.Uint64(body[off : off+8])
 	off += 8
+	if err := m.requireCounterAdvance(counter, "HELLO"); err != nil {
+		return err
+	}
 	// Signature box.
 	sig := body[off : off+signatureBoxSize]
 	nonce := shortNonce(prefixHello, counter)
@@ -729,6 +732,9 @@ func (m *curveMech) parseInitiate(body []byte) error {
 	// Short-nonce counter for the initiate box.
 	counter := binary.BigEndian.Uint64(body[off : off+8])
 	off += 8
+	if err := m.requireCounterAdvance(counter, "INITIATE"); err != nil {
+		return err
+	}
 	initCipher := body[off:]
 
 	initNonce := shortNonce(prefixInitiate, counter)
@@ -833,6 +839,9 @@ func (m *curveMech) parseReady(body []byte) error {
 	off := 1 + len(cmdReady)
 	counter := binary.BigEndian.Uint64(body[off : off+8])
 	off += 8
+	if err := m.requireCounterAdvance(counter, "READY"); err != nil {
+		return err
+	}
 	nonce := shortNonce(prefixReady, counter)
 	plain, ok := box.Open(nil, body[off:], (*[24]byte)(&nonce), (*[32]byte)(&m.peerEphPublic), (*[32]byte)(&m.ourEphSecret))
 	if !ok {
@@ -919,6 +928,10 @@ func (m *curveMech) DecodeFrame(flags uint8, wire []byte) (uint8, []byte, error)
 	if err := checkNonceCounter(counter, "recv"); err != nil {
 		return 0, nil, err
 	}
+	// Reject replays/duplicates before spending work on box.Open.
+	if err := m.requireCounterAdvance(counter, "MESSAGE"); err != nil {
+		return 0, nil, err
+	}
 	nonce := shortNonce(m.decPrefix, counter)
 	plain, ok := box.Open(nil, wire[off:], (*[24]byte)(&nonce), (*[32]byte)(&m.peerEphPublic), (*[32]byte)(&m.ourEphSecret))
 	if !ok {
@@ -931,11 +944,11 @@ func (m *curveMech) DecodeFrame(flags uint8, wire []byte) (uint8, []byte, error)
 		return 0, nil, fmt.Errorf("gozmq/security/curve: MESSAGE inner flags %#x invalid: %w", plain[0], zmqerr.ErrMalformedFrame)
 	}
 	// Strip the 1-byte inner flags prefix and restore MORE to the logical
-	// outer flags seen by the session layer.
-	out := make([]byte, len(plain)-1)
-	copy(out, plain[1:])
+	// outer flags seen by the session layer. plain is a fresh slice
+	// produced by box.Open; slicing it (rather than make+copy) is safe —
+	// the backing array has no other referents.
 	m.peerShortNonce = counter + 1
-	return (flags &^ iface.FlagMore) | (plain[0] & iface.FlagMore), out, nil
+	return (flags &^ iface.FlagMore) | (plain[0] & iface.FlagMore), plain[1:], nil
 }
 
 // --------------------------------------------------------------------------
@@ -977,6 +990,24 @@ func expectCommandName(body []byte, name string) error {
 func checkNonceCounter(counter uint64, direction string) error {
 	if counter == math.MaxUint64 {
 		return fmt.Errorf("gozmq/security/curve: %s nonce counter exhausted: %w", direction, zmqerr.ErrNonceExhausted)
+	}
+	return nil
+}
+
+// requireCounterAdvance rejects an inbound short-nonce counter that does not
+// advance peerShortNonce, i.e. one that repeats or precedes a counter we have
+// already accepted. CurveZMQ (RFC 26 §3) leans on monotonic per-direction
+// counters for replay defence because NaCl's AEAD has no built-in notion of
+// "seen before"; without this check, an on-path attacker can re-inject a
+// captured MESSAGE (or handshake command) and the box opens successfully.
+//
+// We require strictly greater than the LAST accepted counter, equivalently
+// >= the next expected value stored in peerShortNonce. Gaps are tolerated —
+// matching libzmq, which also allows the peer to skip counters (e.g. after
+// an attacker-truncated sequence) rather than stalling the session.
+func (m *curveMech) requireCounterAdvance(counter uint64, frame string) error {
+	if counter < m.peerShortNonce {
+		return fmt.Errorf("gozmq/security/curve: %s counter %d does not advance peer nonce %d: %w", frame, counter, m.peerShortNonce, zmqerr.ErrMalformedFrame)
 	}
 	return nil
 }
@@ -1105,9 +1136,8 @@ func derivePublic(secret Key) (Key, error) {
 	return pub, nil
 }
 
-// encodeMeta matches security/null.go's inline ZMTP property-list encoder.
-// Duplicated here to keep security/curve independent of security (which
-// does not export its helper) and of zmtp (parallel-developed).
+// encodeMeta is an inline ZMTP property-list encoder. It is duplicated here
+// to keep security/curve independent of internal implementation packages.
 func encodeMeta(props map[string]string) []byte {
 	total := 0
 	for name, value := range props {
@@ -1128,7 +1158,7 @@ func encodeMeta(props map[string]string) []byte {
 	return out
 }
 
-// decodeMeta matches security/null.go's inline ZMTP property-list decoder.
+// decodeMeta is an inline ZMTP property-list decoder.
 func decodeMeta(raw []byte) (map[string]string, error) {
 	out := make(map[string]string)
 	seen := make(map[string]struct{})

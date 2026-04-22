@@ -5,8 +5,7 @@
 //
 // The session layer never imports the concrete framing/security/transport
 // packages — it consumes the iface contracts (FrameCodec, SecurityMech,
-// Conn) so it can be developed and tested in isolation per the Wave-1
-// parallel plan.
+// Conn) so it can be developed and tested in isolation.
 package session
 
 import (

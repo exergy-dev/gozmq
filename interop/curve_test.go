@@ -427,7 +427,7 @@ func TestCurve_MalformedHandshake(t *testing.T) {
 		t.Fatalf("gozmq new: %v", err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
-	if err := client.Connect(proxy.Endpoint()); err != nil {
+	if err := client.Connect(proxy.Addr()); err != nil {
 		t.Fatalf("gozmq connect: %v", err)
 	}
 

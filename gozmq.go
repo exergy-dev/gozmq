@@ -13,16 +13,16 @@ import (
 	"time"
 
 	"github.com/rkm/gozmq/internal/iface"
-	"github.com/rkm/gozmq/internal/metrics"
 	"github.com/rkm/gozmq/internal/msg"
+	secmech "github.com/rkm/gozmq/internal/security"
 	"github.com/rkm/gozmq/internal/session"
+	"github.com/rkm/gozmq/internal/socket"
 	"github.com/rkm/gozmq/internal/stream"
 	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/rkm/gozmq/internal/zmtp"
 	"github.com/rkm/gozmq/security"
 	"github.com/rkm/gozmq/security/curve"
-	"github.com/rkm/gozmq/socket"
 	"github.com/rkm/gozmq/transport"
-	"github.com/rkm/gozmq/zmtp"
 )
 
 // SocketType enumerates the ZMTP socket patterns.
@@ -74,8 +74,9 @@ func socketTypeName(t SocketType) string {
 	return ""
 }
 
-// Msg is a ZMTP multipart message. Messages returned by RecvMsg may hold
-// pooled frame buffers; call Release when the message is no longer needed.
+// Msg is a ZMTP multipart message. Frames delivered by RecvMsg are caller-
+// owned heap copies, so a returned *Msg is safe to retain, stash, or pass
+// between goroutines without any further bookkeeping.
 type Msg = msg.Msg
 
 // NewMsg returns an empty message.
@@ -241,7 +242,6 @@ func (c *Context) NewSocket(t SocketType, opts ...Option) (*Socket, error) {
 		cfg:        cfg,
 		engine:     engine,
 		subHandle:  subHandle,
-		metrics:    metrics.NewSocketMetrics(socketTypeName(t)),
 	}
 	c.mu.Lock()
 	c.sockets = append(c.sockets, s)
@@ -305,11 +305,6 @@ type Socket struct {
 	cfg        *socketConfig
 	engine     iface.SocketEngine
 	subHandle  *socket.SubEngine // non-nil for Sub/XSub
-
-	// metrics collects per-socket expvar counters (messages, bytes,
-	// handshake outcomes, reconnects, HWM hits, monitor drops). Non-
-	// nil for every socket constructed via Context.NewSocket.
-	metrics *metrics.SocketMetrics
 
 	closed atomic.Bool
 
@@ -406,18 +401,13 @@ func (s *Socket) Connect(endpoint string) error {
 	}
 	if s.socketType == Stream {
 		// STREAM does not ride on ZMTP / session, so the Reconnector
-		// (which builds iface.Sessions) is not reusable here. Dial
-		// once; a future track can layer reconnect semantics on top.
+		// (which builds iface.Sessions) is not reusable here. Dial once.
 		return s.connectStream(tr, endpoint)
 	}
 	rc := session.NewReconnector(session.ReconnectConfig{
 		Dial: func(ctx context.Context) (iface.Conn, error) {
 			conn, err := tr.Dial(ctx, endpoint)
 			if err != nil {
-				return nil, err
-			}
-			if err := s.applyConnSocketOptions(conn); err != nil {
-				_ = conn.Close()
 				return nil, err
 			}
 			return conn, nil
@@ -442,9 +432,6 @@ func (s *Socket) Connect(endpoint string) error {
 			s.emit(EventDisconnected, endpoint, "")
 		},
 		OnRetry: func(attempt int, backoff time.Duration) {
-			if s.metrics != nil {
-				s.metrics.Reconnects.Add(1)
-			}
 			// Convention: the first backoff after a dial/handshake
 			// failure is "delayed"; subsequent attempts are
 			// "retried". libzmq's monitor events use the same
@@ -517,8 +504,7 @@ func (s *Socket) Disconnect(endpoint string) error {
 // watchClientHandshake spawns a goroutine that waits for the given
 // client-side session's handshake to complete and emits the
 // appropriate EventHandshake* event, mirroring startSession's
-// server-side behavior. It also bumps the handshake success/failure
-// metrics.
+// server-side behavior.
 //
 // Safe to spawn freely: each goroutine exits once Handshaked closes
 // or the Socket's run context cancels.
@@ -532,14 +518,8 @@ func (s *Socket) watchClientHandshake(sess iface.Session, endpoint string) {
 			return
 		}
 		if err := sess.HandshakeErr(); err != nil {
-			if s.metrics != nil {
-				s.metrics.HandshakesFailed.Add(1)
-			}
 			s.emit(classifyHandshakeEvent(err), endpoint, err.Error())
 			return
-		}
-		if s.metrics != nil {
-			s.metrics.HandshakesSucceeded.Add(1)
 		}
 		s.emit(EventHandshakeSucceeded, endpoint, "")
 	}()
@@ -585,7 +565,7 @@ func (s *Socket) newMechanism(role iface.Role) iface.SecurityMech {
 		copy(sk[:], s.cfg.curveSecretKey)
 		m, err := curve.NewCurveServer(sk, meta)
 		if err != nil {
-			return security.NewNull(role, meta)
+			return secmech.NewNull(role, meta)
 		}
 		return m
 	case len(s.cfg.curveSecretKey) == 32 && !s.cfg.curveServer && len(s.cfg.curveServerKey) == 32 && len(s.cfg.curvePublicKey) == 32:
@@ -595,15 +575,15 @@ func (s *Socket) newMechanism(role iface.Role) iface.SecurityMech {
 		copy(spk[:], s.cfg.curveServerKey)
 		m, err := curve.NewCurveClient(spk, pk, sk, meta)
 		if err != nil {
-			return security.NewNull(role, meta)
+			return secmech.NewNull(role, meta)
 		}
 		return m
 	case s.cfg.plainAuth != nil && role == iface.RoleServer:
-		return security.NewPlainServer(s.cfg.plainAuth, meta)
+		return secmech.NewPlainServer(s.cfg.plainAuth, meta)
 	case s.cfg.plainClient && role == iface.RoleClient:
-		return security.NewPlainClient(s.cfg.plainClientUser, s.cfg.plainClientPass, meta)
+		return secmech.NewPlainClient(s.cfg.plainClientUser, s.cfg.plainClientPass, meta)
 	}
-	return security.NewNull(role, meta)
+	return secmech.NewNull(role, meta)
 }
 
 func (s *Socket) acceptLoop(l iface.Listener) {
@@ -620,11 +600,6 @@ func (s *Socket) acceptLoop(l iface.Listener) {
 				s.emit(EventAcceptFailed, bound, err.Error())
 			}
 			return
-		}
-		if err := s.applyConnSocketOptions(conn); err != nil {
-			s.emit(EventAcceptFailed, bound, err.Error())
-			_ = conn.Close()
-			continue
 		}
 		s.emit(EventAccepted, conn.RemoteEndpoint(), "")
 		if s.socketType == Stream {
@@ -666,15 +641,9 @@ func (s *Socket) startSession(conn iface.Conn, role iface.Role) {
 		if err := sess.HandshakeErr(); err != nil {
 			s.logger().Debug("gozmq: server handshake failed",
 				"err", err, "role", role, "socket-type", socketTypeName(s.socketType))
-			if s.metrics != nil {
-				s.metrics.HandshakesFailed.Add(1)
-			}
 			s.emit(classifyHandshakeEvent(err), remote, err.Error())
 			_ = sess.Stop()
 			return
-		}
-		if s.metrics != nil {
-			s.metrics.HandshakesSucceeded.Add(1)
 		}
 		s.emit(EventHandshakeSucceeded, remote, "")
 		if err := s.engine.AttachPipe(sess.Pipe()); err != nil {
@@ -730,16 +699,11 @@ func (s *Socket) startStreamAdapter(conn iface.Conn) {
 
 // connectStream is the STREAM-specific Connect path. It dials once via
 // the transport, constructs a stream.Adapter, attaches it, and wires up
-// teardown. STREAM does not integrate with session.Reconnector — a
-// reconnect loop for raw-bytes transports is a future enhancement.
+// teardown.
 func (s *Socket) connectStream(tr iface.Transport, endpoint string) error {
 	conn, err := tr.Dial(s.runCtx, endpoint)
 	if err != nil {
 		s.emit(EventConnectDelayed, endpoint, err.Error())
-		return err
-	}
-	if err := s.applyConnSocketOptions(conn); err != nil {
-		_ = conn.Close()
 		return err
 	}
 	s.emit(EventConnected, endpoint, "")
@@ -771,9 +735,8 @@ func (s *Socket) SendMsg(ctx context.Context, m *Msg) error {
 	return s.engine.Send(ctx, m)
 }
 
-// RecvMsg blocks until a message arrives or ctx cancels. Call Release on the
-// returned message when it is no longer needed so any pooled frame buffers can
-// be reused.
+// RecvMsg blocks until a message arrives or ctx cancels. The returned *Msg
+// owns its frame bytes; no Release or Clone is required.
 func (s *Socket) RecvMsg(ctx context.Context) (*Msg, error) {
 	if s.closed.Load() {
 		return nil, ErrSocketClosed
@@ -781,23 +744,7 @@ func (s *Socket) RecvMsg(ctx context.Context) (*Msg, error) {
 	return s.engine.Recv(ctx)
 }
 
-// SetOption is intentionally strict on live sockets: options that affect
-// engine/session/transport construction are rejected after NewSocket so the
-// API never silently accepts a no-op mutation. Use dedicated live methods
-// such as Monitor, Subscribe, and Unsubscribe instead.
-func (s *Socket) SetOption(o Option) error {
-	if s.closed.Load() {
-		return ErrSocketClosed
-	}
-	name := "option"
-	if meta, ok := o.(socketOptionMeta); ok {
-		name = meta.optionName()
-	}
-	return fmt.Errorf("gozmq: %s is construction-only on live sockets; use dedicated methods such as Monitor, Subscribe, and Unsubscribe instead", name)
-}
-
-// Monitor registers ch to receive Events matching mask. Wired fully in
-// Wave 3 C1; for now the config fields are stored on the socket.
+// Monitor registers ch to receive Events matching mask.
 func (s *Socket) Monitor(ch chan<- Event, mask EventType) error {
 	if s.closed.Load() {
 		return ErrSocketClosed
@@ -1009,10 +956,9 @@ func waitWritersFlushed(ctx context.Context, sessions []iface.Session, linger ti
 
 // emit publishes a lifecycle Event on the socket's configured monitor
 // channel, non-blocking. Delivery is best-effort: if the channel is
-// full we drop the event and increment the MonitorChanDropped metric,
-// because backpressuring the socket's hot path on a slow consumer is
-// never the right call — monitor channels are user-controlled and a
-// misconfigured consumer must not stall Send/Recv.
+// full we drop the event because backpressuring the socket's hot path on
+// a slow consumer is never the right call — monitor channels are
+// user-controlled and a misconfigured consumer must not stall Send/Recv.
 //
 // The monitor mask filters by event type bitmask. Events whose Type
 // bit is not set in cfg.monitorMask are discarded silently (and not
@@ -1034,9 +980,6 @@ func (s *Socket) emit(eventType EventType, endpoint, reason string) {
 	select {
 	case ch <- ev:
 	default:
-		if s.metrics != nil {
-			s.metrics.MonitorChanDropped.Add(1)
-		}
 	}
 }
 
@@ -1048,25 +991,6 @@ func (s *Socket) logger() *slog.Logger {
 		return s.cfg.logger
 	}
 	return slog.Default()
-}
-
-type socketTuner interface {
-	SetTCPKeepAlive(enabled bool, period time.Duration) error
-	SetTCPNoDelay(enabled bool) error
-}
-
-func (s *Socket) applyConnSocketOptions(conn iface.Conn) error {
-	tuner, ok := conn.(socketTuner)
-	if !ok {
-		return nil
-	}
-	if err := tuner.SetTCPKeepAlive(s.cfg.tcpKeepalive, 30*time.Second); err != nil {
-		return err
-	}
-	if err := tuner.SetTCPNoDelay(s.cfg.tcpNoDelay); err != nil {
-		return err
-	}
-	return nil
 }
 
 // classifyHandshakeEvent maps a handshake error to the appropriate

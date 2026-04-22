@@ -129,8 +129,8 @@ func TestPoolGetReturnsUsableSlice(t *testing.T) {
 func TestPoolConcurrentGetPut(t *testing.T) {
 	t.Parallel()
 	const (
-		workers     = 16
-		iters       = 2000
+		workers = 16
+		iters   = 2000
 	)
 	sizes := []int{64, 300, 5000, 80 * 1024, 600 * 1024, 2 * 1024 * 1024}
 	var wg sync.WaitGroup

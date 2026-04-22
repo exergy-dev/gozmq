@@ -335,25 +335,6 @@ func (s *sessionImpl) drainSessionPipe() error {
 	}
 }
 
-// writeMessage emits a *msg.Msg as a sequence of ZMTP frames in a single
-// batched writev. Used by legacy single-message callers (if any remain)
-// and as the per-message building block in the batched writer loop.
-//
-// Retained for API parity with prior revisions; the writer loop above
-// inlines the encode+batch path directly for zero-allocation reuse of
-// the frame-blob slice.
-func (s *sessionImpl) writeMessage(m *msg.Msg) error {
-	var batch writerBatch
-	_, err := batch.appendMessage(s, m, 0)
-	if err != nil {
-		batch.release()
-		return err
-	}
-	err = s.flushBatch(&batch.buffers)
-	batch.release()
-	return err
-}
-
 // writeFrame encodes body via the mechanism, then writes via the codec
 // under the writeMu so PONGs from the reader don't interleave with a
 // multipart user message. Used for single-frame COMMAND writes

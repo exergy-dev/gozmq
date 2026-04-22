@@ -32,8 +32,8 @@ import (
 // --------------------------------------------------------------------------
 
 var (
-	testCertDER []byte
-	testCertPEM *x509.Certificate
+	testCertDER  []byte
+	testCertPEM  *x509.Certificate
 	testCertPriv ed25519.PrivateKey
 	testRootPool *x509.CertPool
 )

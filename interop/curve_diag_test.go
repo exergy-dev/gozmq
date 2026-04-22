@@ -58,7 +58,7 @@ func libzmqClient_libzmqServer(t *testing.T) {
 	_ = client.SetOption(ZMQ_CURVE_SERVERKEY, serverPub[:])
 	_ = client.SetOption(ZMQ_CURVE_PUBLICKEY, clientPub[:])
 	_ = client.SetOption(ZMQ_CURVE_SECRETKEY, clientSec[:])
-	if err := client.Connect(proxy.Endpoint()); err != nil {
+	if err := client.Connect(proxy.Addr()); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(handshakeSettle)
@@ -130,7 +130,7 @@ func gozmqClient_libzmqServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
-	if err := client.Connect(proxy.Endpoint()); err != nil {
+	if err := client.Connect(proxy.Addr()); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(handshakeSettle)
