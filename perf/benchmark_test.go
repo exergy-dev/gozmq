@@ -509,3 +509,424 @@ func benchPubSubFanout(b *testing.B, msgSize int, endpoint string, nSub int) {
 	}
 	recvWG.Wait()
 }
+
+// -----------------------------------------------------------------------------
+// ROUTER / DEALER round-trip latency.
+// -----------------------------------------------------------------------------
+
+// routerDealerSizes is the latency ladder for ROUTER/DEALER: the 64B point
+// from the canonical `sizes` table is dropped because the per-iteration
+// cost at 32B and 64B is dominated by the same fixed framing overhead, so
+// the 64B sample adds noise without information.
+var routerDealerSizes = []struct {
+	name string
+	n    int
+}{
+	{"32B", 32},
+	{"1KB", 1024},
+	{"64KB", 64 * 1024},
+}
+
+func BenchmarkRouterDealerLatency_Inproc(b *testing.B) {
+	for _, sz := range routerDealerSizes {
+		sz := sz
+		b.Run(sz.name, func(b *testing.B) {
+			benchRouterDealerLatency(b, sz.n, inprocName(b, "routerdealer-inproc-"+sz.name))
+		})
+	}
+}
+
+func BenchmarkRouterDealerLatency_TCP(b *testing.B) {
+	for _, sz := range routerDealerSizes {
+		sz := sz
+		b.Run(sz.name, func(b *testing.B) {
+			benchRouterDealerLatency(b, sz.n, freeTCPEndpoint)
+		})
+	}
+}
+
+// benchRouterDealerLatency binds a ROUTER + connects a DEALER with a known
+// identity, then drives b.N DEALER→ROUTER→DEALER round trips. ROUTER sees
+// [identity, body]; the echo goroutine swaps the body back so the leading
+// identity frame still routes the reply to the originating DEALER.
+func benchRouterDealerLatency(b *testing.B, msgSize int, endpoint string) {
+	b.Helper()
+	b.StopTimer()
+
+	ctxZmq := gozmq.NewContext()
+	defer ctxZmq.Close()
+
+	router, err := ctxZmq.NewSocket(gozmq.Router)
+	if err != nil {
+		b.Fatalf("new router: %v", err)
+	}
+	defer router.Close()
+	if err := router.Bind(endpoint); err != nil {
+		b.Fatalf("bind: %v", err)
+	}
+	ep := router.LastEndpoint()
+
+	dealer, err := ctxZmq.NewSocket(gozmq.Dealer, gozmq.WithIdentity([]byte("bench-dealer")))
+	if err != nil {
+		b.Fatalf("new dealer: %v", err)
+	}
+	defer dealer.Close()
+	if err := dealer.Connect(ep); err != nil {
+		b.Fatalf("connect: %v", err)
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Echo goroutine: ROUTER receives [identity, body...] and sends back
+	// [identity, body...] so the DEALER sees just the body on Recv (DEALER
+	// strips the identity frame applied by the ROUTER).
+	var echoWG sync.WaitGroup
+	echoWG.Add(1)
+	go func() {
+		defer echoWG.Done()
+		for {
+			m, err := router.RecvMsg(runCtx)
+			if err != nil {
+				return
+			}
+			if err := router.SendMsg(runCtx, gozmq.NewMsgFromFrames(m.Frames()...)); err != nil {
+				return
+			}
+		}
+	}()
+
+	payload := newPayload(msgSize)
+
+	callCtx, callCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer callCancel()
+	for i := 0; i < 2; i++ {
+		if err := dealer.SendMsg(callCtx, gozmq.NewMsgFromBytes(payload)); err != nil {
+			b.Fatalf("warmup send: %v", err)
+		}
+		if _, err := dealer.RecvMsg(callCtx); err != nil {
+			b.Fatalf("warmup recv: %v", err)
+		}
+	}
+
+	b.SetBytes(int64(msgSize))
+	b.ResetTimer()
+	b.StartTimer()
+
+	for i := 0; i < b.N; i++ {
+		if err := dealer.SendMsg(callCtx, gozmq.NewMsgFromBytes(payload)); err != nil {
+			b.Fatalf("send[%d]: %v", i, err)
+		}
+		if _, err := dealer.RecvMsg(callCtx); err != nil {
+			b.Fatalf("recv[%d]: %v", i, err)
+		}
+	}
+
+	b.StopTimer()
+	cancel()
+	_ = router.Close()
+	echoWG.Wait()
+}
+
+// -----------------------------------------------------------------------------
+// XPUB / XSUB latency + throughput.
+// -----------------------------------------------------------------------------
+
+// xsubSubscribeFrame builds the synthetic ZMTP subscribe frame the XSUB
+// socket sends to its XPUB peer: 0x01 followed by the topic prefix.
+func xsubSubscribeFrame(topic []byte) []byte {
+	buf := make([]byte, 0, 1+len(topic))
+	buf = append(buf, 0x01)
+	buf = append(buf, topic...)
+	return buf
+}
+
+// BenchmarkXPubXSubLatency_Inproc measures one-shot XPUB→XSUB delivery on
+// an empty-topic subscription. Each iteration sends one message and
+// receives one — the ns/op number is XPUB send + slow-joiner-free XSUB
+// recv on inproc.
+func BenchmarkXPubXSubLatency_Inproc(b *testing.B) {
+	for _, sz := range routerDealerSizes {
+		sz := sz
+		b.Run(sz.name, func(b *testing.B) {
+			benchXPubXSubLatency(b, sz.n, inprocName(b, "xpubxsub-lat-inproc-"+sz.name))
+		})
+	}
+}
+
+func benchXPubXSubLatency(b *testing.B, msgSize int, endpoint string) {
+	b.Helper()
+	b.StopTimer()
+
+	ctxZmq := gozmq.NewContext()
+	defer ctxZmq.Close()
+
+	xpub, err := ctxZmq.NewSocket(gozmq.XPub)
+	if err != nil {
+		b.Fatalf("new xpub: %v", err)
+	}
+	defer xpub.Close()
+	if err := xpub.Bind(endpoint); err != nil {
+		b.Fatalf("bind: %v", err)
+	}
+
+	xsub, err := ctxZmq.NewSocket(gozmq.XSub)
+	if err != nil {
+		b.Fatalf("new xsub: %v", err)
+	}
+	defer xsub.Close()
+	if err := xsub.Connect(xpub.LastEndpoint()); err != nil {
+		b.Fatalf("connect: %v", err)
+	}
+
+	subCtx, subCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer subCancel()
+
+	// XSUB subscribes to all topics via a synthetic 0x01 frame; XPUB
+	// surfaces the subscription on its Recv path. We drain that here so it
+	// doesn't sit in the XPUB queue during the timed phase.
+	if err := xsub.SendMsg(subCtx, gozmq.NewMsgFromBytes(xsubSubscribeFrame(nil))); err != nil {
+		b.Fatalf("xsub subscribe: %v", err)
+	}
+	if _, err := xpub.RecvMsg(subCtx); err != nil {
+		b.Fatalf("xpub recv subscription: %v", err)
+	}
+
+	// Slow-joiner beat: ensure the subscription is applied to the per-pipe
+	// filter before publishing.
+	time.Sleep(50 * time.Millisecond)
+
+	payload := newPayload(msgSize)
+
+	callCtx, callCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer callCancel()
+
+	b.SetBytes(int64(msgSize))
+	b.ResetTimer()
+	b.StartTimer()
+
+	for i := 0; i < b.N; i++ {
+		if err := xpub.SendMsg(callCtx, gozmq.NewMsgFromBytes(payload)); err != nil {
+			b.Fatalf("send[%d]: %v", i, err)
+		}
+		if _, err := xsub.RecvMsg(callCtx); err != nil {
+			b.Fatalf("recv[%d]: %v", i, err)
+		}
+	}
+
+	b.StopTimer()
+}
+
+// BenchmarkXPubXSubThroughput_Inproc streams b.N messages from XPUB to a
+// single XSUB receiver and waits for the drain — measures msg/s + MB/s,
+// not per-iteration latency.
+func BenchmarkXPubXSubThroughput_Inproc(b *testing.B) {
+	for _, sz := range sizes {
+		sz := sz
+		b.Run(sz.name, func(b *testing.B) {
+			benchXPubXSubThroughput(b, sz.n, inprocName(b, "xpubxsub-thr-inproc-"+sz.name))
+		})
+	}
+}
+
+func benchXPubXSubThroughput(b *testing.B, msgSize int, endpoint string) {
+	b.Helper()
+	b.StopTimer()
+
+	ctxZmq := gozmq.NewContext()
+	defer ctxZmq.Close()
+
+	// Raise HWM well above any reasonable b.N so XPUB doesn't drop during
+	// the timed phase — same reasoning as benchPubSubFanout.
+	const benchHWM = 1_000_000
+
+	xpub, err := ctxZmq.NewSocket(gozmq.XPub,
+		gozmq.WithSendHWM(benchHWM), gozmq.WithRecvHWM(benchHWM))
+	if err != nil {
+		b.Fatalf("new xpub: %v", err)
+	}
+	defer xpub.Close()
+	if err := xpub.Bind(endpoint); err != nil {
+		b.Fatalf("bind: %v", err)
+	}
+
+	xsub, err := ctxZmq.NewSocket(gozmq.XSub,
+		gozmq.WithSendHWM(benchHWM), gozmq.WithRecvHWM(benchHWM))
+	if err != nil {
+		b.Fatalf("new xsub: %v", err)
+	}
+	defer xsub.Close()
+	if err := xsub.Connect(xpub.LastEndpoint()); err != nil {
+		b.Fatalf("connect: %v", err)
+	}
+
+	subCtx, subCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer subCancel()
+	if err := xsub.SendMsg(subCtx, gozmq.NewMsgFromBytes(xsubSubscribeFrame(nil))); err != nil {
+		b.Fatalf("xsub subscribe: %v", err)
+	}
+	if _, err := xpub.RecvMsg(subCtx); err != nil {
+		b.Fatalf("xpub recv subscription: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	payload := newPayload(msgSize)
+
+	// Warm-up: one message round-trip to confirm the filter is live.
+	warmCtx, warmCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := xpub.SendMsg(warmCtx, gozmq.NewMsgFromBytes(payload)); err != nil {
+		warmCancel()
+		b.Fatalf("warmup send: %v", err)
+	}
+	if _, err := xsub.RecvMsg(warmCtx); err != nil {
+		warmCancel()
+		b.Fatalf("warmup recv: %v", err)
+	}
+	warmCancel()
+
+	recvCtx, recvCancel := context.WithCancel(context.Background())
+	defer recvCancel()
+
+	var received atomic.Int64
+	var recvWG sync.WaitGroup
+	recvWG.Add(1)
+	go func() {
+		defer recvWG.Done()
+		for {
+			if _, err := xsub.RecvMsg(recvCtx); err != nil {
+				return
+			}
+			received.Add(1)
+		}
+	}()
+
+	sendCtx, sendCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer sendCancel()
+
+	b.SetBytes(int64(msgSize))
+	b.ResetTimer()
+	b.StartTimer()
+
+	for i := 0; i < b.N; i++ {
+		if err := xpub.SendMsg(sendCtx, gozmq.NewMsgFromBytes(payload)); err != nil {
+			b.Fatalf("send[%d]: %v", i, err)
+		}
+	}
+
+	deadline := time.Now().Add(30 * time.Second)
+	for received.Load() < int64(b.N) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	b.StopTimer()
+
+	recvCancel()
+	_ = xsub.Close()
+	recvWG.Wait()
+}
+
+// -----------------------------------------------------------------------------
+// REQ / REP throughput.
+// -----------------------------------------------------------------------------
+
+// reqRepThroughputSizes mirrors routerDealerSizes — the strict REQ/REP
+// alternation makes a 64B sample redundant with the 32B point.
+var reqRepThroughputSizes = routerDealerSizes
+
+func BenchmarkReqRepThroughput_Inproc(b *testing.B) {
+	for _, sz := range reqRepThroughputSizes {
+		sz := sz
+		b.Run(sz.name, func(b *testing.B) {
+			benchReqRepThroughput(b, sz.n, inprocName(b, "reqrep-thr-inproc-"+sz.name))
+		})
+	}
+}
+
+func BenchmarkReqRepThroughput_TCP(b *testing.B) {
+	for _, sz := range reqRepThroughputSizes {
+		sz := sz
+		b.Run(sz.name, func(b *testing.B) {
+			benchReqRepThroughput(b, sz.n, freeTCPEndpoint)
+		})
+	}
+}
+
+// benchReqRepThroughput drives the same REQ↔REP echo loop as
+// benchReqRepRoundTrip but calls b.SetBytes so the result is reported as
+// msg/s + MB/s rather than ns/op. The numerical work is identical; the
+// reporting lens differs so callers can read peak request throughput
+// directly without inverting the latency figure.
+func benchReqRepThroughput(b *testing.B, msgSize int, endpoint string) {
+	b.Helper()
+	b.StopTimer()
+
+	ctxZmq := gozmq.NewContext()
+	defer ctxZmq.Close()
+
+	rep, err := ctxZmq.NewSocket(gozmq.Rep)
+	if err != nil {
+		b.Fatalf("new rep: %v", err)
+	}
+	defer rep.Close()
+	if err := rep.Bind(endpoint); err != nil {
+		b.Fatalf("bind: %v", err)
+	}
+	ep := rep.LastEndpoint()
+
+	req, err := ctxZmq.NewSocket(gozmq.Req)
+	if err != nil {
+		b.Fatalf("new req: %v", err)
+	}
+	defer req.Close()
+	if err := req.Connect(ep); err != nil {
+		b.Fatalf("connect: %v", err)
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var echoWG sync.WaitGroup
+	echoWG.Add(1)
+	go func() {
+		defer echoWG.Done()
+		for {
+			m, err := rep.RecvMsg(runCtx)
+			if err != nil {
+				return
+			}
+			if err := rep.SendMsg(runCtx, gozmq.NewMsgFromBytes(m.Bytes())); err != nil {
+				return
+			}
+		}
+	}()
+
+	payload := newPayload(msgSize)
+
+	callCtx, callCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer callCancel()
+	for i := 0; i < 2; i++ {
+		if err := req.SendMsg(callCtx, gozmq.NewMsgFromBytes(payload)); err != nil {
+			b.Fatalf("warmup send: %v", err)
+		}
+		if _, err := req.RecvMsg(callCtx); err != nil {
+			b.Fatalf("warmup recv: %v", err)
+		}
+	}
+
+	b.SetBytes(int64(msgSize))
+	b.ResetTimer()
+	b.StartTimer()
+
+	for i := 0; i < b.N; i++ {
+		if err := req.SendMsg(callCtx, gozmq.NewMsgFromBytes(payload)); err != nil {
+			b.Fatalf("send[%d]: %v", i, err)
+		}
+		if _, err := req.RecvMsg(callCtx); err != nil {
+			b.Fatalf("recv[%d]: %v", i, err)
+		}
+	}
+
+	b.StopTimer()
+	cancel()
+	_ = rep.Close()
+	echoWG.Wait()
+}
