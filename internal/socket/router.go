@@ -83,6 +83,9 @@ type routerEngine struct {
 	// peer cannot ever resurface as the same map key.
 	detachedIdOf  map[iface.Pipe][]byte
 	detachedOrder []iface.Pipe
+	// readyW is the Poller-facing PollOut signal. Level-armed while
+	// at least one peer is attached. See engine.go Pollable.
+	readyW chan struct{}
 }
 
 // NewRouterEngine returns a new ROUTER socket engine. If mandatory is
@@ -96,6 +99,45 @@ func NewRouterEngine(mandatory bool) iface.SocketEngine {
 		idOf:         make(map[iface.Pipe][]byte),
 		pipeOf:       make(map[string]iface.Pipe),
 		detachedIdOf: make(map[iface.Pipe][]byte),
+		readyW:       make(chan struct{}, 1),
+	}
+}
+
+// ReadyRecv exposes the inbound FairQueue's read-ready signal.
+func (e *routerEngine) ReadyRecv() <-chan struct{} { return e.fq.ReadyRecv() }
+
+// ReadyWrite signals when at least one peer is attached.
+func (e *routerEngine) ReadyWrite() <-chan struct{} {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.closed && len(e.idOf) > 0 {
+		select {
+		case e.readyW <- struct{}{}:
+		default:
+		}
+	}
+	return e.readyW
+}
+
+// CanRecvNow exposes the FairQueue's pending-data level check.
+func (e *routerEngine) CanRecvNow() bool { return e.fq.HasPending() }
+
+// CanSendNow reports whether at least one peer is currently attached.
+func (e *routerEngine) CanSendNow() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return !e.closed && len(e.idOf) > 0
+}
+
+func (e *routerEngine) signalReadyWriteLocked() {
+	if e.readyW == nil || e.closed {
+		return
+	}
+	if len(e.idOf) > 0 {
+		select {
+		case e.readyW <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -122,6 +164,7 @@ func (e *routerEngine) AttachPipe(p iface.Pipe) error {
 	// after detach; drop any stale detached-cache entry so the live
 	// mapping is authoritative.
 	e.removeDetachedLocked(p)
+	e.signalReadyWriteLocked()
 	e.mu.Unlock()
 	return e.fq.Attach(p)
 }
