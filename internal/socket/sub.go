@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rkm/gozmq/internal/iface"
@@ -63,6 +64,15 @@ type SubEngine struct {
 	// dropped by Recv and we go around again.
 	fq      *FairQueue
 	surface bool // XSUB surfaces subscription commands sent by the app; SUB does not
+
+	// recv counts messages SUB/XSUB returned to the caller (matches the
+	// local subscription filter). Filter-mismatch drops are NOT counted
+	// as "dropped" in metrics — they are routine SUB behavior, not a
+	// backpressure/close event. sent counts XSUB subscription-control
+	// messages accepted from the application (zero for plain SUB, which
+	// returns ErrFSMViolation on Send).
+	recv atomic.Uint64
+	sent atomic.Uint64
 }
 
 // NewSubEngine returns a new SUB socket engine and a handle for driving
@@ -280,6 +290,7 @@ func (e *SubEngine) xsubSend(ctx context.Context, m *msg.Msg) error {
 	for _, p := range peers {
 		e.forwardSubscription(p, subscribe, prefix)
 	}
+	e.sent.Add(1)
 	return nil
 }
 
@@ -302,6 +313,7 @@ func (e *SubEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 			// behavior — the app sees SUBSCRIBE events coming from
 			// its peers).
 			if e.surface {
+				e.recv.Add(1)
 				return m, nil
 			}
 			continue
@@ -312,12 +324,26 @@ func (e *SubEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		if !e.matches(m.Frames()[0]) {
 			continue
 		}
+		e.recv.Add(1)
 		return m, nil
 	}
 }
 
 func (e *SubEngine) matches(topic []byte) bool {
 	return e.tree.Match(topic)
+}
+
+// Metrics reports the SUB/XSUB engine's counters. recv counts user-
+// visible Recv returns (filter-matched messages); dropped piggybacks on
+// the FairQueue's drop counter so ctx-cancel/close drops during fanout
+// are observable. QueueDepth samples the FairQueue's inbound channel.
+func (e *SubEngine) Metrics() iface.SocketMetrics {
+	return iface.SocketMetrics{
+		Sent:       e.sent.Load(),
+		Recv:       e.recv.Load(),
+		Dropped:    e.fq.Dropped(),
+		QueueDepth: e.fq.QueueDepth(),
+	}
 }
 
 func (e *SubEngine) Close() error {

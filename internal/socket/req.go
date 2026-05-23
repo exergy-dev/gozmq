@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
@@ -69,6 +70,9 @@ type reqEngine struct {
 	// forwarderWG tracks the per-request stickyForward goroutine so that
 	// Close can wait for it to exit and goleak stays clean.
 	forwarderWG sync.WaitGroup
+
+	sent atomic.Uint64
+	recv atomic.Uint64
 }
 
 type stickyRecvResult struct {
@@ -199,6 +203,7 @@ func (e *reqEngine) Send(ctx context.Context, m *msg.Msg) error {
 			e.forwarderWG.Add(1)
 			go e.stickyForward(p, e.stickyCh)
 			e.mu.Unlock()
+			e.sent.Add(1)
 			return nil
 		}
 		if errors.Is(err, io.ErrClosedPipe) || errors.Is(err, io.EOF) {
@@ -294,6 +299,7 @@ func (e *reqEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		e.sticky = nil
 		e.stickyCh = nil
 		e.mu.Unlock()
+		e.recv.Add(1)
 		return stripped, nil
 	case <-closeCh:
 		return nil, fmt.Errorf("req recv: %w", zmqerr.ErrSocketClosed)
@@ -314,6 +320,16 @@ func stripReqDelimiter(m *msg.Msg) (*msg.Msg, error) {
 	out := make([][]byte, len(rest))
 	copy(out, rest)
 	return msg.FromFrames(out...), nil
+}
+
+// Metrics reports the REQ engine's counters. REQ has no fair-queue;
+// inbound replies are pulled from a per-request sticky channel which is
+// allocated on Send and consumed on Recv, so QueueDepth is always zero.
+func (e *reqEngine) Metrics() iface.SocketMetrics {
+	return iface.SocketMetrics{
+		Sent: e.sent.Load(),
+		Recv: e.recv.Load(),
+	}
 }
 
 func (e *reqEngine) Close() error {

@@ -271,6 +271,28 @@ type Session interface {
 // Socket engine layer
 // --------------------------------------------------------------------------
 
+// SocketMetrics is a point-in-time snapshot of per-socket counters and
+// gauges. Counters (Sent, Recv, Dropped) are monotonically increasing
+// uint64s read atomically; QueueDepth is sampled at the moment Metrics
+// is called and reflects the number of messages buffered in the engine's
+// inbound handoff at that instant (zero for send-only patterns).
+//
+// "Dropped" covers messages the engine refuses to deliver after the
+// caller's Send returned successfully:
+//   - PUB fanout drops when a peer's pipe is at HWM (per-message,
+//     not per-peer).
+//   - FairQueue forwarder drops when its context cancels (Detach) or
+//     the engine closes while a message is mid-handoff.
+//
+// Send-side errors returned to the caller do NOT increment Dropped —
+// the caller already observed the failure.
+type SocketMetrics struct {
+	Sent       uint64 // messages successfully sent
+	Recv       uint64 // messages successfully received
+	Dropped    uint64 // messages dropped (PUB HWM, fairqueue ctx-cancel/close)
+	QueueDepth uint64 // current inbound queue depth (gauge)
+}
+
 // SocketEngine encapsulates the per-type policy (REQ lock-step, PUB fanout,
 // DEALER round-robin, etc.) on top of a set of Pipes. One engine per
 // Socket. The public gozmq.Socket is a thin front for a SocketEngine.
@@ -302,6 +324,11 @@ type SocketEngine interface {
 	// Close releases engine state, unblocks pending Send/Recv with
 	// ErrSocketClosed, and detaches all pipes.
 	Close() error
+
+	// Metrics returns a point-in-time snapshot of the engine's counters
+	// and the current inbound queue-depth gauge. Safe to call from any
+	// goroutine, including concurrently with Send/Recv.
+	Metrics() SocketMetrics
 }
 
 // --------------------------------------------------------------------------

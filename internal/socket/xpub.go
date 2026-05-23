@@ -62,6 +62,11 @@ func (e *xpubEngine) Send(ctx context.Context, m *msg.Msg) error { return e.pub.
 // Close delegates to the embedded pub engine.
 func (e *xpubEngine) Close() error { return e.pub.Close() }
 
+// Metrics delegates to the embedded pub engine. The pub engine tracks
+// sent (per Send call), dropped (per HWM-rejected peer), and recv (per
+// surfaced subscription event consumed by this engine's Recv below).
+func (e *xpubEngine) Metrics() iface.SocketMetrics { return e.pub.Metrics() }
+
 // Recv delivers the next SUBSCRIBE/CANCEL event to the application.
 //
 // Verbose mode: forward every synthetic subscription message the pub
@@ -88,9 +93,11 @@ func (e *xpubEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 			return nil, ctx.Err()
 		}
 		if e.verbose {
+			e.pub.recv.Add(1)
 			return m, nil
 		}
 		if e.shouldSurface(m) {
+			e.pub.recv.Add(1)
 			return m, nil
 		}
 		// Silently dropped; loop to await the next event.

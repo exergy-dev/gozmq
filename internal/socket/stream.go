@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
@@ -76,6 +77,9 @@ type streamEngine struct {
 	// writer-wins on identity collisions; Detach clears only if the current
 	// mapping still points at the pipe being detached.
 	pipeOf map[string]iface.Pipe
+
+	sent atomic.Uint64
+	recv atomic.Uint64
 }
 
 // NewStreamEngine returns a new STREAM socket engine.
@@ -197,7 +201,11 @@ func (e *streamEngine) Send(ctx context.Context, m *msg.Msg) error {
 		buf = append(buf, f...)
 	}
 	out := msg.FromBytes(buf)
-	return p.Send(ctx, out)
+	if err := p.Send(ctx, out); err != nil {
+		return err
+	}
+	e.sent.Add(1)
+	return nil
 }
 
 // Recv fair-queues across attached pipes and tags the returned message
@@ -223,7 +231,21 @@ func (e *streamEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 	out := make([][]byte, 0, len(orig)+1)
 	out = append(out, append([]byte(nil), id...))
 	out = append(out, orig...)
+	e.recv.Add(1)
 	return msg.FromFrames(out...), nil
+}
+
+// Metrics reports the STREAM engine's counters. Dropped delegates to
+// the underlying FairQueue (ctx-cancel/close drops mid-handoff); STREAM
+// never drops on the send path (unknown identities surface as errors).
+// QueueDepth samples the FairQueue.
+func (e *streamEngine) Metrics() iface.SocketMetrics {
+	return iface.SocketMetrics{
+		Sent:       e.sent.Load(),
+		Recv:       e.recv.Load(),
+		Dropped:    e.fq.Dropped(),
+		QueueDepth: e.fq.QueueDepth(),
+	}
 }
 
 // Close releases engine state, unblocks any pending Recv with
