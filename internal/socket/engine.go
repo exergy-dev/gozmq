@@ -75,6 +75,42 @@ import (
 // LoadBalancer
 // --------------------------------------------------------------------------
 
+// Pollable is the optional interface a SocketEngine implements to expose
+// non-consuming readiness signals to the public Poller API. The two
+// channels are level-armed: a chan with a buffered value (or that is
+// closed) means "ready right now"; a chan that blocks means "not ready".
+// Either channel may be nil — Poller skips nil channels. Engines that
+// have no recv direction (PUSH) return nil from ReadyRecv; engines with
+// no send direction (PULL, SUB, XSUB) return nil from ReadyWrite.
+//
+// PollableRecv/PollableSend are separate so engines that support only
+// one direction can omit the other entirely. The combined Pollable
+// interface is what the Poller asserts against; the per-direction
+// methods are convenience for engines that compose primitives.
+type Pollable interface {
+	// ReadyRecv returns a channel that is armed when at least one
+	// message is buffered and immediately available to Recv. Reads
+	// from the channel do not consume the message; the engine
+	// re-arms the signal as long as data remains. Returns nil for
+	// send-only engines.
+	ReadyRecv() <-chan struct{}
+	// ReadyWrite returns a channel that is armed when at least one
+	// peer is attached and a Send would not block on the peer-set
+	// being empty. (HWM-induced blocking is not surfaced; this
+	// mirrors libzmq's poll semantics where POLLOUT means "a peer
+	// exists," not "the next byte is guaranteed to land instantly.")
+	// Returns nil for recv-only engines.
+	ReadyWrite() <-chan struct{}
+	// CanRecvNow is a non-consuming level check: true iff a Recv
+	// would not block on inbound queue emptiness right now. Always
+	// false for send-only engines.
+	CanRecvNow() bool
+	// CanSendNow is a non-consuming level check: true iff a Send
+	// would not block on peer-set emptiness right now (HWM blocking
+	// is not surfaced; see ReadyWrite). Always false for recv-only.
+	CanSendNow() bool
+}
+
 // LoadBalancer is a round-robin outbound dispatcher across a dynamic set of
 // iface.Pipe values. It is goroutine-safe: Attach, Detach, Send, and Close
 // may be called concurrently from any goroutine.
@@ -93,6 +129,7 @@ type LoadBalancer struct {
 	pipes   []iface.Pipe
 	cursor  int
 	notify  chan struct{} // signalled by Attach/Detach
+	readyW  chan struct{} // level-armed while len(pipes) > 0; Poller-facing
 	closeCh chan struct{}
 	closed  bool
 }
@@ -105,7 +142,51 @@ type nonBlockingSender interface {
 func NewLoadBalancer() *LoadBalancer {
 	return &LoadBalancer{
 		notify:  make(chan struct{}, 1),
+		readyW:  make(chan struct{}, 1),
 		closeCh: make(chan struct{}),
+	}
+}
+
+// ReadyWrite returns a channel that is non-blocking-readable whenever
+// the LoadBalancer has at least one attached peer pipe. The Poller
+// uses this as the PollOut readiness signal. Reads from the channel
+// do not change LoadBalancer state; if peers remain attached, the
+// next attach/detach cycle re-arms the channel via signalReadyLocked.
+// To support polling that runs faster than peer churn, the channel is
+// also re-armed by HasPeers callers checking the level state.
+func (lb *LoadBalancer) ReadyWrite() <-chan struct{} {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	// Re-arm if currently ready (level-trigger): the chan may have
+	// been drained by a previous Poll call.
+	if len(lb.pipes) > 0 && !lb.closed {
+		select {
+		case lb.readyW <- struct{}{}:
+		default:
+		}
+	}
+	return lb.readyW
+}
+
+// HasPeers reports whether at least one peer is attached. Used by the
+// Poller for the immediate non-blocking PollOut check.
+func (lb *LoadBalancer) HasPeers() bool {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	return len(lb.pipes) > 0 && !lb.closed
+}
+
+// signalReadyWriteLocked re-arms the write-ready channel when peers
+// are present. Caller must hold lb.mu.
+func (lb *LoadBalancer) signalReadyWriteLocked() {
+	if lb.readyW == nil {
+		return
+	}
+	if len(lb.pipes) > 0 && !lb.closed {
+		select {
+		case lb.readyW <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -125,6 +206,7 @@ func (lb *LoadBalancer) Attach(p iface.Pipe) error {
 	}
 	lb.pipes = append(lb.pipes, p)
 	lb.signalLocked()
+	lb.signalReadyWriteLocked()
 	return nil
 }
 
@@ -147,6 +229,7 @@ func (lb *LoadBalancer) Detach(p iface.Pipe) error {
 				lb.cursor %= len(lb.pipes)
 			}
 			lb.signalLocked()
+			lb.signalReadyWriteLocked()
 			return nil
 		}
 	}
@@ -323,6 +406,7 @@ type FairQueue struct {
 	closed  bool
 	closeCh chan struct{}
 	inbound chan fairItem
+	readyR  chan struct{} // level-armed while inbound holds an item
 	pipes   map[iface.Pipe]*fairForwarder
 	wg      sync.WaitGroup
 }
@@ -349,8 +433,39 @@ func NewFairQueue() *FairQueue {
 		// blocked the moment the receiver pulls. Larger buffers would
 		// undermine HWM, since HWM lives in the Pipe itself.
 		inbound: make(chan fairItem, 1),
+		readyR:  make(chan struct{}, 1),
 		pipes:   make(map[iface.Pipe]*fairForwarder),
 	}
+}
+
+// ReadyRecv returns a channel that is non-blocking-readable whenever
+// the FairQueue has at least one buffered inbound message. The
+// Poller uses this as the PollIn readiness signal. Reads from the
+// channel do not consume the message; the engine re-arms the signal
+// whenever items remain. Callers should invoke HasPending alongside
+// to handle the case where readyR was drained by a prior Poll but
+// the buffered item was not yet consumed.
+func (fq *FairQueue) ReadyRecv() <-chan struct{} {
+	fq.mu.Lock()
+	defer fq.mu.Unlock()
+	// Re-arm if data is still pending in inbound but readyR has
+	// been drained by a previous Poll (level-trigger semantics).
+	if len(fq.inbound) > 0 && !fq.closed {
+		select {
+		case fq.readyR <- struct{}{}:
+		default:
+		}
+	}
+	return fq.readyR
+}
+
+// HasPending reports whether the FairQueue has at least one inbound
+// message buffered and ready to deliver. Used by the Poller for the
+// immediate non-blocking PollIn check.
+func (fq *FairQueue) HasPending() bool {
+	fq.mu.Lock()
+	defer fq.mu.Unlock()
+	return !fq.closed && len(fq.inbound) > 0
 }
 
 // Attach registers p and starts its forwarder goroutine. Idempotent.
@@ -471,6 +586,13 @@ func (fq *FairQueue) forward(p iface.Pipe, fwd *fairForwarder) {
 		// block forever holding a message no one will consume.
 		select {
 		case fq.inbound <- fairItem{m: m, p: p}:
+			// Arm the Poller-facing read-ready signal. Non-blocking;
+			// cap-1 chan coalesces multiple producers, and the Poller
+			// re-arms on the next call if items remain.
+			select {
+			case fq.readyR <- struct{}{}:
+			default:
+			}
 		case <-fwd.ctx.Done():
 			return
 		case <-fq.closeCh:
@@ -500,7 +622,11 @@ func (e *sendOnlyEngine) Send(ctx context.Context, m *msg.Msg) error {
 func (e *sendOnlyEngine) Recv(context.Context) (*msg.Msg, error) {
 	return nil, fmt.Errorf("%s recv: %w", e.name, zmqerr.ErrFSMViolation)
 }
-func (e *sendOnlyEngine) Close() error { return e.lb.Close() }
+func (e *sendOnlyEngine) Close() error                { return e.lb.Close() }
+func (e *sendOnlyEngine) ReadyRecv() <-chan struct{}  { return nil }
+func (e *sendOnlyEngine) ReadyWrite() <-chan struct{} { return e.lb.ReadyWrite() }
+func (e *sendOnlyEngine) CanRecvNow() bool            { return false }
+func (e *sendOnlyEngine) CanSendNow() bool            { return e.lb.HasPeers() }
 
 type recvOnlyEngine struct {
 	name string
@@ -519,7 +645,11 @@ func (e *recvOnlyEngine) Send(context.Context, *msg.Msg) error {
 func (e *recvOnlyEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 	return e.fq.Recv(ctx)
 }
-func (e *recvOnlyEngine) Close() error { return e.fq.Close() }
+func (e *recvOnlyEngine) Close() error                { return e.fq.Close() }
+func (e *recvOnlyEngine) ReadyRecv() <-chan struct{}  { return e.fq.ReadyRecv() }
+func (e *recvOnlyEngine) ReadyWrite() <-chan struct{} { return nil }
+func (e *recvOnlyEngine) CanRecvNow() bool            { return e.fq.HasPending() }
+func (e *recvOnlyEngine) CanSendNow() bool            { return false }
 
 type queuePairEngine struct {
 	lb *LoadBalancer
@@ -560,3 +690,8 @@ func (e *queuePairEngine) Close() error {
 	_ = e.fq.Close()
 	return nil
 }
+
+func (e *queuePairEngine) ReadyRecv() <-chan struct{}  { return e.fq.ReadyRecv() }
+func (e *queuePairEngine) ReadyWrite() <-chan struct{} { return e.lb.ReadyWrite() }
+func (e *queuePairEngine) CanRecvNow() bool            { return e.fq.HasPending() }
+func (e *queuePairEngine) CanSendNow() bool            { return e.lb.HasPeers() }
