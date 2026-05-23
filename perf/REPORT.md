@@ -273,3 +273,26 @@ throughput; Round 4 restored that throughput on the identity-mechanism path
 via finalizer-backed pool recycling above a 4 KiB threshold, producing a
 ~4% net improvement over the pre-Round-3 baseline while keeping the
 simplified always-copy public API.
+
+## Benchmark surface expansion (Round 5)
+
+Adds latency and throughput coverage for socket types and patterns that
+were not previously timed, so the upcoming reactor rewrite has a wider
+baseline to measure against. The new benchmarks live in
+`perf/benchmark_test.go` alongside the existing ones; baseline numbers to
+be captured pre-reactor-rewrite.
+
+New benchmarks:
+
+- `BenchmarkRouterDealerLatency_Inproc` — DEALER↔ROUTER echo round trip
+  over `inproc://`, parameterised over 32B / 1KB / 64KB.
+- `BenchmarkRouterDealerLatency_TCP` — same pattern over TCP loopback.
+- `BenchmarkXPubXSubLatency_Inproc` — XSUB subscribes via a synthetic
+  0x01 frame, XPUB publishes one message per iteration, XSUB receives;
+  parameterised over 32B / 1KB / 64KB.
+- `BenchmarkXPubXSubThroughput_Inproc` — XPUB streams b.N messages to a
+  single XSUB receiver; parameterised over 32B / 64B / 1KB / 64KB.
+- `BenchmarkReqRepThroughput_Inproc` / `BenchmarkReqRepThroughput_TCP` —
+  REQ↔REP echo loop instrumented with `b.SetBytes` so results report as
+  msg/s + MB/s rather than per-op latency; parameterised over 32B / 1KB
+  / 64KB.
