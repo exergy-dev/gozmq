@@ -64,3 +64,72 @@ func TestMsgResetReleasesPooledFrames(t *testing.T) {
 
 	m.Reset()
 }
+
+// TestMsgReleaseNoPooledIsNoop ensures Release on a *Msg with no pooled
+// frames is safe (no panic, no negative refcount surprise on later use).
+func TestMsgReleaseNoPooledIsNoop(t *testing.T) {
+	m := FromBytes([]byte("hello"))
+	m.Release()
+	m.Release() // double-release with no pool is still a no-op
+	if m.NumFrames() != 1 {
+		t.Fatalf("NumFrames after Release = %d, want 1", m.NumFrames())
+	}
+}
+
+// TestMsgRetainReleaseDecrements verifies Retain bumps the count and the
+// pooled buffers survive until the final Release.
+func TestMsgRetainReleaseDecrements(t *testing.T) {
+	buf := PoolGet(4 * 1024)
+	for i := range buf {
+		buf[i] = byte(i)
+	}
+	m := New()
+	m.AppendPooledFrame(buf[:1024], buf)
+	if got := m.refs.Load(); got != 1 {
+		t.Fatalf("initial refs = %d, want 1", got)
+	}
+	m.Retain()
+	if got := m.refs.Load(); got != 2 {
+		t.Fatalf("refs after Retain = %d, want 2", got)
+	}
+	m.Release()
+	if got := m.refs.Load(); got != 1 {
+		t.Fatalf("refs after first Release = %d, want 1", got)
+	}
+	if m.pooled == nil {
+		t.Fatalf("pooled buffers reclaimed too early")
+	}
+	m.Release()
+	if got := m.refs.Load(); got != 0 {
+		t.Fatalf("refs after second Release = %d, want 0", got)
+	}
+	if m.pooled != nil {
+		t.Fatalf("pooled buffers not reclaimed after final Release")
+	}
+}
+
+// TestMsgResetForcesReclamation verifies Reset on a *Msg with pooled
+// frames returns them immediately regardless of refcount.
+func TestMsgResetForcesReclamation(t *testing.T) {
+	buf := PoolGet(4 * 1024)
+	m := New()
+	m.AppendPooledFrame(buf[:512], buf)
+	m.Retain()
+	m.Reset()
+	if m.pooled != nil {
+		t.Fatalf("Reset did not reclaim pooled buffers")
+	}
+	if m.NumFrames() != 0 {
+		t.Fatalf("Reset did not truncate frames: %d", m.NumFrames())
+	}
+}
+
+// TestMsgReleaseIdempotentAfterReclamation ensures a Release after the
+// pool buffers have been reclaimed (e.g. via Reset) is harmless.
+func TestMsgReleaseIdempotentAfterReclamation(t *testing.T) {
+	buf := PoolGet(4 * 1024)
+	m := New()
+	m.AppendPooledFrame(buf[:32], buf)
+	m.Reset()
+	m.Release()
+}
