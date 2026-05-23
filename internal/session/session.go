@@ -62,6 +62,17 @@ func New(cfg Config) iface.Session {
 	ctx, cancel := context.WithCancel(context.Background())
 	wctx, wcancel := context.WithCancel(ctx) // child of session ctx
 	encode, decode, direct := sessionFramePaths(cfg.Mech, cfg.Codec)
+	// directHeader is the writer hot-path fast lane: when the codec
+	// implements FrameHeaderAppender AND we already qualified for the
+	// FrameBufferAppender direct path (NULL/PLAIN identity encode), we
+	// can append wire headers into a caller-owned scratch buffer with
+	// zero per-frame allocations.
+	var directHeader iface.FrameHeaderAppender
+	if direct != nil {
+		if h, ok := cfg.Codec.(iface.FrameHeaderAppender); ok {
+			directHeader = h
+		}
+	}
 	s := &sessionImpl{
 		cfg:          cfg,
 		ctx:          ctx,
@@ -70,6 +81,7 @@ func New(cfg Config) iface.Session {
 		encode:       encode,
 		decode:       decode,
 		direct:       direct,
+		directHeader: directHeader,
 		writerCtx:    wctx,
 		writerCancel: wcancel,
 		handshaked:   make(chan struct{}),
@@ -90,9 +102,10 @@ type sessionImpl struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	reader io.Reader
-	encode frameEncoder
-	decode frameDecoder
-	direct iface.FrameBufferAppender
+	encode       frameEncoder
+	decode       frameDecoder
+	direct       iface.FrameBufferAppender
+	directHeader iface.FrameHeaderAppender
 
 	// startOnce guards Start; stopOnce guards Stop.
 	startOnce sync.Once

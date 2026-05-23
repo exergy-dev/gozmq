@@ -127,6 +127,7 @@ func (s *sessionImpl) runWriter() {
 			msgCount++
 		}
 
+		batch.materializeBuffers()
 		if err := s.flushBatch(&batch.buffers); err != nil {
 			batch.release()
 			if !isWriterShutdownErr(err) {
@@ -173,29 +174,63 @@ func recvNonBlocking(p iface.Pipe) (*msg.Msg, bool) {
 	return m, true
 }
 
+// writerBatch coalesces multiple outbound *msg.Msg into one writev. Two
+// encode paths share the same flush:
+//
+//   - Direct/header-only fast path (NULL/PLAIN security + a codec that
+//     implements FrameHeaderAppender): wire headers are appended into a
+//     single, growing per-batch headerScratch byte slice. Each frame
+//     records (headerOffset, headerLen, body) into entries. At flush time,
+//     materializeBuffers walks entries once, slicing headerScratch into
+//     header sub-buffers and pairing each with its body. headerScratch is
+//     reused across batches (zero allocations after warm-up); aliasing is
+//     safe because all appends complete before any subslice is taken.
+//
+//   - Fallback path (CURVE / other mechanisms that rewrite body bytes):
+//     encodeOneFrame produces a contiguous [header||body] blob per frame
+//     drawn from msg.PoolGet. The blob is owned by the batch (returned to
+//     the pool on release) and appended directly to b.buffers.
+//
+// Reset is called between iterations of runWriter. release recycles any
+// pool-backed fallback blobs and clears headerScratch + entries to their
+// zero length while preserving the underlying arrays' capacity.
 type writerBatch struct {
 	buffers      net.Buffers
 	scratch      bytes.Buffer
-	releases     []func()
 	ownedBuffers [][]byte
+
+	// headerScratch and entries back the header-only direct fast path.
+	// headerScratch must NOT be referenced by net.Buffers until the
+	// batch is fully encoded — slicing into it before that point would
+	// be invalidated by a later append() relocating the array.
+	headerScratch []byte
+	entries       []writerEntry
+}
+
+// writerEntry records one frame's serialization plan: a [headerOff,
+// headerOff+headerLen) slice of headerScratch, followed by body. The
+// final net.Buffers is materialized by walking entries after all encoding
+// completes (headerScratch can no longer grow).
+type writerEntry struct {
+	headerOff int
+	headerLen int
+	body      []byte
 }
 
 func (b *writerBatch) reset() {
 	b.release()
 	b.buffers = b.buffers[:0]
+	b.headerScratch = b.headerScratch[:0]
+	b.entries = b.entries[:0]
 }
 
 func (b *writerBatch) release() {
-	for _, release := range b.releases {
-		if release != nil {
-			release()
-		}
-	}
-	b.releases = b.releases[:0]
 	for _, owned := range b.ownedBuffers {
 		msg.PoolPut(owned)
 	}
 	b.ownedBuffers = b.ownedBuffers[:0]
+	b.entries = b.entries[:0]
+	b.headerScratch = b.headerScratch[:0]
 }
 
 func (b *writerBatch) appendMessage(s *sessionImpl, m *msg.Msg, sizeSoFar int) (int, error) {
@@ -219,13 +254,19 @@ func (b *writerBatch) appendMessage(s *sessionImpl, m *msg.Msg, sizeSoFar int) (
 }
 
 func (b *writerBatch) appendFrame(s *sessionImpl, flags uint8, body []byte, sizeSoFar int) (int, error) {
-	if s.direct != nil {
-		release, frameBytes, err := s.direct.AppendFrameBuffers(&b.buffers, flags, body)
+	if s.directHeader != nil {
+		off := len(b.headerScratch)
+		newScratch, hdrLen, err := s.directHeader.AppendFrameHeader(b.headerScratch, flags, body)
 		if err != nil {
 			return sizeSoFar, fmt.Errorf("gozmq/session: serialize frame: %w", err)
 		}
-		b.releases = append(b.releases, release)
-		return sizeSoFar + frameBytes, nil
+		b.headerScratch = newScratch
+		b.entries = append(b.entries, writerEntry{
+			headerOff: off,
+			headerLen: hdrLen,
+			body:      body,
+		})
+		return sizeSoFar + hdrLen + len(body), nil
 	}
 	blob, sz, err := encodeOneFrame(s.encode, s.cfg.Codec, &b.scratch, flags, body)
 	if err != nil {
@@ -234,6 +275,27 @@ func (b *writerBatch) appendFrame(s *sessionImpl, flags uint8, body []byte, size
 	b.buffers = append(b.buffers, blob)
 	b.ownedBuffers = append(b.ownedBuffers, blob)
 	return sizeSoFar + sz, nil
+}
+
+// materializeBuffers walks entries and appends header + body slices into
+// b.buffers in order. Must be called after all appendFrame calls for this
+// batch — at that point b.headerScratch's underlying array is stable, so
+// the subslices we hand to net.Buffers stay valid through flushBatch.
+//
+// Empty bodies are omitted from b.buffers to keep writev's iovec count
+// minimal (a frame with len(body)==0 is still wire-correct because the
+// header encodes length=0 — no body bytes follow).
+func (b *writerBatch) materializeBuffers() {
+	if len(b.entries) == 0 {
+		return
+	}
+	scratch := b.headerScratch
+	for _, e := range b.entries {
+		b.buffers = append(b.buffers, scratch[e.headerOff:e.headerOff+e.headerLen])
+		if len(e.body) > 0 {
+			b.buffers = append(b.buffers, e.body)
+		}
+	}
 }
 
 // encodeOneFrame applies the mechanism's body/flag rewrite, then the codec
@@ -327,6 +389,7 @@ func (s *sessionImpl) drainSessionPipe() error {
 			}
 			msgCount++
 		}
+		batch.materializeBuffers()
 		if err := s.flushBatch(&batch.buffers); err != nil {
 			batch.release()
 			return err

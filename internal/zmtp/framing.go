@@ -167,6 +167,31 @@ func (c *frameCodec) AppendFrameBuffers(dst *net.Buffers, flags uint8, body []by
 	return func() { shortFrameHeaderPool.Put(hdr) }, len(hdr) + n, nil
 }
 
+// AppendFrameHeader implements iface.FrameHeaderAppender. It appends the
+// ZMTP wire header (flags byte + 1- or 8-byte big-endian length) for a body
+// of len(body) bytes onto scratch and returns the grown scratch plus the
+// number of header bytes appended. The body itself is NOT written; the
+// caller arranges the body slice in its net.Buffers tail separately.
+//
+// This is the allocation-free fast path used by the writer batching loop.
+// Bodies <=255 bytes use the 2-byte short header; longer bodies (or callers
+// that force FlagLong) use the 9-byte long header.
+func (c *frameCodec) AppendFrameHeader(scratch []byte, flags uint8, body []byte) ([]byte, int, error) {
+	useLong, n, err := c.validateWriteFrame(flags, body)
+	if err != nil {
+		return scratch, 0, err
+	}
+	if useLong {
+		scratch = append(scratch, flags|iface.FlagLong)
+		var lenBuf [8]byte
+		binary.BigEndian.PutUint64(lenBuf[:], uint64(n))
+		scratch = append(scratch, lenBuf[:]...)
+		return scratch, 9, nil
+	}
+	scratch = append(scratch, flags, byte(n))
+	return scratch, 2, nil
+}
+
 func (c *frameCodec) validateWriteFrame(flags uint8, body []byte) (useLong bool, n int, err error) {
 	if flags&^validFlagBits != 0 {
 		return false, 0, fmt.Errorf("gozmq/zmtp: reserved flag bits set: 0x%02x: %w", flags, zmqerr.ErrMalformedFrame)
