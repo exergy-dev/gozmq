@@ -74,9 +74,17 @@ func socketTypeName(t SocketType) string {
 	return ""
 }
 
-// Msg is a ZMTP multipart message. Frames delivered by RecvMsg are caller-
-// owned heap copies, so a returned *Msg is safe to retain, stash, or pass
-// between goroutines without any further bookkeeping.
+// Msg is a ZMTP multipart message. Frames delivered by RecvMsg are
+// caller-owned and safe to retain, stash, or pass between goroutines.
+//
+// Some large inbound frames are backed by buffers drawn from an internal
+// size-tiered pool; call (*Msg).Release when finished to return those
+// buffers to the pool. Release is always safe to call (it is a no-op for
+// *Msg values that carry no pooled frames, including any *Msg you
+// constructed via NewMsg / NewMsgFromBytes / NewMsgFromFrames), so the
+// safest pattern is to call Release on every received *Msg once done.
+// A safety-net finalizer reclaims pooled buffers for callers that drop
+// a *Msg without calling Release, but it is not the primary path.
 type Msg = msg.Msg
 
 // NewMsg returns an empty message.
@@ -735,8 +743,10 @@ func (s *Socket) SendMsg(ctx context.Context, m *Msg) error {
 	return s.engine.Send(ctx, m)
 }
 
-// RecvMsg blocks until a message arrives or ctx cancels. The returned *Msg
-// owns its frame bytes; no Release or Clone is required.
+// RecvMsg blocks until a message arrives or ctx cancels. The returned
+// *Msg owns its frame bytes. Call (*Msg).Release when done; this is
+// always safe and recycles any internal pool buffers backing large
+// inbound frames (see the Msg doc).
 func (s *Socket) RecvMsg(ctx context.Context) (*Msg, error) {
 	if s.closed.Load() {
 		return nil, ErrSocketClosed

@@ -4,6 +4,10 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
 
 ## [Unreleased]
 
+### Msg reclamation
+
+- BREAKING: `*Msg` now exposes `Retain`/`Release`; pooled receive buffers are returned to the size-tiered pool when the refcount reaches zero. Callers should `Release` *Msg values returned by `Socket.RecvMsg` (a no-op for *Msg without pooled frames). A safety-net finalizer remains for unmodified callers but is not the primary reclamation path.
+
 ### Draft socket types removed
 
 - Removed `Server`, `Client`, `Radio`, `Dish`, `Scatter`, `Gather`, `Peer`, `Channel` from the `SocketType` enum.

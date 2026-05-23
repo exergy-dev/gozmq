@@ -13,11 +13,10 @@ import (
 )
 
 // largeFrameThreshold picks the boundary between the always-copy receive
-// path (simple, cheap) and the finalizer-backed zero-copy path (worth its
-// fixed overhead only for frames whose memcpy cost clearly exceeds it).
-// 4 KiB is ~6× the measured runtime.SetFinalizer+finalize cost on this
-// codebase; memcpy at 20 GB/s crosses the same budget around 6 KiB, so
-// 4 KiB gives a comfortable margin without starving the fast path.
+// path (simple, cheap) and the refcounted zero-copy path (the pool buffer
+// is attached to the *Msg and returned via Release). 4 KiB lets memcpy
+// at ~20 GB/s amortise the refcount bookkeeping; below it the copy is
+// cheaper than the bookkeeping plus the consumer's mandatory Release.
 const largeFrameThreshold = 4 * 1024
 
 // runReader is the wire->pipe traffic-phase goroutine. It loops reading
@@ -91,16 +90,16 @@ func (s *sessionImpl) runReader() {
 		//   - Small (<= largeFrameThreshold): always-copy. The decoded
 		//     bytes are copied into a heap-owned frame and the pool
 		//     buffer is returned immediately. The extra memcpy is
-		//     cheaper than the runtime.SetFinalizer overhead (~300 ns)
-		//     for small frames, so this is the fastest path for the
-		//     common case of control-plane / small-payload traffic.
+		//     cheaper than the refcount bookkeeping plus the
+		//     consumer's mandatory Release for small frames.
 		//
 		//   - Large (> largeFrameThreshold) with an identity mechanism
 		//     (NULL/PLAIN): attach the pool buffer to the Msg via
-		//     AppendPooledFrame. A finalizer on the Msg returns the
-		//     buffer to the pool at GC time, preserving pool reuse for
-		//     large frames where the avoided memcpy easily pays for
-		//     the finalizer cost.
+		//     AppendPooledFrame, which sets refs=1. The consumer
+		//     (Socket.RecvMsg user) returns the buffer to the pool by
+		//     calling *Msg.Release when done; a runtime finalizer is
+		//     the safety net for callers that drop the *Msg without
+		//     Release.
 		//
 		//   - Large CURVE: decoded is a fresh box.Open slice, not a
 		//     pool buffer. Attach as an ordinary heap frame and PoolPut
