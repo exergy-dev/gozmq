@@ -19,6 +19,7 @@ package perf_test
 import (
 	"context"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -42,6 +43,19 @@ var sizes = []struct {
 // freeTCPEndpoint returns "tcp://127.0.0.1:0"; callers bind and read back
 // LastEndpoint() to obtain the resolved port.
 const freeTCPEndpoint = "tcp://127.0.0.1:0"
+
+// Matches internal/session.largeFrameThreshold. Throughput receivers discard
+// messages immediately, so large receives can synchronously return their
+// pool-backed frame buffers via Msg.Reset without adding work to small-frame
+// benchmarks.
+const largeFrameResetThreshold = 4 * 1024
+
+func shouldResetReceivedLargeFrames(endpoint string, msgSize int) bool {
+	if msgSize <= largeFrameResetThreshold {
+		return false
+	}
+	return !strings.HasPrefix(endpoint, "inproc://")
+}
 
 // inprocName returns a unique inproc endpoint per benchmark sub-test so
 // concurrent b.Run invocations don't collide in the Context registry.
@@ -232,6 +246,7 @@ func benchPushPullThroughput(b *testing.B, msgSize int, endpoint string) {
 	}
 
 	payload := newPayload(msgSize)
+	resetLarge := shouldResetReceivedLargeFrames(endpoint, msgSize)
 
 	// Warm up the handshake + first flight.
 	warmCtx, warmCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -239,9 +254,13 @@ func benchPushPullThroughput(b *testing.B, msgSize int, endpoint string) {
 		warmCancel()
 		b.Fatalf("warmup send: %v", err)
 	}
-	if _, err := pull.RecvMsg(warmCtx); err != nil {
+	if m, err := pull.RecvMsg(warmCtx); err != nil {
 		warmCancel()
 		b.Fatalf("warmup recv: %v", err)
+	} else if resetLarge {
+		// The throughput receiver discards payloads after accounting for
+		// delivery, so return large pool-backed buffers synchronously.
+		m.Reset()
 	}
 	warmCancel()
 
@@ -254,8 +273,12 @@ func benchPushPullThroughput(b *testing.B, msgSize int, endpoint string) {
 	go func() {
 		defer recvWG.Done()
 		for {
-			if _, err := pull.RecvMsg(recvCtx); err != nil {
+			m, err := pull.RecvMsg(recvCtx)
+			if err != nil {
 				return
+			}
+			if resetLarge {
+				m.Reset()
 			}
 			received.Add(1)
 		}
@@ -356,6 +379,7 @@ func benchPubSubFanout(b *testing.B, msgSize int, endpoint string, nSub int) {
 	time.Sleep(200 * time.Millisecond)
 
 	payload := newPayload(msgSize)
+	resetLarge := shouldResetReceivedLargeFrames(endpoint, msgSize)
 
 	// Hard warm-up: alternate pub-sends and short sub-drains until every
 	// sub has seen at least one message. The 200ms sleep above is a best-
@@ -379,7 +403,10 @@ func benchPubSubFanout(b *testing.B, msgSize int, endpoint string, nSub int) {
 		allDrained = true
 		for i, s := range subs {
 			ctxShort, cancelShort := context.WithTimeout(warmCtx, 100*time.Millisecond)
-			if _, err := s.RecvMsg(ctxShort); err == nil {
+			if m, err := s.RecvMsg(ctxShort); err == nil {
+				if resetLarge {
+					m.Reset()
+				}
 				drained[i] = true
 			} else if !drained[i] {
 				allDrained = false
@@ -396,10 +423,13 @@ func benchPubSubFanout(b *testing.B, msgSize int, endpoint string, nSub int) {
 	for _, s := range subs {
 		for {
 			ctxShort, cancelShort := context.WithTimeout(warmCtx, 10*time.Millisecond)
-			_, err := s.RecvMsg(ctxShort)
+			m, err := s.RecvMsg(ctxShort)
 			cancelShort()
 			if err != nil {
 				break
+			}
+			if resetLarge {
+				m.Reset()
 			}
 		}
 	}
@@ -419,8 +449,12 @@ func benchPubSubFanout(b *testing.B, msgSize int, endpoint string, nSub int) {
 		go func() {
 			defer recvWG.Done()
 			for {
-				if _, err := s.RecvMsg(recvCtx); err != nil {
+				m, err := s.RecvMsg(recvCtx)
+				if err != nil {
 					return
+				}
+				if resetLarge {
+					m.Reset()
 				}
 				subCounts[i].Add(1)
 			}

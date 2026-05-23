@@ -44,3 +44,23 @@ func TestMsgReset(t *testing.T) {
 		t.Fatalf("NumFrames after Reset = %d", m.NumFrames())
 	}
 }
+
+func TestMsgResetReleasesPooledFrames(t *testing.T) {
+	pool := PoolGet(1024)
+	m := New()
+	m.AppendPooledFrame(pool[:16], pool)
+	holder := m.pooled
+	if len(holder) != 1 {
+		t.Fatalf("pooled buffers after AppendPooledFrame = %d, want 1", len(holder))
+	}
+
+	m.Reset()
+	if m.NumFrames() != 0 {
+		t.Fatalf("NumFrames after Reset = %d, want 0", m.NumFrames())
+	}
+	if m.pooled != nil {
+		t.Fatal("pooled buffers still attached after Reset")
+	}
+
+	m.Reset()
+}

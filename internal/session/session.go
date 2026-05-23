@@ -148,7 +148,7 @@ type sessionImpl struct {
 	stopErr atomic.Pointer[error]
 }
 
-const sessionReadBufferSize = 32 * 1024
+const sessionReadBufferSize = 16 * 1024
 
 type frameEncoder func(flags uint8, body []byte) (uint8, []byte, error)
 type frameDecoder func(flags uint8, body []byte) (uint8, []byte, error)

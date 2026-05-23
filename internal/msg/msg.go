@@ -59,8 +59,8 @@ func (m *Msg) AppendFrame(b []byte) {
 }
 
 // AppendPooledFrame appends frame to the message and remembers pool as the
-// pool-allocated backing buffer to return via PoolPut when the Msg is GCed.
-// frame may be a subslice of pool. Intended for the session reader only.
+// pool-allocated backing buffer to return via PoolPut when the Msg is reset or
+// GCed. frame may be a subslice of pool. Intended for the session reader only.
 //
 // The first call installs a runtime finalizer on m; subsequent calls just
 // append to the pooled-buffer list. The finalizer runs once, when m has no
@@ -79,6 +79,7 @@ func finalizeMsg(m *Msg) {
 	for _, b := range m.pooled {
 		PoolPut(b)
 	}
+	clear(m.pooled)
 	m.pooled = nil
 }
 
@@ -91,9 +92,18 @@ func (m *Msg) TotalSize() int {
 	return n
 }
 
-// Reset truncates the frame slice to zero length without releasing capacity.
-// Used internally by tests and helper code that reuses a message value
-// directly.
+// Reset releases any pool-backed frames and truncates the frame slice to zero
+// length without releasing capacity. Frames returned by Frames or Bytes before
+// Reset must not be used after Reset returns.
 func (m *Msg) Reset() {
+	if m.pooled != nil {
+		runtime.SetFinalizer(m, nil)
+		for _, b := range m.pooled {
+			PoolPut(b)
+		}
+		clear(m.pooled)
+		m.pooled = nil
+	}
+	clear(m.frames)
 	m.frames = m.frames[:0]
 }

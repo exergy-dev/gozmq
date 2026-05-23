@@ -259,6 +259,40 @@ The baseline is the pre-Round-3 state (original `Msg.Release` API):
 
 Every other benchmark either improves or holds within benchmark noise.
 
+## Round 5 — Synchronous large-buffer return for discard receivers
+
+Date: 2026-04-22
+
+No public API was added. Instead, `Msg.Reset` now returns any pool-backed
+large receive buffers immediately, and discard-style throughput receivers call
+it after they have counted/validated a large non-inproc message. This preserves
+the retain-safe `RecvMsg` default while giving benchmark/CLI consumers that do
+not keep messages an existing no-allocation return point.
+
+Two constants were benchmark-gated:
+
+- `maxBatchBytes`: raised from 1 MiB to 2 MiB. This lets the writer coalesce
+  the full 32-message cap for 64 KiB frames.
+- `sessionReadBufferSize`: lowered from 32 KiB to 16 KiB. 4 KiB was slightly
+  faster for 64 KiB payloads but hurt 1 KiB throughput too much; 16 KiB kept
+  small TCP throughput near baseline.
+
+### Results (14900KF, WSL2, `-benchtime=1s -count=3`)
+
+Representative Round-5 results:
+
+| Benchmark                   | Round 4 (ns/op) | Round 5 (ns/op) |       Δ |
+|:----------------------------|----------------:|----------------:|--------:|
+| PushPull TCP 64KB           |           17388 |        8854–9029 | **~−49%** |
+| PushPull TCP 1KB            |             712 |         713–718 |   ~0    |
+| PushPull inproc 64KB        |            6647 |        6410–6532 |   ~−3%  |
+| ReqRep TCP 64KB             |           72180 |       68577–69629 |   ~−4%  |
+| PubSub inproc 64KB          |           12420 |       12055–12428 |   ~0    |
+
+The main remaining Round-4 outlier, PushPull TCP 64 KiB, is now roughly back
+to the original explicit-release baseline while keeping the simplified
+retain-safe default ownership model.
+
 ## Conclusion
 
 The original performance target for small native messages was met and exceeded:

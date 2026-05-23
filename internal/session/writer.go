@@ -27,7 +27,7 @@ const (
 	// maxBatchBytes caps the total encoded bytes coalesced into one
 	// writev. Primary guard against pathological large-payload bursts
 	// pinning megabytes in the writer's buffer list.
-	maxBatchBytes = 1 << 20 // 1 MiB
+	maxBatchBytes = 2 << 20 // 2 MiB
 
 	// writerDrainSettleTime keeps the conn open briefly after a
 	// CancelWriter-driven drain completes. Socket.Close currently waits on

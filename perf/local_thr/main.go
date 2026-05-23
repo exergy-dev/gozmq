@@ -16,10 +16,13 @@ import (
 	"fmt"
 	"os"
 	"runtime/pprof"
+	"strings"
 	"time"
 
 	"github.com/rkm/gozmq"
 )
+
+const largeFrameResetThreshold = 4 * 1024
 
 func main() {
 	endpoint := flag.String("endpoint", "tcp://*:5555", "bind endpoint")
@@ -77,6 +80,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "message of incorrect size %d (expected %d)\n", len(first.Bytes()), *size)
 		os.Exit(1)
 	}
+	resetLarge := *size > largeFrameResetThreshold && !strings.HasPrefix(*endpoint, "inproc://")
+	if resetLarge {
+		first.Reset()
+	}
 
 	var cpuFile *os.File
 	if *cpuProfile != "" {
@@ -102,6 +109,9 @@ func main() {
 		if *size > 0 && m.NumFrames() == 1 && len(m.Bytes()) != *size {
 			fmt.Fprintf(os.Stderr, "message of incorrect size %d (expected %d)\n", len(m.Bytes()), *size)
 			os.Exit(1)
+		}
+		if resetLarge {
+			m.Reset()
 		}
 	}
 	elapsed := time.Since(start)

@@ -74,9 +74,10 @@ func socketTypeName(t SocketType) string {
 	return ""
 }
 
-// Msg is a ZMTP multipart message. Frames delivered by RecvMsg are caller-
-// owned heap copies, so a returned *Msg is safe to retain, stash, or pass
-// between goroutines without any further bookkeeping.
+// Msg is a ZMTP multipart message. A returned *Msg is safe to retain, stash,
+// or pass between goroutines without any further bookkeeping. Discard-style
+// throughput receivers may call Reset after they are done with the message to
+// return any large pool-backed receive buffers earlier than the GC would.
 type Msg = msg.Msg
 
 // NewMsg returns an empty message.
