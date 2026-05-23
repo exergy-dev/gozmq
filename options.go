@@ -14,10 +14,6 @@ type Option interface {
 	apply(*socketConfig) error
 }
 
-type socketOptionMeta interface {
-	optionName() string
-}
-
 // socketConfig is the concrete aggregate that every Option mutates. Defaults
 // are set in newSocketConfig.
 type socketConfig struct {
@@ -71,15 +67,22 @@ func newSocketConfig() *socketConfig {
 }
 
 type optionFunc struct {
-	name    string
 	applyFn func(*socketConfig) error
 }
 
 func (f optionFunc) apply(c *socketConfig) error { return f.applyFn(c) }
-func (f optionFunc) optionName() string          { return f.name }
 
-func newOption(name string, fn func(*socketConfig) error) Option {
-	return optionFunc{name: name, applyFn: fn}
+func newOption(_ string, fn func(*socketConfig) error) Option {
+	return optionFunc{applyFn: fn}
+}
+
+// copyBytes returns a defensive heap copy of b. Used to prevent callers
+// from mutating bytes stored in socket config after option application.
+func copyBytes(b []byte) []byte {
+	if b == nil {
+		return nil
+	}
+	return append([]byte(nil), b...)
 }
 
 // WithIdentity sets the ROUTER/DEALER identity advertised during the ZMTP
@@ -91,7 +94,7 @@ func newOption(name string, fn func(*socketConfig) error) Option {
 // The slice is copied defensively.
 func WithIdentity(id []byte) Option {
 	return newOption("WithIdentity", func(c *socketConfig) error {
-		c.identity = append([]byte(nil), id...)
+		c.identity = copyBytes(id)
 		return nil
 	})
 }
@@ -205,7 +208,7 @@ func WithXPubVerbose(enabled bool) Option {
 // manage their own subscriptions without interfering.
 func WithSubscribe(prefix []byte) Option {
 	return newOption("WithSubscribe", func(c *socketConfig) error {
-		c.subscriptions = append(c.subscriptions, append([]byte(nil), prefix...))
+		c.subscriptions = append(c.subscriptions, copyBytes(prefix))
 		return nil
 	})
 }
@@ -254,7 +257,7 @@ func WithZapDomain(domain string) Option {
 func WithCurveServer(secretKey []byte) Option {
 	return newOption("WithCurveServer", func(c *socketConfig) error {
 		c.curveServer = true
-		c.curveSecretKey = append([]byte(nil), secretKey...)
+		c.curveSecretKey = copyBytes(secretKey)
 		return nil
 	})
 }
@@ -270,9 +273,9 @@ func WithCurveServer(secretKey []byte) Option {
 func WithCurveClient(serverKey, publicKey, secretKey []byte) Option {
 	return newOption("WithCurveClient", func(c *socketConfig) error {
 		c.curveServer = false
-		c.curveServerKey = append([]byte(nil), serverKey...)
-		c.curvePublicKey = append([]byte(nil), publicKey...)
-		c.curveSecretKey = append([]byte(nil), secretKey...)
+		c.curveServerKey = copyBytes(serverKey)
+		c.curvePublicKey = copyBytes(publicKey)
+		c.curveSecretKey = copyBytes(secretKey)
 		return nil
 	})
 }
@@ -353,14 +356,14 @@ func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 	if len(cfg.subscriptions) > 0 && t != Sub && t != XSub {
 		return fmt.Errorf("gozmq: WithSubscribe only valid on SUB/XSUB sockets")
 	}
-	if len(cfg.curveSecretKey) > 0 && len(cfg.curveSecretKey) != 32 {
-		return fmt.Errorf("gozmq: CURVE secret keys must be 32 bytes")
+	if err := validateCurveKey("secret", cfg.curveSecretKey); err != nil {
+		return err
 	}
-	if len(cfg.curvePublicKey) > 0 && len(cfg.curvePublicKey) != 32 {
-		return fmt.Errorf("gozmq: CURVE public keys must be 32 bytes")
+	if err := validateCurveKey("public", cfg.curvePublicKey); err != nil {
+		return err
 	}
-	if len(cfg.curveServerKey) > 0 && len(cfg.curveServerKey) != 32 {
-		return fmt.Errorf("gozmq: CURVE server keys must be 32 bytes")
+	if err := validateCurveKey("server", cfg.curveServerKey); err != nil {
+		return err
 	}
 	if cfg.curveServer {
 		if len(cfg.curveSecretKey) != 32 {
@@ -372,4 +375,15 @@ func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 		}
 	}
 	return nil
+}
+
+// validateCurveKey asserts that k is either empty (option not set) or
+// exactly 32 bytes (a complete Curve25519 key). It returns a wrapped
+// error naming which key role failed the check so callers can locate
+// the misconfigured option.
+func validateCurveKey(name string, k []byte) error {
+	if len(k) == 0 || len(k) == 32 {
+		return nil
+	}
+	return fmt.Errorf("gozmq: CURVE %s key must be 32 bytes, got %d", name, len(k))
 }

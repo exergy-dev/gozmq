@@ -74,6 +74,9 @@ func socketTypeName(t SocketType) string {
 	return ""
 }
 
+// String implements fmt.Stringer using the ZMTP "Socket-Type" metadata names.
+func (t SocketType) String() string { return socketTypeName(t) }
+
 // Msg is a ZMTP multipart message. Frames delivered by RecvMsg are
 // caller-owned and safe to retain, stash, or pass between goroutines.
 //

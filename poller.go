@@ -123,6 +123,16 @@ func (p *Poller) Modify(sock *Socket, events PollEvents) {
 // immediately detaches between the wake and the readiness scan)
 // Poll may loop internally and wait again. It never returns an
 // empty event slice with a nil error.
+//
+// Cost: each Poll call builds a fresh reflect.SelectCase slice over the
+// registration set and parks via reflect.Select. The reflection step is
+// necessary because the registered set is dynamic and ready channels
+// come from heterogeneous engine types, but the per-call allocation and
+// reflect overhead is not free. Rough budget: comfortable for hundreds
+// of registered sockets at hundreds of Poll/sec; if you need higher
+// rates, consolidate ready channels upstream (e.g. one dedicated
+// goroutine per socket fanning into a single application channel) and
+// avoid Poller in the hot path.
 func (p *Poller) Poll(ctx context.Context) ([]PollEvent, error) {
 	for {
 		// Snapshot the registration set so we can iterate without holding
