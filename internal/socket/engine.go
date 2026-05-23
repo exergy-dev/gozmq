@@ -65,6 +65,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
@@ -132,7 +133,16 @@ type LoadBalancer struct {
 	readyW  chan struct{} // level-armed while len(pipes) > 0; Poller-facing
 	closeCh chan struct{}
 	closed  bool
+
+	// sent is the count of messages successfully dispatched. Incremented
+	// after Pipe.Send returns nil. Send-side errors do NOT increment this
+	// — they are surfaced to the caller.
+	sent atomic.Uint64
 }
+
+// Sent reports the number of messages this LoadBalancer has successfully
+// dispatched. Safe to call concurrently with Send.
+func (lb *LoadBalancer) Sent() uint64 { return lb.sent.Load() }
 
 type nonBlockingSender interface {
 	TrySend(*msg.Msg) bool
@@ -281,6 +291,7 @@ func (lb *LoadBalancer) Send(ctx context.Context, m *msg.Msg) error {
 				lb.cursor = (idx + 1) % len(lb.pipes)
 			}
 			lb.mu.Unlock()
+			lb.sent.Add(1)
 			return nil
 		}
 
@@ -296,6 +307,7 @@ func (lb *LoadBalancer) Send(ctx context.Context, m *msg.Msg) error {
 				lb.cursor = (idx + 1) % len(lb.pipes)
 			}
 			lb.mu.Unlock()
+			lb.sent.Add(1)
 			return nil
 		}
 		if errors.Is(err, errRetry) {
@@ -409,7 +421,29 @@ type FairQueue struct {
 	readyR  chan struct{} // level-armed while inbound holds an item
 	pipes   map[iface.Pipe]*fairForwarder
 	wg      sync.WaitGroup
+
+	// recv counts messages successfully handed off from a forwarder to
+	// the inbound channel (i.e. dequeued by Recv eventually). dropped
+	// counts messages a forwarder pulled from a pipe but had to discard
+	// because its context cancelled (Detach) or the FairQueue closed
+	// before the handoff could complete.
+	recv    atomic.Uint64
+	dropped atomic.Uint64
 }
+
+// Recvd reports the number of messages successfully handed off to the
+// inbound channel. Safe to call concurrently with the forwarders.
+func (fq *FairQueue) Recvd() uint64 { return fq.recv.Load() }
+
+// Dropped reports the number of messages a forwarder pulled from a pipe
+// but had to discard because its context cancelled or the queue closed
+// mid-handoff. Safe to call concurrently with the forwarders.
+func (fq *FairQueue) Dropped() uint64 { return fq.dropped.Load() }
+
+// QueueDepth returns the current length of the inbound handoff channel
+// (gauge). Capacity is 1, so this is 0 or 1 except for very brief
+// windows. Provided for parity with the SocketEngine metrics surface.
+func (fq *FairQueue) QueueDepth() uint64 { return uint64(len(fq.inbound)) }
 
 type fairForwarder struct {
 	ctx    context.Context
@@ -586,6 +620,7 @@ func (fq *FairQueue) forward(p iface.Pipe, fwd *fairForwarder) {
 		// block forever holding a message no one will consume.
 		select {
 		case fq.inbound <- fairItem{m: m, p: p}:
+			fq.recv.Add(1)
 			// Arm the Poller-facing read-ready signal. Non-blocking;
 			// cap-1 chan coalesces multiple producers, and the Poller
 			// re-arms on the next call if items remain.
@@ -594,8 +629,10 @@ func (fq *FairQueue) forward(p iface.Pipe, fwd *fairForwarder) {
 			default:
 			}
 		case <-fwd.ctx.Done():
+			fq.dropped.Add(1)
 			return
 		case <-fq.closeCh:
+			fq.dropped.Add(1)
 			return
 		}
 	}
@@ -627,6 +664,9 @@ func (e *sendOnlyEngine) ReadyRecv() <-chan struct{}  { return nil }
 func (e *sendOnlyEngine) ReadyWrite() <-chan struct{} { return e.lb.ReadyWrite() }
 func (e *sendOnlyEngine) CanRecvNow() bool            { return false }
 func (e *sendOnlyEngine) CanSendNow() bool            { return e.lb.HasPeers() }
+func (e *sendOnlyEngine) Metrics() iface.SocketMetrics {
+	return iface.SocketMetrics{Sent: e.lb.Sent()}
+}
 
 type recvOnlyEngine struct {
 	name string
@@ -650,6 +690,13 @@ func (e *recvOnlyEngine) ReadyRecv() <-chan struct{}  { return e.fq.ReadyRecv() 
 func (e *recvOnlyEngine) ReadyWrite() <-chan struct{} { return nil }
 func (e *recvOnlyEngine) CanRecvNow() bool            { return e.fq.HasPending() }
 func (e *recvOnlyEngine) CanSendNow() bool            { return false }
+func (e *recvOnlyEngine) Metrics() iface.SocketMetrics {
+	return iface.SocketMetrics{
+		Recv:       e.fq.Recvd(),
+		Dropped:    e.fq.Dropped(),
+		QueueDepth: e.fq.QueueDepth(),
+	}
+}
 
 type queuePairEngine struct {
 	lb *LoadBalancer
@@ -695,3 +742,11 @@ func (e *queuePairEngine) ReadyRecv() <-chan struct{}  { return e.fq.ReadyRecv()
 func (e *queuePairEngine) ReadyWrite() <-chan struct{} { return e.lb.ReadyWrite() }
 func (e *queuePairEngine) CanRecvNow() bool            { return e.fq.HasPending() }
 func (e *queuePairEngine) CanSendNow() bool            { return e.lb.HasPeers() }
+func (e *queuePairEngine) Metrics() iface.SocketMetrics {
+	return iface.SocketMetrics{
+		Sent:       e.lb.Sent(),
+		Recv:       e.fq.Recvd(),
+		Dropped:    e.fq.Dropped(),
+		QueueDepth: e.fq.QueueDepth(),
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rkm/gozmq/internal/iface"
@@ -88,6 +89,18 @@ type pubEngine struct {
 	surfaceSubs bool
 	subInbound  chan *msg.Msg // XPUB-only; nil for PUB
 	closeCh     chan struct{}
+
+	// Metrics counters. sent increments once per Send call that has at
+	// least one frame; dropped increments per (message, peer) pair when
+	// the peer's pipe rejects the send (HWM full). Tracks per-peer drops
+	// rather than per-message so observers can see fan-out drop pressure
+	// — one slow subscriber and ten fast ones still surface clearly.
+	sent    atomic.Uint64
+	dropped atomic.Uint64
+	// recv counts subscription events delivered to the application via
+	// Recv. Always zero for plain PUB (Recv is an FSM violation); for
+	// XPUB it tracks the SUBSCRIBE/CANCEL events the app has observed.
+	recv atomic.Uint64
 }
 
 // NewPubEngine returns a new PUB socket engine.
@@ -254,10 +267,34 @@ func (e *pubEngine) Send(ctx context.Context, m *msg.Msg) error {
 			return err
 		}
 		tryCtx, cancel := context.WithTimeout(ctx, pubTryTimeout)
-		_ = p.Send(tryCtx, m)
+		if err := p.Send(tryCtx, m); err != nil {
+			// HWM-full peer (deadline exceeded) or pipe-closed
+			// mid-send. Either way, the message did not reach this
+			// peer — count it as one drop. We do not propagate the
+			// error to the caller: PUB fan-out is best-effort, and a
+			// single slow subscriber must not break the publish call.
+			e.dropped.Add(1)
+		}
 		cancel()
 	}
+	e.sent.Add(1)
 	return nil
+}
+
+// Metrics reports the PUB engine's counters. QueueDepth samples the
+// XPUB subInbound buffer (zero for plain PUB, since subInbound is nil
+// and the lookup short-circuits).
+func (e *pubEngine) Metrics() iface.SocketMetrics {
+	var depth uint64
+	if e.subInbound != nil {
+		depth = uint64(len(e.subInbound))
+	}
+	return iface.SocketMetrics{
+		Sent:       e.sent.Load(),
+		Recv:       e.recv.Load(),
+		Dropped:    e.dropped.Load(),
+		QueueDepth: depth,
+	}
 }
 
 // pubTryTimeout is the per-peer HWM-drop deadline for PUB fanout. Long
@@ -277,11 +314,13 @@ func (e *pubEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 	// engine closes.
 	select {
 	case m := <-e.subInbound:
+		e.recv.Add(1)
 		return m, nil
 	case <-e.closeCh:
 		// Drain any straggler before reporting closed.
 		select {
 		case m := <-e.subInbound:
+			e.recv.Add(1)
 			return m, nil
 		default:
 			return nil, fmt.Errorf("pub recv: %w", zmqerr.ErrSocketClosed)

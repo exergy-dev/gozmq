@@ -754,6 +754,37 @@ func (s *Socket) RecvMsg(ctx context.Context) (*Msg, error) {
 	return s.engine.Recv(ctx)
 }
 
+// SocketMetrics is a point-in-time snapshot of per-socket counters and
+// gauges returned by (*Socket).Metrics.
+//
+// Sent, Recv, and Dropped are monotonic uint64 counters read atomically.
+// QueueDepth is a gauge sampled at the moment Metrics is called and
+// reflects the number of messages buffered in the engine's inbound
+// handoff at that instant (zero for send-only patterns and for engines
+// that read directly from a single pipe).
+//
+// Drop semantics:
+//   - PUB increments Dropped once per (message, peer) pair when the
+//     peer's pipe is at HWM during fan-out (slow-subscriber drop).
+//   - ROUTER (non-mandatory) increments Dropped on a Send whose leading
+//     identity matches no attached peer.
+//   - Every pattern that uses the shared FairQueue inbound multiplexer
+//     also surfaces FairQueue ctx-cancel/close drops here.
+//
+// Send-side errors returned to the caller do NOT count as drops — the
+// caller already observed the failure and can decide what to do.
+type SocketMetrics = iface.SocketMetrics
+
+// Metrics returns a point-in-time snapshot of this socket's counters and
+// queue-depth gauge. Safe to call from any goroutine. Returns the zero
+// SocketMetrics if the socket has been closed.
+func (s *Socket) Metrics() SocketMetrics {
+	if s.closed.Load() || s.engine == nil {
+		return SocketMetrics{}
+	}
+	return s.engine.Metrics()
+}
+
 // Monitor registers ch to receive Events matching mask.
 func (s *Socket) Monitor(ch chan<- Event, mask EventType) error {
 	if s.closed.Load() {

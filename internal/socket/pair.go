@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
@@ -30,6 +31,9 @@ type pairEngine struct {
 	closed   bool
 	closeCh  chan struct{}
 	notifyCh chan struct{} // closed on attach; a fresh one is made if the pipe detaches
+
+	sent atomic.Uint64
+	recv atomic.Uint64
 }
 
 // NewPairEngine returns a new PAIR socket engine.
@@ -97,6 +101,9 @@ func (e *pairEngine) Send(ctx context.Context, m *msg.Msg) error {
 		select {
 		case err := <-done:
 			cancel()
+			if err == nil {
+				e.sent.Add(1)
+			}
 			return err
 		case <-closeCh:
 			cancel()
@@ -141,12 +148,25 @@ func (e *pairEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		select {
 		case r := <-done:
 			cancel()
+			if r.err == nil {
+				e.recv.Add(1)
+			}
 			return r.m, r.err
 		case <-closeCh:
 			cancel()
 			<-done
 			return nil, fmt.Errorf("pair recv: %w", zmqerr.ErrSocketClosed)
 		}
+	}
+}
+
+// Metrics reports the PAIR engine's counters. PAIR has no internal
+// inbound queue (it reads directly from the attached pipe), so
+// QueueDepth is always zero.
+func (e *pairEngine) Metrics() iface.SocketMetrics {
+	return iface.SocketMetrics{
+		Sent: e.sent.Load(),
+		Recv: e.recv.Load(),
 	}
 }
 

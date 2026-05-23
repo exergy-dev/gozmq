@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
@@ -59,6 +60,9 @@ type repEngine struct {
 	// empty delimiter) captured from the current request. Valid only in
 	// canSend. Stored as a fresh slice independent of any caller *Msg.
 	envelope [][]byte
+
+	sent atomic.Uint64
+	recv atomic.Uint64
 }
 
 // NewRepEngine returns a new REP socket engine.
@@ -123,6 +127,7 @@ func (e *repEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		e.envelope = envelope
 		e.state = repStateCanSend
 		e.mu.Unlock()
+		e.recv.Add(1)
 		return body, nil
 	}
 }
@@ -161,7 +166,11 @@ func (e *repEngine) Send(ctx context.Context, m *msg.Msg) error {
 	wireFrames = append(wireFrames, envelope...)
 	wireFrames = append(wireFrames, body...)
 	wire := msg.FromFrames(wireFrames...)
-	return peer.Send(ctx, wire)
+	if err := peer.Send(ctx, wire); err != nil {
+		return err
+	}
+	e.sent.Add(1)
+	return nil
 }
 
 // splitRepEnvelope separates a REQ-shaped inbound frame into envelope
@@ -187,6 +196,18 @@ func splitRepEnvelope(m *msg.Msg) (envelope [][]byte, body *msg.Msg, ok bool) {
 		}
 	}
 	return nil, nil, false
+}
+
+// Metrics reports the REP engine's counters. recv is incremented on
+// each user-visible Recv (after envelope split); dropped delegates to
+// the underlying FairQueue. QueueDepth samples the FairQueue.
+func (e *repEngine) Metrics() iface.SocketMetrics {
+	return iface.SocketMetrics{
+		Sent:       e.sent.Load(),
+		Recv:       e.recv.Load(),
+		Dropped:    e.fq.Dropped(),
+		QueueDepth: e.fq.QueueDepth(),
+	}
 }
 
 func (e *repEngine) Close() error {

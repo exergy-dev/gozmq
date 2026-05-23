@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
@@ -86,6 +87,10 @@ type routerEngine struct {
 	// readyW is the Poller-facing PollOut signal. Level-armed while
 	// at least one peer is attached. See engine.go Pollable.
 	readyW chan struct{}
+
+	sent    atomic.Uint64
+	recv    atomic.Uint64
+	dropped atomic.Uint64 // non-mandatory routes with unknown identity
 }
 
 // NewRouterEngine returns a new ROUTER socket engine. If mandatory is
@@ -252,7 +257,9 @@ func (e *routerEngine) Send(ctx context.Context, m *msg.Msg) error {
 		if mandatory {
 			return fmt.Errorf("router send: identity %q: %w", id, zmqerr.ErrRouteUnknown)
 		}
-		// Silent drop.
+		// Silent drop — count as dropped so observers see the unknown-
+		// identity miss even though the caller saw a successful send.
+		e.dropped.Add(1)
 		return nil
 	}
 
@@ -262,7 +269,11 @@ func (e *routerEngine) Send(ctx context.Context, m *msg.Msg) error {
 	payloadFrames := make([][]byte, len(rest))
 	copy(payloadFrames, rest)
 	routed := msg.FromFrames(payloadFrames...)
-	return p.Send(ctx, routed)
+	if err := p.Send(ctx, routed); err != nil {
+		return err
+	}
+	e.sent.Add(1)
+	return nil
 }
 
 func (e *routerEngine) Recv(ctx context.Context) (*msg.Msg, error) {
@@ -301,7 +312,21 @@ func (e *routerEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 	out := make([][]byte, 0, len(orig)+1)
 	out = append(out, append([]byte(nil), id...))
 	out = append(out, orig...)
+	e.recv.Add(1)
 	return msg.FromFrames(out...), nil
+}
+
+// Metrics reports the ROUTER engine's counters. Dropped covers two
+// classes: silent non-mandatory route-misses (unknown identity, this
+// engine), plus FairQueue ctx-cancel/close drops on the inbound side.
+// QueueDepth samples the underlying FairQueue.
+func (e *routerEngine) Metrics() iface.SocketMetrics {
+	return iface.SocketMetrics{
+		Sent:       e.sent.Load(),
+		Recv:       e.recv.Load(),
+		Dropped:    e.dropped.Load() + e.fq.Dropped(),
+		QueueDepth: e.fq.QueueDepth(),
+	}
 }
 
 func (e *routerEngine) Close() error {
