@@ -5,4 +5,5 @@ coverage.*
 /dist/
 /.idea/
 /.vscode/
+/.claude/
 *.swp
