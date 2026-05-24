@@ -53,11 +53,6 @@ func (s *sessionImpl) runReader() {
 			return
 		}
 
-		// Stamp the inbound clock for the heartbeat goroutine. We do
-		// this on every inbound frame, not just user data, so a peer's
-		// PONG (or any traffic) keeps the link alive.
-		s.lastInboundUnix.Store(time.Now().UnixNano())
-
 		// Decode the body through the security mechanism. For NULL/PLAIN
 		// (identity) decoded aliases body and the same pool buffer will
 		// back the user Msg; for CURVE decoded is a fresh slice produced
@@ -74,6 +69,7 @@ func (s *sessionImpl) runReader() {
 			// past return (SUBSCRIBE/CANCEL copy into a fresh slice
 			// before publishing), so PoolPut on body is safe whether
 			// decoded aliased body or not.
+			s.lastInboundUnix.Store(time.Now().UnixNano())
 			cmdErr := s.handleCommand(decoded)
 			msg.PoolPut(body)
 			if cmdErr != nil {
@@ -105,6 +101,7 @@ func (s *sessionImpl) runReader() {
 		//     pool buffer. Attach as an ordinary heap frame and PoolPut
 		//     the ciphertext scratch.
 		if current == nil {
+			s.lastInboundUnix.Store(time.Now().UnixNano())
 			current = msg.New()
 		}
 		switch {
