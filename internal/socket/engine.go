@@ -426,22 +426,11 @@ type FairQueue struct {
 	pipes   map[iface.Pipe]*fairForwarder
 	wg      sync.WaitGroup
 
-	// directPipe is set when exactly one pipe is attached (via the 0→1
-	// transition). Recv reads from it directly, bypassing the forwarder
-	// goroutine and the inbound channel — saving ~100 ns per message.
-	// When a second pipe is attached, directPipe is promoted to a
-	// forwarder-backed entry in pipes and cleared.
-	//
-	// directWake is closed by Detach/Close/promotion to unblock a
-	// RecvWithSource parked in the direct-pipe select. A fresh channel
-	// is allocated on each 0→1 transition.
-	directPipe iface.Pipe
-	directWake chan struct{}
-
-	// directRecvCh caches the pipe's receive channel (via the
-	// recvChanner type assertion) so RecvWithSource can use a raw
-	// channel select instead of context.WithCancel + AfterFunc per call.
-	directRecvCh <-chan *msg.Msg
+	// direct is an atomically-swapped snapshot of the direct-pipe state.
+	// RecvWithSource reads it without holding mu; Attach/Detach/Close
+	// write it under mu. The indirection eliminates a per-Recv mutex
+	// acquisition on the hot path.
+	direct atomic.Pointer[directSnapshot]
 
 	// recvNotify is signalled when directPipe transitions from nil to
 	// non-nil, waking any RecvWithSource goroutine that is blocked in
@@ -472,12 +461,18 @@ func (fq *FairQueue) Dropped() uint64 { return fq.dropped.Load() }
 // In direct-pipe mode (single peer), the handoff channel is bypassed
 // entirely and the depth is always 0.
 func (fq *FairQueue) QueueDepth() uint64 {
-	fq.mu.Lock()
-	defer fq.mu.Unlock()
-	if fq.directPipe != nil {
+	if fq.direct.Load() != nil {
 		return 0
 	}
 	return uint64(len(fq.inbound))
+}
+
+// directSnapshot holds the direct-pipe state read atomically by
+// RecvWithSource. A nil *directSnapshot means no direct pipe.
+type directSnapshot struct {
+	pipe   iface.Pipe
+	recvCh <-chan *msg.Msg
+	wake   chan struct{}
 }
 
 type fairForwarder struct {
@@ -521,14 +516,14 @@ func (fq *FairQueue) ReadyRecv() <-chan struct{} {
 	if fq.closed {
 		return fq.readyR
 	}
-	// In direct-pipe mode check the pipe's receive channel for
-	// buffered data; if the pipe does not expose RecvCh, fall back
-	// to the conservative "always arm" approach.
+	ds := fq.direct.Load()
 	ready := len(fq.inbound) > 0
-	if fq.directRecvCh != nil {
-		ready = ready || len(fq.directRecvCh) > 0
-	} else if fq.directPipe != nil {
-		ready = true
+	if ds != nil {
+		if ds.recvCh != nil {
+			ready = ready || len(ds.recvCh) > 0
+		} else {
+			ready = true
+		}
 	}
 	if ready {
 		select {
@@ -548,11 +543,11 @@ func (fq *FairQueue) HasPending() bool {
 	if fq.closed {
 		return false
 	}
-	if fq.directRecvCh != nil {
-		return len(fq.directRecvCh) > 0
-	}
-	if fq.directPipe != nil {
-		// Pipe does not expose RecvCh — conservative fallback.
+	ds := fq.direct.Load()
+	if ds != nil {
+		if ds.recvCh != nil {
+			return len(ds.recvCh) > 0
+		}
 		return true
 	}
 	return len(fq.inbound) > 0
@@ -572,7 +567,8 @@ func (fq *FairQueue) Attach(p iface.Pipe) error {
 		return fmt.Errorf("fairqueue attach: %w", zmqerr.ErrSocketClosed)
 	}
 	// Duplicate check: covers both direct and forwarder-backed pipes.
-	if fq.directPipe == p {
+	ds := fq.direct.Load()
+	if ds != nil && ds.pipe == p {
 		return nil
 	}
 	if _, ok := fq.pipes[p]; ok {
@@ -580,16 +576,15 @@ func (fq *FairQueue) Attach(p iface.Pipe) error {
 	}
 
 	// First pipe: use the direct path (no forwarder goroutine).
-	if fq.directPipe == nil && len(fq.pipes) == 0 {
-		fq.directPipe = p
-		fq.directWake = make(chan struct{})
-		if rc, ok := p.(recvChanner); ok {
-			fq.directRecvCh = rc.RecvCh()
-		} else {
-			fq.directRecvCh = nil
+	if ds == nil && len(fq.pipes) == 0 {
+		snap := &directSnapshot{
+			pipe: p,
+			wake: make(chan struct{}),
 		}
-		// Wake any RecvWithSource goroutine blocked in the multi-pipe
-		// select so it re-checks and finds the direct pipe.
+		if rc, ok := p.(recvChanner); ok {
+			snap.recvCh = rc.RecvCh()
+		}
+		fq.direct.Store(snap)
 		select {
 		case fq.recvNotify <- struct{}{}:
 		default:
@@ -599,12 +594,10 @@ func (fq *FairQueue) Attach(p iface.Pipe) error {
 
 	// Transitioning 1→N: promote the existing directPipe to a
 	// forwarder-backed entry before adding the new one.
-	if fq.directPipe != nil {
-		old := fq.directPipe
-		wake := fq.directWake
-		fq.directPipe = nil
-		fq.directWake = nil
-		fq.directRecvCh = nil
+	if ds != nil {
+		old := ds.pipe
+		wake := ds.wake
+		fq.direct.Store(nil)
 		if wake != nil {
 			close(wake)
 		}
@@ -627,14 +620,12 @@ func (fq *FairQueue) Attach(p iface.Pipe) error {
 // Detach removes p and signals its forwarder to stop promptly.
 func (fq *FairQueue) Detach(p iface.Pipe) error {
 	fq.mu.Lock()
-	if fq.directPipe == p {
-		fq.directPipe = nil
-		wake := fq.directWake
-		fq.directWake = nil
-		fq.directRecvCh = nil
+	ds := fq.direct.Load()
+	if ds != nil && ds.pipe == p {
+		fq.direct.Store(nil)
 		fq.mu.Unlock()
-		if wake != nil {
-			close(wake)
+		if ds.wake != nil {
+			close(ds.wake)
 		}
 		return nil
 	}
@@ -681,33 +672,45 @@ func (fq *FairQueue) Recv(ctx context.Context) (*msg.Msg, error) {
 // to unblock a parked select.
 func (fq *FairQueue) RecvWithSource(ctx context.Context) (*msg.Msg, iface.Pipe, error) {
 	for {
-		fq.mu.Lock()
-		dp := fq.directPipe
-		rch := fq.directRecvCh
-		wake := fq.directWake
-		closed := fq.closed
-		fq.mu.Unlock()
+		ds := fq.direct.Load()
 
-		if closed {
+		// Non-blocking closed check via the closeCh channel (avoids
+		// reading fq.closed without the mutex).
+		select {
+		case <-fq.closeCh:
 			select {
 			case it := <-fq.inbound:
 				return it.m, it.p, nil
 			default:
 				return nil, nil, fmt.Errorf("fairqueue recv: %w", zmqerr.ErrSocketClosed)
 			}
+		default:
 		}
 
-		if dp != nil && rch != nil {
+		if ds != nil && ds.recvCh != nil {
+			rch := ds.recvCh
+			// Non-blocking try: 2-case select avoids locking all 5
+			// channels when data is already buffered.
 			select {
 			case m := <-rch:
 				if m != nil {
 					fq.recv.Add(1)
-					return m, dp, nil
+					return m, ds.pipe, nil
 				}
 				continue
-			case <-wake:
+			default:
+			}
+			// Blocking path with full cancellation support.
+			select {
+			case m := <-rch:
+				if m != nil {
+					fq.recv.Add(1)
+					return m, ds.pipe, nil
+				}
 				continue
-			case <-dp.Closed():
+			case <-ds.wake:
+				continue
+			case <-ds.pipe.Closed():
 				continue
 			case <-fq.closeCh:
 				select {
@@ -721,11 +724,11 @@ func (fq *FairQueue) RecvWithSource(ctx context.Context) (*msg.Msg, iface.Pipe, 
 			}
 		}
 
-		if dp != nil {
-			m, err := dp.Recv(ctx)
+		if ds != nil {
+			m, err := ds.pipe.Recv(ctx)
 			if err == nil {
 				fq.recv.Add(1)
-				return m, dp, nil
+				return m, ds.pipe, nil
 			}
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
 				continue
@@ -762,12 +765,10 @@ func (fq *FairQueue) Close() error {
 		return nil
 	}
 	fq.closed = true
-	wake := fq.directWake
-	fq.directPipe = nil
-	fq.directWake = nil
-	fq.directRecvCh = nil
-	if wake != nil {
-		close(wake)
+	ds := fq.direct.Load()
+	fq.direct.Store(nil)
+	if ds != nil && ds.wake != nil {
+		close(ds.wake)
 	}
 	close(fq.closeCh)
 	forwarders := make([]*fairForwarder, 0, len(fq.pipes))

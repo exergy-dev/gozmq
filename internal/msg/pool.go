@@ -70,6 +70,11 @@ func tierIndexForCap(c int) int {
 // The returned bytes are not zeroed; callers treat the buffer as
 // uninitialized storage and write into it (ZMTP body reads do io.ReadFull
 // which overwrites every byte).
+// slicePtrPool recycles *[]byte wrappers so PoolPut can avoid a heap
+// escape on every call. PoolGet returns wrappers here; PoolPut draws
+// from here. After warm-up the pool is self-sustaining.
+var slicePtrPool = sync.Pool{New: func() any { var b []byte; return &b }}
+
 func PoolGet(size int) []byte {
 	if size < 0 {
 		panic("gozmq/internal/msg: PoolGet size < 0")
@@ -80,8 +85,8 @@ func PoolGet(size int) []byte {
 	}
 	bp := bufPools[i].Get().(*[]byte)
 	b := (*bp)[:size]
-	// Release the pointer wrapper; reuse happens on Put.
 	*bp = nil
+	slicePtrPool.Put(bp)
 	return b
 }
 
@@ -103,7 +108,7 @@ func PoolPut(b []byte) {
 		return
 	}
 	b = b[:0]
-	// Store via pointer to avoid the interface-boxing allocation the
-	// sync.Pool documentation flags for non-pointer slice values.
-	bufPools[i].Put(&b)
+	p := slicePtrPool.Get().(*[]byte)
+	*p = b
+	bufPools[i].Put(p)
 }
