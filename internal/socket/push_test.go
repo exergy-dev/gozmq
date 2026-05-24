@@ -2,7 +2,6 @@ package socket_test
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -10,6 +9,7 @@ import (
 	"github.com/rkm/gozmq/internal/pipe"
 	"github.com/rkm/gozmq/internal/socket"
 	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPush_LoadBalances(t *testing.T) {
@@ -22,18 +22,11 @@ func TestPush_LoadBalances(t *testing.T) {
 	engineEnds, peerEnds := makePairs(n, 4, 4)
 	defer closePipes(append(engineEnds, peerEnds...)...)
 
-	for _, p := range engineEnds {
-		if err := eng.AttachPipe(p); err != nil {
-			t.Fatalf("attach: %v", err)
-		}
-	}
+	mustAttach(t, eng, engineEnds...)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 	for i := 0; i < send; i++ {
-		if err := eng.Send(ctx, msg.FromBytes([]byte{byte(i)})); err != nil {
-			t.Fatalf("send %d: %v", i, err)
-		}
+		require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte{byte(i)})), "send %d", i)
 	}
 
 	counts := make([]int, n)
@@ -49,9 +42,7 @@ func TestPush_LoadBalances(t *testing.T) {
 		c()
 	}
 	for i, c := range counts {
-		if c != send/n {
-			t.Fatalf("peer %d got %d messages, expected %d", i, c, send/n)
-		}
+		require.Equal(t, send/n, c, "peer %d got %d messages, expected %d", i, c, send/n)
 	}
 }
 
@@ -60,9 +51,7 @@ func TestPush_RecvIsFSMViolation(t *testing.T) {
 	eng := socket.NewPushEngine()
 	defer eng.Close()
 	_, err := eng.Recv(context.Background())
-	if !errors.Is(err, zmqerr.ErrFSMViolation) {
-		t.Fatalf("recv err = %v, want ErrFSMViolation", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrFSMViolation)
 }
 
 func TestPush_BlocksOnHWMUnblocksOnDrain(t *testing.T) {
@@ -72,38 +61,29 @@ func TestPush_BlocksOnHWMUnblocksOnDrain(t *testing.T) {
 
 	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	if err := eng.AttachPipe(a); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	mustAttach(t, eng, a)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := eng.Send(ctx, msg.FromBytes([]byte("one"))); err != nil {
-		t.Fatalf("first send: %v", err)
-	}
+	ctx := testCtx(t)
+	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("one"))), "first send")
 	done := make(chan error, 1)
 	go func() { done <- eng.Send(ctx, msg.FromBytes([]byte("two"))) }()
 	select {
 	case err := <-done:
-		t.Fatalf("second send completed early: %v", err)
+		require.Fail(t, "second send completed early", "%v", err)
 	case <-time.After(50 * time.Millisecond):
 	}
 	drainCtx, dc := context.WithTimeout(context.Background(), time.Second)
 	defer dc()
-	if _, err := b.Recv(drainCtx); err != nil {
-		t.Fatalf("drain: %v", err)
-	}
+	_, err := b.Recv(drainCtx)
+	require.NoError(t, err, "drain")
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Fatalf("second send: %v", err)
-		}
+		require.NoError(t, err, "second send")
 	case <-time.After(time.Second):
-		t.Fatal("second send did not unblock")
+		require.Fail(t, "second send did not unblock")
 	}
-	if _, err := b.Recv(drainCtx); err != nil {
-		t.Fatalf("drain two: %v", err)
-	}
+	_, err = b.Recv(drainCtx)
+	require.NoError(t, err, "drain two")
 }
 
 func TestPush_CloseUnblocksSend(t *testing.T) {
@@ -111,21 +91,15 @@ func TestPush_CloseUnblocksSend(t *testing.T) {
 	eng := socket.NewPushEngine()
 	a, b := pipe.NewPair(0, 0, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	if err := eng.AttachPipe(a); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	mustAttach(t, eng, a)
 	done := make(chan error, 1)
 	go func() { done <- eng.Send(context.Background(), msg.FromBytes([]byte("x"))) }()
 	time.Sleep(50 * time.Millisecond)
-	if err := eng.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	require.NoError(t, eng.Close(), "close")
 	select {
 	case err := <-done:
-		if !errors.Is(err, zmqerr.ErrSocketClosed) {
-			t.Fatalf("send err = %v, want ErrSocketClosed", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
 	case <-time.After(time.Second):
-		t.Fatal("send did not unblock on close")
+		require.Fail(t, "send did not unblock on close")
 	}
 }

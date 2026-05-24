@@ -2,14 +2,12 @@ package transport
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/rkm/gozmq/internal/iface"
-	"github.com/rkm/gozmq/internal/zmqerr"
 )
 
 // Defaults that match design §7.1 and the socketConfig defaults in
@@ -153,50 +151,12 @@ func (t *TCPTransport) applySocketOptions(c net.Conn) error {
 	return nil
 }
 
-// parseAddress converts a "tcp://host:port" endpoint into a net.Dial
-// address. It rejects wildcard hosts ("*") on the dial path — wildcards are
-// only valid for Listen.
 func (t *TCPTransport) parseAddress(endpoint string) (string, error) {
-	scheme, addr, err := splitEndpoint(endpoint)
-	if err != nil {
-		return "", err
-	}
-	if scheme != t.scheme {
-		return "", fmt.Errorf("%w: scheme %q passed to %s transport", zmqerr.ErrEndpointInvalid, scheme, t.scheme)
-	}
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return "", fmt.Errorf("%w: %s", zmqerr.ErrEndpointInvalid, err.Error())
-	}
-	if host == "*" {
-		return "", fmt.Errorf("%w: wildcard host %q not allowed on Dial", zmqerr.ErrEndpointInvalid, addr)
-	}
-	if port == "" || port == "0" {
-		return "", fmt.Errorf("%w: port must be specified for Dial", zmqerr.ErrEndpointInvalid)
-	}
-	return net.JoinHostPort(host, port), nil
+	return parseTCPEndpoint(endpoint, t.scheme, true)
 }
 
-// parseListenAddress converts a "tcp://*:port" / "tcp://host:port" endpoint
-// into a net.Listen address. Wildcard "*" expands to "" (which net treats
-// as "all interfaces"); ephemeral port 0 is left untouched and surfaces in
-// Endpoint() after Listen returns.
 func (t *TCPTransport) parseListenAddress(endpoint string) (string, error) {
-	scheme, addr, err := splitEndpoint(endpoint)
-	if err != nil {
-		return "", err
-	}
-	if scheme != t.scheme {
-		return "", fmt.Errorf("%w: scheme %q passed to %s transport", zmqerr.ErrEndpointInvalid, scheme, t.scheme)
-	}
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return "", fmt.Errorf("%w: %s", zmqerr.ErrEndpointInvalid, err.Error())
-	}
-	if host == "*" {
-		host = "" // net.Listen treats empty host as all-interfaces
-	}
-	return net.JoinHostPort(host, port), nil
+	return parseTCPEndpoint(endpoint, t.scheme, false)
 }
 
 // --------------------------------------------------------------------------

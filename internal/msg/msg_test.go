@@ -1,48 +1,35 @@
 package msg
 
 import (
-	"bytes"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestMsgAppendFrame(t *testing.T) {
 	m := New()
 	m.AppendFrame([]byte("a"))
 	m.AppendFrame([]byte("bb"))
-	if m.NumFrames() != 2 {
-		t.Fatalf("NumFrames = %d, want 2", m.NumFrames())
-	}
-	if !bytes.Equal(m.Frames()[0], []byte("a")) || !bytes.Equal(m.Frames()[1], []byte("bb")) {
-		t.Fatalf("frames = %q", m.Frames())
-	}
-	if m.TotalSize() != 3 {
-		t.Fatalf("TotalSize = %d, want 3", m.TotalSize())
-	}
+	require.Equal(t, 2, m.NumFrames())
+	require.Equal(t, []byte("a"), m.Frames()[0])
+	require.Equal(t, []byte("bb"), m.Frames()[1])
+	require.Equal(t, 3, m.TotalSize())
 }
 
 func TestMsgBytesSingleFrame(t *testing.T) {
 	m := FromBytes([]byte("hello"))
-	if got := string(m.Bytes()); got != "hello" {
-		t.Fatalf("Bytes = %q", got)
-	}
+	require.Equal(t, "hello", string(m.Bytes()))
 }
 
 func TestMsgBytesPanicsOnMultipart(t *testing.T) {
 	m := FromFrames([]byte("a"), []byte("b"))
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on multipart Bytes")
-		}
-	}()
-	_ = m.Bytes()
+	require.Panics(t, func() { _ = m.Bytes() }, "expected panic on multipart Bytes")
 }
 
 func TestMsgReset(t *testing.T) {
 	m := FromFrames([]byte("x"), []byte("y"))
 	m.Reset()
-	if m.NumFrames() != 0 {
-		t.Fatalf("NumFrames after Reset = %d", m.NumFrames())
-	}
+	require.Equal(t, 0, m.NumFrames())
 }
 
 func TestMsgResetReleasesPooledFrames(t *testing.T) {
@@ -50,17 +37,11 @@ func TestMsgResetReleasesPooledFrames(t *testing.T) {
 	m := New()
 	m.AppendPooledFrame(pool[:16], pool)
 	holder := m.pooled
-	if len(holder) != 1 {
-		t.Fatalf("pooled buffers after AppendPooledFrame = %d, want 1", len(holder))
-	}
+	require.Len(t, holder, 1)
 
 	m.Reset()
-	if m.NumFrames() != 0 {
-		t.Fatalf("NumFrames after Reset = %d, want 0", m.NumFrames())
-	}
-	if m.pooled != nil {
-		t.Fatal("pooled buffers still attached after Reset")
-	}
+	require.Equal(t, 0, m.NumFrames())
+	require.Nil(t, m.pooled, "pooled buffers still attached after Reset")
 
 	m.Reset()
 }
@@ -71,9 +52,7 @@ func TestMsgReleaseNoPooledIsNoop(t *testing.T) {
 	m := FromBytes([]byte("hello"))
 	m.Release()
 	m.Release() // double-release with no pool is still a no-op
-	if m.NumFrames() != 1 {
-		t.Fatalf("NumFrames after Release = %d, want 1", m.NumFrames())
-	}
+	require.Equal(t, 1, m.NumFrames())
 }
 
 // TestMsgRetainReleaseDecrements verifies Retain bumps the count and the
@@ -85,27 +64,15 @@ func TestMsgRetainReleaseDecrements(t *testing.T) {
 	}
 	m := New()
 	m.AppendPooledFrame(buf[:1024], buf)
-	if got := m.refs.Load(); got != 1 {
-		t.Fatalf("initial refs = %d, want 1", got)
-	}
+	require.Equal(t, int32(1), m.refs.Load())
 	m.Retain()
-	if got := m.refs.Load(); got != 2 {
-		t.Fatalf("refs after Retain = %d, want 2", got)
-	}
+	require.Equal(t, int32(2), m.refs.Load())
 	m.Release()
-	if got := m.refs.Load(); got != 1 {
-		t.Fatalf("refs after first Release = %d, want 1", got)
-	}
-	if m.pooled == nil {
-		t.Fatalf("pooled buffers reclaimed too early")
-	}
+	require.Equal(t, int32(1), m.refs.Load())
+	require.NotNil(t, m.pooled, "pooled buffers reclaimed too early")
 	m.Release()
-	if got := m.refs.Load(); got != 0 {
-		t.Fatalf("refs after second Release = %d, want 0", got)
-	}
-	if m.pooled != nil {
-		t.Fatalf("pooled buffers not reclaimed after final Release")
-	}
+	require.Equal(t, int32(0), m.refs.Load())
+	require.Nil(t, m.pooled, "pooled buffers not reclaimed after final Release")
 }
 
 // TestMsgResetForcesReclamation verifies Reset on a *Msg with pooled
@@ -116,12 +83,8 @@ func TestMsgResetForcesReclamation(t *testing.T) {
 	m.AppendPooledFrame(buf[:512], buf)
 	m.Retain()
 	m.Reset()
-	if m.pooled != nil {
-		t.Fatalf("Reset did not reclaim pooled buffers")
-	}
-	if m.NumFrames() != 0 {
-		t.Fatalf("Reset did not truncate frames: %d", m.NumFrames())
-	}
+	require.Nil(t, m.pooled, "Reset did not reclaim pooled buffers")
+	require.Equal(t, 0, m.NumFrames(), "Reset did not truncate frames")
 }
 
 // TestMsgReleaseIdempotentAfterReclamation ensures a Release after the

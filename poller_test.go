@@ -38,27 +38,7 @@ func waitPoll(t *testing.T, p *gozmq.Poller, budget time.Duration) []gozmq.PollE
 // PULL socket. After the user RecvMsgs the message, a subsequent
 // Poll with a short context should not return PollIn (no new data).
 func TestPoller_PullReadsAfterPush(t *testing.T) {
-	zctx := gozmq.NewContext()
-	defer zctx.Close()
-
-	pull, err := zctx.NewSocket(gozmq.Pull)
-	if err != nil {
-		t.Fatalf("new pull: %v", err)
-	}
-	defer pull.Close()
-	if err := pull.Bind("tcp://127.0.0.1:0"); err != nil {
-		t.Fatalf("bind: %v", err)
-	}
-	ep := pull.LastEndpoint()
-
-	push, err := zctx.NewSocket(gozmq.Push)
-	if err != nil {
-		t.Fatalf("new push: %v", err)
-	}
-	defer push.Close()
-	if err := push.Connect(ep); err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	_, pull, push := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "tcp://127.0.0.1:0", nil, nil)
 
 	sendCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -107,27 +87,7 @@ func TestPoller_PullReadsAfterPush(t *testing.T) {
 // then sends a message via PUSH. Poll must not report the removed
 // socket.
 func TestPoller_RemoveStopsReporting(t *testing.T) {
-	zctx := gozmq.NewContext()
-	defer zctx.Close()
-
-	pull, err := zctx.NewSocket(gozmq.Pull)
-	if err != nil {
-		t.Fatalf("new pull: %v", err)
-	}
-	defer pull.Close()
-	if err := pull.Bind("tcp://127.0.0.1:0"); err != nil {
-		t.Fatalf("bind: %v", err)
-	}
-	ep := pull.LastEndpoint()
-
-	push, err := zctx.NewSocket(gozmq.Push)
-	if err != nil {
-		t.Fatalf("new push: %v", err)
-	}
-	defer push.Close()
-	if err := push.Connect(ep); err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	_, pull, push := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "tcp://127.0.0.1:0", nil, nil)
 
 	p := gozmq.NewPoller()
 	p.Add(pull, gozmq.PollIn)
@@ -255,26 +215,7 @@ func TestPoller_ContextCancel(t *testing.T) {
 // TestPoller_DealerRouterPollOut verifies PollOut on a DEALER once
 // it has connected to a ROUTER peer.
 func TestPoller_DealerRouterPollOut(t *testing.T) {
-	zctx := gozmq.NewContext()
-	defer zctx.Close()
-
-	router, err := zctx.NewSocket(gozmq.Router)
-	if err != nil {
-		t.Fatalf("new router: %v", err)
-	}
-	defer router.Close()
-	if err := router.Bind("tcp://127.0.0.1:0"); err != nil {
-		t.Fatalf("bind router: %v", err)
-	}
-
-	dealer, err := zctx.NewSocket(gozmq.Dealer)
-	if err != nil {
-		t.Fatalf("new dealer: %v", err)
-	}
-	defer dealer.Close()
-	if err := dealer.Connect(router.LastEndpoint()); err != nil {
-		t.Fatalf("connect dealer: %v", err)
-	}
+	_, _, dealer := newSocketPairTypes(t, gozmq.Router, gozmq.Dealer, "tcp://127.0.0.1:0", nil, nil)
 
 	p := gozmq.NewPoller()
 	p.Add(dealer, gozmq.PollOut)

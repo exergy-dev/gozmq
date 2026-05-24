@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	gozmq "github.com/rkm/gozmq"
 	"github.com/rkm/gozmq/internal/zmqerr"
 	"github.com/rkm/gozmq/security"
@@ -22,18 +24,12 @@ func TestZapHandler_IntegratesWithPlainHandshake(t *testing.T) {
 	t.Run("accept", func(t *testing.T) {
 		var plainAuthCalls atomic.Int32
 		handler := security.NewZapHandler(zapPolicyFunc(func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
-			if domain != "global" {
-				t.Fatalf("domain = %q, want global", domain)
-			}
-			if mech != "PLAIN" {
-				t.Fatalf("mechanism = %q, want PLAIN", mech)
-			}
-			if len(credentials) != 2 || string(credentials[0]) != "alice" || string(credentials[1]) != "hunter2" {
-				t.Fatalf("credentials = %q, want alice/hunter2", credentials)
-			}
-			if address == "" {
-				t.Fatal("address unexpectedly empty")
-			}
+			require.Equal(t, "global", domain)
+			require.Equal(t, "PLAIN", mech)
+			require.Len(t, credentials, 2)
+			require.Equal(t, "alice", string(credentials[0]))
+			require.Equal(t, "hunter2", string(credentials[1]))
+			require.NotEmpty(t, address, "address unexpectedly empty")
 			return "alice", map[string]string{"Role": "admin"}, nil
 		}))
 
@@ -48,43 +44,25 @@ func TestZapHandler_IntegratesWithPlainHandshake(t *testing.T) {
 			}),
 			gozmq.WithZapDomain("global"),
 			gozmq.WithMonitor(serverEvents, gozmq.EventAll))
-		if err != nil {
-			t.Fatalf("server: %v", err)
-		}
+		require.NoError(t, err)
 		defer server.Close()
-		if err := server.Bind("tcp://127.0.0.1:0"); err != nil {
-			t.Fatalf("bind: %v", err)
-		}
+		require.NoError(t, server.Bind("tcp://127.0.0.1:0"))
 
 		client, err := ctxZmq.NewSocket(gozmq.Pair, gozmq.WithPlainClient("alice", "hunter2"))
-		if err != nil {
-			t.Fatalf("client: %v", err)
-		}
+		require.NoError(t, err)
 		defer client.Close()
-		if err := client.Connect(server.LastEndpoint()); err != nil {
-			t.Fatalf("connect: %v", err)
-		}
+		require.NoError(t, client.Connect(server.LastEndpoint()))
 
 		ev := waitHandshakeEvent(t, serverEvents)
-		if ev.Type != gozmq.EventHandshakeSucceeded {
-			t.Fatalf("handshake event = %v reason=%s, want success", ev.Type, ev.Reason)
-		}
-		if plainAuthCalls.Load() != 0 {
-			t.Fatalf("plain auth fallback called %d times", plainAuthCalls.Load())
-		}
+		require.Equal(t, gozmq.EventHandshakeSucceeded, ev.Type, "want success, got reason=%s", ev.Reason)
+		require.Equal(t, int32(0), plainAuthCalls.Load(), "plain auth fallback should not be called")
 
 		callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := client.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("secret"))); err != nil {
-			t.Fatalf("send: %v", err)
-		}
+		require.NoError(t, client.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("secret"))))
 		msg, err := server.RecvMsg(callCtx)
-		if err != nil {
-			t.Fatalf("recv: %v", err)
-		}
-		if string(msg.Bytes()) != "secret" {
-			t.Fatalf("recv = %q, want secret", msg.Bytes())
-		}
+		require.NoError(t, err)
+		require.Equal(t, "secret", string(msg.Bytes()))
 	})
 
 	t.Run("reject", func(t *testing.T) {
@@ -100,54 +78,33 @@ func TestZapHandler_IntegratesWithPlainHandshake(t *testing.T) {
 			gozmq.WithPlainAuth(func(string, string) bool { return true }),
 			gozmq.WithZapDomain("global"),
 			gozmq.WithMonitor(serverEvents, gozmq.EventAll))
-		if err != nil {
-			t.Fatalf("server: %v", err)
-		}
+		require.NoError(t, err)
 		defer server.Close()
-		if err := server.Bind("tcp://127.0.0.1:0"); err != nil {
-			t.Fatalf("bind: %v", err)
-		}
+		require.NoError(t, server.Bind("tcp://127.0.0.1:0"))
 
 		client, err := ctxZmq.NewSocket(gozmq.Pair, gozmq.WithPlainClient("alice", "wrong"))
-		if err != nil {
-			t.Fatalf("client: %v", err)
-		}
+		require.NoError(t, err)
 		defer client.Close()
-		if err := client.Connect(server.LastEndpoint()); err != nil {
-			t.Fatalf("connect: %v", err)
-		}
+		require.NoError(t, client.Connect(server.LastEndpoint()))
 
 		ev := waitHandshakeEvent(t, serverEvents)
-		if ev.Type != gozmq.EventHandshakeFailedAuth {
-			t.Fatalf("handshake event = %v reason=%s, want auth failure", ev.Type, ev.Reason)
-		}
+		require.Equal(t, gozmq.EventHandshakeFailedAuth, ev.Type, "want auth failure, got reason=%s", ev.Reason)
 	})
 }
 
 func TestZapHandler_IntegratesWithCurveHandshake(t *testing.T) {
 	serverPub, serverSec, err := curve.GenerateKeyPair()
-	if err != nil {
-		t.Fatalf("server keypair: %v", err)
-	}
+	require.NoError(t, err, "server keypair")
 	clientPub, clientSec, err := curve.GenerateKeyPair()
-	if err != nil {
-		t.Fatalf("client keypair: %v", err)
-	}
+	require.NoError(t, err, "client keypair")
 
 	t.Run("accept", func(t *testing.T) {
 		handler := security.NewZapHandler(zapPolicyFunc(func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
-			if domain != "global" {
-				t.Fatalf("domain = %q, want global", domain)
-			}
-			if mech != "CURVE" {
-				t.Fatalf("mechanism = %q, want CURVE", mech)
-			}
-			if len(credentials) != 1 || string(credentials[0]) != string(clientPub[:]) {
-				t.Fatalf("credentials = %x, want client public key", credentials)
-			}
-			if address == "" {
-				t.Fatal("address unexpectedly empty")
-			}
+			require.Equal(t, "global", domain)
+			require.Equal(t, "CURVE", mech)
+			require.Len(t, credentials, 1)
+			require.Equal(t, string(clientPub[:]), string(credentials[0]))
+			require.NotEmpty(t, address, "address unexpectedly empty")
 			return "client", nil, nil
 		}))
 
@@ -159,40 +116,24 @@ func TestZapHandler_IntegratesWithCurveHandshake(t *testing.T) {
 			gozmq.WithCurveServer(serverSec[:]),
 			gozmq.WithZapDomain("global"),
 			gozmq.WithMonitor(serverEvents, gozmq.EventAll))
-		if err != nil {
-			t.Fatalf("server: %v", err)
-		}
+		require.NoError(t, err)
 		defer server.Close()
-		if err := server.Bind("tcp://127.0.0.1:0"); err != nil {
-			t.Fatalf("bind: %v", err)
-		}
+		require.NoError(t, server.Bind("tcp://127.0.0.1:0"))
 
 		client, err := ctxZmq.NewSocket(gozmq.Pair, gozmq.WithCurveClient(serverPub[:], clientPub[:], clientSec[:]))
-		if err != nil {
-			t.Fatalf("client: %v", err)
-		}
+		require.NoError(t, err)
 		defer client.Close()
-		if err := client.Connect(server.LastEndpoint()); err != nil {
-			t.Fatalf("connect: %v", err)
-		}
+		require.NoError(t, client.Connect(server.LastEndpoint()))
 
 		ev := waitHandshakeEvent(t, serverEvents)
-		if ev.Type != gozmq.EventHandshakeSucceeded {
-			t.Fatalf("handshake event = %v reason=%s, want success", ev.Type, ev.Reason)
-		}
+		require.Equal(t, gozmq.EventHandshakeSucceeded, ev.Type, "want success, got reason=%s", ev.Reason)
 
 		callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := client.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("curve-secret"))); err != nil {
-			t.Fatalf("send: %v", err)
-		}
+		require.NoError(t, client.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("curve-secret"))))
 		msg, err := server.RecvMsg(callCtx)
-		if err != nil {
-			t.Fatalf("recv: %v", err)
-		}
-		if string(msg.Bytes()) != "curve-secret" {
-			t.Fatalf("recv = %q, want curve-secret", msg.Bytes())
-		}
+		require.NoError(t, err)
+		require.Equal(t, "curve-secret", string(msg.Bytes()))
 	})
 
 	t.Run("reject", func(t *testing.T) {
@@ -208,27 +149,17 @@ func TestZapHandler_IntegratesWithCurveHandshake(t *testing.T) {
 			gozmq.WithCurveServer(serverSec[:]),
 			gozmq.WithZapDomain("global"),
 			gozmq.WithMonitor(serverEvents, gozmq.EventAll))
-		if err != nil {
-			t.Fatalf("server: %v", err)
-		}
+		require.NoError(t, err)
 		defer server.Close()
-		if err := server.Bind("tcp://127.0.0.1:0"); err != nil {
-			t.Fatalf("bind: %v", err)
-		}
+		require.NoError(t, server.Bind("tcp://127.0.0.1:0"))
 
 		client, err := ctxZmq.NewSocket(gozmq.Pair, gozmq.WithCurveClient(serverPub[:], clientPub[:], clientSec[:]))
-		if err != nil {
-			t.Fatalf("client: %v", err)
-		}
+		require.NoError(t, err)
 		defer client.Close()
-		if err := client.Connect(server.LastEndpoint()); err != nil {
-			t.Fatalf("connect: %v", err)
-		}
+		require.NoError(t, client.Connect(server.LastEndpoint()))
 
 		ev := waitHandshakeEvent(t, serverEvents)
-		if ev.Type != gozmq.EventHandshakeFailedAuth {
-			t.Fatalf("handshake event = %v reason=%s, want auth failure", ev.Type, ev.Reason)
-		}
+		require.Equal(t, gozmq.EventHandshakeFailedAuth, ev.Type, "want auth failure, got reason=%s", ev.Reason)
 	})
 }
 
@@ -243,7 +174,7 @@ func waitHandshakeEvent(t *testing.T, ch <-chan gozmq.Event) gozmq.Event {
 				return ev
 			}
 		case <-timer.C:
-			t.Fatal("timed out waiting for handshake event")
+			require.FailNow(t, "timed out waiting for handshake event")
 		}
 	}
 }

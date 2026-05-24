@@ -1,10 +1,10 @@
 package curve
 
 import (
-	"bytes"
 	"encoding/binary"
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // Hello-world Z85 vectors from RFC 32 §4. 8 bytes of binary data round-trip
@@ -13,16 +13,10 @@ func TestZ85HelloWorldVector(t *testing.T) {
 	bin := []byte{0x86, 0x4F, 0xD2, 0x6F, 0xB5, 0x59, 0xF7, 0x5B}
 	want := "HelloWorld"
 
-	if got := Z85Encode(bin); got != want {
-		t.Fatalf("Z85Encode: got %q, want %q", got, want)
-	}
+	require.Equal(t, want, Z85Encode(bin), "Z85Encode")
 	dec, err := Z85Decode(want)
-	if err != nil {
-		t.Fatalf("Z85Decode: %v", err)
-	}
-	if !bytes.Equal(dec, bin) {
-		t.Fatalf("Z85Decode: got %x, want %x", dec, bin)
-	}
+	require.NoError(t, err, "Z85Decode")
+	require.Equal(t, bin, dec, "Z85Decode")
 }
 
 // Full 40-character Z85 public-key vectors from the RFC 32 §4 example pair.
@@ -38,31 +32,17 @@ func TestZ85KeyVectorsRoundTrip(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if len(c.z85) != 40 {
-				t.Fatalf("vector %q length %d != 40", c.z85, len(c.z85))
-			}
+			require.Len(t, c.z85, 40, "vector %q length", c.z85)
 			raw, err := Z85Decode(c.z85)
-			if err != nil {
-				t.Fatalf("decode: %v", err)
-			}
-			if len(raw) != 32 {
-				t.Fatalf("decoded length %d != 32", len(raw))
-			}
+			require.NoError(t, err, "decode")
+			require.Len(t, raw, 32, "decoded length")
 			back := Z85Encode(raw)
-			if back != c.z85 {
-				t.Fatalf("round-trip: got %q, want %q", back, c.z85)
-			}
+			require.Equal(t, c.z85, back, "round-trip")
 			// Also through the Key wrapper.
 			k, err := Z85DecodeKey(c.z85)
-			if err != nil {
-				t.Fatalf("Z85DecodeKey: %v", err)
-			}
-			if !bytes.Equal(k[:], raw) {
-				t.Fatalf("Z85DecodeKey bytes differ from Z85Decode")
-			}
-			if Z85EncodeKey(k) != c.z85 {
-				t.Fatalf("Z85EncodeKey round-trip failed")
-			}
+			require.NoError(t, err, "Z85DecodeKey")
+			require.Equal(t, raw, k[:], "Z85DecodeKey bytes differ from Z85Decode")
+			require.Equal(t, c.z85, Z85EncodeKey(k), "Z85EncodeKey round-trip")
 		})
 	}
 }
@@ -81,16 +61,10 @@ func TestZ85PropertyEquivalent(t *testing.T) {
 	for _, chunk := range []int{4, 8, 16, 32, 40, 64} {
 		in := buf[:chunk]
 		enc := Z85Encode(in)
-		if len(enc) != chunk/4*5 {
-			t.Fatalf("chunk %d encoded length %d != %d", chunk, len(enc), chunk/4*5)
-		}
+		require.Len(t, enc, chunk/4*5, "chunk %d encoded length", chunk)
 		dec, err := Z85Decode(enc)
-		if err != nil {
-			t.Fatalf("chunk %d decode: %v", chunk, err)
-		}
-		if !bytes.Equal(dec, in) {
-			t.Fatalf("chunk %d round-trip mismatch: got %x, want %x", chunk, dec, in)
-		}
+		require.NoError(t, err, "chunk %d decode", chunk)
+		require.Equal(t, in, dec, "chunk %d round-trip", chunk)
 	}
 }
 
@@ -98,12 +72,9 @@ func TestZ85PropertyEquivalent(t *testing.T) {
 // length is not a multiple of 4. Using recover() because the contract is a
 // panic, not an error return.
 func TestZ85EncodePanicsOnBadLength(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("Z85Encode on 3-byte input: expected panic")
-		}
-	}()
-	Z85Encode([]byte{0, 0, 0})
+	require.Panics(t, func() {
+		Z85Encode([]byte{0, 0, 0})
+	}, "Z85Encode on 3-byte input: expected panic")
 }
 
 func TestZ85DecodeRejectsBadInputs(t *testing.T) {
@@ -119,12 +90,7 @@ func TestZ85DecodeRejectsBadInputs(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			_, err := Z85Decode(c.s)
-			if err == nil {
-				t.Fatalf("decode %q: expected error", c.s)
-			}
-			if !errors.Is(err, ErrInvalidZ85) {
-				t.Fatalf("decode %q: expected ErrInvalidZ85, got %v", c.s, err)
-			}
+			require.ErrorIs(t, err, ErrInvalidZ85, "decode %q", c.s)
 		})
 	}
 }
@@ -134,27 +100,15 @@ func TestZ85DecodeRejectsBadInputs(t *testing.T) {
 // basepoint-multiplication of the secret.
 func TestGenerateKeyPairRandom(t *testing.T) {
 	pub1, sec1, err := GenerateKeyPair()
-	if err != nil {
-		t.Fatalf("GenerateKeyPair 1: %v", err)
-	}
+	require.NoError(t, err, "GenerateKeyPair 1")
 	pub2, sec2, err := GenerateKeyPair()
-	if err != nil {
-		t.Fatalf("GenerateKeyPair 2: %v", err)
-	}
-	if sec1 == sec2 {
-		t.Fatal("two calls returned the same secret")
-	}
-	if pub1 == pub2 {
-		t.Fatal("two calls returned the same public")
-	}
+	require.NoError(t, err, "GenerateKeyPair 2")
+	require.NotEqual(t, sec1, sec2, "two calls returned the same secret")
+	require.NotEqual(t, pub1, pub2, "two calls returned the same public")
 	// Derive and compare.
 	derived, err := derivePublic(sec1)
-	if err != nil {
-		t.Fatalf("derivePublic: %v", err)
-	}
-	if derived != pub1 {
-		t.Fatalf("derived public != returned public")
-	}
+	require.NoError(t, err, "derivePublic")
+	require.Equal(t, pub1, derived, "derived public != returned public")
 }
 
 // TestZ85CounterExample is a small extra guard: a well-known 8-byte counter
@@ -165,10 +119,6 @@ func TestZ85CounterExample(t *testing.T) {
 	binary.BigEndian.PutUint64(b[:], 0x0000_0001_0000_0002)
 	enc := Z85Encode(b[:])
 	dec, err := Z85Decode(enc)
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if !bytes.Equal(dec, b[:]) {
-		t.Fatalf("round-trip mismatch: got %x, want %x", dec, b[:])
-	}
+	require.NoError(t, err, "decode")
+	require.Equal(t, b[:], dec, "round-trip")
 }

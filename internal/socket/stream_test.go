@@ -3,7 +3,6 @@ package socket_test
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -17,6 +16,8 @@ import (
 	"github.com/rkm/gozmq/internal/socket"
 	"github.com/rkm/gozmq/internal/stream"
 	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // --------------------------------------------------------------------------
@@ -43,48 +44,28 @@ func TestStream_InboundTaggedByIdentity(t *testing.T) {
 		_ = peerB.Close()
 	}()
 
-	if err := eng.AttachPipe(engA); err != nil {
-		t.Fatalf("AttachPipe A: %v", err)
-	}
-	if err := eng.AttachPipe(engB); err != nil {
-		t.Fatalf("AttachPipe B: %v", err)
-	}
+	mustAttach(t, eng, engA, engB)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
 	// Peer A pushes raw bytes; Peer B pushes raw bytes. Each should
 	// surface on the engine tagged with the sender's identity.
-	if err := peerA.Send(ctx, msg.FromBytes([]byte("GET / HTTP/1.1\r\n"))); err != nil {
-		t.Fatalf("peerA send: %v", err)
-	}
-	if err := peerB.Send(ctx, msg.FromBytes([]byte("HELO example.com\r\n"))); err != nil {
-		t.Fatalf("peerB send: %v", err)
-	}
+	require.NoError(t, peerA.Send(ctx, msg.FromBytes([]byte("GET / HTTP/1.1\r\n"))), "peerA send")
+	require.NoError(t, peerB.Send(ctx, msg.FromBytes([]byte("HELO example.com\r\n"))), "peerB send")
 
 	// Collect two messages; order is non-deterministic (fair queue).
 	got := make(map[string]string)
 	for i := 0; i < 2; i++ {
 		m, err := eng.Recv(ctx)
-		if err != nil {
-			t.Fatalf("recv %d: %v", i, err)
-		}
-		if m.NumFrames() != 2 {
-			t.Fatalf("recv %d: frames=%d, want 2 (identity + body)", i, m.NumFrames())
-		}
+		require.NoError(t, err, "recv %d", i)
+		require.Equal(t, 2, m.NumFrames(), "recv %d: frames (identity + body)", i)
 		id := string(m.Frames()[0])
 		body := string(m.Frames()[1])
-		if _, dup := got[id]; dup {
-			t.Fatalf("duplicate identity %q", id)
-		}
+		require.NotContains(t, got, id, "duplicate identity %q", id)
 		got[id] = body
 	}
-	if got[string(idA)] != "GET / HTTP/1.1\r\n" {
-		t.Errorf("peer A body = %q", got[string(idA)])
-	}
-	if got[string(idB)] != "HELO example.com\r\n" {
-		t.Errorf("peer B body = %q", got[string(idB)])
-	}
+	assert.Equal(t, "GET / HTTP/1.1\r\n", got[string(idA)], "peer A body")
+	assert.Equal(t, "HELO example.com\r\n", got[string(idB)], "peer B body")
 }
 
 // TestStream_OutboundRoutesByIdentity asserts that Send routes by the
@@ -107,43 +88,23 @@ func TestStream_OutboundRoutesByIdentity(t *testing.T) {
 		_ = peerB.Close()
 	}()
 
-	if err := eng.AttachPipe(engA); err != nil {
-		t.Fatalf("AttachPipe A: %v", err)
-	}
-	if err := eng.AttachPipe(engB); err != nil {
-		t.Fatalf("AttachPipe B: %v", err)
-	}
+	mustAttach(t, eng, engA, engB)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
 	// Send a multi-frame body to peer-a; concatenation should land on peerA.
-	if err := eng.Send(ctx, msg.FromFrames(idA, []byte("HTTP/1.1 "), []byte("200 OK\r\n"))); err != nil {
-		t.Fatalf("send to A: %v", err)
-	}
+	require.NoError(t, eng.Send(ctx, msg.FromFrames(idA, []byte("HTTP/1.1 "), []byte("200 OK\r\n"))), "send to A")
 	// Send a single-frame body to peer-b.
-	if err := eng.Send(ctx, msg.FromFrames(idB, []byte("250 OK\r\n"))); err != nil {
-		t.Fatalf("send to B: %v", err)
-	}
+	require.NoError(t, eng.Send(ctx, msg.FromFrames(idB, []byte("250 OK\r\n"))), "send to B")
 
 	mA, err := peerA.Recv(ctx)
-	if err != nil {
-		t.Fatalf("peerA recv: %v", err)
-	}
-	if mA.NumFrames() != 1 {
-		t.Fatalf("peerA frames = %d, want 1 (concatenated)", mA.NumFrames())
-	}
-	if got := mA.Bytes(); !bytes.Equal(got, []byte("HTTP/1.1 200 OK\r\n")) {
-		t.Fatalf("peerA body = %q, want concatenated %q", got, "HTTP/1.1 200 OK\r\n")
-	}
+	require.NoError(t, err, "peerA recv")
+	require.Equal(t, 1, mA.NumFrames(), "peerA frames (concatenated)")
+	require.Equal(t, []byte("HTTP/1.1 200 OK\r\n"), mA.Bytes())
 
 	mB, err := peerB.Recv(ctx)
-	if err != nil {
-		t.Fatalf("peerB recv: %v", err)
-	}
-	if got := mB.Bytes(); !bytes.Equal(got, []byte("250 OK\r\n")) {
-		t.Fatalf("peerB body = %q", got)
-	}
+	require.NoError(t, err, "peerB recv")
+	require.Equal(t, []byte("250 OK\r\n"), mB.Bytes())
 }
 
 // TestStream_UnknownIdentity asserts that Send to an unrecognized
@@ -155,9 +116,7 @@ func TestStream_UnknownIdentity(t *testing.T) {
 	defer eng.Close()
 
 	err := eng.Send(context.Background(), msg.FromFrames([]byte("nope"), []byte("hi")))
-	if !errors.Is(err, zmqerr.ErrRouteUnknown) {
-		t.Fatalf("err = %v, want wraps ErrRouteUnknown", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrRouteUnknown)
 }
 
 // TestStream_MissingIdentityFrame asserts Send with an empty message
@@ -168,9 +127,7 @@ func TestStream_MissingIdentityFrame(t *testing.T) {
 	defer eng.Close()
 
 	err := eng.Send(context.Background(), msg.New())
-	if !errors.Is(err, zmqerr.ErrRouteUnknown) {
-		t.Fatalf("err = %v, want wraps ErrRouteUnknown", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrRouteUnknown)
 }
 
 // TestStream_DetachRemovesRoute asserts that after DetachPipe, sending to
@@ -187,16 +144,10 @@ func TestStream_DetachRemovesRoute(t *testing.T) {
 		_ = peer.Close()
 	}()
 
-	if err := eng.AttachPipe(engP); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
-	if err := eng.DetachPipe(engP); err != nil {
-		t.Fatalf("detach: %v", err)
-	}
+	mustAttach(t, eng, engP)
+	require.NoError(t, eng.DetachPipe(engP), "detach")
 	err := eng.Send(context.Background(), msg.FromFrames(id, []byte("x")))
-	if !errors.Is(err, zmqerr.ErrRouteUnknown) {
-		t.Fatalf("err after detach = %v, want wraps ErrRouteUnknown", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrRouteUnknown, "after detach")
 }
 
 // TestStream_AnonymousPeerGetsSynthesizedIdentity asserts that a pipe
@@ -215,43 +166,24 @@ func TestStream_AnonymousPeerGetsSynthesizedIdentity(t *testing.T) {
 		_ = engP.Close()
 		_ = peer.Close()
 	}()
-	if err := eng.AttachPipe(engP); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	mustAttach(t, eng, engP)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
-	if err := peer.Send(ctx, msg.FromBytes([]byte("raw"))); err != nil {
-		t.Fatalf("peer send: %v", err)
-	}
+	require.NoError(t, peer.Send(ctx, msg.FromBytes([]byte("raw"))), "peer send")
 	m, err := eng.Recv(ctx)
-	if err != nil {
-		t.Fatalf("recv: %v", err)
-	}
-	if m.NumFrames() != 2 {
-		t.Fatalf("frames=%d", m.NumFrames())
-	}
+	require.NoError(t, err, "recv")
+	require.Equal(t, 2, m.NumFrames())
 	id := m.Frames()[0]
-	if len(id) == 0 {
-		t.Fatalf("synthesized identity was empty")
-	}
+	require.NotEmpty(t, id, "synthesized identity was empty")
 	// Synthesized identities start with a zero byte per libzmq convention.
-	if id[0] != 0 {
-		t.Errorf("synthesized identity leading byte = %d, want 0", id[0])
-	}
+	assert.Equal(t, byte(0), id[0], "synthesized identity leading byte")
 
 	// Replay the synthesized identity on Send — it should route back.
-	if err := eng.Send(ctx, msg.FromFrames(id, []byte("reply"))); err != nil {
-		t.Fatalf("send back: %v", err)
-	}
+	require.NoError(t, eng.Send(ctx, msg.FromFrames(id, []byte("reply"))), "send back")
 	got, err := peer.Recv(ctx)
-	if err != nil {
-		t.Fatalf("peer recv: %v", err)
-	}
-	if !bytes.Equal(got.Bytes(), []byte("reply")) {
-		t.Fatalf("peer body = %q", got.Bytes())
-	}
+	require.NoError(t, err, "peer recv")
+	require.Equal(t, []byte("reply"), got.Bytes())
 }
 
 // TestStream_CloseUnblocksRecv asserts that Close wakes a pending Recv.
@@ -265,16 +197,12 @@ func TestStream_CloseUnblocksRecv(t *testing.T) {
 		done <- err
 	}()
 	time.Sleep(50 * time.Millisecond)
-	if err := eng.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	require.NoError(t, eng.Close(), "close")
 	select {
 	case err := <-done:
-		if !errors.Is(err, zmqerr.ErrSocketClosed) {
-			t.Fatalf("recv err = %v, want wraps ErrSocketClosed", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
 	case <-time.After(time.Second):
-		t.Fatal("recv did not unblock on close")
+		require.Fail(t, "recv did not unblock on close")
 	}
 }
 
@@ -283,17 +211,13 @@ func TestStream_CloseUnblocksRecv(t *testing.T) {
 func TestStream_AttachAfterClose(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewStreamEngine()
-	if err := eng.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	require.NoError(t, eng.Close(), "close")
 	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer func() {
 		_ = a.Close()
 		_ = b.Close()
 	}()
-	if err := eng.AttachPipe(a); !errors.Is(err, zmqerr.ErrSocketClosed) {
-		t.Fatalf("attach after close = %v, want wraps ErrSocketClosed", err)
-	}
+	require.ErrorIs(t, eng.AttachPipe(a), zmqerr.ErrSocketClosed, "attach after close")
 }
 
 // --------------------------------------------------------------------------
@@ -347,7 +271,7 @@ func newStreamPeer(t *testing.T, eng iface.SocketEngine, id []byte) *streamPeer 
 	if err := eng.AttachPipe(engEnd); err != nil {
 		_ = engEnd.Close()
 		_ = peerEnd.Close()
-		t.Fatalf("attach: %v", err)
+		require.NoError(t, err, "attach")
 	}
 	return &streamPeer{id: id, peer: peerEnd, engine: engEnd}
 }
@@ -369,44 +293,27 @@ func TestStream_HTTPEchoRoundTrip(t *testing.T) {
 	client := newStreamPeer(t, eng, []byte("http-client"))
 	defer client.close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
 	// --- client → server ----------------------------------------------------
 	const request = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
-	if err := client.send(ctx, []byte(request)); err != nil {
-		t.Fatalf("client send: %v", err)
-	}
+	require.NoError(t, client.send(ctx, []byte(request)), "client send")
 
 	// Server-side: Recv yields {identity, body}.
 	recvd, err := eng.Recv(ctx)
-	if err != nil {
-		t.Fatalf("server recv: %v", err)
-	}
-	if recvd.NumFrames() != 2 {
-		t.Fatalf("server recv: frames=%d, want 2 (identity + body)", recvd.NumFrames())
-	}
+	require.NoError(t, err, "server recv")
+	require.Equal(t, 2, recvd.NumFrames(), "server recv frames (identity + body)")
 	gotID := recvd.Frames()[0]
 	gotBody := recvd.Frames()[1]
-	if !bytes.Equal(gotID, client.id) {
-		t.Fatalf("server saw identity %q, want %q", gotID, client.id)
-	}
-	if !bytes.Equal(gotBody, []byte(request)) {
-		t.Fatalf("server saw body %q, want %q", gotBody, request)
-	}
+	require.Equal(t, client.id, gotID, "server saw identity")
+	require.Equal(t, []byte(request), gotBody, "server saw body")
 
 	// --- server → client (echo) ---------------------------------------------
-	if err := eng.Send(ctx, msg.FromFrames(gotID, gotBody)); err != nil {
-		t.Fatalf("server echo send: %v", err)
-	}
+	require.NoError(t, eng.Send(ctx, msg.FromFrames(gotID, gotBody)), "server echo send")
 
 	echoed, err := client.recv(ctx)
-	if err != nil {
-		t.Fatalf("client recv echo: %v", err)
-	}
-	if !bytes.Equal(echoed, []byte(request)) {
-		t.Fatalf("client echo = %q, want %q", echoed, request)
-	}
+	require.NoError(t, err, "client recv echo")
+	require.Equal(t, []byte(request), echoed, "client echo")
 }
 
 // TestStream_Multiplex runs 3 concurrent STREAM clients against one STREAM
@@ -436,7 +343,7 @@ func TestStream_Multiplex(t *testing.T) {
 			defer wg.Done()
 			payload := fmt.Sprintf("payload-from-%d", i)
 			if err := p.send(ctx, []byte(payload)); err != nil {
-				t.Errorf("peer %d send: %v", i, err)
+				assert.NoError(t, err, "peer %d send", i)
 			}
 		}(i, p)
 	}
@@ -446,46 +353,31 @@ func TestStream_Multiplex(t *testing.T) {
 	got := make(map[string]string, nPeers)
 	for i := 0; i < nPeers; i++ {
 		m, err := eng.Recv(ctx)
-		if err != nil {
-			t.Fatalf("server recv %d: %v", i, err)
-		}
-		if m.NumFrames() != 2 {
-			t.Fatalf("server recv %d: frames=%d, want 2", i, m.NumFrames())
-		}
+		require.NoError(t, err, "server recv %d", i)
+		require.Equal(t, 2, m.NumFrames(), "server recv %d: frames", i)
 		id := string(m.Frames()[0])
 		body := string(m.Frames()[1])
-		if _, dup := got[id]; dup {
-			t.Fatalf("duplicate identity %q", id)
-		}
+		require.NotContains(t, got, id, "duplicate identity %q", id)
 		got[id] = body
 	}
 	wg.Wait()
 
-	// Verify each peer's payload arrived under its own identity…
+	// Verify each peer's payload arrived under its own identity...
 	for i, p := range peers {
 		want := fmt.Sprintf("payload-from-%d", i)
-		if got[string(p.id)] != want {
-			t.Errorf("peer %d: server saw %q under id %q, want %q",
-				i, got[string(p.id)], p.id, want)
-		}
+		assert.Equal(t, want, got[string(p.id)], "peer %d payload", i)
 	}
 
-	// …and that server replies target the right peer.
+	// ...and that server replies target the right peer.
 	for i, p := range peers {
 		reply := fmt.Sprintf("reply-to-%d", i)
-		if err := eng.Send(ctx, msg.FromFrames(p.id, []byte(reply))); err != nil {
-			t.Fatalf("server reply %d: %v", i, err)
-		}
+		require.NoError(t, eng.Send(ctx, msg.FromFrames(p.id, []byte(reply))), "server reply %d", i)
 	}
 	for i, p := range peers {
 		b, err := p.recv(ctx)
-		if err != nil {
-			t.Fatalf("peer %d recv reply: %v", i, err)
-		}
+		require.NoError(t, err, "peer %d recv reply", i)
 		want := fmt.Sprintf("reply-to-%d", i)
-		if string(b) != want {
-			t.Errorf("peer %d got reply %q, want %q", i, b, want)
-		}
+		assert.Equal(t, want, string(b), "peer %d reply", i)
 	}
 }
 
@@ -510,34 +402,23 @@ func TestStream_PeerDisconnect(t *testing.T) {
 	// Manual close sequence: do not defer p.close() because we want to
 	// observe partial-teardown behavior.
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
 	// 1. Peer sends; engine receives tagged with identity.
-	if err := p.send(ctx, []byte("hello")); err != nil {
-		t.Fatalf("peer send: %v", err)
-	}
+	require.NoError(t, p.send(ctx, []byte("hello")), "peer send")
 	m, err := eng.Recv(ctx)
-	if err != nil {
-		t.Fatalf("engine recv: %v", err)
-	}
-	if !bytes.Equal(m.Frames()[0], id) {
-		t.Fatalf("identity = %q, want %q", m.Frames()[0], id)
-	}
+	require.NoError(t, err, "engine recv")
+	require.Equal(t, id, m.Frames()[0], "identity")
 
 	// 2. Client closes (simulates EOF on conn.Read → adapter closes pipe
 	//    and calls DetachPipe).
 	_ = p.peer.Close()
-	if err := eng.DetachPipe(p.engine); err != nil {
-		t.Fatalf("detach: %v", err)
-	}
+	require.NoError(t, eng.DetachPipe(p.engine), "detach")
 	_ = p.engine.Close()
 
 	// 3. Send to the detached identity is now a routing error.
 	err = eng.Send(ctx, msg.FromFrames(id, []byte("lost message")))
-	if !errors.Is(err, zmqerr.ErrRouteUnknown) {
-		t.Fatalf("post-detach send = %v, want wraps ErrRouteUnknown", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrRouteUnknown, "post-detach send")
 
 	// 4. Engine.Recv must not block indefinitely on the detached peer.
 	//    Drain briefly: a short-deadline Recv should time out (no peers
@@ -545,9 +426,7 @@ func TestStream_PeerDisconnect(t *testing.T) {
 	deadline, dc := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer dc()
 	_, err = eng.Recv(deadline)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("post-detach recv = %v, want DeadlineExceeded (no peers)", err)
-	}
+	require.ErrorIs(t, err, context.DeadlineExceeded, "post-detach recv (no peers)")
 }
 
 // TestStream_HalfCloseZeroLengthBody asserts the libzmq half-close
@@ -566,51 +445,34 @@ func TestStream_HalfCloseZeroLengthBody(t *testing.T) {
 	p := newStreamPeer(t, eng, id)
 	defer p.close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
 	// 1. Send real data first. Then send the zero-length-body sentinel.
-	if err := eng.Send(ctx, msg.FromFrames(id, []byte("final payload\n"))); err != nil {
-		t.Fatalf("data send: %v", err)
-	}
+	require.NoError(t, eng.Send(ctx, msg.FromFrames(id, []byte("final payload\n"))), "data send")
 	// libzmq variant 1: identity + no body frames (NumFrames=1 on input).
-	if err := eng.Send(ctx, msg.FromFrames(id)); err != nil {
-		t.Fatalf("identity-only send: %v", err)
-	}
+	require.NoError(t, eng.Send(ctx, msg.FromFrames(id)), "identity-only send")
 	// libzmq variant 2: identity + single empty body frame.
-	if err := eng.Send(ctx, msg.FromFrames(id, nil)); err != nil {
-		t.Fatalf("empty-body send: %v", err)
-	}
+	require.NoError(t, eng.Send(ctx, msg.FromFrames(id, nil)), "empty-body send")
 
 	// 2. Client sees data, then the zero-length sentinel(s). The engine
 	//    forwards a single-frame Msg per Send; the body is the concatenation
 	//    of the input body frames (which is "" for the sentinel cases).
 	first, err := p.recv(ctx)
-	if err != nil {
-		t.Fatalf("recv data: %v", err)
-	}
-	if !bytes.Equal(first, []byte("final payload\n")) {
-		t.Fatalf("first recv = %q, want %q", first, "final payload\n")
-	}
+	require.NoError(t, err, "recv data")
+	require.Equal(t, []byte("final payload\n"), first)
 
 	// Both sentinel variants must surface as a zero-length body.
 	for i := 0; i < 2; i++ {
 		b, err := p.recv(ctx)
-		if err != nil {
-			t.Fatalf("sentinel %d recv: %v", i, err)
-		}
-		if len(b) != 0 {
-			t.Fatalf("sentinel %d body len = %d, want 0", i, len(b))
-		}
+		require.NoError(t, err, "sentinel %d recv", i)
+		require.Empty(t, b, "sentinel %d body", i)
 	}
 
 	// 3. Data-loss assertion: the cumulative receive buffer must contain
 	//    exactly the real payload, no more, no less (empty-body frames
 	//    don't add bytes). This catches any future regression where the
 	//    engine accidentally drops queued data ahead of the half-close.
-	if got := p.received.String(); got != "final payload\n" {
-		t.Fatalf("cumulative bytes = %q, want %q", got, "final payload\n")
-	}
+	require.Equal(t, "final payload\n", p.received.String(), "cumulative bytes")
 }
 
 // TestStream_PeerCloseDrainsInFlight asserts that when a peer's pipe
@@ -627,42 +489,29 @@ func TestStream_PeerCloseDrainsInFlight(t *testing.T) {
 	p := newStreamPeer(t, eng, id)
 	defer p.close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
 	// Push data, then close the peer side immediately (no wait).
-	if err := p.send(ctx, []byte("inflight-a")); err != nil {
-		t.Fatalf("send a: %v", err)
-	}
-	if err := p.send(ctx, []byte("inflight-b")); err != nil {
-		t.Fatalf("send b: %v", err)
-	}
+	require.NoError(t, p.send(ctx, []byte("inflight-a")), "send a")
+	require.NoError(t, p.send(ctx, []byte("inflight-b")), "send b")
 	_ = p.peer.Close()
 
 	// Engine must still drain the queued-up bytes (order-preserving).
 	seen := make([]string, 0, 2)
 	for i := 0; i < 2; i++ {
 		m, err := eng.Recv(ctx)
-		if err != nil {
-			t.Fatalf("drain recv %d: %v", i, err)
-		}
-		if !bytes.Equal(m.Frames()[0], id) {
-			t.Fatalf("drain %d identity = %q, want %q", i, m.Frames()[0], id)
-		}
+		require.NoError(t, err, "drain recv %d", i)
+		require.Equal(t, id, m.Frames()[0], "drain %d identity", i)
 		seen = append(seen, string(m.Frames()[1]))
 	}
-	if seen[0] != "inflight-a" || seen[1] != "inflight-b" {
-		t.Fatalf("drain order = %v, want [inflight-a inflight-b]", seen)
-	}
+	require.Equal(t, []string{"inflight-a", "inflight-b"}, seen, "drain order")
 
 	// Engine-side pipe.Recv should now return io.EOF — the adapter's
 	// signal to DetachPipe. Use a short-deadline read to confirm.
 	dl, dc := context.WithTimeout(context.Background(), time.Second)
 	defer dc()
 	_, err := p.engine.Recv(dl)
-	if !errors.Is(err, io.EOF) {
-		t.Fatalf("engine pipe.Recv after peer close = %v, want io.EOF", err)
-	}
+	require.ErrorIs(t, err, io.EOF, "engine pipe.Recv after peer close")
 }
 
 // --------------------------------------------------------------------------
@@ -687,9 +536,7 @@ func (c *tcpConn) RemoteEndpoint() string { return "tcp://" + c.Conn.RemoteAddr(
 func tcpPair(t *testing.T) (srv, cli iface.Conn, close func()) {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	require.NoError(t, err, "listen")
 
 	type result struct {
 		c   net.Conn
@@ -704,13 +551,13 @@ func tcpPair(t *testing.T) (srv, cli iface.Conn, close func()) {
 	clientConn, err := net.Dial("tcp", l.Addr().String())
 	if err != nil {
 		_ = l.Close()
-		t.Fatalf("dial: %v", err)
+		require.NoError(t, err, "dial")
 	}
 	r := <-accepted
 	if r.err != nil {
 		_ = clientConn.Close()
 		_ = l.Close()
-		t.Fatalf("accept: %v", r.err)
+		require.NoError(t, r.err, "accept")
 	}
 	_ = l.Close()
 
@@ -733,9 +580,7 @@ func TestStream_TCP_HTTPEcho(t *testing.T) {
 
 	srvAd := stream.NewAdapter(context.Background(), srvConn, stream.Config{})
 	defer srvAd.Close()
-	if err := eng.AttachPipe(srvAd.EnginePipe()); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	mustAttach(t, eng, srvAd.EnginePipe())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -743,40 +588,28 @@ func TestStream_TCP_HTTPEcho(t *testing.T) {
 	const request = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
 
 	// Client (raw net.Conn) sends the request bytes.
-	if _, err := cliConn.Write([]byte(request)); err != nil {
-		t.Fatalf("client write: %v", err)
-	}
+	_, err := cliConn.Write([]byte(request))
+	require.NoError(t, err, "client write")
 
 	// Server reads the tagged Msg and echoes the body back.
 	var gotReq bytes.Buffer
 	var peerID []byte
 	for gotReq.Len() < len(request) {
 		m, err := eng.Recv(ctx)
-		if err != nil {
-			t.Fatalf("server recv: %v", err)
-		}
-		if m.NumFrames() != 2 {
-			t.Fatalf("frames = %d, want 2", m.NumFrames())
-		}
+		require.NoError(t, err, "server recv")
+		require.Equal(t, 2, m.NumFrames())
 		peerID = m.Frames()[0]
 		gotReq.Write(m.Frames()[1])
 	}
-	if gotReq.String() != request {
-		t.Fatalf("server got %q, want %q", gotReq.String(), request)
-	}
+	require.Equal(t, request, gotReq.String(), "server got")
 
 	// Echo back.
-	if err := eng.Send(ctx, msg.FromFrames(peerID, gotReq.Bytes())); err != nil {
-		t.Fatalf("server send: %v", err)
-	}
+	require.NoError(t, eng.Send(ctx, msg.FromFrames(peerID, gotReq.Bytes())), "server send")
 
 	buf := make([]byte, len(request))
-	if _, err := io.ReadFull(cliConn, buf); err != nil {
-		t.Fatalf("client read: %v", err)
-	}
-	if string(buf) != request {
-		t.Fatalf("client got %q, want %q", buf, request)
-	}
+	_, err = io.ReadFull(cliConn, buf)
+	require.NoError(t, err, "client read")
+	require.Equal(t, request, string(buf), "client got")
 }
 
 // TestStream_TCP_Multiplex runs 3 concurrent TCP clients against one
@@ -787,9 +620,7 @@ func TestStream_TCP_Multiplex(t *testing.T) {
 	const nClients = 3
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	require.NoError(t, err, "listen")
 	defer l.Close()
 	addr := l.Addr().String()
 
@@ -825,9 +656,7 @@ func TestStream_TCP_Multiplex(t *testing.T) {
 	clients := make([]net.Conn, nClients)
 	for i := 0; i < nClients; i++ {
 		c, err := net.Dial("tcp", addr)
-		if err != nil {
-			t.Fatalf("dial %d: %v", i, err)
-		}
+		require.NoError(t, err, "dial %d", i)
 		clients[i] = c
 		defer c.Close()
 	}
@@ -840,7 +669,7 @@ func TestStream_TCP_Multiplex(t *testing.T) {
 			defer wg.Done()
 			payload := fmt.Sprintf("payload-%d\n", i)
 			if _, err := c.Write([]byte(payload)); err != nil {
-				t.Errorf("client %d write: %v", i, err)
+				assert.NoError(t, err, "client %d write", i)
 			}
 		}(i, c)
 	}
@@ -858,9 +687,7 @@ func TestStream_TCP_Multiplex(t *testing.T) {
 	slots := make(map[string]*slot)
 	for len(slots) < nClients {
 		m, err := eng.Recv(ctx)
-		if err != nil {
-			t.Fatalf("server recv: %v", err)
-		}
+		require.NoError(t, err, "server recv")
 		id := string(m.Frames()[0])
 		sl, ok := slots[id]
 		if !ok {
@@ -878,9 +705,7 @@ func TestStream_TCP_Multiplex(t *testing.T) {
 	}
 	for i := 0; i < nClients; i++ {
 		want := fmt.Sprintf("payload-%d\n", i)
-		if _, ok := payloadToID[want]; !ok {
-			t.Fatalf("missing payload %q; saw %v", want, payloadToID)
-		}
+		require.Contains(t, payloadToID, want, "missing payload %q", want)
 	}
 
 	// Reply to each peer; the client should read exactly the reply we
@@ -889,20 +714,15 @@ func TestStream_TCP_Multiplex(t *testing.T) {
 		payload := fmt.Sprintf("payload-%d\n", i)
 		id := payloadToID[payload]
 		reply := fmt.Sprintf("reply-%d\n", i)
-		if err := eng.Send(ctx, msg.FromFrames(id, []byte(reply))); err != nil {
-			t.Fatalf("server reply %d: %v", i, err)
-		}
+		require.NoError(t, eng.Send(ctx, msg.FromFrames(id, []byte(reply))), "server reply %d", i)
 	}
 
 	for i, c := range clients {
 		want := fmt.Sprintf("reply-%d\n", i)
 		buf := make([]byte, len(want))
-		if _, err := io.ReadFull(c, buf); err != nil {
-			t.Fatalf("client %d read: %v", i, err)
-		}
-		if string(buf) != want {
-			t.Errorf("client %d got %q, want %q", i, buf, want)
-		}
+		_, err := io.ReadFull(c, buf)
+		require.NoError(t, err, "client %d read", i)
+		assert.Equal(t, want, string(buf), "client %d reply", i)
 	}
 }
 
@@ -921,24 +741,16 @@ func TestStream_TCP_PeerDisconnect(t *testing.T) {
 	ad := stream.NewAdapter(context.Background(), srvConn, stream.Config{})
 	defer ad.Close()
 	engPipe := ad.EnginePipe()
-	if err := eng.AttachPipe(engPipe); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	mustAttach(t, eng, engPipe)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
 	// Send one chunk, then close the client.
-	if _, err := cliConn.Write([]byte("hello\n")); err != nil {
-		t.Fatalf("client write: %v", err)
-	}
+	_, err := cliConn.Write([]byte("hello\n"))
+	require.NoError(t, err, "client write")
 	m, err := eng.Recv(ctx)
-	if err != nil {
-		t.Fatalf("engine recv: %v", err)
-	}
-	if !bytes.Equal(m.Frames()[1], []byte("hello\n")) {
-		t.Fatalf("body = %q", m.Frames()[1])
-	}
+	require.NoError(t, err, "engine recv")
+	require.Equal(t, []byte("hello\n"), m.Frames()[1])
 	peerID := m.Frames()[0]
 
 	// Close the client — adapter's reader should see EOF, close the
@@ -948,18 +760,14 @@ func TestStream_TCP_PeerDisconnect(t *testing.T) {
 	select {
 	case <-engPipe.Closed():
 	case <-time.After(2 * time.Second):
-		t.Fatal("engine pipe did not close after client disconnect")
+		require.Fail(t, "engine pipe did not close after client disconnect")
 	}
 
 	// Post-detach, Send to the peer's identity should fail with
 	// ErrRouteUnknown after we actually Detach.
-	if err := eng.DetachPipe(engPipe); err != nil {
-		t.Fatalf("detach: %v", err)
-	}
+	require.NoError(t, eng.DetachPipe(engPipe), "detach")
 	err = eng.Send(context.Background(), msg.FromFrames(peerID, []byte("lost")))
-	if !errors.Is(err, zmqerr.ErrRouteUnknown) {
-		t.Fatalf("post-detach send = %v, want wraps ErrRouteUnknown", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrRouteUnknown, "post-detach send")
 }
 
 // TestStream_TCP_HalfClose asserts that sending an empty-body Msg to a
@@ -975,40 +783,26 @@ func TestStream_TCP_HalfClose(t *testing.T) {
 
 	ad := stream.NewAdapter(context.Background(), srvConn, stream.Config{})
 	defer ad.Close()
-	if err := eng.AttachPipe(ad.EnginePipe()); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	mustAttach(t, eng, ad.EnginePipe())
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
 	// Prime: have the client write something so the server learns the
 	// peer's identity.
-	if _, err := cliConn.Write([]byte("hi")); err != nil {
-		t.Fatalf("client write: %v", err)
-	}
+	_, err := cliConn.Write([]byte("hi"))
+	require.NoError(t, err, "client write")
 	m, err := eng.Recv(ctx)
-	if err != nil {
-		t.Fatalf("recv: %v", err)
-	}
+	require.NoError(t, err, "recv")
 	peerID := m.Frames()[0]
 
 	// Server sends a final payload, then the half-close sentinel
 	// (identity-only, which the engine translates to an empty-body
 	// frame on the outbound pipe).
-	if err := eng.Send(ctx, msg.FromFrames(peerID, []byte("goodbye\n"))); err != nil {
-		t.Fatalf("data send: %v", err)
-	}
-	if err := eng.Send(ctx, msg.FromFrames(peerID)); err != nil {
-		t.Fatalf("half-close send: %v", err)
-	}
+	require.NoError(t, eng.Send(ctx, msg.FromFrames(peerID, []byte("goodbye\n"))), "data send")
+	require.NoError(t, eng.Send(ctx, msg.FromFrames(peerID)), "half-close send")
 
 	// Client must see "goodbye\n" then EOF.
 	buf, err := io.ReadAll(cliConn)
-	if err != nil {
-		t.Fatalf("client ReadAll: %v", err)
-	}
-	if !bytes.Equal(buf, []byte("goodbye\n")) {
-		t.Fatalf("client got %q, want %q", buf, "goodbye\n")
-	}
+	require.NoError(t, err, "client ReadAll")
+	require.Equal(t, []byte("goodbye\n"), buf, "client got")
 }

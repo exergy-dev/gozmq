@@ -9,6 +9,7 @@ import (
 
 	"github.com/rkm/gozmq"
 	"github.com/rkm/gozmq/typed"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
 
@@ -39,22 +40,14 @@ func TestSenderReceiver_PushPull(t *testing.T) {
 	defer zctx.Close()
 
 	push, err := zctx.NewSocket(gozmq.Push)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer push.Close()
-	if err := push.Bind("inproc://typed-pushpull"); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, push.Bind("inproc://typed-pushpull"))
 
 	pull, err := zctx.NewSocket(gozmq.Pull)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer pull.Close()
-	if err := pull.Connect("inproc://typed-pushpull"); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, pull.Connect("inproc://typed-pushpull"))
 
 	sender := typed.NewSender[payload](push, jsonCodec{})
 	receiver := typed.NewReceiver[payload](pull, jsonCodec{})
@@ -63,16 +56,10 @@ func TestSenderReceiver_PushPull(t *testing.T) {
 	defer cancel()
 
 	want := payload{N: 42, Name: "answer"}
-	if err := sender.Send(callCtx, want); err != nil {
-		t.Fatalf("send: %v", err)
-	}
+	require.NoError(t, sender.Send(callCtx, want), "send")
 	got, err := receiver.Recv(callCtx)
-	if err != nil {
-		t.Fatalf("recv: %v", err)
-	}
-	if got != want {
-		t.Fatalf("got %+v want %+v", got, want)
-	}
+	require.NoError(t, err, "recv")
+	require.Equal(t, want, got)
 }
 
 func TestPublisherSubscriber_TopicRoundtrip(t *testing.T) {
@@ -82,29 +69,19 @@ func TestPublisherSubscriber_TopicRoundtrip(t *testing.T) {
 	defer zctx.Close()
 
 	pubSock, err := zctx.NewSocket(gozmq.Pub)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer pubSock.Close()
-	if err := pubSock.Bind("inproc://typed-pubsub"); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, pubSock.Bind("inproc://typed-pubsub"))
 
 	subSock, err := zctx.NewSocket(gozmq.Sub)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer subSock.Close()
 
 	pub := typed.NewPublisher[payload](pubSock, jsonCodec{})
 	sub := typed.NewSubscriber[payload](subSock, jsonCodec{})
 
-	if err := sub.Subscribe("orders."); err != nil {
-		t.Fatal(err)
-	}
-	if err := subSock.Connect("inproc://typed-pubsub"); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, sub.Subscribe("orders."))
+	require.NoError(t, subSock.Connect("inproc://typed-pubsub"))
 
 	// Slow-joiner: allow subscription to propagate before publishing.
 	time.Sleep(100 * time.Millisecond)
@@ -113,15 +90,9 @@ func TestPublisherSubscriber_TopicRoundtrip(t *testing.T) {
 	defer cancel()
 
 	// Matching and non-matching topics; the filter must drop the latter.
-	if err := pub.Send(callCtx, "orders.new", payload{N: 1, Name: "widget"}); err != nil {
-		t.Fatalf("pub orders.new: %v", err)
-	}
-	if err := pub.Send(callCtx, "metrics.cpu", payload{N: 99, Name: "cpu"}); err != nil {
-		t.Fatalf("pub metrics.cpu: %v", err)
-	}
-	if err := pub.Send(callCtx, "orders.cancel", payload{N: 2, Name: "gadget"}); err != nil {
-		t.Fatalf("pub orders.cancel: %v", err)
-	}
+	require.NoError(t, pub.Send(callCtx, "orders.new", payload{N: 1, Name: "widget"}), "pub orders.new")
+	require.NoError(t, pub.Send(callCtx, "metrics.cpu", payload{N: 99, Name: "cpu"}), "pub metrics.cpu")
+	require.NoError(t, pub.Send(callCtx, "orders.cancel", payload{N: 2, Name: "gadget"}), "pub orders.cancel")
 
 	wants := []typed.Message[payload]{
 		{Topic: "orders.new", Value: payload{N: 1, Name: "widget"}},
@@ -129,12 +100,8 @@ func TestPublisherSubscriber_TopicRoundtrip(t *testing.T) {
 	}
 	for _, want := range wants {
 		got, err := sub.Recv(callCtx)
-		if err != nil {
-			t.Fatalf("recv %s: %v", want.Topic, err)
-		}
-		if got != want {
-			t.Fatalf("got %+v want %+v", got, want)
-		}
+		require.NoError(t, err, "recv %s", want.Topic)
+		require.Equal(t, want, got)
 	}
 }
 
@@ -145,22 +112,16 @@ func TestSender_MarshalErrorPropagates(t *testing.T) {
 	defer zctx.Close()
 
 	push, err := zctx.NewSocket(gozmq.Push)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer push.Close()
-	if err := push.Bind("inproc://typed-marshal-err"); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, push.Bind("inproc://typed-marshal-err"))
 
 	boom := errors.New("boom")
 	sender := typed.NewSender[payload](push, failingCodec{err: boom})
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := sender.Send(ctx, payload{}); !errors.Is(err, boom) {
-		t.Fatalf("want errors.Is boom, got %v", err)
-	}
+	require.ErrorIs(t, sender.Send(ctx, payload{}), boom)
 }
 
 func TestReceiver_WrongFrameCount(t *testing.T) {
@@ -170,37 +131,25 @@ func TestReceiver_WrongFrameCount(t *testing.T) {
 	defer zctx.Close()
 
 	push, err := zctx.NewSocket(gozmq.Push)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer push.Close()
-	if err := push.Bind("inproc://typed-badframes"); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, push.Bind("inproc://typed-badframes"))
 
 	pull, err := zctx.NewSocket(gozmq.Pull)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer pull.Close()
-	if err := pull.Connect("inproc://typed-badframes"); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, pull.Connect("inproc://typed-badframes"))
 
 	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	// Send a two-frame message via the raw socket; the single-frame
 	// Receiver must surface ErrFrameCount.
-	if err := push.SendMsg(callCtx, gozmq.NewMsgFromFrames([]byte("a"), []byte("b"))); err != nil {
-		t.Fatalf("raw send: %v", err)
-	}
+	require.NoError(t, push.SendMsg(callCtx, gozmq.NewMsgFromFrames([]byte("a"), []byte("b"))), "raw send")
 
 	receiver := typed.NewReceiver[payload](pull, jsonCodec{})
 	_, err = receiver.Recv(callCtx)
-	if !errors.Is(err, typed.ErrFrameCount) {
-		t.Fatalf("want ErrFrameCount, got %v", err)
-	}
+	require.ErrorIs(t, err, typed.ErrFrameCount)
 }
 
 func TestReceiver_ContextCancelled(t *testing.T) {
@@ -210,13 +159,9 @@ func TestReceiver_ContextCancelled(t *testing.T) {
 	defer zctx.Close()
 
 	pull, err := zctx.NewSocket(gozmq.Pull)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer pull.Close()
-	if err := pull.Bind("inproc://typed-cancel"); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, pull.Bind("inproc://typed-cancel"))
 
 	receiver := typed.NewReceiver[payload](pull, jsonCodec{})
 
@@ -224,7 +169,5 @@ func TestReceiver_ContextCancelled(t *testing.T) {
 	defer cancel()
 
 	_, err = receiver.Recv(ctx)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("want DeadlineExceeded, got %v", err)
-	}
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 }

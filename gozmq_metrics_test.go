@@ -1,7 +1,6 @@
 package gozmq_test
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -13,28 +12,9 @@ import (
 // count. Exercises the LoadBalancer.Sent / FairQueue.Recvd plumbing
 // through the public Socket.Metrics surface.
 func TestSocketMetrics_PushPullCounters(t *testing.T) {
-	ctxZmq := gozmq.NewContext()
-	defer ctxZmq.Close()
+	_, puller, pusher := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "inproc://metrics-pushpull", nil, nil)
 
-	puller, err := ctxZmq.NewSocket(gozmq.Pull)
-	if err != nil {
-		t.Fatalf("new pull: %v", err)
-	}
-	defer puller.Close()
-	if err := puller.Bind("inproc://metrics-pushpull"); err != nil {
-		t.Fatalf("bind: %v", err)
-	}
-
-	pusher, err := ctxZmq.NewSocket(gozmq.Push)
-	if err != nil {
-		t.Fatalf("new push: %v", err)
-	}
-	defer pusher.Close()
-	if err := pusher.Connect("inproc://metrics-pushpull"); err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-
-	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	callCtx, cancel := testCtx(t)
 	defer cancel()
 
 	const n = 8
@@ -96,7 +76,7 @@ func TestSocketMetrics_PubDropsOnSlowSubscriber(t *testing.T) {
 	// path that doesn't increment Dropped).
 	time.Sleep(150 * time.Millisecond)
 
-	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	callCtx, cancel := testCtx(t)
 	defer cancel()
 	const n = 200
 	for i := 0; i < n; i++ {
@@ -155,7 +135,7 @@ func TestSocketMetrics_QueueDepthGauge(t *testing.T) {
 		t.Fatalf("connect2: %v", err)
 	}
 
-	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	callCtx, cancel := testCtx(t)
 	defer cancel()
 	if err := pusher.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("x"))); err != nil {
 		t.Fatalf("send: %v", err)

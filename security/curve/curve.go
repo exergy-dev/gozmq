@@ -36,6 +36,7 @@ import (
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/rkm/gozmq/internal/zmtp"
 
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/nacl/box"
@@ -470,9 +471,7 @@ func (m *curveMech) buildHello() ([]byte, error) {
 	body = append(body, curveVersionMajor, curveVersionMinor)
 	body = append(body, make([]byte, 72)...)
 	body = append(body, m.ourEphPublic[:]...)
-	var counterBuf [8]byte
-	binary.BigEndian.PutUint64(counterBuf[:], counter)
-	body = append(body, counterBuf[:]...)
+	body = appendCounter(body, counter)
 	body = append(body, sigBox...)
 	if len(body) != helloBodySize {
 		return nil, fmt.Errorf("gozmq/security/curve: HELLO body length %d != %d", len(body), helloBodySize)
@@ -663,7 +662,7 @@ func (m *curveMech) buildInitiate(cookie []byte) ([]byte, error) {
 	vouch = append(vouch, vouchBox...)
 
 	// Initiate box plaintext: C || vouch || metadata.
-	meta := encodeMeta(m.localMeta)
+	meta := zmtp.MetadataCodec.Encode(m.localMeta)
 	initPlain := make([]byte, 0, 32+vouchSize+len(meta))
 	initPlain = append(initPlain, m.ourPublic[:]...)
 	initPlain = append(initPlain, vouch...)
@@ -680,9 +679,7 @@ func (m *curveMech) buildInitiate(cookie []byte) ([]byte, error) {
 	body = append(body, byte(len(cmdInitiate)))
 	body = append(body, cmdInitiate...)
 	body = append(body, cookie...)
-	var counterBuf [8]byte
-	binary.BigEndian.PutUint64(counterBuf[:], counter)
-	body = append(body, counterBuf[:]...)
+	body = appendCounter(body, counter)
 	body = append(body, initBox...)
 	return body, nil
 }
@@ -787,7 +784,7 @@ func (m *curveMech) parseInitiate(body []byte) error {
 	// Client long-term public is now authenticated. Record it and parse
 	// metadata.
 	m.peerPublic = clientLongPub
-	props, err := decodeMeta(metaBytes)
+	props, err := zmtp.MetadataCodec.Decode(metaBytes)
 	if err != nil {
 		return err
 	}
@@ -810,7 +807,7 @@ func (m *curveMech) parseInitiate(body []byte) error {
 // buildReady constructs the READY command body. Layout:
 // [5]"READY" + short-nonce(8) + ready-box(metadata ciphertext).
 func (m *curveMech) buildReady() ([]byte, error) {
-	meta := encodeMeta(m.localMeta)
+	meta := zmtp.MetadataCodec.Encode(m.localMeta)
 	counter := m.ourShortNonce
 	m.ourShortNonce++
 	nonce := shortNonce(prefixReady, counter)
@@ -819,9 +816,7 @@ func (m *curveMech) buildReady() ([]byte, error) {
 	body := make([]byte, 0, 1+len(cmdReady)+8+len(readyBox))
 	body = append(body, byte(len(cmdReady)))
 	body = append(body, cmdReady...)
-	var counterBuf [8]byte
-	binary.BigEndian.PutUint64(counterBuf[:], counter)
-	body = append(body, counterBuf[:]...)
+	body = appendCounter(body, counter)
 	body = append(body, readyBox...)
 	return body, nil
 }
@@ -847,7 +842,7 @@ func (m *curveMech) parseReady(body []byte) error {
 	if !ok {
 		return fmt.Errorf("gozmq/security/curve: READY box open failed: %w", zmqerr.ErrAuthFailed)
 	}
-	props, err := decodeMeta(plain)
+	props, err := zmtp.MetadataCodec.Decode(plain)
 	if err != nil {
 		return err
 	}
@@ -895,9 +890,7 @@ func (m *curveMech) EncodeFrame(flags uint8, plain []byte) (uint8, []byte, error
 	body := make([]byte, 0, 1+len(cmdMessage)+8+len(cipher))
 	body = append(body, byte(len(cmdMessage)))
 	body = append(body, cmdMessage...)
-	var counterBuf [8]byte
-	binary.BigEndian.PutUint64(counterBuf[:], counter)
-	body = append(body, counterBuf[:]...)
+	body = appendCounter(body, counter)
 	body = append(body, cipher...)
 	return flags &^ iface.FlagMore, body, nil
 }
@@ -1136,61 +1129,11 @@ func derivePublic(secret Key) (Key, error) {
 	return pub, nil
 }
 
-// encodeMeta is an inline ZMTP property-list encoder. It is duplicated here
-// to keep security/curve independent of internal implementation packages.
-func encodeMeta(props map[string]string) []byte {
-	total := 0
-	for name, value := range props {
-		total += 1 + len(name) + 4 + len(value)
-	}
-	out := make([]byte, 0, total)
-	for name, value := range props {
-		if len(name) > 255 {
-			panic(fmt.Sprintf("gozmq/security/curve: metadata name %q length %d > 255", name, len(name)))
-		}
-		out = append(out, byte(len(name)))
-		out = append(out, name...)
-		var vln [4]byte
-		binary.BigEndian.PutUint32(vln[:], uint32(len(value)))
-		out = append(out, vln[:]...)
-		out = append(out, value...)
-	}
-	return out
-}
 
-// decodeMeta is an inline ZMTP property-list decoder.
-func decodeMeta(raw []byte) (map[string]string, error) {
-	out := make(map[string]string)
-	seen := make(map[string]struct{})
-	for i := 0; i < len(raw); {
-		if i+1 > len(raw) {
-			return nil, fmt.Errorf("gozmq/security/curve: metadata truncated at name length: %w", zmqerr.ErrMalformedFrame)
-		}
-		nameLen := int(raw[i])
-		i++
-		if i+nameLen > len(raw) {
-			return nil, fmt.Errorf("gozmq/security/curve: metadata truncated in name: %w", zmqerr.ErrMalformedFrame)
-		}
-		name := string(raw[i : i+nameLen])
-		i += nameLen
-		if i+4 > len(raw) {
-			return nil, fmt.Errorf("gozmq/security/curve: metadata truncated at value length: %w", zmqerr.ErrMalformedFrame)
-		}
-		valueLen := binary.BigEndian.Uint32(raw[i : i+4])
-		i += 4
-		if uint64(i)+uint64(valueLen) > uint64(len(raw)) {
-			return nil, fmt.Errorf("gozmq/security/curve: metadata truncated in value: %w", zmqerr.ErrMalformedFrame)
-		}
-		value := string(raw[i : i+int(valueLen)])
-		i += int(valueLen)
-		lower := strings.ToLower(name)
-		if _, dup := seen[lower]; dup {
-			return nil, fmt.Errorf("gozmq/security/curve: duplicate metadata property %q: %w", name, zmqerr.ErrMalformedFrame)
-		}
-		seen[lower] = struct{}{}
-		out[name] = value
-	}
-	return out, nil
+func appendCounter(buf []byte, c uint64) []byte {
+	var b [8]byte
+	binary.BigEndian.PutUint64(b[:], c)
+	return append(buf, b[:]...)
 }
 
 func copyMeta(src map[string]string) map[string]string {

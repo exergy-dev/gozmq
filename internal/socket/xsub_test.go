@@ -2,7 +2,6 @@ package socket_test
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -10,6 +9,7 @@ import (
 	"github.com/rkm/gozmq/internal/pipe"
 	"github.com/rkm/gozmq/internal/socket"
 	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/stretchr/testify/require"
 )
 
 // TestXSub_SendSubscribeViaMessage: XSUB's Send accepts a synthetic
@@ -22,36 +22,23 @@ func TestXSub_SendSubscribeViaMessage(t *testing.T) {
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	if err := eng.AttachPipe(a); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	mustAttach(t, eng, a)
+	ctx := testCtx(t)
 
-	if err := eng.Send(ctx, subscribeMsg(true, []byte("topic"))); err != nil {
-		t.Fatalf("xsub send: %v", err)
-	}
+	require.NoError(t, eng.Send(ctx, subscribeMsg(true, []byte("topic"))), "xsub send")
 	// Peer should receive the synthetic SUBSCRIBE forwarded by XSUB.
 	m, err := b.Recv(ctx)
-	if err != nil {
-		t.Fatalf("peer recv: %v", err)
-	}
+	require.NoError(t, err, "peer recv")
 	body := m.Frames()[0]
-	if body[0] != socket.SubscribeByte || string(body[1:]) != "topic" {
-		t.Fatalf("peer got %v, want subscribe-topic", body)
-	}
+	require.Equal(t, socket.SubscribeByte, body[0])
+	require.Equal(t, "topic", string(body[1:]))
 
 	// Now peer sends a matching data message; Recv surfaces it.
-	if err := b.Send(ctx, msg.FromFrames([]byte("topical"), []byte("payload"))); err != nil {
-		t.Fatalf("peer send: %v", err)
-	}
+	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte("topical"), []byte("payload"))), "peer send")
 	got, err := eng.Recv(ctx)
-	if err != nil {
-		t.Fatalf("xsub recv: %v", err)
-	}
-	if got.NumFrames() != 2 || string(got.Frames()[0]) != "topical" {
-		t.Fatalf("xsub recv = %v", got.Frames())
-	}
+	require.NoError(t, err, "xsub recv")
+	require.Equal(t, 2, got.NumFrames())
+	require.Equal(t, "topical", string(got.Frames()[0]))
 }
 
 // TestXSub_SendDuplicateSubscribeForwardsTwice verifies that app-driven
@@ -65,28 +52,18 @@ func TestXSub_SendDuplicateSubscribeForwardsTwice(t *testing.T) {
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	if err := eng.AttachPipe(a); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	mustAttach(t, eng, a)
+	ctx := testCtx(t)
 
 	sub := subscribeMsg(true, []byte("topic"))
-	if err := eng.Send(ctx, sub); err != nil {
-		t.Fatalf("xsub send #1: %v", err)
-	}
-	if err := eng.Send(ctx, sub); err != nil {
-		t.Fatalf("xsub send #2: %v", err)
-	}
+	require.NoError(t, eng.Send(ctx, sub), "xsub send #1")
+	require.NoError(t, eng.Send(ctx, sub), "xsub send #2")
 	for i := 0; i < 2; i++ {
 		m, err := b.Recv(ctx)
-		if err != nil {
-			t.Fatalf("peer recv #%d: %v", i+1, err)
-		}
+		require.NoError(t, err, "peer recv #%d", i+1)
 		body := m.Frames()[0]
-		if body[0] != socket.SubscribeByte || string(body[1:]) != "topic" {
-			t.Fatalf("peer got %v, want subscribe-topic", body)
-		}
+		require.Equal(t, socket.SubscribeByte, body[0])
+		require.Equal(t, "topic", string(body[1:]))
 	}
 }
 
@@ -98,9 +75,7 @@ func TestXSub_SendNonSubscribeRejected(t *testing.T) {
 	defer eng.Close()
 
 	err := eng.Send(context.Background(), msg.FromBytes([]byte("not a sub msg")))
-	if !errors.Is(err, zmqerr.ErrFSMViolation) {
-		t.Fatalf("xsub send arbitrary = %v, want ErrFSMViolation", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrFSMViolation)
 }
 
 // TestXSub_RecvFiltersByLocalSubscription confirms XSUB still applies
@@ -112,33 +87,20 @@ func TestXSub_RecvFiltersByLocalSubscription(t *testing.T) {
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	if err := eng.AttachPipe(a); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	mustAttach(t, eng, a)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
-	if err := eng.Send(ctx, subscribeMsg(true, []byte("ok"))); err != nil {
-		t.Fatalf("xsub subscribe: %v", err)
-	}
+	require.NoError(t, eng.Send(ctx, subscribeMsg(true, []byte("ok"))), "xsub subscribe")
 	// Drain the forwarded subscription so it doesn't collide with data.
 	drainCtx, dc := context.WithTimeout(ctx, 100*time.Millisecond)
 	_, _ = b.Recv(drainCtx)
 	dc()
 
-	if err := b.Send(ctx, msg.FromFrames([]byte("bad"), []byte("x"))); err != nil {
-		t.Fatalf("peer send bad: %v", err)
-	}
-	if err := b.Send(ctx, msg.FromFrames([]byte("okay"), []byte("y"))); err != nil {
-		t.Fatalf("peer send good: %v", err)
-	}
+	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte("bad"), []byte("x"))), "peer send bad")
+	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte("okay"), []byte("y"))), "peer send good")
 
 	m, err := eng.Recv(ctx)
-	if err != nil {
-		t.Fatalf("xsub recv: %v", err)
-	}
-	if string(m.Frames()[0]) != "okay" {
-		t.Fatalf("recv topic = %q, want okay", m.Frames()[0])
-	}
+	require.NoError(t, err, "xsub recv")
+	require.Equal(t, "okay", string(m.Frames()[0]))
 }

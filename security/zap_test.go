@@ -1,10 +1,11 @@
 package security
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/rkm/gozmq/internal/zmqerr"
 )
@@ -47,25 +48,18 @@ func TestZapRequestRoundTrip(t *testing.T) {
 		Credentials: [][]byte{[]byte("alice"), []byte("hunter2")},
 	}
 	frames := EncodeZapRequest(req)
-	if len(frames) != 8 {
-		t.Fatalf("frames len: got %d, want 8", len(frames))
-	}
+	require.Len(t, frames, 8)
 	got, err := DecodeZapRequest(frames)
-	if err != nil {
-		t.Fatalf("DecodeZapRequest: %v", err)
-	}
-	if got.Version != req.Version || got.Domain != req.Domain || got.Address != req.Address || got.Mechanism != req.Mechanism {
-		t.Fatalf("scalar fields mismatch: got %+v, want %+v", got, req)
-	}
-	if !bytes.Equal(got.RequestID, req.RequestID) {
-		t.Fatalf("RequestID: got %x, want %x", got.RequestID, req.RequestID)
-	}
-	if !bytes.Equal(got.Identity, req.Identity) {
-		t.Fatalf("Identity: got %x, want %x", got.Identity, req.Identity)
-	}
-	if len(got.Credentials) != 2 || !bytes.Equal(got.Credentials[0], []byte("alice")) || !bytes.Equal(got.Credentials[1], []byte("hunter2")) {
-		t.Fatalf("Credentials mismatch: %v", got.Credentials)
-	}
+	require.NoError(t, err)
+	require.Equal(t, req.Version, got.Version)
+	require.Equal(t, req.Domain, got.Domain)
+	require.Equal(t, req.Address, got.Address)
+	require.Equal(t, req.Mechanism, got.Mechanism)
+	require.Equal(t, req.RequestID, got.RequestID)
+	require.Equal(t, req.Identity, got.Identity)
+	require.Len(t, got.Credentials, 2)
+	require.Equal(t, []byte("alice"), got.Credentials[0])
+	require.Equal(t, []byte("hunter2"), got.Credentials[1])
 }
 
 func TestZapResponseRoundTrip(t *testing.T) {
@@ -78,22 +72,15 @@ func TestZapResponseRoundTrip(t *testing.T) {
 		Metadata:   map[string]string{"Role": "admin"},
 	}
 	frames := EncodeZapResponse(resp)
-	if len(frames) != 6 {
-		t.Fatalf("frames len: got %d, want 6", len(frames))
-	}
+	require.Len(t, frames, 6)
 	got, err := DecodeZapResponse(frames)
-	if err != nil {
-		t.Fatalf("DecodeZapResponse: %v", err)
-	}
-	if got.Version != resp.Version || got.StatusCode != resp.StatusCode || got.StatusText != resp.StatusText || got.UserID != resp.UserID {
-		t.Fatalf("scalar mismatch: got %+v want %+v", got, resp)
-	}
-	if !bytes.Equal(got.RequestID, resp.RequestID) {
-		t.Fatalf("RequestID: got %x want %x", got.RequestID, resp.RequestID)
-	}
-	if got.Metadata["Role"] != "admin" {
-		t.Fatalf("Metadata: got %v", got.Metadata)
-	}
+	require.NoError(t, err)
+	require.Equal(t, resp.Version, got.Version)
+	require.Equal(t, resp.StatusCode, got.StatusCode)
+	require.Equal(t, resp.StatusText, got.StatusText)
+	require.Equal(t, resp.UserID, got.UserID)
+	require.Equal(t, resp.RequestID, got.RequestID)
+	require.Equal(t, "admin", got.Metadata["Role"])
 }
 
 func TestZapResponseEncodeIsolatesInput(t *testing.T) {
@@ -109,9 +96,7 @@ func TestZapResponseEncodeIsolatesInput(t *testing.T) {
 	frames := EncodeZapResponse(resp)
 	// Mutate caller's RequestID; the frame in `frames` must be unchanged.
 	reqID[0] = 0xff
-	if frames[1][0] == 0xff {
-		t.Fatalf("EncodeZapResponse aliases input RequestID (frame[1]=%x)", frames[1])
-	}
+	require.NotEqual(t, byte(0xff), frames[1][0], "EncodeZapResponse aliases input RequestID")
 }
 
 // ---------------------------------------------------------------------------
@@ -137,29 +122,16 @@ func TestZapServeValidRequest200(t *testing.T) {
 	respFrames := h.ServeRequest(req)
 
 	resp, err := DecodeZapResponse(respFrames)
-	if err != nil {
-		t.Fatalf("DecodeZapResponse: %v", err)
-	}
-	if resp.StatusCode != ZapStatusOK {
-		t.Fatalf("StatusCode: got %q, want %q", resp.StatusCode, ZapStatusOK)
-	}
-	if resp.UserID != "alice" {
-		t.Fatalf("UserID: got %q, want %q", resp.UserID, "alice")
-	}
-	if !bytes.Equal(resp.RequestID, []byte("req-1")) {
-		t.Fatalf("RequestID echo: got %x, want %x", resp.RequestID, []byte("req-1"))
-	}
-	if resp.Metadata["User-Id"] != "alice" {
-		t.Fatalf("Metadata: got %v", resp.Metadata)
-	}
+	require.NoError(t, err)
+	require.Equal(t, ZapStatusOK, resp.StatusCode)
+	require.Equal(t, "alice", resp.UserID)
+	require.Equal(t, []byte("req-1"), resp.RequestID)
+	require.Equal(t, "alice", resp.Metadata["User-Id"])
 
 	// The policy saw the raw credentials and mechanism.
-	if policy.lastMechanism != "PLAIN" {
-		t.Fatalf("policy.lastMechanism: got %q", policy.lastMechanism)
-	}
-	if len(policy.lastCreds) != 2 || !bytes.Equal(policy.lastCreds[0], []byte("alice")) {
-		t.Fatalf("policy.lastCreds: got %v", policy.lastCreds)
-	}
+	require.Equal(t, "PLAIN", policy.lastMechanism)
+	require.Len(t, policy.lastCreds, 2)
+	require.Equal(t, []byte("alice"), policy.lastCreds[0])
 }
 
 func TestZapServeInvalidCreds400(t *testing.T) {
@@ -179,18 +151,10 @@ func TestZapServeInvalidCreds400(t *testing.T) {
 	respFrames := h.ServeRequest(req)
 
 	resp, err := DecodeZapResponse(respFrames)
-	if err != nil {
-		t.Fatalf("DecodeZapResponse: %v", err)
-	}
-	if resp.StatusCode != ZapStatusClientError {
-		t.Fatalf("StatusCode: got %q, want %q", resp.StatusCode, ZapStatusClientError)
-	}
-	if resp.UserID != "" {
-		t.Fatalf("UserID on failure: got %q, want empty", resp.UserID)
-	}
-	if resp.StatusText == "" {
-		t.Fatal("StatusText: empty; want policy error message")
-	}
+	require.NoError(t, err)
+	require.Equal(t, ZapStatusClientError, resp.StatusCode)
+	require.Empty(t, resp.UserID, "UserID on failure should be empty")
+	require.NotEmpty(t, resp.StatusText, "StatusText should contain policy error message")
 }
 
 func TestZapServeMalformedRequest500(t *testing.T) {
@@ -262,15 +226,9 @@ func TestZapServeMalformedRequest500(t *testing.T) {
 			policy.lastMechanism = ""
 			respFrames := h.ServeRequest(tc.frames)
 			resp, err := DecodeZapResponse(respFrames)
-			if err != nil {
-				t.Fatalf("DecodeZapResponse: %v", err)
-			}
-			if resp.StatusCode != ZapStatusServerError {
-				t.Fatalf("StatusCode: got %q, want %q", resp.StatusCode, ZapStatusServerError)
-			}
-			if policy.lastMechanism != "" {
-				t.Fatalf("policy was called on malformed request (mech=%q)", policy.lastMechanism)
-			}
+			require.NoError(t, err)
+			require.Equal(t, ZapStatusServerError, resp.StatusCode)
+			require.Empty(t, policy.lastMechanism, "policy was called on malformed request")
 		})
 	}
 }
@@ -291,12 +249,8 @@ func TestZapServeTemporaryFailure300(t *testing.T) {
 	})
 	respFrames := h.ServeRequest(req)
 	resp, err := DecodeZapResponse(respFrames)
-	if err != nil {
-		t.Fatalf("DecodeZapResponse: %v", err)
-	}
-	if resp.StatusCode != ZapStatusTempError {
-		t.Fatalf("StatusCode: got %q, want %q", resp.StatusCode, ZapStatusTempError)
-	}
+	require.NoError(t, err)
+	require.Equal(t, ZapStatusTempError, resp.StatusCode)
 }
 
 func TestZapServeGenericErrorIsServerError(t *testing.T) {
@@ -315,12 +269,8 @@ func TestZapServeGenericErrorIsServerError(t *testing.T) {
 	})
 	respFrames := h.ServeRequest(req)
 	resp, err := DecodeZapResponse(respFrames)
-	if err != nil {
-		t.Fatalf("DecodeZapResponse: %v", err)
-	}
-	if resp.StatusCode != ZapStatusServerError {
-		t.Fatalf("StatusCode: got %q, want %q", resp.StatusCode, ZapStatusServerError)
-	}
+	require.NoError(t, err)
+	require.Equal(t, ZapStatusServerError, resp.StatusCode)
 }
 
 func TestZapServeRequestIDEcho(t *testing.T) {
@@ -335,15 +285,9 @@ func TestZapServeRequestIDEcho(t *testing.T) {
 		[]byte("req-echo"),
 	})
 	resp, err := DecodeZapResponse(respFrames)
-	if err != nil {
-		t.Fatalf("DecodeZapResponse: %v", err)
-	}
-	if !bytes.Equal(resp.RequestID, []byte("req-echo")) {
-		t.Fatalf("RequestID echo on malformed: got %x, want %x", resp.RequestID, []byte("req-echo"))
-	}
-	if resp.StatusCode != ZapStatusServerError {
-		t.Fatalf("StatusCode: got %q, want %q", resp.StatusCode, ZapStatusServerError)
-	}
+	require.NoError(t, err)
+	require.Equal(t, []byte("req-echo"), resp.RequestID)
+	require.Equal(t, ZapStatusServerError, resp.StatusCode)
 }
 
 func TestZapNullMechanismAllowsZeroCreds(t *testing.T) {
@@ -364,15 +308,9 @@ func TestZapNullMechanismAllowsZeroCreds(t *testing.T) {
 	})
 	respFrames := h.ServeRequest(req)
 	resp, err := DecodeZapResponse(respFrames)
-	if err != nil {
-		t.Fatalf("DecodeZapResponse: %v", err)
-	}
-	if resp.StatusCode != ZapStatusOK {
-		t.Fatalf("StatusCode: got %q, want %q", resp.StatusCode, ZapStatusOK)
-	}
-	if len(policy.lastCreds) != 0 {
-		t.Fatalf("policy.lastCreds: got %v, want empty", policy.lastCreds)
-	}
+	require.NoError(t, err)
+	require.Equal(t, ZapStatusOK, resp.StatusCode)
+	require.Empty(t, policy.lastCreds)
 }
 
 func TestZapCurveMechanismRequiresKey(t *testing.T) {
@@ -393,22 +331,13 @@ func TestZapCurveMechanismRequiresKey(t *testing.T) {
 	})
 	respFrames := h.ServeRequest(req)
 	resp, err := DecodeZapResponse(respFrames)
-	if err != nil {
-		t.Fatalf("DecodeZapResponse: %v", err)
-	}
-	if resp.StatusCode != ZapStatusOK {
-		t.Fatalf("StatusCode: got %q, want %q", resp.StatusCode, ZapStatusOK)
-	}
-	if !bytes.Equal(policy.lastCreds[0], key) {
-		t.Fatalf("policy.lastCreds[0]: got %x, want %x", policy.lastCreds[0], key)
-	}
+	require.NoError(t, err)
+	require.Equal(t, ZapStatusOK, resp.StatusCode)
+	require.Equal(t, key, policy.lastCreds[0])
 }
 
 func TestNewZapHandlerPanicsOnNilPolicy(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("NewZapHandler(nil): expected panic")
-		}
-	}()
-	_ = NewZapHandler(nil)
+	require.Panics(t, func() {
+		_ = NewZapHandler(nil)
+	})
 }

@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/rkm/gozmq/internal/msg"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"pgregory.net/rapid"
 )
 
@@ -23,26 +25,15 @@ func TestRoundTrip_Basic(t *testing.T) {
 	ctx := context.Background()
 
 	payload := msg.FromBytes([]byte("hello"))
-	if err := a.Send(ctx, payload); err != nil {
-		t.Fatalf("a.Send: %v", err)
-	}
+	require.NoError(t, a.Send(ctx, payload))
 	got, err := b.Recv(ctx)
-	if err != nil {
-		t.Fatalf("b.Recv: %v", err)
-	}
-	if string(got.Bytes()) != "hello" {
-		t.Fatalf("got %q, want hello", got.Bytes())
-	}
+	require.NoError(t, err)
+	require.Equal(t, "hello", string(got.Bytes()))
 
-	if a.SendHWM() != 2 || a.RecvHWM() != 2 {
-		t.Fatalf("HWM report wrong on A: send=%d recv=%d", a.SendHWM(), a.RecvHWM())
-	}
-	if a.PeerEndpoint() != "b-side" {
-		t.Fatalf("a.PeerEndpoint = %q, want b-side", a.PeerEndpoint())
-	}
-	if b.PeerEndpoint() != "a-side" {
-		t.Fatalf("b.PeerEndpoint = %q, want a-side", b.PeerEndpoint())
-	}
+	require.Equal(t, 2, a.SendHWM(), "SendHWM")
+	require.Equal(t, 2, a.RecvHWM(), "RecvHWM")
+	require.Equal(t, "b-side", a.PeerEndpoint())
+	require.Equal(t, "a-side", b.PeerEndpoint())
 }
 
 // TestHWM_Blocks_Send_On_Full asserts that Send blocks once HWM buffered
@@ -56,26 +47,19 @@ func TestHWM_Blocks_Send_On_Full(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < hwm; i++ {
-		if err := a.Send(ctx, msg.FromBytes([]byte{byte(i)})); err != nil {
-			t.Fatalf("a.Send[%d]: %v", i, err)
-		}
+		require.NoError(t, a.Send(ctx, msg.FromBytes([]byte{byte(i)})), "a.Send[%d]", i)
 	}
 
 	// Fourth send must block. Confirm by using a deadline.
 	blockCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
 	defer cancel()
 	err := a.Send(blockCtx, msg.FromBytes([]byte{byte(hwm)}))
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected DeadlineExceeded on over-HWM send, got %v", err)
-	}
+	require.ErrorIs(t, err, context.DeadlineExceeded, "expected DeadlineExceeded on over-HWM send")
 
 	// Drain one; another send must now succeed.
-	if _, err := b.Recv(ctx); err != nil {
-		t.Fatalf("b.Recv drain: %v", err)
-	}
-	if err := a.Send(ctx, msg.FromBytes([]byte{byte(hwm)})); err != nil {
-		t.Fatalf("a.Send post-drain: %v", err)
-	}
+	_, err = b.Recv(ctx)
+	require.NoError(t, err, "b.Recv drain")
+	require.NoError(t, a.Send(ctx, msg.FromBytes([]byte{byte(hwm)})), "a.Send post-drain")
 }
 
 // TestClose_Unblocks_Send asserts that closing either end wakes a Send
@@ -87,9 +71,7 @@ func TestClose_Unblocks_Send(t *testing.T) {
 
 	ctx := context.Background()
 	// Fill the single slot.
-	if err := a.Send(ctx, msg.FromBytes([]byte{1})); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, a.Send(ctx, msg.FromBytes([]byte{1})))
 
 	done := make(chan error, 1)
 	go func() { done <- a.Send(ctx, msg.FromBytes([]byte{2})) }()
@@ -98,20 +80,16 @@ func TestClose_Unblocks_Send(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 	select {
 	case err := <-done:
-		t.Fatalf("Send returned before close: %v", err)
+		require.Fail(t, "Send returned before close", "%v", err)
 	default:
 	}
 
-	if err := b.Close(); err != nil {
-		t.Fatalf("b.Close: %v", err)
-	}
+	require.NoError(t, b.Close(), "b.Close")
 	select {
 	case err := <-done:
-		if !errors.Is(err, io.ErrClosedPipe) {
-			t.Fatalf("Send err = %v, want io.ErrClosedPipe", err)
-		}
+		require.ErrorIs(t, err, io.ErrClosedPipe)
 	case <-time.After(time.Second):
-		t.Fatal("Send did not wake within 1s of peer Close")
+		require.Fail(t, "Send did not wake within 1s of peer Close")
 	}
 }
 
@@ -122,26 +100,17 @@ func TestClose_Drains_Then_EOF(t *testing.T) {
 
 	ctx := context.Background()
 	for i := 0; i < 3; i++ {
-		if err := a.Send(ctx, msg.FromBytes([]byte{byte(i)})); err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, a.Send(ctx, msg.FromBytes([]byte{byte(i)})))
 	}
-	if err := a.Close(); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, a.Close())
 
 	for i := 0; i < 3; i++ {
 		m, err := b.Recv(ctx)
-		if err != nil {
-			t.Fatalf("Recv[%d]: %v", i, err)
-		}
-		if m.Bytes()[0] != byte(i) {
-			t.Fatalf("Recv[%d] = %v, want %d", i, m.Bytes(), i)
-		}
+		require.NoError(t, err, "Recv[%d]", i)
+		require.Equal(t, byte(i), m.Bytes()[0], "Recv[%d]", i)
 	}
-	if _, err := b.Recv(ctx); !errors.Is(err, io.EOF) {
-		t.Fatalf("expected io.EOF after drain, got %v", err)
-	}
+	_, err := b.Recv(ctx)
+	require.ErrorIs(t, err, io.EOF, "expected io.EOF after drain")
 }
 
 // TestCtx_Cancel_Wakes_Send asserts ctx.Err() propagates out of Send.
@@ -150,9 +119,7 @@ func TestCtx_Cancel_Wakes_Send(t *testing.T) {
 	defer a.Close()
 	defer b.Close()
 
-	if err := a.Send(context.Background(), msg.FromBytes([]byte{1})); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte{1})))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -161,11 +128,9 @@ func TestCtx_Cancel_Wakes_Send(t *testing.T) {
 	cancel()
 	select {
 	case err := <-errCh:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("err = %v, want context.Canceled", err)
-		}
+		require.ErrorIs(t, err, context.Canceled)
 	case <-time.After(time.Second):
-		t.Fatal("Send did not honor ctx.Cancel")
+		require.Fail(t, "Send did not honor ctx.Cancel")
 	}
 }
 
@@ -175,36 +140,20 @@ func TestTrySend_FastPath(t *testing.T) {
 	defer b.Close()
 
 	endA, ok := a.(*end)
-	if !ok {
-		t.Fatalf("pipe end type = %T, want *end", a)
-	}
-	if !endA.TrySend(msg.FromBytes([]byte("one"))) {
-		t.Fatal("TrySend on empty pipe = false, want true")
-	}
-	if endA.TrySend(msg.FromBytes([]byte("two"))) {
-		t.Fatal("TrySend on full pipe = true, want false")
-	}
+	require.True(t, ok, "pipe end type = %T, want *end", a)
+	require.True(t, endA.TrySend(msg.FromBytes([]byte("one"))), "TrySend on empty pipe should succeed")
+	assert.False(t, endA.TrySend(msg.FromBytes([]byte("two"))), "TrySend on full pipe should fail")
 	got, err := b.Recv(context.Background())
-	if err != nil {
-		t.Fatalf("Recv: %v", err)
-	}
-	if string(got.Bytes()) != "one" {
-		t.Fatalf("Recv = %q, want one", got.Bytes())
-	}
+	require.NoError(t, err)
+	require.Equal(t, "one", string(got.Bytes()))
 }
 
 // TestDoubleClose_Idempotent ensures Close is safe to call repeatedly.
 func TestDoubleClose_Idempotent(t *testing.T) {
 	a, b := NewPair(1, 1, PeerInfo{}, PeerInfo{})
-	if err := a.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.Close(); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, a.Close())
+	require.NoError(t, a.Close())
+	require.NoError(t, b.Close())
 }
 
 // TestClosed_Channel fires once either side closes.
@@ -215,14 +164,14 @@ func TestClosed_Channel(t *testing.T) {
 
 	select {
 	case <-a.Closed():
-		t.Fatal("Closed() fired before Close call")
+		require.Fail(t, "Closed() fired before Close call")
 	default:
 	}
 	_ = b.Close()
 	select {
 	case <-a.Closed():
 	case <-time.After(time.Second):
-		t.Fatal("Closed() did not fire after peer Close")
+		require.Fail(t, "Closed() did not fire after peer Close")
 	}
 }
 

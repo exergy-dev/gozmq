@@ -16,6 +16,8 @@ import (
 	"github.com/rkm/gozmq/internal/pipe"
 	"github.com/rkm/gozmq/internal/socket"
 	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // makeRouterPeers creates len(ids) pipe pairs where engineEnds[i] sees a
@@ -42,37 +44,25 @@ func TestRouter_RoutesByIdentity(t *testing.T) {
 	ids := [][]byte{[]byte("peerA"), []byte("peerB"), []byte("peerC")}
 	engineEnds, peerEnds := makeRouterPeers(ids, 4)
 	defer closePipes(append(engineEnds, peerEnds...)...)
-	for _, p := range engineEnds {
-		if err := eng.AttachPipe(p); err != nil {
-			t.Fatalf("attach: %v", err)
-		}
-	}
+	mustAttach(t, eng, engineEnds...)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
 	// Send a message targeted at peerB.
 	out := msg.FromFrames([]byte("peerB"), []byte("hello"))
-	if err := eng.Send(ctx, out); err != nil {
-		t.Fatalf("send: %v", err)
-	}
+	require.NoError(t, eng.Send(ctx, out), "send")
 
 	// peerB's peer-end should receive "hello"; the others should not.
 	got, err := peerEnds[1].Recv(ctx)
-	if err != nil {
-		t.Fatalf("peerB recv: %v", err)
-	}
-	if got.NumFrames() != 1 || string(got.Bytes()) != "hello" {
-		t.Fatalf("peerB got %q frames=%d", got.Frames(), got.NumFrames())
-	}
+	require.NoError(t, err, "peerB recv")
+	require.Equal(t, 1, got.NumFrames())
+	require.Equal(t, "hello", string(got.Bytes()))
 	// Other peers must not have received anything.
 	for _, idx := range []int{0, 2} {
 		ctx2, c := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		_, err := peerEnds[idx].Recv(ctx2)
 		c()
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("peer %d unexpectedly got message (err=%v)", idx, err)
-		}
+		require.ErrorIs(t, err, context.DeadlineExceeded, "peer %d unexpectedly got message", idx)
 	}
 }
 
@@ -86,32 +76,17 @@ func TestRouter_PrependsIdentityOnRecv(t *testing.T) {
 	ids := [][]byte{[]byte("alpha"), []byte("bravo")}
 	engineEnds, peerEnds := makeRouterPeers(ids, 4)
 	defer closePipes(append(engineEnds, peerEnds...)...)
-	for _, p := range engineEnds {
-		if err := eng.AttachPipe(p); err != nil {
-			t.Fatalf("attach: %v", err)
-		}
-	}
+	mustAttach(t, eng, engineEnds...)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
 	// Peer "bravo" sends a message into the router.
-	if err := peerEnds[1].Send(ctx, msg.FromBytes([]byte("ping"))); err != nil {
-		t.Fatalf("peer send: %v", err)
-	}
+	require.NoError(t, peerEnds[1].Send(ctx, msg.FromBytes([]byte("ping"))), "peer send")
 	got, err := eng.Recv(ctx)
-	if err != nil {
-		t.Fatalf("recv: %v", err)
-	}
-	if got.NumFrames() != 2 {
-		t.Fatalf("frames = %d, want 2", got.NumFrames())
-	}
-	if !bytes.Equal(got.Frames()[0], []byte("bravo")) {
-		t.Fatalf("leading frame = %q, want %q", got.Frames()[0], "bravo")
-	}
-	if !bytes.Equal(got.Frames()[1], []byte("ping")) {
-		t.Fatalf("body = %q, want ping", got.Frames()[1])
-	}
+	require.NoError(t, err, "recv")
+	require.Equal(t, 2, got.NumFrames())
+	require.Equal(t, []byte("bravo"), got.Frames()[0])
+	require.Equal(t, []byte("ping"), got.Frames()[1])
 }
 
 // TestRouter_UnroutableSilentWhenNotMandatory asserts that a Send to an
@@ -124,22 +99,17 @@ func TestRouter_UnroutableSilentWhenNotMandatory(t *testing.T) {
 	ids := [][]byte{[]byte("known")}
 	engineEnds, peerEnds := makeRouterPeers(ids, 4)
 	defer closePipes(append(engineEnds, peerEnds...)...)
-	if err := eng.AttachPipe(engineEnds[0]); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	mustAttach(t, eng, engineEnds[0])
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	out := msg.FromFrames([]byte("unknown"), []byte("hi"))
-	if err := eng.Send(ctx, out); err != nil {
-		t.Fatalf("send = %v, want nil (silent drop)", err)
-	}
+	require.NoError(t, eng.Send(ctx, out), "send (silent drop)")
 	// known peer must not have received anything.
 	ctx2, c := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer c()
-	if _, err := peerEnds[0].Recv(ctx2); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("known peer unexpectedly received (err=%v)", err)
-	}
+	_, err := peerEnds[0].Recv(ctx2)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "known peer unexpectedly received")
 }
 
 // TestRouter_UnroutableErrorsWhenMandatory asserts that Send to an
@@ -152,16 +122,12 @@ func TestRouter_UnroutableErrorsWhenMandatory(t *testing.T) {
 	ids := [][]byte{[]byte("known")}
 	engineEnds, peerEnds := makeRouterPeers(ids, 4)
 	defer closePipes(append(engineEnds, peerEnds...)...)
-	if err := eng.AttachPipe(engineEnds[0]); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	mustAttach(t, eng, engineEnds[0])
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	out := msg.FromFrames([]byte("unknown"), []byte("hi"))
-	if err := eng.Send(ctx, out); !errors.Is(err, zmqerr.ErrRouteUnknown) {
-		t.Fatalf("send err = %v, want ErrRouteUnknown", err)
-	}
+	require.ErrorIs(t, eng.Send(ctx, out), zmqerr.ErrRouteUnknown)
 }
 
 // TestRouter_SendRejectsEmptyMessage asserts that Send with no frames
@@ -172,9 +138,7 @@ func TestRouter_SendRejectsEmptyMessage(t *testing.T) {
 	defer eng.Close()
 
 	err := eng.Send(context.Background(), msg.New())
-	if !errors.Is(err, zmqerr.ErrRouteUnknown) {
-		t.Fatalf("send err = %v, want ErrRouteUnknown", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrRouteUnknown)
 }
 
 // TestRouter_DetachClearsRoute asserts that detaching a peer removes its
@@ -187,18 +151,12 @@ func TestRouter_DetachClearsRoute(t *testing.T) {
 	ids := [][]byte{[]byte("peerX")}
 	engineEnds, peerEnds := makeRouterPeers(ids, 4)
 	defer closePipes(append(engineEnds, peerEnds...)...)
-	if err := eng.AttachPipe(engineEnds[0]); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
-	if err := eng.DetachPipe(engineEnds[0]); err != nil {
-		t.Fatalf("detach: %v", err)
-	}
+	mustAttach(t, eng, engineEnds[0])
+	require.NoError(t, eng.DetachPipe(engineEnds[0]), "detach")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	out := msg.FromFrames([]byte("peerX"), []byte("hi"))
-	if err := eng.Send(ctx, out); !errors.Is(err, zmqerr.ErrRouteUnknown) {
-		t.Fatalf("send after detach = %v, want ErrRouteUnknown", err)
-	}
+	require.ErrorIs(t, eng.Send(ctx, out), zmqerr.ErrRouteUnknown, "send after detach")
 }
 
 // TestRouter_AnonymousPeerGetsSynthesizedIdentity asserts that a peer
@@ -212,43 +170,28 @@ func TestRouter_AnonymousPeerGetsSynthesizedIdentity(t *testing.T) {
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	if err := eng.AttachPipe(a); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	mustAttach(t, eng, a)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
 	// Anonymous peer sends; Router receives with a leading synthesized
 	// identity.
-	if err := b.Send(ctx, msg.FromBytes([]byte("hello"))); err != nil {
-		t.Fatalf("peer send: %v", err)
-	}
+	require.NoError(t, b.Send(ctx, msg.FromBytes([]byte("hello"))), "peer send")
 	got, err := eng.Recv(ctx)
-	if err != nil {
-		t.Fatalf("recv: %v", err)
-	}
-	if got.NumFrames() != 2 {
-		t.Fatalf("frames = %d, want 2", got.NumFrames())
-	}
+	require.NoError(t, err, "recv")
+	require.Equal(t, 2, got.NumFrames())
 	synthID := got.Frames()[0]
-	if len(synthID) != 5 || synthID[0] != 0 {
-		t.Fatalf("synthesized identity = %v, want 5 bytes starting with 0", synthID)
-	}
+	require.Len(t, synthID, 5, "synthesized identity length")
+	require.Equal(t, byte(0), synthID[0], "synthesized identity leading byte")
 
 	// Replay the synthesized identity on Send; peer must receive the
 	// reply body.
 	reply := msg.FromFrames(synthID, []byte("world"))
-	if err := eng.Send(ctx, reply); err != nil {
-		t.Fatalf("send: %v", err)
-	}
+	require.NoError(t, eng.Send(ctx, reply), "send")
 	got2, err := b.Recv(ctx)
-	if err != nil {
-		t.Fatalf("peer recv: %v", err)
-	}
-	if got2.NumFrames() != 1 || string(got2.Bytes()) != "world" {
-		t.Fatalf("peer got %q frames=%d", got2.Frames(), got2.NumFrames())
-	}
+	require.NoError(t, err, "peer recv")
+	require.Equal(t, 1, got2.NumFrames())
+	require.Equal(t, "world", string(got2.Bytes()))
 }
 
 // TestRouter_IdentityStableUnderDetachChurn stresses the Recv-vs-Detach
@@ -303,7 +246,7 @@ func TestRouter_IdentityStableUnderDetachChurn(t *testing.T) {
 		}
 		a, b := pipe.NewPair(8, 8, pipe.PeerInfo{Identity: peerID}, pipe.PeerInfo{})
 		if err := eng.AttachPipe(a); err != nil {
-			t.Fatalf("initial attach %d: %v", i, err)
+			require.NoError(t, err, "initial attach %d", i)
 		}
 		slots[i] = &peerSlot{id: id, anon: anon, eng: a, prx: b}
 	}
@@ -497,7 +440,7 @@ func TestRouter_IdentityStableUnderDetachChurn(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if err, _ := recvErr.Load().(error); err != nil {
-			t.Fatalf("tracker: %v", err)
+			require.NoError(t, err, "tracker")
 		}
 		time.Sleep(10 * time.Millisecond)
 		// Heuristic stop: no more messages for a quiet window.
@@ -510,10 +453,8 @@ func TestRouter_IdentityStableUnderDetachChurn(t *testing.T) {
 	recvCancel()
 	recvWg.Wait()
 	if err, _ := recvErr.Load().(error); err != nil {
-		t.Fatalf("tracker (post-stop): %v", err)
+		require.NoError(t, err, "tracker (post-stop)")
 	}
-	if recvCount.Load() == 0 {
-		t.Fatalf("tracker saw zero messages; expected some of %d (sends=%d)", iterations, sendsDone.Load())
-	}
+	assert.NotZero(t, recvCount.Load(), "tracker saw zero messages; expected some of %d (sends=%d)", iterations, sendsDone.Load())
 	t.Logf("tracker validated %d messages (successful sends: %d / %d)", recvCount.Load(), sendsDone.Load(), iterations)
 }

@@ -1,7 +1,6 @@
 package session
 
 import (
-	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -10,6 +9,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
@@ -193,99 +195,84 @@ func (m *fakeMech) NextHandshake(in []byte) ([]byte, bool, error) {
 }
 
 // --------------------------------------------------------------------------
-// Tests
+// startSessionPair builds a client/server pair over fakeConns, starts both,
+// registers t.Cleanup to stop them, and waits for both handshakes.
 // --------------------------------------------------------------------------
 
-func TestSession_Handshake_AndRoundTrip(t *testing.T) {
-	connA, connB := newFakeConnPair()
+func startSessionPair(t *testing.T, propsA, propsB map[string]string, hwm int) (sA, sB iface.Session, connA, connB *fakeConn) {
+	t.Helper()
+	connA, connB = newFakeConnPair()
 
-	sA := New(Config{
+	sA = New(Config{
 		Conn:    connA,
-		Mech:    newFakeMech("NULL", false, map[string]string{"Socket-Type": "PAIR", "Identity": "A"}),
+		Mech:    newFakeMech("NULL", false, propsA),
 		Codec:   fakeCodec{},
 		Role:    iface.RoleClient,
-		SendHWM: 4,
-		RecvHWM: 4,
+		SendHWM: hwm,
+		RecvHWM: hwm,
 	})
-	sB := New(Config{
+	sB = New(Config{
 		Conn:    connB,
-		Mech:    newFakeMech("NULL", true, map[string]string{"Socket-Type": "PAIR", "Identity": "B"}),
+		Mech:    newFakeMech("NULL", true, propsB),
 		Codec:   fakeCodec{},
 		Role:    iface.RoleServer,
-		SendHWM: 4,
-		RecvHWM: 4,
+		SendHWM: hwm,
+		RecvHWM: hwm,
 	})
 
 	sA.Start()
 	sB.Start()
-
-	// Ensure cleanup on any failure.
-	defer func() {
+	t.Cleanup(func() {
 		_ = sA.Stop()
 		_ = sB.Stop()
-	}()
+	})
 
-	// Wait for both handshakes (with a generous timeout to accommodate
-	// CI scheduling jitter).
 	waitHandshake(t, sA, "A")
 	waitHandshake(t, sB, "B")
+	return sA, sB, connA, connB
+}
+
+// --------------------------------------------------------------------------
+// Tests
+// --------------------------------------------------------------------------
+
+func TestSession_Handshake_AndRoundTrip(t *testing.T) {
+	sA, sB, _, _ := startSessionPair(t,
+		map[string]string{"Socket-Type": "PAIR", "Identity": "A"},
+		map[string]string{"Socket-Type": "PAIR", "Identity": "B"},
+		4,
+	)
 
 	// Verify the engine-facing pipe surfaces the peer's identity from
 	// metadata propagated through SetPeerMetadata after the handshake.
-	if got := sA.Pipe().PeerEndpoint(); got != "fake://b" {
-		t.Errorf("A pipe peer endpoint = %q, want fake://b", got)
-	}
-	if got := sB.Pipe().PeerEndpoint(); got != "fake://a" {
-		t.Errorf("B pipe peer endpoint = %q, want fake://a", got)
-	}
+	assert.Equal(t, "fake://b", sA.Pipe().PeerEndpoint(), "A pipe peer endpoint")
+	assert.Equal(t, "fake://a", sB.Pipe().PeerEndpoint(), "B pipe peer endpoint")
 	mechA := sA.(*sessionImpl).cfg.Mech.(*fakeMech)
 	mechB := sB.(*sessionImpl).cfg.Mech.(*fakeMech)
-	if mechA.setPeerCalls != 1 {
-		t.Fatalf("A SetPeerMetadata calls = %d, want 1", mechA.setPeerCalls)
-	}
-	if mechB.setPeerCalls != 1 {
-		t.Fatalf("B SetPeerMetadata calls = %d, want 1", mechB.setPeerCalls)
-	}
-	if got := string(sA.Pipe().PeerIdentity()); got != "B" {
-		t.Fatalf("A pipe peer identity = %q, want B", got)
-	}
-	if got := string(sB.Pipe().PeerIdentity()); got != "A" {
-		t.Fatalf("B pipe peer identity = %q, want A", got)
-	}
+	require.Equal(t, 1, mechA.setPeerCalls, "A SetPeerMetadata calls")
+	require.Equal(t, 1, mechB.setPeerCalls, "B SetPeerMetadata calls")
+	require.Equal(t, "B", string(sA.Pipe().PeerIdentity()), "A pipe peer identity")
+	require.Equal(t, "A", string(sB.Pipe().PeerIdentity()), "B pipe peer identity")
 
 	// Push a multipart message A→B and verify it surfaces verbatim.
 	out := msg.FromFrames([]byte("hello"), []byte("world"), []byte("!"))
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := sA.Pipe().Send(ctx, out); err != nil {
-		t.Fatalf("A.Pipe.Send: %v", err)
-	}
+	ctx := testCtx(t, 2*time.Second)
+	require.NoError(t, sA.Pipe().Send(ctx, out), "A.Pipe.Send")
 	got, err := sB.Pipe().Recv(ctx)
-	if err != nil {
-		t.Fatalf("B.Pipe.Recv: %v", err)
-	}
-	if got.NumFrames() != 3 {
-		t.Fatalf("got %d frames, want 3 (frames=%v)", got.NumFrames(), got.Frames())
-	}
+	require.NoError(t, err, "B.Pipe.Recv")
+	require.Equal(t, 3, got.NumFrames(), "got frames count (frames=%v)", got.Frames())
 	want := []string{"hello", "world", "!"}
 	for i, f := range got.Frames() {
-		if string(f) != want[i] {
-			t.Errorf("frame[%d] = %q, want %q", i, f, want[i])
-		}
+		assert.Equal(t, want[i], string(f), "frame[%d]", i)
 	}
 
 	// Round-trip the other direction too, to exercise B's writer / A's
 	// reader paths.
-	if err := sB.Pipe().Send(ctx, msg.FromBytes([]byte("ack"))); err != nil {
-		t.Fatalf("B.Pipe.Send: %v", err)
-	}
+	require.NoError(t, sB.Pipe().Send(ctx, msg.FromBytes([]byte("ack"))), "B.Pipe.Send")
 	got2, err := sA.Pipe().Recv(ctx)
-	if err != nil {
-		t.Fatalf("A.Pipe.Recv: %v", err)
-	}
-	if got2.NumFrames() != 1 || string(got2.Bytes()) != "ack" {
-		t.Errorf("ack roundtrip = %v, want [ack]", got2.Frames())
-	}
+	require.NoError(t, err, "A.Pipe.Recv")
+	assert.Equal(t, 1, got2.NumFrames(), "ack roundtrip frame count")
+	assert.Equal(t, "ack", string(got2.Bytes()), "ack roundtrip payload")
 
 	// Stop must drain cleanly. We rely on goleak (TestMain) for the
 	// leak assertion; here we just verify Stop returns without error
@@ -294,28 +281,20 @@ func TestSession_Handshake_AndRoundTrip(t *testing.T) {
 	doneB := stopAsync(sB)
 	select {
 	case err := <-doneA:
-		if err != nil {
-			t.Errorf("A.Stop: %v", err)
-		}
+		assert.NoError(t, err, "A.Stop")
 	case <-time.After(2 * time.Second):
-		t.Fatal("A.Stop did not return within 2s")
+		require.FailNow(t, "A.Stop did not return within 2s")
 	}
 	select {
 	case err := <-doneB:
-		if err != nil {
-			t.Errorf("B.Stop: %v", err)
-		}
+		assert.NoError(t, err, "B.Stop")
 	case <-time.After(2 * time.Second):
-		t.Fatal("B.Stop did not return within 2s")
+		require.FailNow(t, "B.Stop did not return within 2s")
 	}
 
 	// Stop is idempotent.
-	if err := sA.Stop(); err != nil {
-		t.Errorf("A.Stop second call: %v", err)
-	}
-	if err := sB.Stop(); err != nil {
-		t.Errorf("B.Stop second call: %v", err)
-	}
+	assert.NoError(t, sA.Stop(), "A.Stop second call")
+	assert.NoError(t, sB.Stop(), "B.Stop second call")
 }
 
 func encodeFakeProps(props map[string]string) []byte {
@@ -390,11 +369,9 @@ func TestSession_StopBeforeHandshake(t *testing.T) {
 		// We expect Stop itself to return nil — the handshake error
 		// is reported via HandshakeErr. Conn.Close on an already-closed
 		// io.Pipe returns nil, so this should be cleanly nil.
-		if err != nil {
-			t.Errorf("Stop returned %v, want nil", err)
-		}
+		assert.NoError(t, err, "Stop returned error, want nil")
 	case <-time.After(2 * time.Second):
-		t.Fatal("Stop did not return within 2s")
+		require.FailNow(t, "Stop did not return within 2s")
 	}
 
 	// Handshaked must be closed; HandshakeErr must be non-nil since
@@ -402,11 +379,9 @@ func TestSession_StopBeforeHandshake(t *testing.T) {
 	select {
 	case <-s.Handshaked():
 	case <-time.After(time.Second):
-		t.Fatal("Handshaked not closed after Stop")
+		require.FailNow(t, "Handshaked not closed after Stop")
 	}
-	if err := s.HandshakeErr(); err == nil {
-		t.Error("HandshakeErr = nil after Stop-before-handshake; want non-nil")
-	}
+	assert.Error(t, s.HandshakeErr(), "HandshakeErr = nil after Stop-before-handshake; want non-nil")
 }
 
 // TestSession_StopWithoutStart ensures the no-Start path is leak-free
@@ -423,89 +398,53 @@ func TestSession_StopWithoutStart(t *testing.T) {
 		SendHWM: 1,
 		RecvHWM: 1,
 	})
-	if err := s.Stop(); err != nil {
-		t.Fatalf("Stop without Start: %v", err)
-	}
-	if err := s.Stop(); err != nil {
-		t.Fatalf("Stop second call without Start: %v", err)
-	}
+	require.NoError(t, s.Stop(), "Stop without Start")
+	require.NoError(t, s.Stop(), "Stop second call without Start")
 	// Handshaked must close so observers don't hang.
 	select {
 	case <-s.Handshaked():
 	case <-time.After(time.Second):
-		t.Fatal("Handshaked not closed by Stop-without-Start")
+		require.FailNow(t, "Handshaked not closed by Stop-without-Start")
 	}
 }
 
 func TestSession_CancelWriter_DoesNotCloseConnUntilStop(t *testing.T) {
-	connA, connB := newFakeConnPair()
+	sA, sB, connA, _ := startSessionPair(t,
+		map[string]string{"Identity": "A"},
+		map[string]string{"Identity": "B"},
+		8,
+	)
 
-	sA := New(Config{
-		Conn:    connA,
-		Mech:    newFakeMech("NULL", false, map[string]string{"Identity": "A"}),
-		Codec:   fakeCodec{},
-		Role:    iface.RoleClient,
-		SendHWM: 8,
-		RecvHWM: 8,
-	})
-	sB := New(Config{
-		Conn:    connB,
-		Mech:    newFakeMech("NULL", true, map[string]string{"Identity": "B"}),
-		Codec:   fakeCodec{},
-		Role:    iface.RoleServer,
-		SendHWM: 8,
-		RecvHWM: 8,
-	})
-
-	sA.Start()
-	sB.Start()
-	defer func() {
-		_ = sA.Stop()
-		_ = sB.Stop()
-	}()
-
-	waitHandshake(t, sA, "A")
-	waitHandshake(t, sB, "B")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t, 2*time.Second)
 	for i := 0; i < 4; i++ {
-		if err := sA.Pipe().Send(ctx, msg.FromBytes([]byte(fmt.Sprintf("linger-%d", i)))); err != nil {
-			t.Fatalf("Send[%d]: %v", i, err)
-		}
+		require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte(fmt.Sprintf("linger-%d", i)))), "Send[%d]", i)
 	}
 
 	sA.CancelWriter()
 	select {
 	case <-sA.WriterFlushed():
 	case <-time.After(2 * time.Second):
-		t.Fatal("WriterFlushed did not fire after CancelWriter")
+		require.FailNow(t, "WriterFlushed did not fire after CancelWriter")
 	}
 
 	select {
 	case <-connA.Closed():
-		t.Fatal("CancelWriter closed the conn before Stop")
+		require.FailNow(t, "CancelWriter closed the conn before Stop")
 	case <-time.After(50 * time.Millisecond):
 	}
 
 	for i := 0; i < 4; i++ {
 		m, err := sB.Pipe().Recv(ctx)
-		if err != nil {
-			t.Fatalf("Recv[%d]: %v", i, err)
-		}
+		require.NoError(t, err, "Recv[%d]", i)
 		want := fmt.Sprintf("linger-%d", i)
-		if string(m.Bytes()) != want {
-			t.Fatalf("Recv[%d] = %q, want %q", i, m.Bytes(), want)
-		}
+		require.Equal(t, want, string(m.Bytes()), "Recv[%d]", i)
 	}
 
-	if err := sA.Stop(); err != nil {
-		t.Fatalf("Stop: %v", err)
-	}
+	require.NoError(t, sA.Stop(), "Stop")
 	select {
 	case <-connA.Closed():
 	case <-time.After(time.Second):
-		t.Fatal("Stop did not close the conn")
+		require.FailNow(t, "Stop did not close the conn")
 	}
 }
 
@@ -518,11 +457,9 @@ func waitHandshake(t *testing.T, s iface.Session, label string) {
 	select {
 	case <-s.Handshaked():
 	case <-time.After(2 * time.Second):
-		t.Fatalf("%s: handshake did not complete within 2s", label)
+		require.FailNow(t, label+": handshake did not complete within 2s")
 	}
-	if err := s.HandshakeErr(); err != nil {
-		t.Fatalf("%s: HandshakeErr = %v", label, err)
-	}
+	require.NoError(t, s.HandshakeErr(), "%s: HandshakeErr", label)
 }
 
 func stopAsync(s iface.Session) <-chan error {
@@ -568,16 +505,13 @@ func TestSession_HandshakeErr_ProtocolViolation(t *testing.T) {
 	select {
 	case <-sA.Handshaked():
 	case <-time.After(2 * time.Second):
-		t.Fatal("handshake did not complete (or fail) within 2s")
+		require.FailNow(t, "handshake did not complete (or fail) within 2s")
 	}
 	err := sA.HandshakeErr()
-	if err == nil {
-		t.Fatalf("expected handshake to fail, got nil")
-	}
+	require.Error(t, err, "expected handshake to fail")
 	// Confirm the error chain is well-formed.
-	if !errorsContains(err, "malformed") && !errorsContains(err, "signature") {
-		t.Errorf("HandshakeErr = %v; expected malformed/signature wording", err)
-	}
+	assert.True(t, errorsContains(err, "malformed") || errorsContains(err, "signature"),
+		"HandshakeErr = %v; expected malformed/signature wording", err)
 
 	wg.Wait()
 }
@@ -636,35 +570,20 @@ var _ = fmt.Errorf
 // TestSession_Done_FiresOnNormalStop covers the happy path: handshake
 // completes, traffic flows, caller invokes Stop, Done() closes.
 func TestSession_Done_FiresOnNormalStop(t *testing.T) {
-	connA, connB := newFakeConnPair()
-	sA := New(Config{
-		Conn: connA, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{},
-		Role: iface.RoleClient, SendHWM: 1, RecvHWM: 1,
-	})
-	sB := New(Config{
-		Conn: connB, Mech: newFakeMech("NULL", true, nil), Codec: fakeCodec{},
-		Role: iface.RoleServer, SendHWM: 1, RecvHWM: 1,
-	})
-	sA.Start()
-	sB.Start()
-	defer sB.Stop()
-	waitHandshake(t, sA, "A")
-	waitHandshake(t, sB, "B")
+	sA, _, _, _ := startSessionPair(t, nil, nil, 1)
 
 	// Done must not fire until Stop.
 	select {
 	case <-sA.Done():
-		t.Fatal("Done fired before Stop")
+		require.FailNow(t, "Done fired before Stop")
 	case <-time.After(20 * time.Millisecond):
 	}
 
-	if err := sA.Stop(); err != nil {
-		t.Fatalf("Stop: %v", err)
-	}
+	require.NoError(t, sA.Stop(), "Stop")
 	select {
 	case <-sA.Done():
 	case <-time.After(time.Second):
-		t.Fatal("Done did not fire after Stop")
+		require.FailNow(t, "Done did not fire after Stop")
 	}
 }
 
@@ -673,21 +592,7 @@ func TestSession_Done_FiresOnNormalStop(t *testing.T) {
 // which cancels ctx and closes the conn; writer exits on pipe Recv
 // cancellation; wg drains; Done closes.
 func TestSession_Done_FiresOnReaderEOF(t *testing.T) {
-	connA, connB := newFakeConnPair()
-	sA := New(Config{
-		Conn: connA, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{},
-		Role: iface.RoleClient, SendHWM: 1, RecvHWM: 1,
-	})
-	sB := New(Config{
-		Conn: connB, Mech: newFakeMech("NULL", true, nil), Codec: fakeCodec{},
-		Role: iface.RoleServer, SendHWM: 1, RecvHWM: 1,
-	})
-	sA.Start()
-	sB.Start()
-	defer sA.Stop()
-	defer sB.Stop()
-	waitHandshake(t, sA, "A")
-	waitHandshake(t, sB, "B")
+	sA, _, _, connB := startSessionPair(t, nil, nil, 1)
 
 	// Kill the peer's conn out from under sA. sA's reader sees EOF
 	// (io.Pipe closed), shutdown cascades, Done fires.
@@ -696,7 +601,7 @@ func TestSession_Done_FiresOnReaderEOF(t *testing.T) {
 	select {
 	case <-sA.Done():
 	case <-time.After(2 * time.Second):
-		t.Fatal("Done did not fire after peer EOF")
+		require.FailNow(t, "Done did not fire after peer EOF")
 	}
 }
 
@@ -724,22 +629,18 @@ func TestSession_Done_FiresOnHandshakeFailure(t *testing.T) {
 	select {
 	case <-sA.Handshaked():
 	case <-time.After(2 * time.Second):
-		t.Fatal("handshake did not settle")
+		require.FailNow(t, "handshake did not settle")
 	}
-	if sA.HandshakeErr() == nil {
-		t.Fatal("expected HandshakeErr, got nil")
-	}
+	require.Error(t, sA.HandshakeErr(), "expected HandshakeErr, got nil")
 	// Done fires on run() exit without Stop being called; no traffic-
 	// phase goroutines were spawned, so wg drains as soon as run returns.
 	select {
 	case <-sA.Done():
 	case <-time.After(2 * time.Second):
-		t.Fatal("Done did not fire after handshake failure")
+		require.FailNow(t, "Done did not fire after handshake failure")
 	}
 	// Stop still idempotent afterwards.
-	if err := sA.Stop(); err != nil {
-		t.Errorf("Stop after handshake failure: %v", err)
-	}
+	assert.NoError(t, sA.Stop(), "Stop after handshake failure")
 }
 
 // TestSession_Done_FiresOnContextCancel is exercised via Stop; there is
@@ -759,13 +660,11 @@ func TestSession_Done_FiresOnStopBeforeHandshake(t *testing.T) {
 	s.Start()
 	// Give the run goroutine a moment to reach the blocking greeting read.
 	time.Sleep(10 * time.Millisecond)
-	if err := s.Stop(); err != nil {
-		t.Fatalf("Stop: %v", err)
-	}
+	require.NoError(t, s.Stop(), "Stop")
 	select {
 	case <-s.Done():
 	case <-time.After(2 * time.Second):
-		t.Fatal("Done did not fire after Stop-before-handshake")
+		require.FailNow(t, "Done did not fire after Stop-before-handshake")
 	}
 }
 
@@ -782,21 +681,15 @@ func TestSession_Done_FiresExactlyOnce(t *testing.T) {
 	})
 	s.Start()
 	time.Sleep(10 * time.Millisecond)
-	if err := s.Stop(); err != nil {
-		t.Fatalf("first Stop: %v", err)
-	}
-	if err := s.Stop(); err != nil {
-		t.Fatalf("second Stop: %v", err)
-	}
+	require.NoError(t, s.Stop(), "first Stop")
+	require.NoError(t, s.Stop(), "second Stop")
 	// Third stop, for good measure — must not panic.
-	if err := s.Stop(); err != nil {
-		t.Fatalf("third Stop: %v", err)
-	}
+	require.NoError(t, s.Stop(), "third Stop")
 	// Done still closed and drainable without panic.
 	select {
 	case <-s.Done():
 	case <-time.After(time.Second):
-		t.Fatal("Done not closed after multiple Stops")
+		require.FailNow(t, "Done not closed after multiple Stops")
 	}
 	// And a Stop-without-Start session: Done must still fire.
 	connC, connD := newFakeConnPair()
@@ -805,12 +698,10 @@ func TestSession_Done_FiresExactlyOnce(t *testing.T) {
 		Conn: connC, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{},
 		Role: iface.RoleClient, SendHWM: 1, RecvHWM: 1,
 	})
-	if err := s2.Stop(); err != nil {
-		t.Fatalf("Stop-without-Start: %v", err)
-	}
+	require.NoError(t, s2.Stop(), "Stop-without-Start")
 	select {
 	case <-s2.Done():
 	case <-time.After(time.Second):
-		t.Fatal("Done not closed after Stop-without-Start")
+		require.FailNow(t, "Done not closed after Stop-without-Start")
 	}
 }

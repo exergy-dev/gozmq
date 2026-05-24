@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/rkm/gozmq/internal/iface"
 )
 
@@ -36,9 +38,7 @@ func TestValidateSocketTypeCompatibility(t *testing.T) {
 				map[string]string{"Socket-Type": tc.local},
 				map[string]string{"Socket-Type": tc.peer},
 			)
-			if err != nil {
-				t.Fatalf("validateSocketTypeCompatibility(%s, %s) = %v, want nil", tc.local, tc.peer, err)
-			}
+			require.NoError(t, err, "validateSocketTypeCompatibility(%s, %s)", tc.local, tc.peer)
 		})
 	}
 
@@ -78,12 +78,9 @@ func TestValidateSocketTypeCompatibility(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			err := validateSocketTypeCompatibility(tc.local, tc.peer)
-			if err == nil {
-				t.Fatal("validateSocketTypeCompatibility returned nil, want error")
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("validateSocketTypeCompatibility error = %v, want substring %q", err, tc.want)
-			}
+			require.Error(t, err, "validateSocketTypeCompatibility returned nil, want error")
+			require.True(t, strings.Contains(err.Error(), tc.want),
+				"validateSocketTypeCompatibility error = %v, want substring %q", err, tc.want)
 		})
 	}
 }
@@ -126,24 +123,12 @@ func TestSession_HandshakeRejectsIncompatibleSocketTypes(t *testing.T) {
 
 	mechA := sA.(*sessionImpl).cfg.Mech.(*fakeMech)
 	mechB := sB.(*sessionImpl).cfg.Mech.(*fakeMech)
-	if mechA.setPeerCalls != 1 {
-		t.Fatalf("A SetPeerMetadata calls = %d, want 1", mechA.setPeerCalls)
-	}
-	if mechB.setPeerCalls != 1 {
-		t.Fatalf("B SetPeerMetadata calls = %d, want 1", mechB.setPeerCalls)
-	}
-	if got := mechA.PeerMetadata()["Socket-Type"]; got != "REQ" {
-		t.Fatalf("A peer socket type = %q, want REQ", got)
-	}
-	if got := mechB.PeerMetadata()["Socket-Type"]; got != "REQ" {
-		t.Fatalf("B peer socket type = %q, want REQ", got)
-	}
-	if sA.Pipe() != nil {
-		t.Fatal("A Pipe() = non-nil after handshake rejection, want nil")
-	}
-	if sB.Pipe() != nil {
-		t.Fatal("B Pipe() = non-nil after handshake rejection, want nil")
-	}
+	require.Equal(t, 1, mechA.setPeerCalls, "A SetPeerMetadata calls")
+	require.Equal(t, 1, mechB.setPeerCalls, "B SetPeerMetadata calls")
+	require.Equal(t, "REQ", mechA.PeerMetadata()["Socket-Type"], "A peer socket type")
+	require.Equal(t, "REQ", mechB.PeerMetadata()["Socket-Type"], "B peer socket type")
+	require.Nil(t, sA.Pipe(), "A Pipe() = non-nil after handshake rejection, want nil")
+	require.Nil(t, sB.Pipe(), "B Pipe() = non-nil after handshake rejection, want nil")
 }
 
 func waitHandshakeFailure(t *testing.T, s iface.Session, label string) {
@@ -151,13 +136,10 @@ func waitHandshakeFailure(t *testing.T, s iface.Session, label string) {
 	select {
 	case <-s.Handshaked():
 	case <-time.After(2 * time.Second):
-		t.Fatalf("%s: handshake did not complete within 2s", label)
+		require.FailNow(t, "handshake did not complete within 2s", label)
 	}
 	err := s.HandshakeErr()
-	if err == nil {
-		t.Fatalf("%s: HandshakeErr = nil, want incompatibility failure", label)
-	}
-	if !strings.Contains(err.Error(), "incompatible Socket-Type pairing") {
-		t.Fatalf("%s: HandshakeErr = %v, want incompatibility message", label, err)
-	}
+	require.Error(t, err, "%s: HandshakeErr = nil, want incompatibility failure", label)
+	require.True(t, strings.Contains(err.Error(), "incompatible Socket-Type pairing"),
+		"%s: HandshakeErr = %v, want incompatibility message", label, err)
 }

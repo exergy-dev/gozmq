@@ -1,7 +1,6 @@
 package transport
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -13,6 +12,8 @@ import (
 	"time"
 
 	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // tmpSock returns a unique socket path under t.TempDir. Paths must be
@@ -31,23 +32,18 @@ func TestIPC_Filesystem_RoundTrip(t *testing.T) {
 	endpoint := "ipc://" + path
 
 	l, err := tr.Listen(context.Background(), endpoint)
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	defer l.Close()
 
-	if l.Endpoint() != endpoint {
-		t.Fatalf("Endpoint = %q, want %q", l.Endpoint(), endpoint)
-	}
+	require.Equal(t, endpoint, l.Endpoint())
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t, 2*time.Second)
 
 	acceptCh := make(chan *ipcConn, 1)
 	go func() {
 		c, err := l.Accept(ctx)
 		if err != nil {
-			t.Errorf("Accept: %v", err)
+			assert.NoError(t, err, "Accept")
 			close(acceptCh)
 			return
 		}
@@ -55,45 +51,31 @@ func TestIPC_Filesystem_RoundTrip(t *testing.T) {
 	}()
 
 	dial, err := tr.Dial(ctx, endpoint)
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	defer dial.Close()
 
 	srv := <-acceptCh
-	if srv == nil {
-		t.Fatal("accept failed")
-	}
+	require.NotNil(t, srv, "accept failed")
 	defer srv.Close()
 
 	// Endpoint reporting.
-	if !ipcHasPrefix(dial.(*ipcConn).RemoteEndpoint(), "ipc://") {
-		t.Errorf("client Remote = %q", dial.(*ipcConn).RemoteEndpoint())
-	}
+	assert.True(t, ipcHasPrefix(dial.(*ipcConn).RemoteEndpoint(), "ipc://"), "client Remote = %q", dial.(*ipcConn).RemoteEndpoint())
 
 	want := []byte("ping-ipc")
-	if _, err := dial.Write(want); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
+	_, err = dial.Write(want)
+	require.NoError(t, err, "Write")
 	got := make([]byte, len(want))
-	if _, err := io.ReadFull(srv, got); err != nil {
-		t.Fatalf("ReadFull server: %v", err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("got %q want %q", got, want)
-	}
+	_, err = io.ReadFull(srv, got)
+	require.NoError(t, err, "ReadFull server")
+	require.Equal(t, want, got)
 
 	want2 := []byte("pong-ipc")
-	if _, err := srv.Write(want2); err != nil {
-		t.Fatalf("Write server: %v", err)
-	}
+	_, err = srv.Write(want2)
+	require.NoError(t, err, "Write server")
 	got2 := make([]byte, len(want2))
-	if _, err := io.ReadFull(dial, got2); err != nil {
-		t.Fatalf("ReadFull client: %v", err)
-	}
-	if !bytes.Equal(got2, want2) {
-		t.Fatalf("got %q want %q", got2, want2)
-	}
+	_, err = io.ReadFull(dial, got2)
+	require.NoError(t, err, "ReadFull client")
+	require.Equal(t, want2, got2)
 }
 
 // TestIPC_SocketFileCleanup asserts that closing the listener removes the
@@ -105,20 +87,14 @@ func TestIPC_SocketFileCleanup(t *testing.T) {
 	endpoint := "ipc://" + path
 
 	l, err := tr.Listen(context.Background(), endpoint)
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	// After Listen the file must exist.
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("socket file missing after Listen: %v", err)
-	}
-	if err := l.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
+	_, err = os.Stat(path)
+	require.NoError(t, err, "socket file missing after Listen")
+	require.NoError(t, l.Close(), "Close")
 	// After Close it must be gone.
-	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("socket file still exists after Close: err=%v", err)
-	}
+	_, err = os.Stat(path)
+	require.ErrorIs(t, err, os.ErrNotExist, "socket file still exists after Close")
 }
 
 // TestIPC_FilePerm asserts that WithIPCFilePerm chmods the socket file to
@@ -135,18 +111,12 @@ func TestIPC_FilePerm(t *testing.T) {
 	endpoint := "ipc://" + path
 
 	l, err := tr.Listen(context.Background(), endpoint)
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	defer l.Close()
 
 	fi, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("Stat: %v", err)
-	}
-	if got := fi.Mode().Perm(); got != 0o600 {
-		t.Fatalf("perm = %#o, want %#o", got, 0o600)
-	}
+	require.NoError(t, err, "Stat")
+	require.Equal(t, os.FileMode(0o600), fi.Mode().Perm())
 }
 
 // TestIPC_AbstractNamespace exercises the "@name" abstract-namespace
@@ -160,23 +130,18 @@ func TestIPC_AbstractNamespace(t *testing.T) {
 	endpoint := "ipc://@gozmq-abstract-" + t.Name()
 
 	l, err := tr.Listen(context.Background(), endpoint)
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	defer l.Close()
 
-	if l.Endpoint() != endpoint {
-		t.Fatalf("Endpoint = %q, want %q", l.Endpoint(), endpoint)
-	}
+	require.Equal(t, endpoint, l.Endpoint())
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t, 2*time.Second)
 
 	acceptCh := make(chan *ipcConn, 1)
 	go func() {
 		c, err := l.Accept(ctx)
 		if err != nil {
-			t.Errorf("Accept: %v", err)
+			assert.NoError(t, err, "Accept")
 			close(acceptCh)
 			return
 		}
@@ -184,28 +149,20 @@ func TestIPC_AbstractNamespace(t *testing.T) {
 	}()
 
 	dial, err := tr.Dial(ctx, endpoint)
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	defer dial.Close()
 
 	srv := <-acceptCh
-	if srv == nil {
-		t.Fatal("accept failed")
-	}
+	require.NotNil(t, srv, "accept failed")
 	defer srv.Close()
 
 	want := []byte("abs")
-	if _, err := dial.Write(want); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
+	_, err = dial.Write(want)
+	require.NoError(t, err, "Write")
 	got := make([]byte, len(want))
-	if _, err := io.ReadFull(srv, got); err != nil {
-		t.Fatalf("ReadFull: %v", err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("got %q want %q", got, want)
-	}
+	_, err = io.ReadFull(srv, got)
+	require.NoError(t, err, "ReadFull")
+	require.Equal(t, want, got)
 }
 
 // TestIPC_AbstractNamespace_NoFile asserts that the abstract-namespace
@@ -218,14 +175,11 @@ func TestIPC_AbstractNamespace_NoFile(t *testing.T) {
 	tr := NewIPCTransport()
 	endpoint := "ipc://@gozmq-no-file-" + t.Name()
 	l, err := tr.Listen(context.Background(), endpoint)
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	defer l.Close()
 	// The literal path "@name" (relative to cwd) should not exist.
-	if _, err := os.Stat("@gozmq-no-file-" + t.Name()); err == nil {
-		t.Fatal("abstract socket unexpectedly created a filesystem entry")
-	}
+	_, err = os.Stat("@gozmq-no-file-" + t.Name())
+	require.Error(t, err, "abstract socket unexpectedly created a filesystem entry")
 }
 
 // TestIPC_AbstractNamespace_NonLinux asserts that on non-Linux platforms
@@ -236,9 +190,7 @@ func TestIPC_AbstractNamespace_NonLinux(t *testing.T) {
 	}
 	tr := NewIPCTransport()
 	_, err := tr.Listen(context.Background(), "ipc://@foo")
-	if !errors.Is(err, zmqerr.ErrEndpointInvalid) {
-		t.Fatalf("Listen(abstract) on %s err = %v, want wraps ErrEndpointInvalid", runtime.GOOS, err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrEndpointInvalid, "Listen(abstract) on %s", runtime.GOOS)
 }
 
 // TestIPC_ListenerClose_WakesAccept asserts Close wakes a parked Accept.
@@ -247,9 +199,7 @@ func TestIPC_ListenerClose_WakesAccept(t *testing.T) {
 	path := tmpSock(t, "close-wake.sock")
 	endpoint := "ipc://" + path
 	l, err := tr.Listen(context.Background(), endpoint)
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -257,16 +207,12 @@ func TestIPC_ListenerClose_WakesAccept(t *testing.T) {
 		errCh <- err
 	}()
 	time.Sleep(20 * time.Millisecond)
-	if err := l.Close(); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, l.Close())
 	select {
 	case err := <-errCh:
-		if !errors.Is(err, zmqerr.ErrEndpointInvalid) {
-			t.Fatalf("Accept err = %v, want wraps ErrEndpointInvalid", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrEndpointInvalid)
 	case <-time.After(2 * time.Second):
-		t.Fatal("Accept did not wake on Close")
+		require.Fail(t, "Accept did not wake on Close")
 	}
 }
 
@@ -276,9 +222,7 @@ func TestIPC_AcceptHonorsCtx(t *testing.T) {
 	path := tmpSock(t, "ctx.sock")
 	endpoint := "ipc://" + path
 	l, err := tr.Listen(context.Background(), endpoint)
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	defer l.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -291,11 +235,9 @@ func TestIPC_AcceptHonorsCtx(t *testing.T) {
 	cancel()
 	select {
 	case err := <-errCh:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("Accept err = %v, want context.Canceled", err)
-		}
+		require.ErrorIs(t, err, context.Canceled)
 	case <-time.After(2 * time.Second):
-		t.Fatal("Accept did not wake on ctx cancel")
+		require.Fail(t, "Accept did not wake on ctx cancel")
 	}
 }
 
@@ -310,14 +252,13 @@ func TestIPC_BadEndpoint(t *testing.T) {
 		"no-scheme", // missing ://
 	}
 	for _, ep := range cases {
-		if _, err := tr.Listen(context.Background(), ep); !errors.Is(err, zmqerr.ErrEndpointInvalid) {
-			t.Errorf("Listen(%q) err = %v, want wraps ErrEndpointInvalid", ep, err)
-		}
+		_, err := tr.Listen(context.Background(), ep)
+		assert.ErrorIs(t, err, zmqerr.ErrEndpointInvalid, "Listen(%q)", ep)
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-		_, err := tr.Dial(ctx, ep)
+		_, err = tr.Dial(ctx, ep)
 		cancel()
 		if !errors.Is(err, zmqerr.ErrEndpointInvalid) && !errors.Is(err, context.DeadlineExceeded) {
-			t.Errorf("Dial(%q) err = %v, want wraps ErrEndpointInvalid", ep, err)
+			assert.Failf(t, "unexpected Dial error", "Dial(%q) err = %v, want wraps ErrEndpointInvalid", ep, err)
 		}
 	}
 }
@@ -329,9 +270,7 @@ func TestIPC_ManyConcurrentDials(t *testing.T) {
 	path := tmpSock(t, "many.sock")
 	endpoint := "ipc://" + path
 	l, err := tr.Listen(context.Background(), endpoint)
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	defer l.Close()
 
 	const N = 8
@@ -344,7 +283,7 @@ func TestIPC_ManyConcurrentDials(t *testing.T) {
 			c, err := l.Accept(ctx)
 			cancel()
 			if err != nil {
-				t.Errorf("Accept[%d]: %v", i, err)
+				assert.NoError(t, err, "Accept[%d]", i)
 				return
 			}
 			c.Close()
@@ -359,7 +298,7 @@ func TestIPC_ManyConcurrentDials(t *testing.T) {
 			defer cancel()
 			c, err := tr.Dial(ctx, endpoint)
 			if err != nil {
-				t.Errorf("Dial: %v", err)
+				assert.NoError(t, err, "Dial")
 				return
 			}
 			c.Close()

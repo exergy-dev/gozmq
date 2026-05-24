@@ -2,8 +2,9 @@ package zmtp
 
 import (
 	"bytes"
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/rkm/gozmq/internal/zmqerr"
 )
@@ -46,19 +47,11 @@ func TestGreetingRoundTrip(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var buf bytes.Buffer
-			if err := WriteGreeting(&buf, tc.in); err != nil {
-				t.Fatalf("WriteGreeting: %v", err)
-			}
-			if buf.Len() != GreetingSize {
-				t.Fatalf("encoded size %d want %d", buf.Len(), GreetingSize)
-			}
+			require.NoError(t, WriteGreeting(&buf, tc.in), "WriteGreeting")
+			require.Equal(t, GreetingSize, buf.Len(), "encoded size")
 			got, err := ReadGreeting(&buf)
-			if err != nil {
-				t.Fatalf("ReadGreeting: %v", err)
-			}
-			if got != tc.want {
-				t.Fatalf("got %+v want %+v", got, tc.want)
-			}
+			require.NoError(t, err, "ReadGreeting")
+			require.Equal(t, tc.want, got)
 		})
 	}
 }
@@ -66,39 +59,22 @@ func TestGreetingRoundTrip(t *testing.T) {
 func TestGreetingWireFormat(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	if err := WriteGreeting(&buf, Greeting{Version: [2]byte{0x03, 0x01}, Mechanism: "NULL", AsServer: true}); err != nil {
-		t.Fatalf("WriteGreeting: %v", err)
-	}
+	require.NoError(t, WriteGreeting(&buf, Greeting{Version: [2]byte{0x03, 0x01}, Mechanism: "NULL", AsServer: true}), "WriteGreeting")
 	b := buf.Bytes()
-	if b[0] != signaturePrefix {
-		t.Fatalf("sig prefix: got 0x%02x", b[0])
-	}
+	require.Equal(t, signaturePrefix, b[0], "sig prefix")
 	for i := 1; i < 9; i++ {
-		if b[i] != 0 {
-			t.Fatalf("padding[%d] non-zero: 0x%02x", i, b[i])
-		}
+		require.Equal(t, byte(0), b[i], "padding[%d] non-zero", i)
 	}
-	if b[9] != signatureTerminator {
-		t.Fatalf("sig terminator: got 0x%02x", b[9])
-	}
-	if b[10] != 0x03 || b[11] != 0x01 {
-		t.Fatalf("version: %02x %02x", b[10], b[11])
-	}
-	if string(b[12:16]) != "NULL" {
-		t.Fatalf("mechanism: %q", b[12:16])
-	}
+	require.Equal(t, signatureTerminator, b[9], "sig terminator")
+	require.Equal(t, byte(0x03), b[10], "version major")
+	require.Equal(t, byte(0x01), b[11], "version minor")
+	require.Equal(t, "NULL", string(b[12:16]), "mechanism")
 	for i := 16; i < 32; i++ {
-		if b[i] != 0 {
-			t.Fatalf("mechanism padding[%d] non-zero: 0x%02x", i, b[i])
-		}
+		require.Equal(t, byte(0), b[i], "mechanism padding[%d] non-zero", i)
 	}
-	if b[32] != 1 {
-		t.Fatalf("as-server: 0x%02x", b[32])
-	}
+	require.Equal(t, byte(1), b[32], "as-server")
 	for i := 33; i < GreetingSize; i++ {
-		if b[i] != 0 {
-			t.Fatalf("filler[%d] non-zero: 0x%02x", i, b[i])
-		}
+		require.Equal(t, byte(0), b[i], "filler[%d] non-zero", i)
 	}
 }
 
@@ -106,9 +82,7 @@ func TestGreetingRejects(t *testing.T) {
 	t.Parallel()
 	good := func() []byte {
 		var buf bytes.Buffer
-		if err := WriteGreeting(&buf, Greeting{Version: [2]byte{0x03, 0x01}, Mechanism: "NULL"}); err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		require.NoError(t, WriteGreeting(&buf, Greeting{Version: [2]byte{0x03, 0x01}, Mechanism: "NULL"}), "seed")
 		return buf.Bytes()
 	}
 	cases := []struct {
@@ -159,9 +133,7 @@ func TestGreetingRejects(t *testing.T) {
 			b := good()
 			tc.mutate(b)
 			_, err := ReadGreeting(bytes.NewReader(b))
-			if !errors.Is(err, tc.wantErr) {
-				t.Fatalf("err: got %v want %v", err, tc.wantErr)
-			}
+			require.ErrorIs(t, err, tc.wantErr)
 		})
 	}
 }
@@ -169,17 +141,13 @@ func TestGreetingRejects(t *testing.T) {
 func TestGreetingTruncated(t *testing.T) {
 	t.Parallel()
 	_, err := ReadGreeting(bytes.NewReader([]byte{0xFF, 0x00, 0x7F}))
-	if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-		t.Fatalf("err: got %v want ErrMalformedFrame", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 }
 
 func TestGreetingMechanismTooLong(t *testing.T) {
 	t.Parallel()
 	err := WriteGreeting(&bytes.Buffer{}, Greeting{Version: [2]byte{0x03, 0x01}, Mechanism: "0123456789012345678901"})
-	if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-		t.Fatalf("err: got %v want ErrMalformedFrame", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 }
 
 // FuzzGreeting feeds arbitrary 64-byte (or shorter) blobs through the
@@ -203,15 +171,9 @@ func FuzzGreeting(f *testing.F) {
 			return
 		}
 		var buf bytes.Buffer
-		if werr := WriteGreeting(&buf, got); werr != nil {
-			t.Fatalf("re-encode of accepted greeting failed: %v", werr)
-		}
+		require.NoError(t, WriteGreeting(&buf, got), "re-encode of accepted greeting failed")
 		got2, err2 := ReadGreeting(&buf)
-		if err2 != nil {
-			t.Fatalf("re-decode of accepted greeting failed: %v", err2)
-		}
-		if got != got2 {
-			t.Fatalf("round-trip drift: %+v → %+v", got, got2)
-		}
+		require.NoError(t, err2, "re-decode of accepted greeting failed")
+		require.Equal(t, got, got2, "round-trip drift")
 	})
 }

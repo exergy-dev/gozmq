@@ -1,7 +1,9 @@
 package transport
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/rkm/gozmq/internal/testutil"
 )
@@ -11,3 +13,11 @@ import (
 // in this layer because the transport owns the long-lived goroutines that
 // poll Accept and shuttle bytes.
 func TestMain(m *testing.M) { testutil.VerifyTestMain(m) }
+
+// testCtx returns a context.Context that is cancelled when t finishes.
+func testCtx(t *testing.T, timeout time.Duration) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	t.Cleanup(cancel)
+	return ctx
+}

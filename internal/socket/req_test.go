@@ -1,9 +1,7 @@
 package socket_test
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -11,6 +9,7 @@ import (
 	"github.com/rkm/gozmq/internal/pipe"
 	"github.com/rkm/gozmq/internal/socket"
 	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/stretchr/testify/require"
 )
 
 // TestReq_PrependsEmptyDelimiter asserts that REQ.Send wraps the caller's
@@ -22,29 +21,16 @@ func TestReq_PrependsEmptyDelimiter(t *testing.T) {
 
 	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	if err := eng.AttachPipe(a); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	mustAttach(t, eng, a)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
-	if err := eng.Send(ctx, msg.FromBytes([]byte("hello"))); err != nil {
-		t.Fatalf("send: %v", err)
-	}
+	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("hello"))), "send")
 	got, err := b.Recv(ctx)
-	if err != nil {
-		t.Fatalf("peer recv: %v", err)
-	}
-	if got.NumFrames() != 2 {
-		t.Fatalf("frames = %d, want 2 (empty + body)", got.NumFrames())
-	}
-	if len(got.Frames()[0]) != 0 {
-		t.Fatalf("leading frame = %q, want empty delimiter", got.Frames()[0])
-	}
-	if !bytes.Equal(got.Frames()[1], []byte("hello")) {
-		t.Fatalf("body = %q, want hello", got.Frames()[1])
-	}
+	require.NoError(t, err, "peer recv")
+	require.Equal(t, 2, got.NumFrames(), "frames (empty + body)")
+	require.Empty(t, got.Frames()[0], "leading frame should be empty delimiter")
+	require.Equal(t, []byte("hello"), got.Frames()[1])
 }
 
 // TestReq_StripsEmptyDelimiterOnRecv asserts that REQ.Recv strips the
@@ -56,37 +42,23 @@ func TestReq_StripsEmptyDelimiterOnRecv(t *testing.T) {
 
 	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	if err := eng.AttachPipe(a); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	mustAttach(t, eng, a)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
 	// First send so the FSM moves to canRecv and a sticky forwarder launches.
-	if err := eng.Send(ctx, msg.FromBytes([]byte("q"))); err != nil {
-		t.Fatalf("send: %v", err)
-	}
+	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))), "send")
 	// Drain the request from the peer side so we keep pipe clean.
-	if _, err := b.Recv(ctx); err != nil {
-		t.Fatalf("drain request: %v", err)
-	}
+	_, err := b.Recv(ctx)
+	require.NoError(t, err, "drain request")
 
 	// Peer-side REP-shape reply: [empty, "reply"].
 	reply := msg.FromFrames([]byte{}, []byte("reply"))
-	if err := b.Send(ctx, reply); err != nil {
-		t.Fatalf("peer send: %v", err)
-	}
+	require.NoError(t, b.Send(ctx, reply), "peer send")
 	got, err := eng.Recv(ctx)
-	if err != nil {
-		t.Fatalf("recv: %v", err)
-	}
-	if got.NumFrames() != 1 {
-		t.Fatalf("frames = %d, want 1", got.NumFrames())
-	}
-	if !bytes.Equal(got.Bytes(), []byte("reply")) {
-		t.Fatalf("body = %q, want reply", got.Bytes())
-	}
+	require.NoError(t, err, "recv")
+	require.Equal(t, 1, got.NumFrames())
+	require.Equal(t, []byte("reply"), got.Bytes())
 }
 
 // TestReq_DoubleSendFSMViolation asserts that calling Send twice
@@ -98,20 +70,13 @@ func TestReq_DoubleSendFSMViolation(t *testing.T) {
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	if err := eng.AttachPipe(a); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	mustAttach(t, eng, a)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
-	if err := eng.Send(ctx, msg.FromBytes([]byte("1"))); err != nil {
-		t.Fatalf("first send: %v", err)
-	}
+	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("1"))), "first send")
 	err := eng.Send(ctx, msg.FromBytes([]byte("2")))
-	if !errors.Is(err, zmqerr.ErrFSMViolation) {
-		t.Fatalf("second send err = %v, want ErrFSMViolation", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrFSMViolation, "second send")
 }
 
 // TestReq_RecvBeforeSendFSMViolation asserts that Recv without a prior
@@ -122,9 +87,7 @@ func TestReq_RecvBeforeSendFSMViolation(t *testing.T) {
 	defer eng.Close()
 
 	_, err := eng.Recv(context.Background())
-	if !errors.Is(err, zmqerr.ErrFSMViolation) {
-		t.Fatalf("recv err = %v, want ErrFSMViolation", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrFSMViolation)
 }
 
 // TestReq_DoubleRecvFSMViolation asserts that a second Recv after one
@@ -137,30 +100,19 @@ func TestReq_DoubleRecvFSMViolation(t *testing.T) {
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	if err := eng.AttachPipe(a); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	mustAttach(t, eng, a)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := eng.Send(ctx, msg.FromBytes([]byte("q"))); err != nil {
-		t.Fatalf("send: %v", err)
-	}
+	ctx := testCtx(t)
+	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))), "send")
 	// Drain request; peer replies.
-	if _, err := b.Recv(ctx); err != nil {
-		t.Fatalf("drain: %v", err)
-	}
-	if err := b.Send(ctx, msg.FromFrames([]byte{}, []byte("a"))); err != nil {
-		t.Fatalf("peer send: %v", err)
-	}
-	if _, err := eng.Recv(ctx); err != nil {
-		t.Fatalf("first recv: %v", err)
-	}
+	_, err := b.Recv(ctx)
+	require.NoError(t, err, "drain")
+	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("a"))), "peer send")
+	_, err = eng.Recv(ctx)
+	require.NoError(t, err, "first recv")
 	// A second Recv with no Send between must fail FSM.
-	_, err := eng.Recv(ctx)
-	if !errors.Is(err, zmqerr.ErrFSMViolation) {
-		t.Fatalf("second recv err = %v, want ErrFSMViolation", err)
-	}
+	_, err = eng.Recv(ctx)
+	require.ErrorIs(t, err, zmqerr.ErrFSMViolation, "second recv")
 }
 
 // TestReq_Rep_RoundTrip_Direct wires two engines (REQ + REP) directly via
@@ -176,15 +128,10 @@ func TestReq_Rep_RoundTrip_Direct(t *testing.T) {
 	// Pipe pair: one end attached to REQ, the other to REP.
 	reqSide, repSide := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(reqSide, repSide)
-	if err := reqEng.AttachPipe(reqSide); err != nil {
-		t.Fatalf("req attach: %v", err)
-	}
-	if err := repEng.AttachPipe(repSide); err != nil {
-		t.Fatalf("rep attach: %v", err)
-	}
+	mustAttach(t, reqEng, reqSide)
+	mustAttach(t, repEng, repSide)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
 	const rounds = 4
 	for i := 0; i < rounds; i++ {
@@ -196,28 +143,18 @@ func TestReq_Rep_RoundTrip_Direct(t *testing.T) {
 		}()
 
 		got, err := repEng.Recv(ctx)
-		if err != nil {
-			t.Fatalf("rep recv %d: %v", i, err)
-		}
-		if err := <-errCh; err != nil {
-			t.Fatalf("req send %d: %v", i, err)
-		}
-		if got.NumFrames() != 1 || !bytes.Equal(got.Bytes(), body) {
-			t.Fatalf("rep got %q frames=%d", got.Frames(), got.NumFrames())
-		}
+		require.NoError(t, err, "rep recv %d", i)
+		require.NoError(t, <-errCh, "req send %d", i)
+		require.Equal(t, 1, got.NumFrames())
+		require.Equal(t, body, got.Bytes())
 
 		// REP → REQ
 		reply := append([]byte("r:"), body...)
-		if err := repEng.Send(ctx, msg.FromBytes(reply)); err != nil {
-			t.Fatalf("rep send %d: %v", i, err)
-		}
+		require.NoError(t, repEng.Send(ctx, msg.FromBytes(reply)), "rep send %d", i)
 		gotReply, err := reqEng.Recv(ctx)
-		if err != nil {
-			t.Fatalf("req recv %d: %v", i, err)
-		}
-		if gotReply.NumFrames() != 1 || !bytes.Equal(gotReply.Bytes(), reply) {
-			t.Fatalf("req got %q frames=%d", gotReply.Frames(), gotReply.NumFrames())
-		}
+		require.NoError(t, err, "req recv %d", i)
+		require.Equal(t, 1, gotReply.NumFrames())
+		require.Equal(t, reply, gotReply.Bytes())
 	}
 }
 
@@ -228,18 +165,13 @@ func TestReq_Close_UnblocksRecv(t *testing.T) {
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	if err := eng.AttachPipe(a); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	mustAttach(t, eng, a)
 
 	ctx := context.Background()
 	// Send to move to canRecv, then drain so the peer side is idle.
-	if err := eng.Send(ctx, msg.FromBytes([]byte("q"))); err != nil {
-		t.Fatalf("send: %v", err)
-	}
-	if _, err := b.Recv(ctx); err != nil {
-		t.Fatalf("drain: %v", err)
-	}
+	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))), "send")
+	_, err := b.Recv(ctx)
+	require.NoError(t, err, "drain")
 
 	recvDone := make(chan error, 1)
 	go func() {
@@ -247,16 +179,12 @@ func TestReq_Close_UnblocksRecv(t *testing.T) {
 		recvDone <- err
 	}()
 	time.Sleep(50 * time.Millisecond)
-	if err := eng.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	require.NoError(t, eng.Close(), "close")
 	select {
 	case err := <-recvDone:
-		if !errors.Is(err, zmqerr.ErrSocketClosed) {
-			t.Fatalf("recv err = %v, want ErrSocketClosed", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
 	case <-time.After(time.Second):
-		t.Fatal("recv did not unblock on close")
+		require.Fail(t, "recv did not unblock on close")
 	}
 }
 
@@ -267,8 +195,7 @@ func TestReq_Send_WaitsForPeer(t *testing.T) {
 	eng := socket.NewReqEngine()
 	defer eng.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
 	sendDone := make(chan error, 1)
 	go func() {
@@ -276,25 +203,20 @@ func TestReq_Send_WaitsForPeer(t *testing.T) {
 	}()
 	select {
 	case err := <-sendDone:
-		t.Fatalf("send returned early: %v", err)
+		require.Fail(t, "send returned early", "%v", err)
 	case <-time.After(50 * time.Millisecond):
 	}
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	if err := eng.AttachPipe(a); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	mustAttach(t, eng, a)
 	select {
 	case err := <-sendDone:
-		if err != nil {
-			t.Fatalf("send err: %v", err)
-		}
+		require.NoError(t, err, "send")
 	case <-time.After(time.Second):
-		t.Fatal("send did not unblock on attach")
+		require.Fail(t, "send did not unblock on attach")
 	}
 	// Drain the request so the pipe doesn't hold a message at close.
-	if _, err := b.Recv(ctx); err != nil {
-		t.Fatalf("drain: %v", err)
-	}
+	_, err := b.Recv(ctx)
+	require.NoError(t, err, "drain")
 }

@@ -3,11 +3,13 @@ package zmtp
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"math/rand"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/rkm/gozmq/internal/zmqerr"
 )
@@ -51,16 +53,10 @@ func TestMetadataEncodeDecode(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			wire := codec.Encode(tc.props)
 			got, err := codec.Decode(wire)
-			if err != nil {
-				t.Fatalf("Decode: %v", err)
-			}
-			if len(got) != len(tc.props) {
-				t.Fatalf("roundtrip: got %d props, want %d", len(got), len(tc.props))
-			}
+			require.NoError(t, err, "Decode")
+			require.Len(t, got, len(tc.props), "roundtrip prop count")
 			for k, v := range tc.props {
-				if gv, ok := got[k]; !ok || gv != v {
-					t.Errorf("roundtrip: key %q: got %q, want %q", k, gv, v)
-				}
+				assert.Equal(t, v, got[k], "roundtrip: key %q", k)
 			}
 		})
 	}
@@ -73,22 +69,14 @@ func TestMetadataEncodeLongValueOver255Bytes(t *testing.T) {
 	wire := codec.Encode(map[string]string{"Big": big})
 
 	// Expect: 1 (name-len) + 3 ("Big") + 4 (value-len) + 1000 = 1008.
-	if got := len(wire); got != 1008 {
-		t.Fatalf("wire length: got %d, want 1008", got)
-	}
+	require.Equal(t, 1008, len(wire), "wire length")
 	// The 4-byte big-endian value length should read 1000.
 	vln := binary.BigEndian.Uint32(wire[1+3 : 1+3+4])
-	if vln != 1000 {
-		t.Fatalf("wire value-length: got %d, want 1000", vln)
-	}
+	require.Equal(t, uint32(1000), vln, "wire value-length")
 
 	got, err := codec.Decode(wire)
-	if err != nil {
-		t.Fatalf("Decode: %v", err)
-	}
-	if got["Big"] != big {
-		t.Fatalf("roundtrip long value: mismatch")
-	}
+	require.NoError(t, err, "Decode")
+	require.Equal(t, big, got["Big"], "roundtrip long value")
 }
 
 func TestMetadataDecodeCaseInsensitiveDuplicate(t *testing.T) {
@@ -100,12 +88,7 @@ func TestMetadataDecodeCaseInsensitiveDuplicate(t *testing.T) {
 	}, nil)
 
 	_, err := NewMetadataCodec().Decode(wire)
-	if err == nil {
-		t.Fatal("Decode: want error, got nil")
-	}
-	if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-		t.Fatalf("Decode: want ErrMalformedFrame, got %v", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 }
 
 func TestMetadataDecodeTruncatedInputs(t *testing.T) {
@@ -130,12 +113,7 @@ func TestMetadataDecodeTruncatedInputs(t *testing.T) {
 		i := i
 		t.Run(fmt.Sprintf("truncate-at-%d", i), func(t *testing.T) {
 			_, err := NewMetadataCodec().Decode(good[:i])
-			if err == nil {
-				t.Fatal("Decode(truncated): want error, got nil")
-			}
-			if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-				t.Fatalf("Decode(truncated): want ErrMalformedFrame, got %v", err)
-			}
+			require.ErrorIs(t, err, zmqerr.ErrMalformedFrame, "Decode(truncated)")
 		})
 	}
 }
@@ -143,19 +121,11 @@ func TestMetadataDecodeTruncatedInputs(t *testing.T) {
 func TestMetadataDecodeEmptyIsNotDuplicate(t *testing.T) {
 	// Zero-length property list decodes to an empty map without error.
 	got, err := NewMetadataCodec().Decode(nil)
-	if err != nil {
-		t.Fatalf("Decode(nil): %v", err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("Decode(nil): got %d props, want 0", len(got))
-	}
+	require.NoError(t, err, "Decode(nil)")
+	require.Empty(t, got, "Decode(nil)")
 	got, err = NewMetadataCodec().Decode([]byte{})
-	if err != nil {
-		t.Fatalf("Decode(empty): %v", err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("Decode(empty): got %d props, want 0", len(got))
-	}
+	require.NoError(t, err, "Decode(empty)")
+	require.Empty(t, got, "Decode(empty)")
 }
 
 func TestMetadataDecodeZeroLengthName(t *testing.T) {
@@ -164,15 +134,11 @@ func TestMetadataDecodeZeroLengthName(t *testing.T) {
 	// with the empty-string key.
 	wire := encodeProp("", []byte{})
 	got, err := NewMetadataCodec().Decode(wire)
-	if err != nil {
-		t.Fatalf("Decode: %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("Decode: got %d props, want 1", len(got))
-	}
-	if v, ok := got[""]; !ok || v != "" {
-		t.Fatalf("Decode: empty-name entry missing or wrong: %q/%v", v, ok)
-	}
+	require.NoError(t, err, "Decode")
+	require.Len(t, got, 1, "Decode prop count")
+	v, ok := got[""]
+	require.True(t, ok, "Decode: empty-name entry missing")
+	require.Equal(t, "", v, "Decode: empty-name entry value")
 }
 
 // TestMetadataRoundtripRandom is a testing/quick-style randomized roundtrip
@@ -198,16 +164,10 @@ func TestMetadataRoundtripRandom(t *testing.T) {
 		}
 		wire := codec.Encode(props)
 		got, err := codec.Decode(wire)
-		if err != nil {
-			t.Fatalf("iter %d: Decode: %v", iter, err)
-		}
-		if len(got) != len(props) {
-			t.Fatalf("iter %d: prop count: got %d, want %d", iter, len(got), len(props))
-		}
+		require.NoError(t, err, "iter %d: Decode", iter)
+		require.Len(t, got, len(props), "iter %d: prop count", iter)
 		for k, v := range props {
-			if gv, ok := got[k]; !ok || gv != v {
-				t.Fatalf("iter %d: key %q mismatch: got %q, want %q", iter, k, gv, v)
-			}
+			require.Equal(t, v, got[k], "iter %d: key %q", iter, k)
 		}
 	}
 }
@@ -235,24 +195,16 @@ func FuzzMetadata(f *testing.F) {
 		props, err := codec.Decode(raw)
 		if err != nil {
 			// Every decode error must wrap ErrMalformedFrame.
-			if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-				t.Fatalf("Decode error does not wrap ErrMalformedFrame: %v", err)
-			}
+			require.ErrorIs(t, err, zmqerr.ErrMalformedFrame, "Decode error does not wrap ErrMalformedFrame")
 			return
 		}
 		// Successful decode: re-encode and redecode; result must equal.
 		wire := codec.Encode(props)
 		props2, err := codec.Decode(wire)
-		if err != nil {
-			t.Fatalf("re-Decode of re-Encode failed: %v", err)
-		}
-		if len(props) != len(props2) {
-			t.Fatalf("prop count: first=%d re=%d", len(props), len(props2))
-		}
+		require.NoError(t, err, "re-Decode of re-Encode failed")
+		require.Len(t, props2, len(props), "prop count mismatch")
 		for k, v := range props {
-			if props2[k] != v {
-				t.Fatalf("key %q: first=%q re=%q", k, v, props2[k])
-			}
+			require.Equal(t, v, props2[k], "key %q", k)
 		}
 	})
 }

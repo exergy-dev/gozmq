@@ -1,9 +1,7 @@
 package transport
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"io"
 	"net"
 	"strings"
@@ -12,6 +10,8 @@ import (
 	"time"
 
 	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // listenLoopback binds tcp://127.0.0.1:0 and returns the resolved Listener.
@@ -19,9 +19,7 @@ func listenLoopback(t *testing.T) (*TCPTransport, *tcpListener) {
 	t.Helper()
 	tr := NewTCPTransport()
 	l, err := tr.Listen(context.Background(), "tcp://127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	return tr, l.(*tcpListener)
 }
 
@@ -30,12 +28,9 @@ func TestTCP_RoundTrip_Bytes(t *testing.T) {
 	defer l.Close()
 
 	endpoint := l.Endpoint()
-	if !strings.HasPrefix(endpoint, "tcp://127.0.0.1:") {
-		t.Fatalf("Endpoint = %q, want tcp://127.0.0.1:<port>", endpoint)
-	}
+	require.True(t, strings.HasPrefix(endpoint, "tcp://127.0.0.1:"), "Endpoint = %q, want tcp://127.0.0.1:<port>", endpoint)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	ctx := testCtx(t, 5*time.Second)
 
 	type acceptResult struct {
 		c   net.Conn
@@ -52,41 +47,29 @@ func TestTCP_RoundTrip_Bytes(t *testing.T) {
 	}()
 
 	dial, err := tr.Dial(ctx, endpoint)
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	defer dial.Close()
 
 	r := <-acceptedCh
-	if r.err != nil {
-		t.Fatalf("Accept: %v", r.err)
-	}
+	require.NoError(t, r.err, "Accept")
 	defer r.c.Close()
 
 	// Both directions.
 	want := []byte("hello, world")
-	if _, err := dial.Write(want); err != nil {
-		t.Fatalf("Write client→server: %v", err)
-	}
+	_, err = dial.Write(want)
+	require.NoError(t, err, "Write client->server")
 	got := make([]byte, len(want))
-	if _, err := io.ReadFull(r.c, got); err != nil {
-		t.Fatalf("ReadFull server: %v", err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("server read %q, want %q", got, want)
-	}
+	_, err = io.ReadFull(r.c, got)
+	require.NoError(t, err, "ReadFull server")
+	require.Equal(t, want, got)
 
 	want2 := []byte("ack")
-	if _, err := r.c.Write(want2); err != nil {
-		t.Fatalf("Write server→client: %v", err)
-	}
+	_, err = r.c.Write(want2)
+	require.NoError(t, err, "Write server->client")
 	got2 := make([]byte, len(want2))
-	if _, err := io.ReadFull(dial, got2); err != nil {
-		t.Fatalf("ReadFull client: %v", err)
-	}
-	if !bytes.Equal(got2, want2) {
-		t.Fatalf("client read %q, want %q", got2, want2)
-	}
+	_, err = io.ReadFull(dial, got2)
+	require.NoError(t, err, "ReadFull client")
+	require.Equal(t, want2, got2)
 }
 
 // TestTCP_Wildcard_And_Ephemeral_Port covers the "tcp://*:0" → resolved
@@ -94,34 +77,28 @@ func TestTCP_RoundTrip_Bytes(t *testing.T) {
 func TestTCP_Wildcard_And_Ephemeral_Port(t *testing.T) {
 	tr := NewTCPTransport()
 	l, err := tr.Listen(context.Background(), "tcp://*:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	defer l.Close()
 
 	ep := l.Endpoint()
 	// On all-interfaces with port 0 we expect "tcp://[::]:<port>" or
 	// "tcp://0.0.0.0:<port>" depending on the kernel; the dial path can
 	// connect via 127.0.0.1 regardless.
-	if !strings.HasPrefix(ep, "tcp://") || strings.HasSuffix(ep, ":0") {
-		t.Fatalf("Endpoint after wildcard listen = %q (port unresolved?)", ep)
-	}
+	require.True(t, strings.HasPrefix(ep, "tcp://") && !strings.HasSuffix(ep, ":0"),
+		"Endpoint after wildcard listen = %q (port unresolved?)", ep)
 
 	// Extract the port from the resolved endpoint.
 	_, portStr, err := net.SplitHostPort(strings.TrimPrefix(ep, "tcp://"))
-	if err != nil {
-		t.Fatalf("SplitHostPort %q: %v", ep, err)
-	}
+	require.NoError(t, err, "SplitHostPort %q", ep)
 	dialEP := "tcp://127.0.0.1:" + portStr
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	ctx := testCtx(t, 5*time.Second)
 
 	acceptCh := make(chan struct{}, 1)
 	go func() {
 		c, err := l.Accept(ctx)
 		if err != nil {
-			t.Errorf("Accept: %v", err)
+			assert.NoError(t, err, "Accept")
 			return
 		}
 		defer c.Close()
@@ -131,17 +108,14 @@ func TestTCP_Wildcard_And_Ephemeral_Port(t *testing.T) {
 	}()
 
 	c, err := tr.Dial(ctx, dialEP)
-	if err != nil {
-		t.Fatalf("Dial(%q): %v", dialEP, err)
-	}
+	require.NoError(t, err, "Dial(%q)", dialEP)
 	defer c.Close()
-	if _, err := c.Write([]byte("hello")); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
+	_, err = c.Write([]byte("hello"))
+	require.NoError(t, err, "Write")
 	select {
 	case <-acceptCh:
 	case <-ctx.Done():
-		t.Fatal("Accept did not receive bytes within deadline")
+		require.Fail(t, "Accept did not receive bytes within deadline")
 	}
 }
 
@@ -159,16 +133,12 @@ func TestTCP_Listener_Close_Wakes_Accept(t *testing.T) {
 	// Brief settle so Accept is parked.
 	time.Sleep(50 * time.Millisecond)
 
-	if err := l.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
+	require.NoError(t, l.Close(), "Close")
 	select {
 	case err := <-errCh:
-		if !errors.Is(err, zmqerr.ErrEndpointInvalid) {
-			t.Fatalf("Accept after Close err = %v, want wraps ErrEndpointInvalid", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrEndpointInvalid)
 	case <-time.After(2 * time.Second):
-		t.Fatal("Accept did not wake within 2s of Close")
+		require.Fail(t, "Accept did not wake within 2s of Close")
 	}
 }
 
@@ -184,11 +154,9 @@ func TestTCP_Accept_Honors_Ctx(t *testing.T) {
 	cancel()
 	select {
 	case err := <-errCh:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("Accept err = %v, want context.Canceled", err)
-		}
+		require.ErrorIs(t, err, context.Canceled)
 	case <-time.After(2 * time.Second):
-		t.Fatal("Accept did not honor ctx within 2s")
+		require.Fail(t, "Accept did not honor ctx within 2s")
 	}
 }
 
@@ -198,12 +166,9 @@ func TestTCP_Dial_Honors_Ctx_Cancellation(t *testing.T) {
 	tr := NewTCPTransport()
 	// 240.0.0.1 is reserved; connect attempts hang or RST quickly. Use ctx
 	// to bound.
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
+	ctx := testCtx(t, 100*time.Millisecond)
 	_, err := tr.Dial(ctx, "tcp://240.0.0.1:9")
-	if err == nil {
-		t.Fatal("Dial unexpectedly succeeded")
-	}
+	require.Error(t, err, "Dial unexpectedly succeeded")
 }
 
 // TestTCP_BadEndpoint covers the parse path.
@@ -217,10 +182,9 @@ func TestTCP_BadEndpoint(t *testing.T) {
 		"no-scheme-here", // no scheme
 	}
 	for _, ep := range cases {
-		if _, err := tr.Dial(context.Background(), ep); err == nil {
-			t.Errorf("Dial(%q) succeeded, want error", ep)
-		} else if !errors.Is(err, zmqerr.ErrEndpointInvalid) {
-			t.Errorf("Dial(%q) err = %v, want wraps ErrEndpointInvalid", ep, err)
+		_, err := tr.Dial(context.Background(), ep)
+		if assert.Error(t, err, "Dial(%q) succeeded, want error", ep) {
+			assert.ErrorIs(t, err, zmqerr.ErrEndpointInvalid, "Dial(%q)", ep)
 		}
 	}
 }
@@ -232,8 +196,7 @@ func TestTCP_Conn_Endpoints(t *testing.T) {
 	defer l.Close()
 	endpoint := l.Endpoint()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	ctx := testCtx(t, 5*time.Second)
 
 	type acceptResult struct {
 		c   net.Conn
@@ -250,27 +213,20 @@ func TestTCP_Conn_Endpoints(t *testing.T) {
 	}()
 
 	dial, err := tr.Dial(ctx, endpoint)
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	defer dial.Close()
 
 	r := <-acceptedCh
-	if r.err != nil {
-		t.Fatalf("Accept: %v", r.err)
-	}
+	require.NoError(t, r.err, "Accept")
 	defer r.c.Close()
 
 	dc := dial.(interface {
 		LocalEndpoint() string
 		RemoteEndpoint() string
 	})
-	if !strings.HasPrefix(dc.LocalEndpoint(), "tcp://") {
-		t.Errorf("client.LocalEndpoint = %q", dc.LocalEndpoint())
-	}
-	if dc.RemoteEndpoint() != endpoint && !strings.HasPrefix(dc.RemoteEndpoint(), "tcp://") {
-		t.Errorf("client.RemoteEndpoint = %q, want tcp://...", dc.RemoteEndpoint())
-	}
+	assert.True(t, strings.HasPrefix(dc.LocalEndpoint(), "tcp://"), "client.LocalEndpoint = %q", dc.LocalEndpoint())
+	assert.True(t, dc.RemoteEndpoint() == endpoint || strings.HasPrefix(dc.RemoteEndpoint(), "tcp://"),
+		"client.RemoteEndpoint = %q, want tcp://...", dc.RemoteEndpoint())
 }
 
 // TestTCP_NoDelay_KeepAlive_Defaults asserts the design defaults are
@@ -279,21 +235,13 @@ func TestTCP_Conn_Endpoints(t *testing.T) {
 // exposed configuration.
 func TestTCP_NoDelay_KeepAlive_Defaults(t *testing.T) {
 	tr := NewTCPTransport()
-	if !tr.KeepAlive {
-		t.Error("default KeepAlive should be true")
-	}
-	if !tr.NoDelay {
-		t.Error("default NoDelay should be true")
-	}
-	if tr.KeepAlivePeriod != defaultTCPKeepAliveIdle {
-		t.Errorf("KeepAlivePeriod = %v, want %v", tr.KeepAlivePeriod, defaultTCPKeepAliveIdle)
-	}
+	assert.True(t, tr.KeepAlive, "default KeepAlive should be true")
+	assert.True(t, tr.NoDelay, "default NoDelay should be true")
+	assert.Equal(t, defaultTCPKeepAliveIdle, tr.KeepAlivePeriod)
 
 	tr.KeepAlive = false
 	tr.NoDelay = false
-	if tr.keepAliveSetting() >= 0 {
-		t.Errorf("keepAliveSetting = %v, want negative when disabled", tr.keepAliveSetting())
-	}
+	assert.Negative(t, tr.keepAliveSetting(), "keepAliveSetting should be negative when disabled")
 }
 
 // TestTCP_TCP6_Scheme covers the alternate scheme ("tcp6"). We only smoke
@@ -308,19 +256,16 @@ func TestTCP_TCP6_Scheme(t *testing.T) {
 	defer l.Close()
 
 	ep := l.Endpoint()
-	if !strings.HasPrefix(ep, "tcp6://") {
-		t.Fatalf("Endpoint = %q", ep)
-	}
+	require.True(t, strings.HasPrefix(ep, "tcp6://"), "Endpoint = %q", ep)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	ctx := testCtx(t, 5*time.Second)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		c, err := l.Accept(ctx)
 		if err != nil {
-			t.Errorf("Accept: %v", err)
+			assert.NoError(t, err, "Accept")
 			return
 		}
 		defer c.Close()
@@ -328,12 +273,9 @@ func TestTCP_TCP6_Scheme(t *testing.T) {
 	}()
 
 	c, err := tr.Dial(ctx, ep)
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	defer c.Close()
-	if _, err := c.Write([]byte{0x42}); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
+	_, err = c.Write([]byte{0x42})
+	require.NoError(t, err, "Write")
 	wg.Wait()
 }

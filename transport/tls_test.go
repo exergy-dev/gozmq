@@ -1,14 +1,13 @@
 package transport
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"errors"
 	"io"
 	"math/big"
 	"net"
@@ -18,6 +17,8 @@ import (
 	"time"
 
 	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // --------------------------------------------------------------------------
@@ -98,13 +99,9 @@ func clientTLSConfig() *tls.Config {
 func listenTLSLoopback(t *testing.T, cfg *tls.Config) (*TLSTransport, *tlsListener) {
 	t.Helper()
 	tr, err := NewTLSTransport(cfg)
-	if err != nil {
-		t.Fatalf("NewTLSTransport: %v", err)
-	}
+	require.NoError(t, err, "NewTLSTransport")
 	l, err := tr.Listen(context.Background(), "tls+tcp://127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	return tr, l.(*tlsListener)
 }
 
@@ -112,9 +109,7 @@ func listenTLSLoopback(t *testing.T, cfg *tls.Config) (*TLSTransport, *tlsListen
 func mustNewTLS(t *testing.T, cfg *tls.Config) *TLSTransport {
 	t.Helper()
 	tr, err := NewTLSTransport(cfg)
-	if err != nil {
-		t.Fatalf("NewTLSTransport: %v", err)
-	}
+	require.NoError(t, err, "NewTLSTransport")
 	return tr
 }
 
@@ -126,12 +121,10 @@ func TestTLS_RoundTrip(t *testing.T) {
 	defer l.Close()
 
 	endpoint := l.Endpoint()
-	if !strings.HasPrefix(endpoint, "tls+tcp://127.0.0.1:") {
-		t.Fatalf("Endpoint = %q, want tls+tcp://127.0.0.1:<port>", endpoint)
-	}
+	require.True(t, strings.HasPrefix(endpoint, "tls+tcp://127.0.0.1:"),
+		"Endpoint = %q, want tls+tcp://127.0.0.1:<port>", endpoint)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	ctx := testCtx(t, 5*time.Second)
 
 	type acceptResult struct {
 		c   net.Conn
@@ -150,59 +143,41 @@ func TestTLS_RoundTrip(t *testing.T) {
 	// Dial with a client config that trusts the server cert. Dial through
 	// "localhost:<port>" so SAN validation matches.
 	_, portStr, err := net.SplitHostPort(strings.TrimPrefix(endpoint, "tls+tcp://"))
-	if err != nil {
-		t.Fatalf("SplitHostPort: %v", err)
-	}
+	require.NoError(t, err, "SplitHostPort")
 	cliTr := mustNewTLS(t, clientTLSConfig())
 	dial, err := cliTr.Dial(ctx, "tls+tcp://localhost:"+portStr)
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	defer dial.Close()
 
 	r := <-acceptedCh
-	if r.err != nil {
-		t.Fatalf("Accept: %v", r.err)
-	}
+	require.NoError(t, r.err, "Accept")
 	defer r.c.Close()
 
 	// Endpoint-string reporting: the Conn LocalEndpoint / RemoteEndpoint
 	// must announce tls+tcp, not raw tcp.
-	if cli, ok := dial.(*tlsConn); ok {
-		if !strings.HasPrefix(cli.RemoteEndpoint(), "tls+tcp://") {
-			t.Errorf("client RemoteEndpoint = %q, want tls+tcp prefix", cli.RemoteEndpoint())
-		}
-		if !strings.HasPrefix(cli.LocalEndpoint(), "tls+tcp://") {
-			t.Errorf("client LocalEndpoint = %q, want tls+tcp prefix", cli.LocalEndpoint())
-		}
-	} else {
-		t.Fatalf("client conn type = %T", dial)
-	}
+	cli, ok := dial.(*tlsConn)
+	require.True(t, ok, "client conn type = %T", dial)
+	assert.True(t, strings.HasPrefix(cli.RemoteEndpoint(), "tls+tcp://"),
+		"client RemoteEndpoint = %q, want tls+tcp prefix", cli.RemoteEndpoint())
+	assert.True(t, strings.HasPrefix(cli.LocalEndpoint(), "tls+tcp://"),
+		"client LocalEndpoint = %q, want tls+tcp prefix", cli.LocalEndpoint())
 
 	// Bidirectional write/read over the TLS channel.
 	want := []byte("ping-over-tls")
-	if _, err := dial.Write(want); err != nil {
-		t.Fatalf("Write client→server: %v", err)
-	}
+	_, err = dial.Write(want)
+	require.NoError(t, err, "Write client->server")
 	got := make([]byte, len(want))
-	if _, err := io.ReadFull(r.c, got); err != nil {
-		t.Fatalf("ReadFull server: %v", err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("server read %q, want %q", got, want)
-	}
+	_, err = io.ReadFull(r.c, got)
+	require.NoError(t, err, "ReadFull server")
+	require.Equal(t, want, got)
 
 	want2 := []byte("pong-over-tls")
-	if _, err := r.c.Write(want2); err != nil {
-		t.Fatalf("Write server→client: %v", err)
-	}
+	_, err = r.c.Write(want2)
+	require.NoError(t, err, "Write server->client")
 	got2 := make([]byte, len(want2))
-	if _, err := io.ReadFull(dial, got2); err != nil {
-		t.Fatalf("ReadFull client: %v", err)
-	}
-	if !bytes.Equal(got2, want2) {
-		t.Fatalf("client read %q, want %q", got2, want2)
-	}
+	_, err = io.ReadFull(dial, got2)
+	require.NoError(t, err, "ReadFull client")
+	require.Equal(t, want2, got2)
 }
 
 // TestTLS_BadCert asserts that a client dialing with a config that does
@@ -236,13 +211,12 @@ func TestTLS_BadCert(t *testing.T) {
 		MinVersion: tls.VersionTLS12,
 	}
 	cliTr := mustNewTLS(t, badCfg)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t, 2*time.Second)
 	c, err := cliTr.Dial(ctx, "tls+tcp://localhost:"+portStr)
 	if err == nil {
 		c.Close()
-		t.Fatal("Dial unexpectedly succeeded with untrusted server cert")
 	}
+	require.Error(t, err, "Dial unexpectedly succeeded with untrusted server cert")
 	// We don't assert a specific wrapper; any non-nil error from the TLS
 	// handshake demonstrates verification actually ran.
 	<-done
@@ -265,11 +239,9 @@ func TestTLS_AcceptHonorsCtx(t *testing.T) {
 	cancel()
 	select {
 	case err := <-errCh:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("Accept err = %v, want context.Canceled", err)
-		}
+		require.ErrorIs(t, err, context.Canceled)
 	case <-time.After(2 * time.Second):
-		t.Fatal("Accept did not wake within 2s of ctx cancel")
+		require.Fail(t, "Accept did not wake within 2s of ctx cancel")
 	}
 }
 
@@ -284,16 +256,12 @@ func TestTLS_ListenerClose_WakesAccept(t *testing.T) {
 		errCh <- err
 	}()
 	time.Sleep(20 * time.Millisecond)
-	if err := l.Close(); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, l.Close())
 	select {
 	case err := <-errCh:
-		if !errors.Is(err, zmqerr.ErrEndpointInvalid) {
-			t.Fatalf("Accept err = %v, want wraps ErrEndpointInvalid", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrEndpointInvalid)
 	case <-time.After(2 * time.Second):
-		t.Fatal("Accept did not wake on Close")
+		require.Fail(t, "Accept did not wake on Close")
 	}
 }
 
@@ -302,12 +270,8 @@ func TestTLS_ListenerClose_WakesAccept(t *testing.T) {
 // fail later at Dial/Listen time.
 func TestTLS_NilConfig_Rejected(t *testing.T) {
 	tr, err := NewTLSTransport(nil)
-	if err == nil {
-		t.Fatalf("NewTLSTransport(nil) succeeded, want error")
-	}
-	if tr != nil {
-		t.Errorf("NewTLSTransport(nil) returned non-nil transport %v", tr)
-	}
+	require.Error(t, err, "NewTLSTransport(nil) succeeded, want error")
+	assert.Nil(t, tr, "NewTLSTransport(nil) returned non-nil transport")
 }
 
 // TestTLS_BadEndpoint covers scheme and host-port parse failures.
@@ -319,14 +283,13 @@ func TestTLS_BadEndpoint(t *testing.T) {
 		"tls+tcp://xx", // missing port
 	}
 	for _, ep := range cases {
-		if _, err := tr.Listen(context.Background(), ep); !errors.Is(err, zmqerr.ErrEndpointInvalid) {
-			t.Errorf("Listen(%q) err = %v, want wraps ErrEndpointInvalid", ep, err)
-		}
+		_, err := tr.Listen(context.Background(), ep)
+		assert.ErrorIs(t, err, zmqerr.ErrEndpointInvalid, "Listen(%q)", ep)
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-		_, err := tr.Dial(ctx, ep)
+		_, dialErr := tr.Dial(ctx, ep)
 		cancel()
-		if !errors.Is(err, zmqerr.ErrEndpointInvalid) && !errors.Is(err, context.DeadlineExceeded) {
-			t.Errorf("Dial(%q) err = %v, want wraps ErrEndpointInvalid", ep, err)
+		if !errors.Is(dialErr, zmqerr.ErrEndpointInvalid) && !errors.Is(dialErr, context.DeadlineExceeded) {
+			assert.Failf(t, "unexpected Dial error", "Dial(%q) err = %v, want wraps ErrEndpointInvalid", ep, dialErr)
 		}
 	}
 }
@@ -350,7 +313,7 @@ func TestTLS_ManyConcurrentDials(t *testing.T) {
 			c, err := l.Accept(ctx)
 			cancel()
 			if err != nil {
-				t.Errorf("Accept[%d]: %v", i, err)
+				assert.NoError(t, err, "Accept[%d]", i)
 				return
 			}
 			c.Close()
@@ -366,7 +329,7 @@ func TestTLS_ManyConcurrentDials(t *testing.T) {
 			defer cancel()
 			c, err := cliTr.Dial(ctx, "tls+tcp://localhost:"+portStr)
 			if err != nil {
-				t.Errorf("Dial: %v", err)
+				assert.NoError(t, err, "Dial")
 				return
 			}
 			c.Close()
@@ -389,17 +352,13 @@ func TestTLS_ConfigCloneIsolatesFromCaller(t *testing.T) {
 	// handshake. Because we Clone on construction, the mutation is
 	// invisible to the transport.
 	srvTr, err := NewTLSTransport(srvCfg)
-	if err != nil {
-		t.Fatalf("NewTLSTransport(server): %v", err)
-	}
+	require.NoError(t, err, "NewTLSTransport(server)")
 	// Mutate the ORIGINAL caller-owned config after construction.
 	srvCfg.Certificates = nil
 	srvCfg.MinVersion = 0
 
 	l, err := srvTr.Listen(context.Background(), "tls+tcp://127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	defer l.Close()
 	endpoint := l.Endpoint()
 	_, portStr, _ := net.SplitHostPort(strings.TrimPrefix(endpoint, "tls+tcp://"))
@@ -409,8 +368,7 @@ func TestTLS_ConfigCloneIsolatesFromCaller(t *testing.T) {
 		err error
 	}
 	acceptedCh := make(chan acceptResult, 1)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	ctx := testCtx(t, 5*time.Second)
 	go func() {
 		c, err := l.Accept(ctx)
 		if err != nil {
@@ -424,39 +382,29 @@ func TestTLS_ConfigCloneIsolatesFromCaller(t *testing.T) {
 	// the handshake still works against the snapshot.
 	cliCfg := clientTLSConfig()
 	cliTr, err := NewTLSTransport(cliCfg)
-	if err != nil {
-		t.Fatalf("NewTLSTransport(client): %v", err)
-	}
+	require.NoError(t, err, "NewTLSTransport(client)")
 	cliCfg.RootCAs = nil
 	cliCfg.ServerName = ""
 	cliCfg.MinVersion = 0
 
 	dial, err := cliTr.Dial(ctx, "tls+tcp://localhost:"+portStr)
-	if err != nil {
-		t.Fatalf("Dial after caller mutation: %v", err)
-	}
+	require.NoError(t, err, "Dial after caller mutation")
 	defer dial.Close()
 
 	r := <-acceptedCh
-	if r.err != nil {
-		t.Fatalf("Accept after caller mutation: %v", r.err)
-	}
+	require.NoError(t, r.err, "Accept after caller mutation")
 	defer r.c.Close()
 
 	// Sanity-check: the pre-mutation MinVersion (TLS 1.2) is still in
 	// force on the transport's snapshot — a full write/read proves
 	// the handshake completed end-to-end.
 	want := []byte("isolated")
-	if _, err := dial.Write(want); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
+	_, err = dial.Write(want)
+	require.NoError(t, err, "Write")
 	got := make([]byte, len(want))
-	if _, err := io.ReadFull(r.c, got); err != nil {
-		t.Fatalf("ReadFull: %v", err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("read %q, want %q", got, want)
-	}
+	_, err = io.ReadFull(r.c, got)
+	require.NoError(t, err, "ReadFull")
+	require.Equal(t, want, got)
 }
 
 // TestTLS_AcceptGoroutineExitsOnCtxCancel asserts that canceling the
@@ -483,22 +431,16 @@ func TestTLS_AcceptGoroutineExitsOnCtxCancel(t *testing.T) {
 
 	select {
 	case err := <-errCh:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("Accept err = %v, want context.Canceled", err)
-		}
+		require.ErrorIs(t, err, context.Canceled)
 	case <-time.After(500 * time.Millisecond):
-		t.Fatal("Accept did not return within 500ms of ctx cancel — backing goroutine likely leaked")
+		require.Fail(t, "Accept did not return within 500ms of ctx cancel — backing goroutine likely leaked")
 	}
 
 	// Close is idempotent: calling it again after the ctx-cancel path
 	// already closed the underlying listener must be a no-op rather
 	// than a panic or a double-close error surfacing to the caller.
-	if err := l.Close(); err != nil {
-		t.Fatalf("first Close: %v", err)
-	}
-	if err := l.Close(); err != nil {
-		t.Fatalf("second Close (idempotency check): %v", err)
-	}
+	require.NoError(t, l.Close(), "first Close")
+	require.NoError(t, l.Close(), "second Close (idempotency check)")
 	// goleak in TestMain will catch any stray Accept goroutine at
 	// package-test teardown; this test's own return is the trigger.
 }

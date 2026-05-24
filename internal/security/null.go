@@ -7,12 +7,12 @@
 package security
 
 import (
-	"encoding/binary"
 	"fmt"
 	"strings"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/rkm/gozmq/internal/zmtp"
 )
 
 // nullMechName is the greeting mechanism token for NULL (ZMTP 3.1 §3.2.1).
@@ -59,7 +59,7 @@ func NewNull(role iface.Role, localMeta map[string]string) iface.SecurityMech {
 	return &nullMech{
 		role:      role,
 		localMeta: copied,
-		metaCodec: nullMetaCodec{},
+		metaCodec: zmtp.MetadataCodec,
 	}
 }
 
@@ -135,9 +135,9 @@ func (m *nullMech) nextServer(in []byte) ([]byte, bool, error) {
 			if err != nil {
 				return nil, false, fmt.Errorf("gozmq/security/null: ZAP rejected peer: %w", err)
 			}
-			m.zapMeta = copyNullMeta(meta)
+			m.zapMeta = copyMeta(meta)
 		}
-		m.peerMeta = mergeNullMeta(props, m.zapMeta)
+		m.peerMeta = mergeMeta(props, m.zapMeta)
 		m.peerReady = true
 	}
 	if !m.sentReady {
@@ -248,85 +248,3 @@ func (m *nullMech) decodeReady(body []byte) (map[string]string, error) {
 	return props, nil
 }
 
-// nullMetaCodec is a minimal inline copy of the ZMTP metadata codec. Keeping
-// it local avoids coupling the security mechanisms to the ZMTP package.
-type nullMetaCodec struct{}
-
-func (nullMetaCodec) Encode(props map[string]string) []byte {
-	total := 0
-	for name, value := range props {
-		total += 1 + len(name) + 4 + len(value)
-	}
-	out := make([]byte, 0, total)
-	for name, value := range props {
-		if len(name) > 255 {
-			panic(fmt.Sprintf("gozmq/security/null: metadata name length %d > 255", len(name)))
-		}
-		out = append(out, byte(len(name)))
-		out = append(out, name...)
-		var vln [4]byte
-		binary.BigEndian.PutUint32(vln[:], uint32(len(value)))
-		out = append(out, vln[:]...)
-		out = append(out, value...)
-	}
-	return out
-}
-
-func (nullMetaCodec) Decode(raw []byte) (map[string]string, error) {
-	out := make(map[string]string)
-	seen := make(map[string]struct{})
-	for i := 0; i < len(raw); {
-		if i+1 > len(raw) {
-			return nil, fmt.Errorf("gozmq/security/null: metadata truncated at name length: %w", zmqerr.ErrMalformedFrame)
-		}
-		nameLen := int(raw[i])
-		i++
-		if i+nameLen > len(raw) {
-			return nil, fmt.Errorf("gozmq/security/null: metadata truncated in name: %w", zmqerr.ErrMalformedFrame)
-		}
-		name := string(raw[i : i+nameLen])
-		i += nameLen
-		if i+4 > len(raw) {
-			return nil, fmt.Errorf("gozmq/security/null: metadata truncated at value length: %w", zmqerr.ErrMalformedFrame)
-		}
-		valueLen := binary.BigEndian.Uint32(raw[i : i+4])
-		i += 4
-		if uint64(i)+uint64(valueLen) > uint64(len(raw)) {
-			return nil, fmt.Errorf("gozmq/security/null: metadata truncated in value: %w", zmqerr.ErrMalformedFrame)
-		}
-		value := string(raw[i : i+int(valueLen)])
-		i += int(valueLen)
-		lower := strings.ToLower(name)
-		if _, dup := seen[lower]; dup {
-			return nil, fmt.Errorf("gozmq/security/null: duplicate metadata property %q: %w", name, zmqerr.ErrMalformedFrame)
-		}
-		seen[lower] = struct{}{}
-		out[name] = value
-	}
-	return out, nil
-}
-
-func copyNullMeta(src map[string]string) map[string]string {
-	if len(src) == 0 {
-		return nil
-	}
-	dst := make(map[string]string, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
-}
-
-func mergeNullMeta(base, overlay map[string]string) map[string]string {
-	if len(base) == 0 {
-		return copyNullMeta(overlay)
-	}
-	if len(overlay) == 0 {
-		return copyNullMeta(base)
-	}
-	out := copyNullMeta(base)
-	for k, v := range overlay {
-		out[k] = v
-	}
-	return out
-}

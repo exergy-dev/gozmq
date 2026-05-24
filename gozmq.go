@@ -604,6 +604,12 @@ func (s *Socket) buildSession(conn iface.Conn, role iface.Role) iface.Session {
 	})
 }
 
+func toKey(b []byte) curve.Key {
+	var k curve.Key
+	copy(k[:], b)
+	return k
+}
+
 // newMechanism picks the security mechanism for a new session based on
 // the socket's configured options. Precedence: CURVE > PLAIN > NULL.
 func (s *Socket) newMechanism(role iface.Role) iface.SecurityMech {
@@ -615,23 +621,13 @@ func (s *Socket) newMechanism(role iface.Role) iface.SecurityMech {
 	}
 	switch {
 	case len(s.cfg.curveSecretKey) == 32 && s.cfg.curveServer:
-		var sk curve.Key
-		copy(sk[:], s.cfg.curveSecretKey)
-		m, err := curve.NewCurveServer(sk, meta)
-		if err != nil {
-			return secmech.NewNull(role, meta)
+		if m, err := curve.NewCurveServer(toKey(s.cfg.curveSecretKey), meta); err == nil {
+			return m
 		}
-		return m
 	case len(s.cfg.curveSecretKey) == 32 && !s.cfg.curveServer && len(s.cfg.curveServerKey) == 32 && len(s.cfg.curvePublicKey) == 32:
-		var sk, pk, spk curve.Key
-		copy(sk[:], s.cfg.curveSecretKey)
-		copy(pk[:], s.cfg.curvePublicKey)
-		copy(spk[:], s.cfg.curveServerKey)
-		m, err := curve.NewCurveClient(spk, pk, sk, meta)
-		if err != nil {
-			return secmech.NewNull(role, meta)
+		if m, err := curve.NewCurveClient(toKey(s.cfg.curveServerKey), toKey(s.cfg.curvePublicKey), toKey(s.cfg.curveSecretKey), meta); err == nil {
+			return m
 		}
-		return m
 	case s.cfg.plainAuth != nil && role == iface.RoleServer:
 		return secmech.NewPlainServer(s.cfg.plainAuth, meta)
 	case s.cfg.plainClient && role == iface.RoleClient:
@@ -754,17 +750,7 @@ func (s *Socket) startStreamAdapter(conn iface.Conn) {
 		return
 	}
 
-	s.connectWG.Add(1)
-	go func() {
-		defer s.connectWG.Done()
-		select {
-		case <-p.Closed():
-		case <-s.runCtx.Done():
-		}
-		_ = s.engine.DetachPipe(p)
-		_ = ad.Close()
-		s.emit(EventDisconnected, remote, "")
-	}()
+	s.watchPipeClose(p, remote, func() { _ = ad.Close() })
 }
 
 // connectStream is the STREAM-specific Connect path. It dials once via
@@ -799,32 +785,14 @@ func (s *Socket) hasSecurityMech() bool {
 // its own engine, and offers the other end to the bind-side listener via
 // the DirectPipeAcceptor interface.
 func (s *Socket) connectDirectPipe(acceptor iface.DirectPipeAcceptor, endpoint string) error {
-	localType := socketTypeName(s.socketType)
-
-	// Negotiate HWMs: use the socket's configured values.
-	sendHWM := s.cfg.sendHWM
-	recvHWM := s.cfg.recvHWM
-
-	// Build PeerInfo for each side.
-	dialerInfo := pipe.PeerInfo{
-		Endpoint: endpoint,
-		Identity: s.cfg.identity,
-	}
-	binderInfo := pipe.PeerInfo{
-		Endpoint: endpoint,
-	}
-
-	// Create the pipe pair. dialerPipe goes to our engine; binderPipe
-	// goes to the bind-side engine via the acceptor.
 	dialerPipe, binderPipe := pipe.NewPair(
-		sendHWM, recvHWM,
-		binderInfo, // what dialer sees as peer info
-		dialerInfo, // what binder sees as peer info
+		s.cfg.sendHWM, s.cfg.recvHWM,
+		pipe.PeerInfo{Endpoint: endpoint},
+		pipe.PeerInfo{Endpoint: endpoint, Identity: s.cfg.identity},
 	)
-
 	offer := &iface.DirectPipeOffer{
 		BindPipe:         binderPipe,
-		DialerSocketType: localType,
+		DialerSocketType: socketTypeName(s.socketType),
 		Endpoint:         endpoint,
 	}
 
@@ -847,19 +815,7 @@ func (s *Socket) connectDirectPipe(acceptor iface.DirectPipeAcceptor, endpoint s
 		return err
 	}
 
-	// Spawn a watcher goroutine that DetachPipes when the pipe closes.
-	s.connectWG.Add(1)
-	go func() {
-		defer s.connectWG.Done()
-		select {
-		case <-dialerPipe.Closed():
-		case <-s.runCtx.Done():
-		}
-		_ = s.engine.DetachPipe(dialerPipe)
-		_ = dialerPipe.Close()
-		s.emit(EventDisconnected, endpoint, "")
-	}()
-
+	s.watchPipeClose(dialerPipe, endpoint, func() { _ = dialerPipe.Close() })
 	return nil
 }
 
@@ -893,20 +849,8 @@ func (s *Socket) acceptDirectPipeLoop(acceptor iface.DirectPipeAcceptor) {
 			continue
 		}
 
-		// Spawn a watcher goroutine for teardown.
-		bindPipe := offer.BindPipe
-		ep := offer.Endpoint
-		s.connectWG.Add(1)
-		go func() {
-			defer s.connectWG.Done()
-			select {
-			case <-bindPipe.Closed():
-			case <-s.runCtx.Done():
-			}
-			_ = s.engine.DetachPipe(bindPipe)
-			_ = bindPipe.Close()
-			s.emit(EventDisconnected, ep, "")
-		}()
+		bp := offer.BindPipe
+		s.watchPipeClose(bp, offer.Endpoint, func() { _ = bp.Close() })
 	}
 }
 
@@ -1175,14 +1119,13 @@ func isExpectedTeardownErr(err error) bool {
 	return false
 }
 
-// waitWritersFlushed blocks until every session's WriterFlushed() channel
-// has fired, bounded by linger and cancellable via ctx. linger < 0 waits
-// indefinitely (ctx-cancellable); linger > 0 caps the wait. Returns
-// ctx.Err() if ctx fires before the drain completes, nil otherwise.
-// Should be called AFTER closing each session's engine-facing pipe (which
-// signals the writer to drain).
-func waitWritersFlushed(ctx context.Context, sessions []iface.Session, linger time.Duration) error {
-	if len(sessions) == 0 || linger == 0 {
+// waitChannels blocks until ch(item) fires for every item, bounded by
+// linger and cancellable via ctx. linger < 0 waits indefinitely
+// (ctx-cancellable); linger > 0 caps the wait. Returns ctx.Err() if ctx
+// fires before drain completes, nil otherwise. A nil channel from ch
+// skips that item.
+func waitChannels[T any](ctx context.Context, items []T, ch func(T) <-chan struct{}, linger time.Duration) error {
+	if len(items) == 0 || linger == 0 {
 		return nil
 	}
 
@@ -1193,15 +1136,14 @@ func waitWritersFlushed(ctx context.Context, sessions []iface.Session, linger ti
 	}
 	defer cancel()
 
-	for _, sess := range sessions {
-		if sess == nil {
+	for _, item := range items {
+		done := ch(item)
+		if done == nil {
 			continue
 		}
 		select {
-		case <-sess.WriterFlushed():
+		case <-done:
 		case <-waitCtx.Done():
-			// Positive linger is a bounded "best effort" wait, not an error.
-			// Only surface ctx cancellation from the caller.
 			if linger > 0 && errors.Is(waitCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
 				return nil
 			}
@@ -1211,35 +1153,40 @@ func waitWritersFlushed(ctx context.Context, sessions []iface.Session, linger ti
 	return nil
 }
 
-// waitDirectPipesDrained blocks until every direct pipe's Closed() channel
-// has fired (peer consumed/closed), bounded by linger and cancellable via
-// ctx. Semantics mirror waitWritersFlushed for session-based connections.
-func waitDirectPipesDrained(ctx context.Context, pipes []iface.Pipe, linger time.Duration) error {
-	if len(pipes) == 0 || linger == 0 {
-		return nil
-	}
-
-	waitCtx := ctx
-	cancel := func() {}
-	if linger > 0 {
-		waitCtx, cancel = context.WithTimeout(ctx, linger)
-	}
-	defer cancel()
-
-	for _, p := range pipes {
-		if p == nil {
-			continue
+func waitWritersFlushed(ctx context.Context, sessions []iface.Session, linger time.Duration) error {
+	return waitChannels(ctx, sessions, func(s iface.Session) <-chan struct{} {
+		if s == nil {
+			return nil
 		}
+		return s.WriterFlushed()
+	}, linger)
+}
+
+func waitDirectPipesDrained(ctx context.Context, pipes []iface.Pipe, linger time.Duration) error {
+	return waitChannels(ctx, pipes, func(p iface.Pipe) <-chan struct{} {
+		if p == nil {
+			return nil
+		}
+		return p.Closed()
+	}, linger)
+}
+
+// watchPipeClose spawns a goroutine that waits for p to close (or the
+// socket's run context to cancel), then detaches p, runs cleanup, and
+// emits EventDisconnected. Used by startStreamAdapter, connectDirectPipe,
+// and acceptDirectPipeLoop.
+func (s *Socket) watchPipeClose(p iface.Pipe, endpoint string, cleanup func()) {
+	s.connectWG.Add(1)
+	go func() {
+		defer s.connectWG.Done()
 		select {
 		case <-p.Closed():
-		case <-waitCtx.Done():
-			if linger > 0 && errors.Is(waitCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-				return nil
-			}
-			return waitCtx.Err()
+		case <-s.runCtx.Done():
 		}
-	}
-	return nil
+		_ = s.engine.DetachPipe(p)
+		cleanup()
+		s.emit(EventDisconnected, endpoint, "")
+	}()
 }
 
 // emit publishes a lifecycle Event on the socket's configured monitor

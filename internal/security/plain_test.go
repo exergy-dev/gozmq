@@ -1,8 +1,9 @@
 package security
 
 import (
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/zmqerr"
@@ -67,7 +68,7 @@ func pumpPlain(t *testing.T, client, server iface.SecurityMech) (clientErr, serv
 			return cErr, sErr
 		}
 	}
-	t.Fatalf("pumpPlain: exceeded %d steps (client done=%v err=%v, server done=%v err=%v)", maxSteps, clientDone, cErr, serverDone, sErr)
+	require.Failf(t, "pumpPlain", "exceeded %d steps (client done=%v err=%v, server done=%v err=%v)", maxSteps, clientDone, cErr, serverDone, sErr)
 	return cErr, sErr
 }
 
@@ -89,39 +90,27 @@ func TestPlainHandshakeSuccess(t *testing.T) {
 	client := NewPlainClient("alice", "hunter2", clientMeta)
 	server := NewPlainServer(authenticate, serverMeta)
 
-	if client.AsServer() {
-		t.Fatal("client.AsServer = true, want false")
-	}
-	if !server.AsServer() {
-		t.Fatal("server.AsServer = false, want true")
-	}
-	if client.Name() != "PLAIN" || server.Name() != "PLAIN" {
-		t.Fatalf("Name: client=%q server=%q", client.Name(), server.Name())
-	}
+	require.False(t, client.AsServer(), "client.AsServer should be false")
+	require.True(t, server.AsServer(), "server.AsServer should be true")
+	require.Equal(t, "PLAIN", client.Name())
+	require.Equal(t, "PLAIN", server.Name())
 
 	cerr, serr := pumpPlain(t, client, server)
-	if cerr != nil || serr != nil {
-		t.Fatalf("handshake failed: client=%v server=%v", cerr, serr)
-	}
+	require.NoError(t, cerr, "client handshake")
+	require.NoError(t, serr, "server handshake")
 
 	clientImpl := client.(*plainMech)
 	serverImpl := server.(*plainMech)
 
-	if !mapsEqual(clientImpl.PeerMetadata(), serverMeta) {
-		t.Fatalf("client peer metadata: got %v, want %v", clientImpl.PeerMetadata(), serverMeta)
-	}
-	if !mapsEqual(serverImpl.PeerMetadata(), clientMeta) {
-		t.Fatalf("server peer metadata: got %v, want %v", serverImpl.PeerMetadata(), clientMeta)
-	}
+	require.Equal(t, serverMeta, clientImpl.PeerMetadata(), "client peer metadata")
+	require.Equal(t, clientMeta, serverImpl.PeerMetadata(), "server peer metadata")
 
 	// The client sends metadata in INITIATE and receives it in READY; the
 	// server receives metadata in INITIATE and sends it in READY.
-	if !clientImpl.metaSent || !clientImpl.metaRecv {
-		t.Fatalf("client metadata flags: sent=%v recv=%v", clientImpl.metaSent, clientImpl.metaRecv)
-	}
-	if !serverImpl.metaSent || !serverImpl.metaRecv {
-		t.Fatalf("server metadata flags: sent=%v recv=%v", serverImpl.metaSent, serverImpl.metaRecv)
-	}
+	require.True(t, clientImpl.metaSent, "client metadata sent flag")
+	require.True(t, clientImpl.metaRecv, "client metadata recv flag")
+	require.True(t, serverImpl.metaSent, "server metadata sent flag")
+	require.True(t, serverImpl.metaRecv, "server metadata recv flag")
 }
 
 func TestPlainHandshakeWrongPassword(t *testing.T) {
@@ -136,18 +125,8 @@ func TestPlainHandshakeWrongPassword(t *testing.T) {
 	// Both sides eventually surface ErrAuthFailed: the server rejects HELLO
 	// and emits ERROR; the client, upon receiving ERROR, returns
 	// ErrAuthFailed from its own NextHandshake call.
-	if serr == nil {
-		t.Fatal("server: expected error, got nil")
-	}
-	if !errors.Is(serr, zmqerr.ErrAuthFailed) {
-		t.Fatalf("server error: want ErrAuthFailed, got %v", serr)
-	}
-	if cerr == nil {
-		t.Fatal("client: expected error, got nil")
-	}
-	if !errors.Is(cerr, zmqerr.ErrAuthFailed) {
-		t.Fatalf("client error: want ErrAuthFailed, got %v", cerr)
-	}
+	require.ErrorIs(t, serr, zmqerr.ErrAuthFailed, "server error")
+	require.ErrorIs(t, cerr, zmqerr.ErrAuthFailed, "client error")
 }
 
 func TestPlainHandshakeNilAuthCallback(t *testing.T) {
@@ -156,12 +135,8 @@ func TestPlainHandshakeNilAuthCallback(t *testing.T) {
 	server := NewPlainServer(nil, nil)
 
 	cerr, serr := pumpPlain(t, client, server)
-	if !errors.Is(serr, zmqerr.ErrAuthFailed) {
-		t.Fatalf("server error: want ErrAuthFailed, got %v", serr)
-	}
-	if !errors.Is(cerr, zmqerr.ErrAuthFailed) {
-		t.Fatalf("client error: want ErrAuthFailed, got %v", cerr)
-	}
+	require.ErrorIs(t, serr, zmqerr.ErrAuthFailed, "server error")
+	require.ErrorIs(t, cerr, zmqerr.ErrAuthFailed, "client error")
 }
 
 func TestPlainMalformedHello(t *testing.T) {
@@ -217,16 +192,10 @@ func TestPlainMalformedHello(t *testing.T) {
 			server := NewPlainServer(func(string, string) bool { return true }, nil)
 			// Advance server past the passive seed state so the next call
 			// exercises the HELLO parse path.
-			if _, _, err := server.NextHandshake(nil); err != nil {
-				t.Fatalf("seed: %v", err)
-			}
-			_, _, err := server.NextHandshake(tc.body)
-			if err == nil {
-				t.Fatalf("NextHandshake(%q): want error, got nil", tc.body)
-			}
-			if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-				t.Fatalf("NextHandshake(%q): want ErrMalformedFrame, got %v", tc.body, err)
-			}
+			_, _, err := server.NextHandshake(nil)
+			require.NoError(t, err, "seed")
+			_, _, err = server.NextHandshake(tc.body)
+			require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 		})
 	}
 }
@@ -238,88 +207,55 @@ func TestPlainClientRejectsMalformedPeer(t *testing.T) {
 
 	// Seed.
 	_, _, err := client.NextHandshake(nil)
-	if err != nil {
-		t.Fatalf("seed: %v", err)
-	}
+	require.NoError(t, err, "seed")
 
 	// Feed a bogus reply.
 	bogus := []byte{0x06, 'N', 'O', 'P', 'E', 'R', 'S'}
 	_, _, err = client.NextHandshake(bogus)
-	if err == nil {
-		t.Fatal("want error, got nil")
-	}
-	if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-		t.Fatalf("want ErrMalformedFrame, got %v", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 }
 
 func TestPlainClientRejectsWelcomeWithPayload(t *testing.T) {
 	client := NewPlainClient("alice", "hunter2", nil)
 
-	if _, _, err := client.NextHandshake(nil); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
+	_, _, err := client.NextHandshake(nil)
+	require.NoError(t, err, "seed")
 
 	// WELCOME with an extra byte should fail.
 	bad := []byte{0x07, 'W', 'E', 'L', 'C', 'O', 'M', 'E', 0xff}
-	_, _, err := client.NextHandshake(bad)
-	if err == nil {
-		t.Fatal("want error, got nil")
-	}
-	if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-		t.Fatalf("want ErrMalformedFrame, got %v", err)
-	}
+	_, _, err = client.NextHandshake(bad)
+	require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 }
 
 func TestPlainClientAcceptsErrorAfterInitiate(t *testing.T) {
 	client := NewPlainClient("alice", "hunter2", map[string]string{"Socket-Type": "PAIR"})
 
 	out, done, err := client.NextHandshake(nil)
-	if err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	if done || len(out) == 0 {
-		t.Fatalf("seed: out=%x done=%v", out, done)
-	}
+	require.NoError(t, err, "seed")
+	require.False(t, done, "seed: done should be false")
+	require.NotEmpty(t, out, "seed: out should not be empty")
 
 	out, done, err = client.NextHandshake([]byte{0x07, 'W', 'E', 'L', 'C', 'O', 'M', 'E'})
-	if err != nil {
-		t.Fatalf("WELCOME: %v", err)
-	}
-	if done || len(out) == 0 {
-		t.Fatalf("INITIATE: out=%x done=%v", out, done)
-	}
+	require.NoError(t, err, "WELCOME")
+	require.False(t, done, "INITIATE: done should be false")
+	require.NotEmpty(t, out, "INITIATE: out should not be empty")
 
 	_, _, err = client.NextHandshake([]byte{0x05, 'E', 'R', 'R', 'O', 'R', 0x03, '4', '0', '0'})
-	if err == nil {
-		t.Fatal("ERROR after INITIATE: want error")
-	}
-	if !errors.Is(err, zmqerr.ErrAuthFailed) {
-		t.Fatalf("ERROR after INITIATE: want ErrAuthFailed, got %v", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "ERROR after INITIATE")
 }
 
 func TestPlainClientAcceptsCompatErrorAfterInitiate(t *testing.T) {
 	client := NewPlainClient("alice", "hunter2", nil)
 
-	if _, _, err := client.NextHandshake(nil); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
+	_, _, err := client.NextHandshake(nil)
+	require.NoError(t, err, "seed")
 	out, done, err := client.NextHandshake([]byte{0x07, 'W', 'E', 'L', 'C', 'O', 'M', 'E'})
-	if err != nil {
-		t.Fatalf("WELCOME: %v", err)
-	}
-	if done || len(out) == 0 {
-		t.Fatalf("INITIATE: out=%x done=%v", out, done)
-	}
+	require.NoError(t, err, "WELCOME")
+	require.False(t, done, "INITIATE: done should be false")
+	require.NotEmpty(t, out, "INITIATE: out should not be empty")
 
 	_, _, err = client.NextHandshake([]byte{0x5e, 'R', 'R', 'O', 'R', 0x03, '4', '0', '0'})
-	if err == nil {
-		t.Fatal("compat ERROR after INITIATE: want error")
-	}
-	if !errors.Is(err, zmqerr.ErrAuthFailed) {
-		t.Fatalf("compat ERROR after INITIATE: want ErrAuthFailed, got %v", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "compat ERROR after INITIATE")
 }
 
 func TestPlainEncodeDecodeFrameIdentity(t *testing.T) {
@@ -333,25 +269,13 @@ func TestPlainEncodeDecodeFrameIdentity(t *testing.T) {
 	} {
 		for _, input := range tc.input {
 			wireFlags, enc, err := m.EncodeFrame(tc.flags, input)
-			if err != nil {
-				t.Fatalf("EncodeFrame: %v", err)
-			}
-			if wireFlags != tc.flags {
-				t.Fatalf("EncodeFrame flags: got %#x, want %#x", wireFlags, tc.flags)
-			}
-			if len(enc) != len(input) {
-				t.Fatalf("EncodeFrame length changed: %d -> %d", len(input), len(enc))
-			}
+			require.NoError(t, err, "EncodeFrame")
+			require.Equal(t, tc.flags, wireFlags, "EncodeFrame flags")
+			require.Equal(t, len(input), len(enc), "EncodeFrame length")
 			plainFlags, dec, err := m.DecodeFrame(wireFlags, enc)
-			if err != nil {
-				t.Fatalf("DecodeFrame: %v", err)
-			}
-			if plainFlags != tc.flags {
-				t.Fatalf("DecodeFrame flags: got %#x, want %#x", plainFlags, tc.flags)
-			}
-			if len(dec) != len(input) {
-				t.Fatalf("DecodeFrame length changed: %d -> %d", len(input), len(dec))
-			}
+			require.NoError(t, err, "DecodeFrame")
+			require.Equal(t, tc.flags, plainFlags, "DecodeFrame flags")
+			require.Equal(t, input, dec, "DecodeFrame output")
 		}
 	}
 }
@@ -362,37 +286,24 @@ func TestPlainMetadataIsolated(t *testing.T) {
 
 	local["Socket-Type"] = "REP" // must not leak into mechanism
 	got := m.Metadata()
-	if got["Socket-Type"] != "REQ" {
-		t.Fatalf("Metadata not isolated: got %q, want %q", got["Socket-Type"], "REQ")
-	}
+	require.Equal(t, "REQ", got["Socket-Type"], "Metadata not isolated from caller mutation")
 
 	got["Socket-Type"] = "PUB" // mutating returned map must not affect next call
-	if again := m.Metadata(); again["Socket-Type"] != "REQ" {
-		t.Fatalf("Metadata not isolated on return: got %q, want %q", again["Socket-Type"], "REQ")
-	}
+	again := m.Metadata()
+	require.Equal(t, "REQ", again["Socket-Type"], "Metadata not isolated on return")
 }
 
 func TestPlainSetPeerMetadataStores(t *testing.T) {
 	m := NewPlainServer(func(string, string) bool { return true }, nil).(*plainMech)
 	props := map[string]string{"Socket-Type": "PAIR"}
-	if err := m.SetPeerMetadata(props); err != nil {
-		t.Fatalf("SetPeerMetadata: %v", err)
-	}
-	if !mapsEqual(m.PeerMetadata(), props) {
-		t.Fatalf("PeerMetadata: got %v, want %v", m.PeerMetadata(), props)
-	}
+	require.NoError(t, m.SetPeerMetadata(props))
+	require.Equal(t, props, m.PeerMetadata())
 
 	props["Socket-Type"] = "PUB"
-	if m.PeerMetadata()["Socket-Type"] != "PAIR" {
-		t.Fatal("PeerMetadata not isolated from caller mutations")
-	}
+	require.Equal(t, "PAIR", m.PeerMetadata()["Socket-Type"], "PeerMetadata not isolated from caller mutations")
 
-	if err := m.SetPeerMetadata(nil); err != nil {
-		t.Fatalf("SetPeerMetadata(nil): %v", err)
-	}
-	if m.PeerMetadata() != nil {
-		t.Fatalf("PeerMetadata after nil-set: got %v, want nil", m.PeerMetadata())
-	}
+	require.NoError(t, m.SetPeerMetadata(nil))
+	require.Nil(t, m.PeerMetadata(), "PeerMetadata after nil-set should be nil")
 }
 
 func TestPlainHelloEncodesLengthPrefixedCredentials(t *testing.T) {
@@ -400,12 +311,8 @@ func TestPlainHelloEncodesLengthPrefixedCredentials(t *testing.T) {
 	// match RFC 24 §4 exactly.
 	client := NewPlainClient("alice", "hunter2", nil)
 	out, done, err := client.NextHandshake(nil)
-	if err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	if done {
-		t.Fatal("seed: done=true")
-	}
+	require.NoError(t, err, "seed")
+	require.False(t, done, "seed: done should be false")
 
 	// [5]"HELLO" [5]"alice" [7]"hunter2"
 	want := []byte{
@@ -413,14 +320,7 @@ func TestPlainHelloEncodesLengthPrefixedCredentials(t *testing.T) {
 		0x05, 'a', 'l', 'i', 'c', 'e',
 		0x07, 'h', 'u', 'n', 't', 'e', 'r', '2',
 	}
-	if len(out) != len(want) {
-		t.Fatalf("HELLO body length: got %d, want %d (%x vs %x)", len(out), len(want), out, want)
-	}
-	for i := range want {
-		if out[i] != want[i] {
-			t.Fatalf("HELLO body byte %d: got %#x, want %#x (full: %x)", i, out[i], want[i], out)
-		}
-	}
+	require.Equal(t, want, out, "HELLO body")
 }
 
 func TestPlainServerInitialSeedIsPassive(t *testing.T) {
@@ -430,18 +330,10 @@ func TestPlainServerInitialSeedIsPassive(t *testing.T) {
 	// before the next NextHandshake call.
 	server := NewPlainServer(func(string, string) bool { return true }, nil)
 	out, done, err := server.NextHandshake(nil)
-	if err != nil {
-		t.Fatalf("seed: unexpected err %v", err)
-	}
-	if done {
-		t.Fatal("seed should not report done")
-	}
-	if out != nil {
-		t.Fatalf("seed should return nil out, got %x", out)
-	}
+	require.NoError(t, err, "seed")
+	require.False(t, done, "seed should not report done")
+	require.Nil(t, out, "seed should return nil out")
 	// A second nil seed is an error — the seed state is one-shot.
 	_, _, err = server.NextHandshake(nil)
-	if err == nil {
-		t.Fatal("second NextHandshake with nil input should error")
-	}
+	require.Error(t, err, "second NextHandshake with nil input should error")
 }

@@ -2,7 +2,6 @@ package socket_test
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -10,6 +9,7 @@ import (
 	"github.com/rkm/gozmq/internal/pipe"
 	"github.com/rkm/gozmq/internal/socket"
 	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/stretchr/testify/require"
 )
 
 // TestFairQueue_RecvWithSource asserts that RecvWithSource returns both
@@ -29,45 +29,24 @@ func TestFairQueue_RecvWithSource(t *testing.T) {
 	)
 	defer closePipes(aEng, aPeer, bEng, bPeer)
 
-	if err := fq.Attach(aEng); err != nil {
-		t.Fatalf("attach A: %v", err)
-	}
-	if err := fq.Attach(bEng); err != nil {
-		t.Fatalf("attach B: %v", err)
-	}
+	require.NoError(t, fq.Attach(aEng), "attach A")
+	require.NoError(t, fq.Attach(bEng), "attach B")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
 	// Send from B first; assert source is bEng.
-	if err := bPeer.Send(ctx, msg.FromBytes([]byte("from-B"))); err != nil {
-		t.Fatalf("bPeer send: %v", err)
-	}
+	require.NoError(t, bPeer.Send(ctx, msg.FromBytes([]byte("from-B"))), "bPeer send")
 	m, src, err := fq.RecvWithSource(ctx)
-	if err != nil {
-		t.Fatalf("recv: %v", err)
-	}
-	if string(m.Bytes()) != "from-B" {
-		t.Fatalf("body = %q, want from-B", m.Bytes())
-	}
-	if src != bEng {
-		t.Fatalf("source mismatch: want bEng, got %v", src)
-	}
+	require.NoError(t, err, "recv")
+	require.Equal(t, "from-B", string(m.Bytes()))
+	require.Equal(t, bEng, src, "source mismatch: want bEng")
 
 	// Now A.
-	if err := aPeer.Send(ctx, msg.FromBytes([]byte("from-A"))); err != nil {
-		t.Fatalf("aPeer send: %v", err)
-	}
+	require.NoError(t, aPeer.Send(ctx, msg.FromBytes([]byte("from-A"))), "aPeer send")
 	m, src, err = fq.RecvWithSource(ctx)
-	if err != nil {
-		t.Fatalf("recv2: %v", err)
-	}
-	if string(m.Bytes()) != "from-A" {
-		t.Fatalf("body = %q, want from-A", m.Bytes())
-	}
-	if src != aEng {
-		t.Fatalf("source mismatch: want aEng, got %v", src)
-	}
+	require.NoError(t, err, "recv2")
+	require.Equal(t, "from-A", string(m.Bytes()))
+	require.Equal(t, aEng, src, "source mismatch: want aEng")
 }
 
 // TestFairQueue_RecvWithSource_CloseError asserts that RecvWithSource
@@ -86,15 +65,11 @@ func TestFairQueue_RecvWithSource_CloseError(t *testing.T) {
 		done <- result{err: err}
 	}()
 	time.Sleep(30 * time.Millisecond)
-	if err := fq.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	require.NoError(t, fq.Close(), "close")
 	select {
 	case r := <-done:
-		if !errors.Is(r.err, zmqerr.ErrSocketClosed) {
-			t.Fatalf("err = %v, want ErrSocketClosed", r.err)
-		}
+		require.ErrorIs(t, r.err, zmqerr.ErrSocketClosed)
 	case <-time.After(time.Second):
-		t.Fatal("recv did not unblock on close")
+		require.Fail(t, "recv did not unblock on close")
 	}
 }

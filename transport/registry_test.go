@@ -2,41 +2,35 @@ package transport
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNew_RegistersStandardSchemes(t *testing.T) {
 	r := New()
 	for _, scheme := range []string{"tcp", "tcp6", "inproc"} {
 		tr, err := r.Lookup(scheme + "://nope:0")
-		if err != nil {
-			t.Errorf("Lookup(%q) err = %v, want nil", scheme, err)
+		if !assert.NoError(t, err, "Lookup(%q)", scheme) {
 			continue
 		}
-		if tr.Scheme() != scheme {
-			t.Errorf("Lookup(%q) returned scheme %q", scheme, tr.Scheme())
-		}
+		assert.Equal(t, scheme, tr.Scheme(), "Lookup(%q) returned wrong scheme", scheme)
 	}
 }
 
 func TestRegistry_UnknownScheme(t *testing.T) {
 	r := New()
 	_, err := r.Lookup("frob://something")
-	if !errors.Is(err, zmqerr.ErrTransportUnknown) {
-		t.Fatalf("err = %v, want wraps ErrTransportUnknown", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrTransportUnknown)
 }
 
 func TestRegistry_BadEndpoint(t *testing.T) {
 	r := New()
 	for _, ep := range []string{"", "no-scheme-here", "://missing"} {
 		_, err := r.Lookup(ep)
-		if !errors.Is(err, zmqerr.ErrEndpointInvalid) {
-			t.Errorf("Lookup(%q) err = %v, want wraps ErrEndpointInvalid", ep, err)
-		}
+		assert.ErrorIs(t, err, zmqerr.ErrEndpointInvalid, "Lookup(%q)", ep)
 	}
 }
 
@@ -51,9 +45,7 @@ func TestRegistry_RegisterOverwrites(t *testing.T) {
 	r.Register(replacement)
 	got, _ := r.Lookup("tcp://x:1")
 
-	if first == got {
-		t.Fatalf("Register did not overwrite existing entry")
-	}
+	require.False(t, first == got, "Register did not overwrite existing entry")
 }
 
 // TestRegistry_ConcurrentAccess is a -race smoke that the registry tolerates
@@ -78,12 +70,8 @@ func TestRegistry_ConcurrentAccess(t *testing.T) {
 func TestRegistry_LookupHonorsScheme(t *testing.T) {
 	r := New()
 	tr, err := r.Lookup("inproc://name")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tr.Scheme() != "inproc" {
-		t.Fatalf("got scheme %q", tr.Scheme())
-	}
+	require.NoError(t, err)
+	require.Equal(t, "inproc", tr.Scheme())
 }
 
 // TestRegistry_DialThroughLookup is a tiny end-to-end smoke that the
@@ -92,25 +80,17 @@ func TestRegistry_LookupHonorsScheme(t *testing.T) {
 func TestRegistry_DialThroughLookup(t *testing.T) {
 	r := New()
 	tr, err := r.Lookup("inproc://reg-smoke")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	l, err := tr.Listen(context.Background(), "inproc://reg-smoke")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	defer l.Close()
 
 	ctx := context.Background()
 	c, err := tr.Dial(ctx, "inproc://reg-smoke")
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	defer c.Close()
 
 	srv, err := l.Accept(ctx)
-	if err != nil {
-		t.Fatalf("Accept: %v", err)
-	}
+	require.NoError(t, err, "Accept")
 	defer srv.Close()
 }

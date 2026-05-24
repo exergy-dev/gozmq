@@ -2,9 +2,10 @@ package zmtp
 
 import (
 	"bytes"
-	"errors"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/rkm/gozmq/internal/zmqerr"
 )
@@ -28,14 +29,12 @@ func TestCommandRoundTrip(t *testing.T) {
 			t.Parallel()
 			raw := EncodeCommand(tc.cmd)
 			got, err := DecodeCommand(raw)
-			if err != nil {
-				t.Fatalf("DecodeCommand: %v", err)
-			}
-			if got.Name != tc.cmd.Name {
-				t.Fatalf("name: got %q want %q", got.Name, tc.cmd.Name)
-			}
-			if !bytes.Equal(got.Body, tc.cmd.Body) {
-				t.Fatalf("body: got %x want %x", got.Body, tc.cmd.Body)
+			require.NoError(t, err, "DecodeCommand")
+			require.Equal(t, tc.cmd.Name, got.Name, "name")
+			if len(tc.cmd.Body) == 0 {
+				require.Empty(t, got.Body, "body")
+			} else {
+				require.Equal(t, tc.cmd.Body, got.Body, "body")
 			}
 		})
 	}
@@ -46,9 +45,7 @@ func TestCommandWireFormat(t *testing.T) {
 	raw := EncodeCommand(Command{Name: CmdReady, Body: []byte("payload")})
 	want := append([]byte{byte(len(CmdReady))}, []byte(CmdReady)...)
 	want = append(want, []byte("payload")...)
-	if !bytes.Equal(raw, want) {
-		t.Fatalf("got %x want %x", raw, want)
-	}
+	require.Equal(t, want, raw)
 }
 
 func TestCommandRejects(t *testing.T) {
@@ -67,21 +64,16 @@ func TestCommandRejects(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			_, err := DecodeCommand(tc.raw)
-			if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-				t.Fatalf("err: got %v want ErrMalformedFrame", err)
-			}
+			require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 		})
 	}
 }
 
 func TestEncodeCommandPanicsOnHugeName(t *testing.T) {
 	t.Parallel()
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatalf("expected panic")
-		}
-	}()
-	EncodeCommand(Command{Name: strings.Repeat("X", MaxCommandNameLen+1)})
+	require.Panics(t, func() {
+		EncodeCommand(Command{Name: strings.Repeat("X", MaxCommandNameLen+1)})
+	})
 }
 
 func TestPingPongRoundTrip(t *testing.T) {
@@ -101,41 +93,25 @@ func TestPingPongRoundTrip(t *testing.T) {
 		t.Run("ping-"+tc.name, func(t *testing.T) {
 			t.Parallel()
 			cmd, err := EncodePing(tc.ttl, tc.ctx)
-			if err != nil {
-				t.Fatalf("EncodePing: %v", err)
-			}
-			if cmd.Name != CmdPing {
-				t.Fatalf("name: got %q", cmd.Name)
-			}
+			require.NoError(t, err, "EncodePing")
+			require.Equal(t, CmdPing, cmd.Name, "name")
 			ttl, ctx, err := DecodePing(cmd)
-			if err != nil {
-				t.Fatalf("DecodePing: %v", err)
-			}
-			if ttl != tc.ttl {
-				t.Fatalf("ttl: got %d want %d", ttl, tc.ttl)
-			}
-			if !bytes.Equal(ctx, tc.ctx) && !(len(ctx) == 0 && len(tc.ctx) == 0) {
-				t.Fatalf("ctx: got %x want %x", ctx, tc.ctx)
+			require.NoError(t, err, "DecodePing")
+			require.Equal(t, tc.ttl, ttl, "ttl")
+			if len(ctx) != 0 || len(tc.ctx) != 0 {
+				require.Equal(t, tc.ctx, ctx, "ctx")
 			}
 		})
 		t.Run("pong-"+tc.name, func(t *testing.T) {
 			t.Parallel()
 			cmd, err := EncodePong(tc.ttl, tc.ctx)
-			if err != nil {
-				t.Fatalf("EncodePong: %v", err)
-			}
-			if cmd.Name != CmdPong {
-				t.Fatalf("name: got %q", cmd.Name)
-			}
+			require.NoError(t, err, "EncodePong")
+			require.Equal(t, CmdPong, cmd.Name, "name")
 			ttl, ctx, err := DecodePong(cmd)
-			if err != nil {
-				t.Fatalf("DecodePong: %v", err)
-			}
-			if ttl != tc.ttl {
-				t.Fatalf("ttl: got %d want %d", ttl, tc.ttl)
-			}
-			if !bytes.Equal(ctx, tc.ctx) && !(len(ctx) == 0 && len(tc.ctx) == 0) {
-				t.Fatalf("ctx: got %x want %x", ctx, tc.ctx)
+			require.NoError(t, err, "DecodePong")
+			require.Equal(t, tc.ttl, ttl, "ttl")
+			if len(ctx) != 0 || len(tc.ctx) != 0 {
+				require.Equal(t, tc.ctx, ctx, "ctx")
 			}
 		})
 	}
@@ -145,38 +121,26 @@ func TestPingPongRejects(t *testing.T) {
 	t.Parallel()
 	t.Run("encode-context-too-long", func(t *testing.T) {
 		_, err := EncodePing(0, bytes.Repeat([]byte{0}, PingPongMaxContext+1))
-		if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-			t.Fatalf("err: got %v want ErrMalformedFrame", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 		_, err = EncodePong(0, bytes.Repeat([]byte{0}, PingPongMaxContext+1))
-		if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-			t.Fatalf("err: got %v want ErrMalformedFrame", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 	})
 	t.Run("decode-too-short", func(t *testing.T) {
 		_, _, err := DecodePing(Command{Name: CmdPing, Body: []byte{0x00}})
-		if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-			t.Fatalf("err: got %v want ErrMalformedFrame", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 		_, _, err = DecodePong(Command{Name: CmdPong, Body: []byte{0x00}})
-		if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-			t.Fatalf("err: got %v want ErrMalformedFrame", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 	})
 	t.Run("decode-too-long", func(t *testing.T) {
 		body := append([]byte{0, 0}, bytes.Repeat([]byte{0xCC}, PingPongMaxContext+1)...)
 		_, _, err := DecodePing(Command{Name: CmdPing, Body: body})
-		if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-			t.Fatalf("err: got %v want ErrMalformedFrame", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 	})
 	t.Run("decode-wrong-name", func(t *testing.T) {
-		if _, _, err := DecodePing(Command{Name: CmdPong, Body: []byte{0, 0}}); !errors.Is(err, zmqerr.ErrMalformedFrame) {
-			t.Fatalf("err: got %v want ErrMalformedFrame", err)
-		}
-		if _, _, err := DecodePong(Command{Name: CmdPing, Body: []byte{0, 0}}); !errors.Is(err, zmqerr.ErrMalformedFrame) {
-			t.Fatalf("err: got %v want ErrMalformedFrame", err)
-		}
+		_, _, err := DecodePing(Command{Name: CmdPong, Body: []byte{0, 0}})
+		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
+		_, _, err = DecodePong(Command{Name: CmdPing, Body: []byte{0, 0}})
+		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 	})
 }
 
@@ -199,18 +163,14 @@ func FuzzCommand(f *testing.F) {
 		// Re-encode and re-decode must be stable.
 		raw := EncodeCommand(c)
 		c2, err2 := DecodeCommand(raw)
-		if err2 != nil {
-			t.Fatalf("re-decode failed: %v", err2)
-		}
-		if c.Name != c2.Name || !bytes.Equal(c.Body, c2.Body) {
-			t.Fatalf("round-trip drift: %+v → %+v", c, c2)
-		}
+		require.NoError(t, err2, "re-decode failed")
+		require.Equal(t, c.Name, c2.Name, "round-trip name drift")
+		require.Equal(t, c.Body, c2.Body, "round-trip body drift")
 		// If the decoded command is a PING/PONG with a body that fits the
 		// helper schema, the typed helpers must agree.
 		if c.Name == CmdPing && len(c.Body) >= pingPongTTLBytes && len(c.Body) <= pingPongTTLBytes+PingPongMaxContext {
-			if _, _, err := DecodePing(c); err != nil {
-				t.Fatalf("DecodePing on accepted PING: %v", err)
-			}
+			_, _, err := DecodePing(c)
+			require.NoError(t, err, "DecodePing on accepted PING")
 		}
 	})
 }

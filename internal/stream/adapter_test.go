@@ -3,13 +3,14 @@ package stream
 import (
 	"bytes"
 	"context"
-	"errors"
-	"fmt"
 	"io"
 	"net"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
@@ -69,21 +70,13 @@ func TestAdapter_InboundChunking(t *testing.T) {
 	var got bytes.Buffer
 	for got.Len() < len(payload) {
 		m, err := eng.Recv(ctx)
-		if err != nil {
-			t.Fatalf("eng recv after %d bytes: %v", got.Len(), err)
-		}
-		if m.NumFrames() != 1 {
-			t.Fatalf("inbound msg frames = %d, want 1", m.NumFrames())
-		}
+		require.NoError(t, err, "eng recv after %d bytes", got.Len())
+		require.Equal(t, 1, m.NumFrames(), "inbound msg frames")
 		got.Write(m.Bytes())
 	}
-	if !bytes.Equal(got.Bytes(), payload) {
-		t.Fatalf("reassembled body mismatch (len got=%d want=%d)", got.Len(), len(payload))
-	}
+	require.Equal(t, payload, got.Bytes(), "reassembled body mismatch")
 
-	if err := <-writerDone; err != nil {
-		t.Fatalf("peer write: %v", err)
-	}
+	require.NoError(t, <-writerDone, "peer write")
 }
 
 // TestAdapter_OutboundWrite pushes a Msg through the engine pipe; the
@@ -102,17 +95,12 @@ func TestAdapter_OutboundWrite(t *testing.T) {
 	// body Msg down the pipe; emulate that here.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := eng.Send(ctx, msg.FromBytes([]byte(body))); err != nil {
-		t.Fatalf("eng send: %v", err)
-	}
+	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte(body))), "eng send")
 
 	buf := make([]byte, len(body))
-	if _, err := io.ReadFull(pc, buf); err != nil {
-		t.Fatalf("peer read: %v", err)
-	}
-	if string(buf) != body {
-		t.Fatalf("peer got %q, want %q", buf, body)
-	}
+	_, err := io.ReadFull(pc, buf)
+	require.NoError(t, err, "peer read")
+	require.Equal(t, body, string(buf), "peer body")
 	_ = pc.Close()
 }
 
@@ -133,28 +121,18 @@ func TestAdapter_HalfClose_EmptyBody(t *testing.T) {
 
 	// Send non-empty data first so we can assert ordering: the empty
 	// sentinel must NOT jump ahead of queued bytes.
-	if err := eng.Send(ctx, msg.FromBytes([]byte("last-packet"))); err != nil {
-		t.Fatalf("data send: %v", err)
-	}
-	if err := eng.Send(ctx, msg.FromBytes(nil)); err != nil {
-		t.Fatalf("half-close send: %v", err)
-	}
+	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("last-packet"))), "data send")
+	require.NoError(t, eng.Send(ctx, msg.FromBytes(nil)), "half-close send")
 
 	// Peer must see "last-packet" then EOF.
 	buf, err := io.ReadAll(pc)
-	if err != nil {
-		t.Fatalf("peer read: %v", err)
-	}
-	if !bytes.Equal(buf, []byte("last-packet")) {
-		t.Fatalf("peer got %q, want %q", buf, "last-packet")
-	}
+	require.NoError(t, err, "peer read")
+	require.Equal(t, []byte("last-packet"), buf, "peer body")
 
 	// Writer goroutine should have exited (conn closed). Close the
 	// adapter explicitly so we surface any stashed err and wait on
 	// goroutine exit.
-	if err := ad.Close(); err != nil {
-		t.Fatalf("adapter close: %v", err)
-	}
+	require.NoError(t, ad.Close(), "adapter close")
 }
 
 // TestAdapter_ReaderEOF_ClosesInboundPipe asserts that closing the conn
@@ -174,16 +152,14 @@ func TestAdapter_ReaderEOF_ClosesInboundPipe(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_, err := eng.Recv(ctx)
-	if !errors.Is(err, io.EOF) {
-		t.Fatalf("eng recv after peer close = %v, want io.EOF", err)
-	}
+	require.ErrorIs(t, err, io.EOF, "eng recv after peer close")
 
 	// Closed() channel should also fire so the engine's AttachPipe
 	// watcher can call DetachPipe.
 	select {
 	case <-eng.Closed():
 	case <-time.After(time.Second):
-		t.Fatal("engine pipe Closed() did not fire after peer disconnect")
+		require.Fail(t, "engine pipe Closed() did not fire after peer disconnect")
 	}
 }
 
@@ -201,16 +177,13 @@ func TestAdapter_CtxCancel_ExitsBothGoroutines(t *testing.T) {
 
 	// Cancel the parent ctx; Close drains the goroutines.
 	cancel()
-	if err := ad.Close(); err != nil {
-		t.Fatalf("adapter close: %v", err)
-	}
+	require.NoError(t, ad.Close(), "adapter close")
 
 	// After close, Recv on the engine pipe must return promptly.
 	rctx, rcancel := context.WithTimeout(context.Background(), time.Second)
 	defer rcancel()
-	if _, err := eng.Recv(rctx); err == nil {
-		t.Fatal("eng recv after close returned no error")
-	}
+	_, err := eng.Recv(rctx)
+	require.Error(t, err, "eng recv after close should return an error")
 }
 
 // TestAdapter_TCPRoundTrip brings up two real *net.TCPConn endpoints,
@@ -220,9 +193,7 @@ func TestAdapter_TCPRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	require.NoError(t, err, "listen")
 	defer l.Close()
 
 	addr := l.Addr().String()
@@ -238,13 +209,9 @@ func TestAdapter_TCPRoundTrip(t *testing.T) {
 	}()
 
 	clientConn, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	require.NoError(t, err, "dial")
 	srv := <-accepted
-	if srv.err != nil {
-		t.Fatalf("accept: %v", srv.err)
-	}
+	require.NoError(t, srv.err, "accept")
 
 	clientSide := &testConn{Conn: clientConn, local: clientConn.LocalAddr().String(), remote: clientConn.RemoteAddr().String()}
 	serverSide := &testConn{Conn: srv.conn, local: srv.conn.LocalAddr().String(), remote: srv.conn.RemoteAddr().String()}
@@ -261,39 +228,27 @@ func TestAdapter_TCPRoundTrip(t *testing.T) {
 	const response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"
 
 	// Client writes the request via its engine pipe.
-	if err := clientAd.EnginePipe().Send(ctx, msg.FromBytes([]byte(request))); err != nil {
-		t.Fatalf("client send: %v", err)
-	}
+	require.NoError(t, clientAd.EnginePipe().Send(ctx, msg.FromBytes([]byte(request))), "client send")
 
 	// Server drains conn.Read chunks until it has the whole request.
 	var gotReq bytes.Buffer
 	for gotReq.Len() < len(request) {
 		m, err := serverAd.EnginePipe().Recv(ctx)
-		if err != nil {
-			t.Fatalf("server recv: %v", err)
-		}
+		require.NoError(t, err, "server recv")
 		gotReq.Write(m.Bytes())
 	}
-	if gotReq.String() != request {
-		t.Fatalf("server got req %q, want %q", gotReq.String(), request)
-	}
+	require.Equal(t, request, gotReq.String(), "server request body")
 
 	// Server writes the response.
-	if err := serverAd.EnginePipe().Send(ctx, msg.FromBytes([]byte(response))); err != nil {
-		t.Fatalf("server send: %v", err)
-	}
+	require.NoError(t, serverAd.EnginePipe().Send(ctx, msg.FromBytes([]byte(response))), "server send")
 
 	var gotResp bytes.Buffer
 	for gotResp.Len() < len(response) {
 		m, err := clientAd.EnginePipe().Recv(ctx)
-		if err != nil {
-			t.Fatalf("client recv: %v", err)
-		}
+		require.NoError(t, err, "client recv")
 		gotResp.Write(m.Bytes())
 	}
-	if gotResp.String() != response {
-		t.Fatalf("client got resp %q, want %q", gotResp.String(), response)
-	}
+	require.Equal(t, response, gotResp.String(), "client response body")
 }
 
 // TestAdapter_ConcurrentCloseIdempotent smashes Close from multiple
@@ -309,9 +264,7 @@ func TestAdapter_ConcurrentCloseIdempotent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := ad.Close(); err != nil {
-				t.Errorf("close: %v", err)
-			}
+			assert.NoError(t, ad.Close(), "close")
 		}()
 	}
 	wg.Wait()
@@ -319,4 +272,4 @@ func TestAdapter_ConcurrentCloseIdempotent(t *testing.T) {
 
 // (unused helper placeholder to avoid test-time complaints during
 // iterative edits; intentionally a no-op reference.)
-var _ = fmt.Sprintf
+var _ = assert.Equal

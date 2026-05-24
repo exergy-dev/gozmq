@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/rkm/gozmq/typed/codecjson"
+	"github.com/stretchr/testify/require"
 )
 
 type thing struct {
@@ -15,22 +16,14 @@ func TestCodec_Roundtrip(t *testing.T) {
 	c := codecjson.Codec{}
 	want := thing{N: 7, Name: "lucky"}
 	b, err := c.Marshal(want)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
+	require.NoError(t, err, "marshal")
 	var got thing
-	if err := c.Unmarshal(b, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if got != want {
-		t.Fatalf("got %+v want %+v", got, want)
-	}
+	require.NoError(t, c.Unmarshal(b, &got), "unmarshal")
+	require.Equal(t, want, got)
 }
 
 func TestCodec_UnmarshalError(t *testing.T) {
 	c := codecjson.Codec{}
 	var got thing
-	if err := c.Unmarshal([]byte("not json"), &got); err == nil {
-		t.Fatal("want error on malformed json, got nil")
-	}
+	require.Error(t, c.Unmarshal([]byte("not json"), &got), "want error on malformed json")
 }

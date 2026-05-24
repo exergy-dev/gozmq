@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/rkm/gozmq"
+	"github.com/stretchr/testify/require"
 )
 
 // TestSubscribe_RefcountedBehavior verifies that SUB's Subscribe/Unsubscribe
@@ -32,31 +33,19 @@ func TestSubscribe_RefcountedBehavior(t *testing.T) {
 	endpoint := fmt.Sprintf("inproc://sub-refcount-%d", time.Now().UnixNano())
 
 	pub, err := ctxZmq.NewSocket(gozmq.Pub)
-	if err != nil {
-		t.Fatalf("new pub: %v", err)
-	}
+	require.NoError(t, err, "new pub")
 	t.Cleanup(func() { _ = pub.Close() })
-	if err := pub.Bind(endpoint); err != nil {
-		t.Fatalf("pub bind: %v", err)
-	}
+	require.NoError(t, pub.Bind(endpoint), "pub bind")
 
 	sub, err := ctxZmq.NewSocket(gozmq.Sub)
-	if err != nil {
-		t.Fatalf("new sub: %v", err)
-	}
+	require.NoError(t, err, "new sub")
 	t.Cleanup(func() { _ = sub.Close() })
 
 	// Two Subscribe calls for the same prefix — refcount goes 0 → 1 → 2.
-	if err := sub.Subscribe([]byte("a")); err != nil {
-		t.Fatalf("subscribe 1: %v", err)
-	}
-	if err := sub.Subscribe([]byte("a")); err != nil {
-		t.Fatalf("subscribe 2: %v", err)
-	}
+	require.NoError(t, sub.Subscribe([]byte("a")), "subscribe 1")
+	require.NoError(t, sub.Subscribe([]byte("a")), "subscribe 2")
 
-	if err := sub.Connect(endpoint); err != nil {
-		t.Fatalf("sub connect: %v", err)
-	}
+	require.NoError(t, sub.Connect(endpoint), "sub connect")
 
 	// Slow-joiner: give the SUBSCRIBE command time to reach the PUB so
 	// it starts forwarding to this peer.
@@ -67,17 +56,13 @@ func TestSubscribe_RefcountedBehavior(t *testing.T) {
 
 	// Step 4: Unsubscribe once. Refcount 2 → 1 — filter intact locally,
 	// no CANCEL yet upstream.
-	if err := sub.Unsubscribe([]byte("a")); err != nil {
-		t.Fatalf("unsubscribe 1: %v", err)
-	}
+	require.NoError(t, sub.Unsubscribe([]byte("a")), "unsubscribe 1")
 	sendAndExpect(t, pub, sub, "a:2", true)
 
 	// Step 5: Unsubscribe again. Refcount 1 → 0 — filter removed, CANCEL
 	// forwarded to PUB. PUB.Send still enqueues but PUB drops before the
 	// wire. SUB receives nothing within the bounded timeout.
-	if err := sub.Unsubscribe([]byte("a")); err != nil {
-		t.Fatalf("unsubscribe 2: %v", err)
-	}
+	require.NoError(t, sub.Unsubscribe([]byte("a")), "unsubscribe 2")
 	// Let the CANCEL propagate upstream before we send.
 	time.Sleep(100 * time.Millisecond)
 	sendAndExpect(t, pub, sub, "a:3", false)
@@ -90,22 +75,16 @@ func sendAndExpect(t *testing.T, pub, sub *gozmq.Socket, payload string, want bo
 	t.Helper()
 	sendCtx, sendCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer sendCancel()
-	if err := pub.SendMsg(sendCtx, gozmq.NewMsgFromBytes([]byte(payload))); err != nil {
-		t.Fatalf("pub send %q: %v", payload, err)
-	}
+	require.NoError(t, pub.SendMsg(sendCtx, gozmq.NewMsgFromBytes([]byte(payload))), "pub send %q", payload)
 	recvCtx, recvCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer recvCancel()
 	got, err := sub.RecvMsg(recvCtx)
 	if want {
-		if err != nil {
-			t.Fatalf("expected to receive %q, got err=%v", payload, err)
-		}
-		if string(got.Bytes()) != payload {
-			t.Fatalf("received %q want %q", got.Bytes(), payload)
-		}
+		require.NoError(t, err, "expected to receive %q", payload)
+		require.Equal(t, payload, string(got.Bytes()))
 	} else {
 		if err == nil {
-			t.Fatalf("expected NOT to receive %q (filter removed), but got %q", payload, got.Bytes())
+			require.Fail(t, "expected NOT to receive", "payload %q (filter removed), but got %q", payload, got.Bytes())
 		}
 		if !errors.Is(err, context.DeadlineExceeded) {
 			// Closed pipes / context cancellations are acceptable
@@ -129,9 +108,7 @@ func TestRouterMandatory_UnroutableReturnsError(t *testing.T) {
 		t.Cleanup(func() { _ = ctxZmq.Close() })
 
 		router, err := ctxZmq.NewSocket(gozmq.Router)
-		if err != nil {
-			t.Fatalf("new router: %v", err)
-		}
+		require.NoError(t, err, "new router")
 		t.Cleanup(func() { _ = router.Close() })
 
 		// No peers attached — every identity is unknown.
@@ -139,9 +116,7 @@ func TestRouterMandatory_UnroutableReturnsError(t *testing.T) {
 		defer cancel()
 		msg := gozmq.NewMsgFromFrames([]byte("nobody-home"), []byte("payload"))
 		err = router.SendMsg(sendCtx, msg)
-		if err != nil {
-			t.Fatalf("expected silent drop (nil), got %v", err)
-		}
+		require.NoError(t, err, "expected silent drop (nil)")
 	})
 
 	t.Run("MandatoryReturnsErrRouteUnknown", func(t *testing.T) {
@@ -149,21 +124,15 @@ func TestRouterMandatory_UnroutableReturnsError(t *testing.T) {
 		t.Cleanup(func() { _ = ctxZmq.Close() })
 
 		router, err := ctxZmq.NewSocket(gozmq.Router, gozmq.WithRouterMandatory(true))
-		if err != nil {
-			t.Fatalf("new router: %v", err)
-		}
+		require.NoError(t, err, "new router")
 		t.Cleanup(func() { _ = router.Close() })
 
 		sendCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		msg := gozmq.NewMsgFromFrames([]byte("nobody-home"), []byte("payload"))
 		err = router.SendMsg(sendCtx, msg)
-		if err == nil {
-			t.Fatal("expected ErrRouteUnknown with WithRouterMandatory(true), got nil")
-		}
-		if !errors.Is(err, gozmq.ErrRouteUnknown) {
-			t.Fatalf("expected errors.Is(err, ErrRouteUnknown), got %v", err)
-		}
+		require.Error(t, err, "expected ErrRouteUnknown with WithRouterMandatory(true)")
+		require.ErrorIs(t, err, gozmq.ErrRouteUnknown)
 	})
 }
 
@@ -181,46 +150,31 @@ func TestReq_FSMViolations(t *testing.T) {
 		endpoint := fmt.Sprintf("inproc://req-fsm-double-send-%d", time.Now().UnixNano())
 
 		rep, err := ctxZmq.NewSocket(gozmq.Rep)
-		if err != nil {
-			t.Fatalf("new rep: %v", err)
-		}
+		require.NoError(t, err, "new rep")
 		t.Cleanup(func() { _ = rep.Close() })
-		if err := rep.Bind(endpoint); err != nil {
-			t.Fatalf("rep bind: %v", err)
-		}
+		require.NoError(t, rep.Bind(endpoint), "rep bind")
 
 		req, err := ctxZmq.NewSocket(gozmq.Req)
-		if err != nil {
-			t.Fatalf("new req: %v", err)
-		}
+		require.NoError(t, err, "new req")
 		t.Cleanup(func() { _ = req.Close() })
-		if err := req.Connect(endpoint); err != nil {
-			t.Fatalf("req connect: %v", err)
-		}
+		require.NoError(t, req.Connect(endpoint), "req connect")
 
 		sendCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
 		// First send transitions state canSend → canRecv.
-		if err := req.SendMsg(sendCtx, gozmq.NewMsgFromBytes([]byte("first"))); err != nil {
-			t.Fatalf("first send: %v", err)
-		}
+		require.NoError(t, req.SendMsg(sendCtx, gozmq.NewMsgFromBytes([]byte("first"))), "first send")
 
 		// Drain the REP side so the REP engine is ready when we retry,
 		// but we deliberately do NOT call req.RecvMsg — we want to test
 		// the second Send against the still-canRecv state.
-		if _, err := rep.RecvMsg(sendCtx); err != nil {
-			t.Fatalf("rep recv first: %v", err)
-		}
+		_, err = rep.RecvMsg(sendCtx)
+		require.NoError(t, err, "rep recv first")
 
 		// Second send without a Recv: FSM violation.
 		err = req.SendMsg(sendCtx, gozmq.NewMsgFromBytes([]byte("second")))
-		if err == nil {
-			t.Fatal("expected ErrFSMViolation on second REQ send without Recv, got nil")
-		}
-		if !errors.Is(err, gozmq.ErrFSMViolation) {
-			t.Fatalf("expected errors.Is(err, ErrFSMViolation), got %v", err)
-		}
+		require.Error(t, err, "expected ErrFSMViolation on second REQ send without Recv")
+		require.ErrorIs(t, err, gozmq.ErrFSMViolation)
 	})
 
 	t.Run("RecvWithoutSend", func(t *testing.T) {
@@ -230,20 +184,14 @@ func TestReq_FSMViolations(t *testing.T) {
 		// No peer needed — the FSM check fires before any transport
 		// interaction.
 		req, err := ctxZmq.NewSocket(gozmq.Req)
-		if err != nil {
-			t.Fatalf("new req: %v", err)
-		}
+		require.NoError(t, err, "new req")
 		t.Cleanup(func() { _ = req.Close() })
 
 		recvCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_, err = req.RecvMsg(recvCtx)
-		if err == nil {
-			t.Fatal("expected ErrFSMViolation on REQ Recv without prior Send, got nil")
-		}
-		if !errors.Is(err, gozmq.ErrFSMViolation) {
-			t.Fatalf("expected errors.Is(err, ErrFSMViolation), got %v", err)
-		}
+		require.Error(t, err, "expected ErrFSMViolation on REQ Recv without prior Send")
+		require.ErrorIs(t, err, gozmq.ErrFSMViolation)
 	})
 
 	t.Run("HappyPathRoundTrip", func(t *testing.T) {
@@ -253,49 +201,29 @@ func TestReq_FSMViolations(t *testing.T) {
 		endpoint := fmt.Sprintf("inproc://req-fsm-roundtrip-%d", time.Now().UnixNano())
 
 		rep, err := ctxZmq.NewSocket(gozmq.Rep)
-		if err != nil {
-			t.Fatalf("new rep: %v", err)
-		}
+		require.NoError(t, err, "new rep")
 		t.Cleanup(func() { _ = rep.Close() })
-		if err := rep.Bind(endpoint); err != nil {
-			t.Fatalf("rep bind: %v", err)
-		}
+		require.NoError(t, rep.Bind(endpoint), "rep bind")
 
 		req, err := ctxZmq.NewSocket(gozmq.Req)
-		if err != nil {
-			t.Fatalf("new req: %v", err)
-		}
+		require.NoError(t, err, "new req")
 		t.Cleanup(func() { _ = req.Close() })
-		if err := req.Connect(endpoint); err != nil {
-			t.Fatalf("req connect: %v", err)
-		}
+		require.NoError(t, req.Connect(endpoint), "req connect")
 
 		callCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
 		for i := 0; i < 2; i++ {
 			payload := []byte(fmt.Sprintf("req-%d", i))
-			if err := req.SendMsg(callCtx, gozmq.NewMsgFromBytes(payload)); err != nil {
-				t.Fatalf("req send %d: %v", i, err)
-			}
+			require.NoError(t, req.SendMsg(callCtx, gozmq.NewMsgFromBytes(payload)), "req send %d", i)
 			got, err := rep.RecvMsg(callCtx)
-			if err != nil {
-				t.Fatalf("rep recv %d: %v", i, err)
-			}
-			if string(got.Bytes()) != string(payload) {
-				t.Fatalf("rep got %q want %q", got.Bytes(), payload)
-			}
+			require.NoError(t, err, "rep recv %d", i)
+			require.Equal(t, string(payload), string(got.Bytes()))
 			reply := []byte(fmt.Sprintf("rep-%d", i))
-			if err := rep.SendMsg(callCtx, gozmq.NewMsgFromBytes(reply)); err != nil {
-				t.Fatalf("rep send %d: %v", i, err)
-			}
+			require.NoError(t, rep.SendMsg(callCtx, gozmq.NewMsgFromBytes(reply)), "rep send %d", i)
 			back, err := req.RecvMsg(callCtx)
-			if err != nil {
-				t.Fatalf("req recv %d: %v", i, err)
-			}
-			if string(back.Bytes()) != string(reply) {
-				t.Fatalf("req got %q want %q", back.Bytes(), reply)
-			}
+			require.NoError(t, err, "req recv %d", i)
+			require.Equal(t, string(reply), string(back.Bytes()))
 		}
 	})
 }

@@ -2,7 +2,6 @@ package socket_test
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -11,6 +10,8 @@ import (
 	"github.com/rkm/gozmq/internal/pipe"
 	"github.com/rkm/gozmq/internal/socket"
 	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // subscribeMsg builds the single-frame synthetic subscribe/unsubscribe
@@ -55,25 +56,14 @@ func TestPub_FanoutByPrefix(t *testing.T) {
 	engineEnds, peerEnds := makePairs(n, 4, 4)
 	defer closePipes(append(engineEnds, peerEnds...)...)
 
-	for _, p := range engineEnds {
-		if err := eng.AttachPipe(p); err != nil {
-			t.Fatalf("attach: %v", err)
-		}
-	}
+	mustAttach(t, eng, engineEnds...)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
 	// Subscribe peer 0 to "A", peer 1 to "B", peer 2 to "" (everything).
-	if err := peerEnds[0].Send(ctx, subscribeMsg(true, []byte("A"))); err != nil {
-		t.Fatalf("peer0 subscribe: %v", err)
-	}
-	if err := peerEnds[1].Send(ctx, subscribeMsg(true, []byte("B"))); err != nil {
-		t.Fatalf("peer1 subscribe: %v", err)
-	}
-	if err := peerEnds[2].Send(ctx, subscribeMsg(true, []byte{})); err != nil {
-		t.Fatalf("peer2 subscribe: %v", err)
-	}
+	require.NoError(t, peerEnds[0].Send(ctx, subscribeMsg(true, []byte("A"))), "peer0 subscribe")
+	require.NoError(t, peerEnds[1].Send(ctx, subscribeMsg(true, []byte("B"))), "peer1 subscribe")
+	require.NoError(t, peerEnds[2].Send(ctx, subscribeMsg(true, []byte{})), "peer2 subscribe")
 
 	// Wait for each peer's subscription to land. A simple time-based
 	// synchronization is flaky under load; instead we poll by sending
@@ -95,7 +85,7 @@ func TestPub_FanoutByPrefix(t *testing.T) {
 		deadline := time.Now().Add(2 * time.Second)
 		for time.Now().Before(deadline) {
 			if err := eng.Send(ctx, msg.FromFrames([]byte(topic), []byte("probe"))); err != nil {
-				t.Fatalf("pub probe: %v", err)
+				require.NoError(t, err, "pub probe")
 			}
 			rc, c := context.WithTimeout(ctx, 50*time.Millisecond)
 			m, err := peerEnds[peerIdx].Recv(rc)
@@ -105,7 +95,7 @@ func TestPub_FanoutByPrefix(t *testing.T) {
 				return
 			}
 		}
-		t.Fatalf("peer %d sub for %q never took effect", peerIdx, topic)
+		require.Failf(t, "subscription timeout", "peer %d sub for %q never took effect", peerIdx, topic)
 	}
 	waitForSub(0, "A")
 	waitForSub(1, "B")
@@ -115,12 +105,8 @@ func TestPub_FanoutByPrefix(t *testing.T) {
 	// peer 1 should receive the B message; only peer 2 should receive
 	// the X message. Peer 2 additionally receives the B (it subscribed
 	// to everything). Peer 0 receives neither.
-	if err := eng.Send(ctx, msg.FromFrames([]byte("B"), []byte("bpayload"))); err != nil {
-		t.Fatalf("pub send B: %v", err)
-	}
-	if err := eng.Send(ctx, msg.FromFrames([]byte("X"), []byte("xpayload"))); err != nil {
-		t.Fatalf("pub send X: %v", err)
-	}
+	require.NoError(t, eng.Send(ctx, msg.FromFrames([]byte("B"), []byte("bpayload"))), "pub send B")
+	require.NoError(t, eng.Send(ctx, msg.FromFrames([]byte("X"), []byte("xpayload"))), "pub send X")
 
 	// Allow fanout to settle before we start draining.
 	time.Sleep(50 * time.Millisecond)
@@ -133,9 +119,7 @@ func TestPub_FanoutByPrefix(t *testing.T) {
 
 	// Peer 0 subscribed only to A; after the real-assertion sends
 	// (topics B and X), peer 0 should receive nothing.
-	if len(peer0) != 0 {
-		t.Errorf("peer0 got %d unexpected messages (first topic=%q)", len(peer0), peer0[0].Frames()[0])
-	}
+	assert.Empty(t, peer0, "peer0 got unexpected messages")
 	// Peer 1 should have exactly one "B" message and no "A"/"X".
 	countByTopic := func(ms []*msg.Msg) map[string]int {
 		counts := map[string]int{}
@@ -148,21 +132,14 @@ func TestPub_FanoutByPrefix(t *testing.T) {
 		return counts
 	}
 	p1Counts := countByTopic(peer1)
-	if p1Counts["B"] != 1 {
-		t.Errorf("peer1 B count = %d, want 1 (all=%v)", p1Counts["B"], p1Counts)
-	}
-	if p1Counts["A"] != 0 || p1Counts["X"] != 0 {
-		t.Errorf("peer1 got unsubscribed topics: %v", p1Counts)
-	}
+	assert.Equal(t, 1, p1Counts["B"], "peer1 B count (all=%v)", p1Counts)
+	assert.Equal(t, 0, p1Counts["A"], "peer1 got unsubscribed topic A: %v", p1Counts)
+	assert.Equal(t, 0, p1Counts["X"], "peer1 got unsubscribed topic X: %v", p1Counts)
 	p2Counts := countByTopic(peer2)
 	// Peer 2 ("" subscription) should have received every topic the
 	// pub sent while peer 2 was subscribed.
-	if p2Counts["B"] != 1 {
-		t.Errorf("peer2 B count = %d, want 1 (all=%v)", p2Counts["B"], p2Counts)
-	}
-	if p2Counts["X"] != 1 {
-		t.Errorf("peer2 X count = %d, want 1 (all=%v)", p2Counts["X"], p2Counts)
-	}
+	assert.Equal(t, 1, p2Counts["B"], "peer2 B count (all=%v)", p2Counts)
+	assert.Equal(t, 1, p2Counts["X"], "peer2 X count (all=%v)", p2Counts)
 }
 
 // TestPub_UnsubscribeStopsDelivery checks that a synthetic unsubscribe
@@ -174,22 +151,17 @@ func TestPub_UnsubscribeStopsDelivery(t *testing.T) {
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	if err := eng.AttachPipe(a); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	mustAttach(t, eng, a)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
 	// Subscribe to A; poll until it lands.
-	if err := b.Send(ctx, subscribeMsg(true, []byte("A"))); err != nil {
-		t.Fatalf("subscribe: %v", err)
-	}
+	require.NoError(t, b.Send(ctx, subscribeMsg(true, []byte("A"))), "subscribe")
 	deadline := time.Now().Add(time.Second)
 	got := false
 	for time.Now().Before(deadline) {
 		if err := eng.Send(ctx, msg.FromFrames([]byte("A"), []byte("p"))); err != nil {
-			t.Fatalf("pub send: %v", err)
+			require.NoError(t, err, "pub send")
 		}
 		rc, c := context.WithTimeout(ctx, 50*time.Millisecond)
 		_, err := b.Recv(rc)
@@ -199,9 +171,7 @@ func TestPub_UnsubscribeStopsDelivery(t *testing.T) {
 			break
 		}
 	}
-	if !got {
-		t.Fatal("subscribe never took effect")
-	}
+	require.True(t, got, "subscribe never took effect")
 	// Drain any extras from the polling loop.
 	for {
 		rc, c := context.WithTimeout(ctx, 50*time.Millisecond)
@@ -213,20 +183,15 @@ func TestPub_UnsubscribeStopsDelivery(t *testing.T) {
 	}
 
 	// Unsubscribe.
-	if err := b.Send(ctx, subscribeMsg(false, []byte("A"))); err != nil {
-		t.Fatalf("unsubscribe: %v", err)
-	}
+	require.NoError(t, b.Send(ctx, subscribeMsg(false, []byte("A"))), "unsubscribe")
 	// Wait for the engine to process.
 	time.Sleep(50 * time.Millisecond)
 	// Send and confirm nothing arrives.
-	if err := eng.Send(ctx, msg.FromFrames([]byte("A"), []byte("p"))); err != nil {
-		t.Fatalf("pub send post-unsub: %v", err)
-	}
+	require.NoError(t, eng.Send(ctx, msg.FromFrames([]byte("A"), []byte("p"))), "pub send post-unsub")
 	rc, c := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer c()
-	if _, err := b.Recv(rc); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("peer received after unsubscribe: err=%v", err)
-	}
+	_, err := b.Recv(rc)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "peer received after unsubscribe")
 }
 
 // TestPub_RecvIsFSMViolation: PUB is send-only.
@@ -235,9 +200,7 @@ func TestPub_RecvIsFSMViolation(t *testing.T) {
 	eng := socket.NewPubEngine()
 	defer eng.Close()
 	_, err := eng.Recv(context.Background())
-	if !errors.Is(err, zmqerr.ErrFSMViolation) {
-		t.Fatalf("recv err = %v, want ErrFSMViolation", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrFSMViolation)
 }
 
 // TestPub_HWMDropsRatherThanBlocks: a PUB send to a peer at HWM drops
@@ -250,15 +213,10 @@ func TestPub_HWMDropsRatherThanBlocks(t *testing.T) {
 	// HWM=1 on peer -> second send drops for that peer.
 	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	if err := eng.AttachPipe(a); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	mustAttach(t, eng, a)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := b.Send(ctx, subscribeMsg(true, []byte{})); err != nil {
-		t.Fatalf("subscribe all: %v", err)
-	}
+	ctx := testCtx(t)
+	require.NoError(t, b.Send(ctx, subscribeMsg(true, []byte{})), "subscribe all")
 	// Wait for subscription.
 	time.Sleep(50 * time.Millisecond)
 
@@ -266,22 +224,16 @@ func TestPub_HWMDropsRatherThanBlocks(t *testing.T) {
 	// each time (no block) because of the non-blocking try-send.
 	start := time.Now()
 	for i := 0; i < 10; i++ {
-		if err := eng.Send(ctx, msg.FromFrames([]byte("t"), []byte("x"))); err != nil {
-			t.Fatalf("pub send %d: %v", i, err)
-		}
+		require.NoError(t, eng.Send(ctx, msg.FromFrames([]byte("t"), []byte("x"))), "pub send %d", i)
 	}
 	elapsed := time.Since(start)
-	if elapsed > 500*time.Millisecond {
-		t.Fatalf("pub send appears to be blocking on HWM: took %v", elapsed)
-	}
+	require.Less(t, elapsed, 500*time.Millisecond, "pub send appears to be blocking on HWM")
 	// We should be able to drain at least one message (the buffered
 	// one), but not necessarily all ten.
 	drainCtx, dc := context.WithTimeout(ctx, time.Second)
 	defer dc()
 	_, err := b.Recv(drainCtx)
-	if err != nil {
-		t.Fatalf("drain one: %v", err)
-	}
+	require.NoError(t, err, "drain one")
 }
 
 // TestPub_CloseReleasesPeerReaders ensures Close unblocks the per-peer
@@ -293,21 +245,15 @@ func TestPub_CloseReleasesPeerReaders(t *testing.T) {
 	const n = 3
 	engineEnds, peerEnds := makePairs(n, 2, 2)
 	defer closePipes(append(engineEnds, peerEnds...)...)
-	for _, p := range engineEnds {
-		if err := eng.AttachPipe(p); err != nil {
-			t.Fatalf("attach: %v", err)
-		}
-	}
+	mustAttach(t, eng, engineEnds...)
 
 	done := make(chan error, 1)
 	go func() { done <- eng.Close() }()
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Fatalf("close err: %v", err)
-		}
+		require.NoError(t, err, "close")
 	case <-time.After(2 * time.Second):
-		t.Fatal("Close did not return within 2s")
+		require.Fail(t, "Close did not return within 2s")
 	}
 }
 
@@ -320,17 +266,13 @@ func TestPub_DetachReleasesPeerReader(t *testing.T) {
 
 	a, b := pipe.NewPair(2, 2, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	if err := eng.AttachPipe(a); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	mustAttach(t, eng, a)
 	done := make(chan error, 1)
 	go func() { done <- eng.DetachPipe(a) }()
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Fatalf("detach err: %v", err)
-		}
+		require.NoError(t, err, "detach")
 	case <-time.After(2 * time.Second):
-		t.Fatal("Detach did not return within 2s")
+		require.Fail(t, "Detach did not return within 2s")
 	}
 }

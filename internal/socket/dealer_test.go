@@ -2,7 +2,6 @@ package socket_test
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -10,6 +9,8 @@ import (
 	"github.com/rkm/gozmq/internal/pipe"
 	"github.com/rkm/gozmq/internal/socket"
 	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestDealer_LoadBalancesOutbound asserts that DEALER.Send distributes
@@ -26,18 +27,11 @@ func TestDealer_LoadBalancesOutbound(t *testing.T) {
 	engineEnds, peerEnds := makePairs(n, 4, 4)
 	defer closePipes(append(engineEnds, peerEnds...)...)
 
-	for _, p := range engineEnds {
-		if err := eng.AttachPipe(p); err != nil {
-			t.Fatalf("attach: %v", err)
-		}
-	}
+	mustAttach(t, eng, engineEnds...)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 	for i := 0; i < send; i++ {
-		if err := eng.Send(ctx, msg.FromBytes([]byte{byte(i)})); err != nil {
-			t.Fatalf("send %d: %v", i, err)
-		}
+		require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte{byte(i)})), "send %d", i)
 	}
 
 	counts := make([]int, n)
@@ -53,9 +47,7 @@ func TestDealer_LoadBalancesOutbound(t *testing.T) {
 		c()
 	}
 	for i, c := range counts {
-		if c != send/n {
-			t.Fatalf("peer %d got %d messages, expected %d", i, c, send/n)
-		}
+		require.Equal(t, send/n, c, "peer %d got %d messages, expected %d", i, c, send/n)
 	}
 }
 
@@ -70,34 +62,23 @@ func TestDealer_FairQueuesInbound(t *testing.T) {
 	engineEnds, peerEnds := makePairs(n, 4, 4)
 	defer closePipes(append(engineEnds, peerEnds...)...)
 
-	for _, p := range engineEnds {
-		if err := eng.AttachPipe(p); err != nil {
-			t.Fatalf("attach: %v", err)
-		}
-	}
+	mustAttach(t, eng, engineEnds...)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 	want := map[byte]bool{}
 	for i := 0; i < n; i++ {
 		b := byte('a' + i)
 		want[b] = true
-		if err := peerEnds[i].Send(ctx, msg.FromBytes([]byte{b})); err != nil {
-			t.Fatalf("peer send: %v", err)
-		}
+		require.NoError(t, peerEnds[i].Send(ctx, msg.FromBytes([]byte{b})), "peer send")
 	}
 	got := map[byte]bool{}
 	for i := 0; i < n; i++ {
 		m, err := eng.Recv(ctx)
-		if err != nil {
-			t.Fatalf("recv: %v", err)
-		}
+		require.NoError(t, err, "recv")
 		got[m.Bytes()[0]] = true
 	}
 	for b := range want {
-		if !got[b] {
-			t.Fatalf("missing %c", b)
-		}
+		require.True(t, got[b], "missing %c", b)
 	}
 }
 
@@ -111,27 +92,17 @@ func TestDealer_DoesNotMangleIdentity(t *testing.T) {
 
 	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	if err := eng.AttachPipe(a); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	mustAttach(t, eng, a)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
 	sent := msg.FromFrames([]byte("hello"), []byte("world"))
-	if err := eng.Send(ctx, sent); err != nil {
-		t.Fatalf("send: %v", err)
-	}
+	require.NoError(t, eng.Send(ctx, sent), "send")
 	got, err := b.Recv(ctx)
-	if err != nil {
-		t.Fatalf("recv: %v", err)
-	}
-	if got.NumFrames() != 2 {
-		t.Fatalf("frames = %d, want 2 (no delimiter)", got.NumFrames())
-	}
-	if string(got.Frames()[0]) != "hello" || string(got.Frames()[1]) != "world" {
-		t.Fatalf("frames = %q %q", got.Frames()[0], got.Frames()[1])
-	}
+	require.NoError(t, err, "recv")
+	require.Equal(t, 2, got.NumFrames(), "frames (no delimiter)")
+	require.Equal(t, "hello", string(got.Frames()[0]))
+	require.Equal(t, "world", string(got.Frames()[1]))
 }
 
 // TestDealer_CloseUnblocksBoth asserts Close unblocks both pending Send
@@ -155,17 +126,13 @@ func TestDealer_CloseUnblocksBoth(t *testing.T) {
 	}()
 
 	time.Sleep(50 * time.Millisecond)
-	if err := eng.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	require.NoError(t, eng.Close(), "close")
 	for _, ch := range []chan error{recvDone, sendDone} {
 		select {
 		case err := <-ch:
-			if !errors.Is(err, zmqerr.ErrSocketClosed) {
-				t.Fatalf("err = %v, want ErrSocketClosed", err)
-			}
+			require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
 		case <-time.After(time.Second):
-			t.Fatal("did not unblock on close")
+			require.Fail(t, "did not unblock on close")
 		}
 	}
 }
@@ -175,12 +142,8 @@ func TestDealer_CloseUnblocksBoth(t *testing.T) {
 func TestDealer_AttachAfterCloseFails(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewDealerEngine()
-	if err := eng.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	require.NoError(t, eng.Close(), "close")
 	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	if err := eng.AttachPipe(a); !errors.Is(err, zmqerr.ErrSocketClosed) {
-		t.Fatalf("attach after close = %v, want ErrSocketClosed", err)
-	}
+	assert.ErrorIs(t, eng.AttachPipe(a), zmqerr.ErrSocketClosed)
 }

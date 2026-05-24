@@ -1,7 +1,6 @@
 package transport
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -12,6 +11,8 @@ import (
 	"time"
 
 	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestInproc_RoundTrip is the smoke: bind, dial, write, read in both
@@ -20,13 +21,10 @@ import (
 func TestInproc_RoundTrip(t *testing.T) {
 	tr := NewInprocTransport(0)
 	l, err := tr.Listen(context.Background(), "inproc://round-trip")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	defer l.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t, 2*time.Second)
 
 	type acceptResult struct {
 		c   inprocConnish
@@ -43,40 +41,30 @@ func TestInproc_RoundTrip(t *testing.T) {
 	}()
 
 	cli, err := tr.Dial(ctx, "inproc://round-trip")
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	defer cli.Close()
 
 	r := <-acceptCh
-	if r.err != nil {
-		t.Fatalf("Accept: %v", r.err)
-	}
+	require.NoError(t, r.err, "Accept")
 	defer r.c.Close()
 
 	want := []byte("ping")
-	if _, err := cli.Write(want); err != nil {
-		t.Fatalf("Write client: %v", err)
-	}
+	_, err = cli.Write(want)
+	require.NoError(t, err, "Write client")
 	got := make([]byte, len(want))
-	if n, err := r.c.Read(got); err != nil || n != len(want) {
-		t.Fatalf("Read server: n=%d err=%v", n, err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("got %q want %q", got, want)
-	}
+	n, err := r.c.Read(got)
+	require.NoError(t, err, "Read server")
+	require.Equal(t, len(want), n, "Read server byte count")
+	require.Equal(t, want, got, "server read data")
 
 	want2 := []byte("pong")
-	if _, err := r.c.Write(want2); err != nil {
-		t.Fatalf("Write server: %v", err)
-	}
+	_, err = r.c.Write(want2)
+	require.NoError(t, err, "Write server")
 	got2 := make([]byte, len(want2))
-	if n, err := cli.Read(got2); err != nil || n != len(want2) {
-		t.Fatalf("Read client: n=%d err=%v", n, err)
-	}
-	if !bytes.Equal(got2, want2) {
-		t.Fatalf("got %q want %q", got2, want2)
-	}
+	n, err = cli.Read(got2)
+	require.NoError(t, err, "Read client")
+	require.Equal(t, len(want2), n, "Read client byte count")
+	require.Equal(t, want2, got2, "client read data")
 }
 
 // inprocConnish is the minimal subset we need from iface.Conn in tests.
@@ -95,19 +83,16 @@ type inprocConnish interface {
 func TestInproc_FrameBoundary(t *testing.T) {
 	tr := NewInprocTransport(0)
 	l, err := tr.Listen(context.Background(), "inproc://framing")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	defer l.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t, 2*time.Second)
 
 	acceptCh := make(chan inprocConnish, 1)
 	go func() {
 		c, err := l.Accept(ctx)
 		if err != nil {
-			t.Errorf("Accept: %v", err)
+			assert.NoError(t, err, "Accept")
 			close(acceptCh)
 			return
 		}
@@ -115,57 +100,40 @@ func TestInproc_FrameBoundary(t *testing.T) {
 	}()
 
 	cli, err := tr.Dial(ctx, "inproc://framing")
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	defer cli.Close()
 
 	srv := <-acceptCh
-	if srv == nil {
-		t.Fatal("accept failed")
-	}
+	require.NotNil(t, srv, "accept failed")
 	defer srv.Close()
 
 	// Two distinct Writes.
-	if _, err := cli.Write([]byte("aaa")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := cli.Write([]byte("bbb")); err != nil {
-		t.Fatal(err)
-	}
+	_, err = cli.Write([]byte("aaa"))
+	require.NoError(t, err)
+	_, err = cli.Write([]byte("bbb"))
+	require.NoError(t, err)
 
 	// First Read with a small buffer pulls "aaa" only — it MUST NOT include
 	// any bytes from the second Write.
 	got := make([]byte, 16)
 	n, err := srv.Read(got)
-	if err != nil {
-		t.Fatalf("Read 1: %v", err)
-	}
-	if string(got[:n]) != "aaa" {
-		t.Fatalf("Read 1 = %q, want %q (frame boundary violated)", got[:n], "aaa")
-	}
+	require.NoError(t, err, "Read 1")
+	require.Equal(t, "aaa", string(got[:n]), "Read 1 frame boundary violated")
 
 	n, err = srv.Read(got)
-	if err != nil {
-		t.Fatalf("Read 2: %v", err)
-	}
-	if string(got[:n]) != "bbb" {
-		t.Fatalf("Read 2 = %q, want %q", got[:n], "bbb")
-	}
+	require.NoError(t, err, "Read 2")
+	require.Equal(t, "bbb", string(got[:n]), "Read 2")
 
 	// Short-buffer leftover: write 6 bytes, read into a 3-byte buffer twice.
-	if _, err := cli.Write([]byte("ABCDEF")); err != nil {
-		t.Fatal(err)
-	}
+	_, err = cli.Write([]byte("ABCDEF"))
+	require.NoError(t, err)
 	short := make([]byte, 3)
 	n, err = srv.Read(short)
-	if err != nil || string(short[:n]) != "ABC" {
-		t.Fatalf("short Read 1: n=%d data=%q err=%v", n, short[:n], err)
-	}
+	require.NoError(t, err, "short Read 1")
+	require.Equal(t, "ABC", string(short[:n]), "short Read 1 data")
 	n, err = srv.Read(short)
-	if err != nil || string(short[:n]) != "DEF" {
-		t.Fatalf("short Read 2: n=%d data=%q err=%v", n, short[:n], err)
-	}
+	require.NoError(t, err, "short Read 2")
+	require.Equal(t, "DEF", string(short[:n]), "short Read 2 data")
 }
 
 // TestInproc_ConnectBeforeBind_Queues asserts that a Dial can race ahead
@@ -192,9 +160,7 @@ func TestInproc_ConnectBeforeBind_Queues(t *testing.T) {
 	// Listen lands well within the queue window.
 	time.Sleep(50 * time.Millisecond)
 	l, err := tr.Listen(context.Background(), "inproc://race")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	defer l.Close()
 
 	// Listener side accepts so the server-side conn drains.
@@ -207,12 +173,10 @@ func TestInproc_ConnectBeforeBind_Queues(t *testing.T) {
 
 	select {
 	case r := <-dialDone:
-		if r.err != nil {
-			t.Fatalf("queued Dial err = %v, want nil", r.err)
-		}
+		require.NoError(t, r.err, "queued Dial")
 		defer r.c.Close()
 	case <-time.After(2 * time.Second):
-		t.Fatal("queued Dial never resolved")
+		require.Fail(t, "queued Dial never resolved")
 	}
 }
 
@@ -221,15 +185,10 @@ func TestInproc_ConnectBeforeBind_Queues(t *testing.T) {
 func TestInproc_ConnectBeforeBind_Window(t *testing.T) {
 	tr := NewInprocTransport(50 * time.Millisecond)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
+	ctx := testCtx(t, 1*time.Second)
 	_, err := tr.Dial(ctx, "inproc://no-bind-ever")
-	if err == nil {
-		t.Fatal("Dial unexpectedly succeeded")
-	}
-	if !errors.Is(err, zmqerr.ErrEndpointInvalid) {
-		t.Fatalf("Dial err = %v, want wraps ErrEndpointInvalid", err)
-	}
+	require.Error(t, err, "Dial unexpectedly succeeded")
+	require.ErrorIs(t, err, zmqerr.ErrEndpointInvalid)
 }
 
 // TestInproc_Dial_Honors_Ctx asserts ctx cancellation wakes a queued Dial.
@@ -246,11 +205,9 @@ func TestInproc_Dial_Honors_Ctx(t *testing.T) {
 	cancel()
 	select {
 	case err := <-errCh:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("Dial err = %v, want context.Canceled", err)
-		}
+		require.ErrorIs(t, err, context.Canceled)
 	case <-time.After(2 * time.Second):
-		t.Fatal("Dial did not wake within 2s of ctx cancel")
+		require.Fail(t, "Dial did not wake within 2s of ctx cancel")
 	}
 }
 
@@ -258,15 +215,11 @@ func TestInproc_Dial_Honors_Ctx(t *testing.T) {
 func TestInproc_Listen_DuplicateName(t *testing.T) {
 	tr := NewInprocTransport(0)
 	l1, err := tr.Listen(context.Background(), "inproc://dup")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer l1.Close()
 
 	_, err = tr.Listen(context.Background(), "inproc://dup")
-	if !errors.Is(err, zmqerr.ErrEndpointInvalid) {
-		t.Fatalf("second Listen err = %v, want wraps ErrEndpointInvalid", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrEndpointInvalid)
 }
 
 // TestInproc_BadEndpoint covers the parse failures.
@@ -278,14 +231,13 @@ func TestInproc_BadEndpoint(t *testing.T) {
 		"no-scheme", // missing scheme
 	}
 	for _, ep := range cases {
-		if _, err := tr.Listen(context.Background(), ep); !errors.Is(err, zmqerr.ErrEndpointInvalid) {
-			t.Errorf("Listen(%q) err = %v, want wraps ErrEndpointInvalid", ep, err)
-		}
+		_, err := tr.Listen(context.Background(), ep)
+		assert.ErrorIs(t, err, zmqerr.ErrEndpointInvalid, "Listen(%q)", ep)
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-		_, err := tr.Dial(ctx, ep)
+		_, err = tr.Dial(ctx, ep)
 		cancel()
 		if !errors.Is(err, zmqerr.ErrEndpointInvalid) && !errors.Is(err, context.DeadlineExceeded) {
-			t.Errorf("Dial(%q) err = %v, want wraps ErrEndpointInvalid (or ctx)", ep, err)
+			assert.Failf(t, "unexpected Dial error", "Dial(%q) err = %v, want wraps ErrEndpointInvalid (or ctx)", ep, err)
 		}
 	}
 }
@@ -295,9 +247,7 @@ func TestInproc_BadEndpoint(t *testing.T) {
 func TestInproc_Listener_Close_Wakes_Accept(t *testing.T) {
 	tr := NewInprocTransport(0)
 	l, err := tr.Listen(context.Background(), "inproc://close-wake")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -305,16 +255,12 @@ func TestInproc_Listener_Close_Wakes_Accept(t *testing.T) {
 		errCh <- err
 	}()
 	time.Sleep(20 * time.Millisecond)
-	if err := l.Close(); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, l.Close())
 	select {
 	case err := <-errCh:
-		if !errors.Is(err, zmqerr.ErrEndpointInvalid) {
-			t.Fatalf("Accept err = %v, want wraps ErrEndpointInvalid", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrEndpointInvalid)
 	case <-time.After(2 * time.Second):
-		t.Fatal("Accept did not wake on Close")
+		require.Fail(t, "Accept did not wake on Close")
 	}
 }
 
@@ -322,13 +268,9 @@ func TestInproc_Listener_Close_Wakes_Accept(t *testing.T) {
 func TestInproc_Endpoint(t *testing.T) {
 	tr := NewInprocTransport(0)
 	l, err := tr.Listen(context.Background(), "inproc://my-name")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer l.Close()
-	if l.Endpoint() != "inproc://my-name" {
-		t.Fatalf("Endpoint = %q", l.Endpoint())
-	}
+	require.Equal(t, "inproc://my-name", l.Endpoint())
 }
 
 // TestInproc_Conn_Endpoints asserts the LocalEndpoint / RemoteEndpoint
@@ -336,13 +278,10 @@ func TestInproc_Endpoint(t *testing.T) {
 func TestInproc_Conn_Endpoints(t *testing.T) {
 	tr := NewInprocTransport(0)
 	l, err := tr.Listen(context.Background(), "inproc://eps")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer l.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t, 2*time.Second)
 	acceptCh := make(chan inprocConnish, 1)
 	go func() {
 		c, _ := l.Accept(ctx)
@@ -350,20 +289,14 @@ func TestInproc_Conn_Endpoints(t *testing.T) {
 	}()
 
 	c, err := tr.Dial(ctx, "inproc://eps")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer c.Close()
 	srv := <-acceptCh
 	defer srv.Close()
 
 	cc := c.(inprocConnish)
-	if cc.RemoteEndpoint() != "inproc://eps" {
-		t.Errorf("client Remote = %q", cc.RemoteEndpoint())
-	}
-	if srv.LocalEndpoint() != "inproc://eps" {
-		t.Errorf("server Local = %q", srv.LocalEndpoint())
-	}
+	assert.Equal(t, "inproc://eps", cc.RemoteEndpoint(), "client Remote")
+	assert.Equal(t, "inproc://eps", srv.LocalEndpoint(), "server Local")
 }
 
 // TestInproc_ConcurrentDialsStress fires 50 concurrent Dials with random
@@ -421,9 +354,7 @@ func TestInproc_ConcurrentDialsStress(t *testing.T) {
 	// Listen lands 100ms later.
 	time.Sleep(listenDelay)
 	l, err := tr.Listen(context.Background(), "inproc://race-stress")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	defer l.Close()
 
 	// Drain accepts in the background so dialIn can place server-side conns.
@@ -452,13 +383,13 @@ func TestInproc_ConcurrentDialsStress(t *testing.T) {
 		}
 		// Any non-nil error: classify.
 		if !errors.Is(r.err, context.DeadlineExceeded) && !errors.Is(r.err, zmqerr.ErrEndpointInvalid) {
-			t.Errorf("dial[%d] timeout=%v: unexpected err = %v", r.idx, r.timeout, r.err)
+			assert.Fail(t, "unexpected error", "dial[%d] timeout=%v: unexpected err = %v", r.idx, r.timeout, r.err)
 			continue
 		}
 		// If the timeout strictly exceeded listenDelay + safety, the Listen
 		// should have arrived in time for this Dial to succeed.
 		if r.timeout > listenDelay+safetyMargin {
-			t.Errorf("dial[%d] with timeout=%v (> listen@%v + %v) failed spuriously: %v",
+			assert.Fail(t, "spurious failure", "dial[%d] with timeout=%v (> listen@%v + %v) failed spuriously: %v",
 				r.idx, r.timeout, listenDelay, safetyMargin, r.err)
 			failedLong++
 		} else {
@@ -467,9 +398,7 @@ func TestInproc_ConcurrentDialsStress(t *testing.T) {
 	}
 	t.Logf("stress: N=%d succeeded=%d failedShort=%d failedLong=%d elapsed=%v",
 		N, succeeded, failedShort, failedLong, time.Since(start))
-	if succeeded == 0 {
-		t.Fatalf("no Dial succeeded — suspicious")
-	}
+	require.NotZero(t, succeeded, "no Dial succeeded — suspicious")
 
 	// Tear down the acceptor goroutine.
 	_ = l.Close()
@@ -539,9 +468,7 @@ func TestInproc_TimeoutRaceDoesNotDropListener(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		runtimeGosched()
 		l, err := tr.Listen(context.Background(), "inproc://race-narrow")
-		if err != nil {
-			t.Fatalf("iter %d: Listen: %v", iter, err)
-		}
+		require.NoError(t, err, "iter %d: Listen", iter)
 		// Drain accepts so dialIn hand-offs complete.
 		acceptDone := make(chan struct{})
 		go func() {
@@ -563,7 +490,7 @@ func TestInproc_TimeoutRaceDoesNotDropListener(t *testing.T) {
 			if v := d2Err.Load(); v != nil {
 				e = v.(error)
 			}
-			t.Fatalf("iter %d: D2 failed — listener was dropped due to race: err=%v", iter, e)
+			require.True(t, d2Succeeded.Load(), "iter %d: D2 failed — listener was dropped due to race: err=%v", iter, e)
 		}
 		// D1 may have succeeded (Listen arrived before its timeout) or
 		// returned ctx.DeadlineExceeded / ErrEndpointInvalid. No other
@@ -571,9 +498,8 @@ func TestInproc_TimeoutRaceDoesNotDropListener(t *testing.T) {
 		if !d1Succeeded.Load() {
 			if v := d1Err.Load(); v != nil {
 				e := v.(error)
-				if !errors.Is(e, context.DeadlineExceeded) && !errors.Is(e, zmqerr.ErrEndpointInvalid) {
-					t.Fatalf("iter %d: D1 unexpected err = %v", iter, e)
-				}
+				ok := errors.Is(e, context.DeadlineExceeded) || errors.Is(e, zmqerr.ErrEndpointInvalid)
+				require.True(t, ok, "iter %d: D1 unexpected err = %v", iter, e)
 			}
 		}
 
@@ -595,9 +521,7 @@ func runtimeGosched() {
 func TestInproc_ManyConcurrentDials(t *testing.T) {
 	tr := NewInprocTransport(0)
 	l, err := tr.Listen(context.Background(), "inproc://many")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer l.Close()
 
 	const N = 32
@@ -609,7 +533,7 @@ func TestInproc_ManyConcurrentDials(t *testing.T) {
 		for i := 0; i < N; i++ {
 			c, err := l.Accept(context.Background())
 			if err != nil {
-				t.Errorf("Accept[%d]: %v", i, err)
+				assert.NoError(t, err, "Accept[%d]", i)
 				return
 			}
 			c.Close()
@@ -622,7 +546,7 @@ func TestInproc_ManyConcurrentDials(t *testing.T) {
 			defer wg.Done()
 			c, err := tr.Dial(context.Background(), "inproc://many")
 			if err != nil {
-				t.Errorf("Dial: %v", err)
+				assert.NoError(t, err, "Dial")
 				return
 			}
 			c.Close()

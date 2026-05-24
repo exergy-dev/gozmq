@@ -1,6 +1,10 @@
 package gozmq
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
 
 func TestNewSocketRejectsInvalidOptionCombinations(t *testing.T) {
 	ctx := NewContext()
@@ -20,9 +24,8 @@ func TestNewSocketRejectsInvalidOptionCombinations(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := ctx.NewSocket(tc.typ, tc.opt); err == nil {
-				t.Fatalf("NewSocket(%v, %T) unexpectedly succeeded", tc.typ, tc.opt)
-			}
+			_, err := ctx.NewSocket(tc.typ, tc.opt)
+			require.Error(t, err, "NewSocket(%v, %T) unexpectedly succeeded", tc.typ, tc.opt)
 		})
 	}
 }

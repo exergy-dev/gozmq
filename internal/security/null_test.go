@@ -1,8 +1,9 @@
 package security
 
 import (
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/zmqerr"
@@ -25,74 +26,40 @@ func TestNullHandshakeEndToEnd(t *testing.T) {
 	client := NewNull(iface.RoleClient, clientMeta)
 	server := NewNull(iface.RoleServer, serverMeta)
 
-	if client.AsServer() {
-		t.Fatal("client.AsServer = true, want false")
-	}
-	if !server.AsServer() {
-		t.Fatal("server.AsServer = false, want true")
-	}
-	if client.Name() != "NULL" || server.Name() != "NULL" {
-		t.Fatalf("Name: client=%q server=%q", client.Name(), server.Name())
-	}
+	require.False(t, client.AsServer(), "client.AsServer should be false")
+	require.True(t, server.AsServer(), "server.AsServer should be true")
+	require.Equal(t, "NULL", client.Name())
+	require.Equal(t, "NULL", server.Name())
 
 	// Step 1: the client emits READY; the server is passive on seed so it can
 	// authorize the peer before sending its own READY.
 	clientOut, clientDone, err := client.NextHandshake(nil)
-	if err != nil {
-		t.Fatalf("client seed: %v", err)
-	}
-	if clientDone {
-		t.Fatal("client seed: done=true, want false")
-	}
-	if len(clientOut) == 0 {
-		t.Fatal("client seed: empty out")
-	}
+	require.NoError(t, err, "client seed")
+	require.False(t, clientDone, "client seed: done should be false")
+	require.NotEmpty(t, clientOut, "client seed: out should not be empty")
 
 	serverOut, serverDone, err := server.NextHandshake(nil)
-	if err != nil {
-		t.Fatalf("server seed: %v", err)
-	}
-	if serverDone {
-		t.Fatal("server seed: done=true, want false")
-	}
-	if len(serverOut) != 0 {
-		t.Fatalf("server seed: out=%x, want empty", serverOut)
-	}
+	require.NoError(t, err, "server seed")
+	require.False(t, serverDone, "server seed: done should be false")
+	require.Empty(t, serverOut, "server seed: out should be empty")
 
 	// Sanity-check the client's READY command shape: [5]"READY"[meta...].
-	if len(clientOut) < 6 {
-		t.Fatalf("READY body too short: %d bytes", len(clientOut))
-	}
-	if clientOut[0] != 5 {
-		t.Fatalf("READY name-length byte: got %d, want 5", clientOut[0])
-	}
-	if string(clientOut[1:6]) != "READY" {
-		t.Fatalf("READY name: got %q, want %q", clientOut[1:6], "READY")
-	}
+	require.GreaterOrEqual(t, len(clientOut), 6, "READY body too short")
+	require.Equal(t, byte(5), clientOut[0], "READY name-length byte")
+	require.Equal(t, "READY", string(clientOut[1:6]), "READY name")
 
 	// Step 2: the server ingests the client's READY and emits its own READY.
 	serverOut, serverDone, err = server.NextHandshake(clientOut)
-	if err != nil {
-		t.Fatalf("server ingest: %v", err)
-	}
-	if !serverDone {
-		t.Fatal("server ingest: done=false, want true")
-	}
-	if len(serverOut) == 0 {
-		t.Fatal("server ingest: empty READY out")
-	}
-	if serverOut[0] != 5 || string(serverOut[1:6]) != "READY" {
-		t.Fatalf("server READY malformed: %x", serverOut)
-	}
+	require.NoError(t, err, "server ingest")
+	require.True(t, serverDone, "server ingest: done should be true")
+	require.NotEmpty(t, serverOut, "server ingest: READY out should not be empty")
+	require.Equal(t, byte(5), serverOut[0], "server READY name-length byte")
+	require.Equal(t, "READY", string(serverOut[1:6]), "server READY name")
 
 	// Step 3: client ingests the server's READY body.
 	_, clientDone, err = client.NextHandshake(serverOut)
-	if err != nil {
-		t.Fatalf("client ingest: %v", err)
-	}
-	if !clientDone {
-		t.Fatal("client ingest: done=false, want true")
-	}
+	require.NoError(t, err, "client ingest")
+	require.True(t, clientDone, "client ingest: done should be true")
 
 	// Peer metadata round-tripped through the handshake. We cast to the
 	// concrete type to access PeerMetadata; the public iface uses
@@ -101,20 +68,12 @@ func TestNullHandshakeEndToEnd(t *testing.T) {
 	clientImpl := client.(*nullMech)
 	serverImpl := server.(*nullMech)
 
-	if !mapsEqual(clientImpl.PeerMetadata(), serverMeta) {
-		t.Fatalf("client peer-metadata: got %v, want %v", clientImpl.PeerMetadata(), serverMeta)
-	}
-	if !mapsEqual(serverImpl.PeerMetadata(), clientMeta) {
-		t.Fatalf("server peer-metadata: got %v, want %v", serverImpl.PeerMetadata(), clientMeta)
-	}
+	require.Equal(t, serverMeta, clientImpl.PeerMetadata(), "client peer-metadata")
+	require.Equal(t, clientMeta, serverImpl.PeerMetadata(), "server peer-metadata")
 
 	// Metadata() returns a copy of the local properties.
-	if !mapsEqual(client.Metadata(), clientMeta) {
-		t.Fatalf("client local-metadata: got %v, want %v", client.Metadata(), clientMeta)
-	}
-	if !mapsEqual(server.Metadata(), serverMeta) {
-		t.Fatalf("server local-metadata: got %v, want %v", server.Metadata(), serverMeta)
-	}
+	require.Equal(t, clientMeta, client.Metadata(), "client local-metadata")
+	require.Equal(t, serverMeta, server.Metadata(), "server local-metadata")
 }
 
 // TestNullEncodeDecodeFrameIdentity verifies NULL applies no per-frame
@@ -130,30 +89,13 @@ func TestNullEncodeDecodeFrameIdentity(t *testing.T) {
 	} {
 		for _, input := range tc.input {
 			wireFlags, enc, err := m.EncodeFrame(tc.flags, input)
-			if err != nil {
-				t.Fatalf("EncodeFrame(%d bytes): %v", len(input), err)
-			}
-			if wireFlags != tc.flags {
-				t.Fatalf("EncodeFrame flags: got %#x, want %#x", wireFlags, tc.flags)
-			}
-			if len(enc) != len(input) {
-				t.Fatalf("EncodeFrame: length changed %d -> %d", len(input), len(enc))
-			}
+			require.NoError(t, err, "EncodeFrame(%d bytes)", len(input))
+			require.Equal(t, tc.flags, wireFlags, "EncodeFrame flags")
+			require.Equal(t, len(input), len(enc), "EncodeFrame length")
 			plainFlags, dec, err := m.DecodeFrame(wireFlags, enc)
-			if err != nil {
-				t.Fatalf("DecodeFrame(%d bytes): %v", len(enc), err)
-			}
-			if plainFlags != tc.flags {
-				t.Fatalf("DecodeFrame flags: got %#x, want %#x", plainFlags, tc.flags)
-			}
-			if len(dec) != len(input) {
-				t.Fatalf("DecodeFrame: length changed %d -> %d", len(input), len(dec))
-			}
-			for i := range input {
-				if dec[i] != input[i] {
-					t.Fatalf("DecodeFrame: byte %d diverged", i)
-				}
-			}
+			require.NoError(t, err, "DecodeFrame(%d bytes)", len(enc))
+			require.Equal(t, tc.flags, plainFlags, "DecodeFrame flags")
+			require.Equal(t, input, dec, "DecodeFrame output")
 		}
 	}
 }
@@ -163,25 +105,15 @@ func TestNullEncodeDecodeFrameIdentity(t *testing.T) {
 func TestNullSetPeerMetadataStores(t *testing.T) {
 	m := NewNull(iface.RoleServer, nil).(*nullMech)
 	props := map[string]string{"Socket-Type": "PAIR"}
-	if err := m.SetPeerMetadata(props); err != nil {
-		t.Fatalf("SetPeerMetadata: %v", err)
-	}
-	if !mapsEqual(m.PeerMetadata(), props) {
-		t.Fatalf("PeerMetadata: got %v, want %v", m.PeerMetadata(), props)
-	}
+	require.NoError(t, m.SetPeerMetadata(props))
+	require.Equal(t, props, m.PeerMetadata())
 
 	// Mutating the caller's map must not affect the stored copy.
 	props["Socket-Type"] = "PUB"
-	if m.PeerMetadata()["Socket-Type"] != "PAIR" {
-		t.Fatal("PeerMetadata not isolated from caller mutations")
-	}
+	require.Equal(t, "PAIR", m.PeerMetadata()["Socket-Type"], "PeerMetadata not isolated from caller mutations")
 
-	if err := m.SetPeerMetadata(nil); err != nil {
-		t.Fatalf("SetPeerMetadata(nil): %v", err)
-	}
-	if m.PeerMetadata() != nil {
-		t.Fatalf("PeerMetadata after nil-set: got %v, want nil", m.PeerMetadata())
-	}
+	require.NoError(t, m.SetPeerMetadata(nil))
+	require.Nil(t, m.PeerMetadata(), "PeerMetadata after nil-set should be nil")
 }
 
 // TestNullNextHandshakeRejectsMalformed covers the defensive error paths in
@@ -191,76 +123,43 @@ func TestNullNextHandshakeRejectsMalformed(t *testing.T) {
 	t.Run("non-nil-on-seed", func(t *testing.T) {
 		m := NewNull(iface.RoleClient, nil)
 		_, _, err := m.NextHandshake([]byte{0x00})
-		if err == nil {
-			t.Fatal("seed with non-nil input: want error")
-		}
-		if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-			t.Fatalf("want ErrMalformedFrame, got %v", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 	})
 
 	t.Run("nil-on-ingest", func(t *testing.T) {
 		m := NewNull(iface.RoleClient, nil)
 		_, _, err := m.NextHandshake(nil)
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		require.NoError(t, err, "seed")
 		_, _, err = m.NextHandshake(nil)
-		if err == nil {
-			t.Fatal("ingest with nil input: want error")
-		}
-		if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-			t.Fatalf("want ErrMalformedFrame, got %v", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 	})
 
 	t.Run("wrong-command-name", func(t *testing.T) {
 		m := NewNull(iface.RoleClient, nil)
 		_, _, err := m.NextHandshake(nil)
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		require.NoError(t, err, "seed")
 		// Fabricate a command that is not READY.
 		body := []byte{0x05, 'E', 'R', 'R', 'O', 'R'}
 		_, _, err = m.NextHandshake(body)
-		if err == nil {
-			t.Fatal("ingest of ERROR command: want error")
-		}
-		if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-			t.Fatalf("want ErrMalformedFrame, got %v", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 	})
 
 	t.Run("truncated-name", func(t *testing.T) {
 		m := NewNull(iface.RoleClient, nil)
 		_, _, err := m.NextHandshake(nil)
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		require.NoError(t, err, "seed")
 		// Declares a 5-byte name but only supplies 2 bytes.
 		body := []byte{0x05, 'R', 'E'}
 		_, _, err = m.NextHandshake(body)
-		if err == nil {
-			t.Fatal("ingest truncated: want error")
-		}
-		if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-			t.Fatalf("want ErrMalformedFrame, got %v", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 	})
 
 	t.Run("empty-body", func(t *testing.T) {
 		m := NewNull(iface.RoleClient, nil)
 		_, _, err := m.NextHandshake(nil)
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		require.NoError(t, err, "seed")
 		_, _, err = m.NextHandshake([]byte{})
-		if err == nil {
-			t.Fatal("ingest empty body: want error")
-		}
-		if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-			t.Fatalf("want ErrMalformedFrame, got %v", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 	})
 }
 
@@ -274,26 +173,10 @@ func TestNullMetadataIsolated(t *testing.T) {
 	local["Socket-Type"] = "REP"
 
 	got := m.Metadata()
-	if got["Socket-Type"] != "REQ" {
-		t.Fatalf("Metadata not isolated from caller mutation: got %q, want %q", got["Socket-Type"], "REQ")
-	}
+	require.Equal(t, "REQ", got["Socket-Type"], "Metadata not isolated from caller mutation")
 
 	// Mutating the Metadata() result must not affect subsequent calls.
 	got["Socket-Type"] = "PUB"
 	again := m.Metadata()
-	if again["Socket-Type"] != "REQ" {
-		t.Fatalf("Metadata not isolated from returned-map mutation: got %q, want %q", again["Socket-Type"], "REQ")
-	}
-}
-
-func mapsEqual(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if bv, ok := b[k]; !ok || bv != v {
-			return false
-		}
-	}
-	return true
+	require.Equal(t, "REQ", again["Socket-Type"], "Metadata not isolated from returned-map mutation")
 }

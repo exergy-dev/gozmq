@@ -2,7 +2,6 @@ package socket_test
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -10,6 +9,7 @@ import (
 	"github.com/rkm/gozmq/internal/pipe"
 	"github.com/rkm/gozmq/internal/socket"
 	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/stretchr/testify/require"
 )
 
 // TestXPub_SurfacesSubscribeToApplication: XPUB's Recv returns the
@@ -25,39 +25,24 @@ func TestXPub_SurfacesSubscribeToApplication(t *testing.T) {
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	if err := eng.AttachPipe(a); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	mustAttach(t, eng, a)
+	ctx := testCtx(t)
 
-	if err := b.Send(ctx, subscribeMsg(true, []byte("news"))); err != nil {
-		t.Fatalf("peer subscribe: %v", err)
-	}
+	require.NoError(t, b.Send(ctx, subscribeMsg(true, []byte("news"))), "peer subscribe")
 	m, err := eng.Recv(ctx)
-	if err != nil {
-		t.Fatalf("xpub recv: %v", err)
-	}
-	if m.NumFrames() != 1 {
-		t.Fatalf("xpub recv frames = %d, want 1", m.NumFrames())
-	}
+	require.NoError(t, err, "xpub recv")
+	require.Equal(t, 1, m.NumFrames(), "xpub recv frames")
 	body := m.Frames()[0]
-	if body[0] != socket.SubscribeByte || string(body[1:]) != "news" {
-		t.Fatalf("xpub surfaced body = %v", body)
-	}
+	require.Equal(t, socket.SubscribeByte, body[0])
+	require.Equal(t, "news", string(body[1:]))
 
 	// Subsequent publish to the "news" topic should reach the peer
 	// because XPUB updated its SubTree before surfacing.
-	if err := eng.Send(ctx, msg.FromFrames([]byte("news"), []byte("hello"))); err != nil {
-		t.Fatalf("xpub send: %v", err)
-	}
+	require.NoError(t, eng.Send(ctx, msg.FromFrames([]byte("news"), []byte("hello"))), "xpub send")
 	got, err := b.Recv(ctx)
-	if err != nil {
-		t.Fatalf("peer recv data: %v", err)
-	}
-	if got.NumFrames() != 2 || string(got.Frames()[0]) != "news" {
-		t.Fatalf("peer recv data = %v", got.Frames())
-	}
+	require.NoError(t, err, "peer recv data")
+	require.Equal(t, 2, got.NumFrames())
+	require.Equal(t, "news", string(got.Frames()[0]))
 }
 
 // TestXPub_SurfacesUnsubscribe: an unsubscribe message surfaces too.
@@ -72,30 +57,19 @@ func TestXPub_SurfacesUnsubscribe(t *testing.T) {
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	if err := eng.AttachPipe(a); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	mustAttach(t, eng, a)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
-	if err := b.Send(ctx, subscribeMsg(true, []byte("t"))); err != nil {
-		t.Fatalf("sub: %v", err)
-	}
-	if _, err := eng.Recv(ctx); err != nil {
-		t.Fatalf("recv sub: %v", err)
-	}
-	if err := b.Send(ctx, subscribeMsg(false, []byte("t"))); err != nil {
-		t.Fatalf("cancel: %v", err)
-	}
+	require.NoError(t, b.Send(ctx, subscribeMsg(true, []byte("t"))), "sub")
+	_, err := eng.Recv(ctx)
+	require.NoError(t, err, "recv sub")
+	require.NoError(t, b.Send(ctx, subscribeMsg(false, []byte("t"))), "cancel")
 	m, err := eng.Recv(ctx)
-	if err != nil {
-		t.Fatalf("recv cancel: %v", err)
-	}
+	require.NoError(t, err, "recv cancel")
 	body := m.Frames()[0]
-	if body[0] != socket.UnsubscribeByte || string(body[1:]) != "t" {
-		t.Fatalf("surfaced cancel = %v", body)
-	}
+	require.Equal(t, socket.UnsubscribeByte, body[0])
+	require.Equal(t, "t", string(body[1:]))
 }
 
 // TestXPub_CloseUnblocksRecv.
@@ -109,16 +83,12 @@ func TestXPub_CloseUnblocksRecv(t *testing.T) {
 		done <- err
 	}()
 	time.Sleep(50 * time.Millisecond)
-	if err := eng.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	require.NoError(t, eng.Close(), "close")
 	select {
 	case err := <-done:
-		if !errors.Is(err, zmqerr.ErrSocketClosed) {
-			t.Fatalf("recv err = %v, want ErrSocketClosed", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
 	case <-time.After(time.Second):
-		t.Fatal("recv did not unblock on close")
+		require.Fail(t, "recv did not unblock on close")
 	}
 }
 
@@ -134,42 +104,27 @@ func TestXPub_DedupDefault(t *testing.T) {
 
 	a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	if err := eng.AttachPipe(a); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	mustAttach(t, eng, a)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
 	// Two identical SUBSCRIBEs from the same peer.
-	if err := b.Send(ctx, subscribeMsg(true, []byte("news"))); err != nil {
-		t.Fatalf("sub1: %v", err)
-	}
-	if err := b.Send(ctx, subscribeMsg(true, []byte("news"))); err != nil {
-		t.Fatalf("sub2: %v", err)
-	}
+	require.NoError(t, b.Send(ctx, subscribeMsg(true, []byte("news"))), "sub1")
+	require.NoError(t, b.Send(ctx, subscribeMsg(true, []byte("news"))), "sub2")
 
 	// First recv must return the subscribe event.
 	m, err := eng.Recv(ctx)
-	if err != nil {
-		t.Fatalf("recv1: %v", err)
-	}
+	require.NoError(t, err, "recv1")
 	body := m.Frames()[0]
-	if body[0] != socket.SubscribeByte || string(body[1:]) != "news" {
-		t.Fatalf("first event body = %v", body)
-	}
+	require.Equal(t, socket.SubscribeByte, body[0])
+	require.Equal(t, "news", string(body[1:]))
 
-	// Second recv must NOT produce a duplicate SUBSCRIBE — block and
+	// Second recv must NOT produce a duplicate SUBSCRIBE -- block and
 	// time out. Use a short deadline so the test stays fast.
 	shortCtx, shortCancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer shortCancel()
-	m2, err := eng.Recv(shortCtx)
-	if err == nil {
-		t.Fatalf("unexpected second event %v — dedup should have swallowed it", m2.Frames()[0])
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("recv err = %v, want DeadlineExceeded", err)
-	}
+	_, err = eng.Recv(shortCtx)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "dedup should have swallowed second event")
 }
 
 // TestXPub_VerboseDisablesDedup: constructing with verbose=true causes
@@ -181,30 +136,20 @@ func TestXPub_VerboseDisablesDedup(t *testing.T) {
 
 	a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	if err := eng.AttachPipe(a); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	mustAttach(t, eng, a)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
-	if err := b.Send(ctx, subscribeMsg(true, []byte("news"))); err != nil {
-		t.Fatalf("sub1: %v", err)
-	}
-	if err := b.Send(ctx, subscribeMsg(true, []byte("news"))); err != nil {
-		t.Fatalf("sub2: %v", err)
-	}
+	require.NoError(t, b.Send(ctx, subscribeMsg(true, []byte("news"))), "sub1")
+	require.NoError(t, b.Send(ctx, subscribeMsg(true, []byte("news"))), "sub2")
 
 	// Both events must surface.
 	for i := 0; i < 2; i++ {
 		m, err := eng.Recv(ctx)
-		if err != nil {
-			t.Fatalf("recv[%d]: %v", i, err)
-		}
+		require.NoError(t, err, "recv[%d]", i)
 		body := m.Frames()[0]
-		if body[0] != socket.SubscribeByte || string(body[1:]) != "news" {
-			t.Fatalf("event[%d] body = %v", i, body)
-		}
+		require.Equal(t, socket.SubscribeByte, body[0], "event[%d]", i)
+		require.Equal(t, "news", string(body[1:]), "event[%d]", i)
 	}
 }
 
@@ -220,58 +165,36 @@ func TestXPub_DedupLastCancel(t *testing.T) {
 	a1, b1 := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
 	a2, b2 := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a1, b1, a2, b2)
-	if err := eng.AttachPipe(a1); err != nil {
-		t.Fatalf("attach peer1: %v", err)
-	}
-	if err := eng.AttachPipe(a2); err != nil {
-		t.Fatalf("attach peer2: %v", err)
-	}
+	mustAttach(t, eng, a1, a2)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 
 	// Two distinct peers subscribe to "news". Only the first should
 	// surface.
-	if err := b1.Send(ctx, subscribeMsg(true, []byte("news"))); err != nil {
-		t.Fatalf("peer1 sub: %v", err)
-	}
-	if _, err := eng.Recv(ctx); err != nil {
-		t.Fatalf("first sub recv: %v", err)
-	}
-	if err := b2.Send(ctx, subscribeMsg(true, []byte("news"))); err != nil {
-		t.Fatalf("peer2 sub: %v", err)
-	}
+	require.NoError(t, b1.Send(ctx, subscribeMsg(true, []byte("news"))), "peer1 sub")
+	_, err := eng.Recv(ctx)
+	require.NoError(t, err, "first sub recv")
+	require.NoError(t, b2.Send(ctx, subscribeMsg(true, []byte("news"))), "peer2 sub")
 
 	// No second SUBSCRIBE surfaced.
 	shortCtx, shortCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	if _, err := eng.Recv(shortCtx); !errors.Is(err, context.DeadlineExceeded) {
-		shortCancel()
-		t.Fatalf("expected no second subscribe, got %v", err)
-	}
+	_, err = eng.Recv(shortCtx)
 	shortCancel()
+	require.ErrorIs(t, err, context.DeadlineExceeded, "expected no second subscribe")
 
-	// Peer1 unsubscribes — still one subscriber remaining (peer2), so
+	// Peer1 unsubscribes -- still one subscriber remaining (peer2), so
 	// CANCEL is swallowed.
-	if err := b1.Send(ctx, subscribeMsg(false, []byte("news"))); err != nil {
-		t.Fatalf("peer1 cancel: %v", err)
-	}
+	require.NoError(t, b1.Send(ctx, subscribeMsg(false, []byte("news"))), "peer1 cancel")
 	shortCtx2, shortCancel2 := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	if _, err := eng.Recv(shortCtx2); !errors.Is(err, context.DeadlineExceeded) {
-		shortCancel2()
-		t.Fatalf("expected no cancel surface (refcount still 1), got %v", err)
-	}
+	_, err = eng.Recv(shortCtx2)
 	shortCancel2()
+	require.ErrorIs(t, err, context.DeadlineExceeded, "expected no cancel surface (refcount still 1)")
 
-	// Peer2 unsubscribes — refcount drops to 0, CANCEL surfaces.
-	if err := b2.Send(ctx, subscribeMsg(false, []byte("news"))); err != nil {
-		t.Fatalf("peer2 cancel: %v", err)
-	}
+	// Peer2 unsubscribes -- refcount drops to 0, CANCEL surfaces.
+	require.NoError(t, b2.Send(ctx, subscribeMsg(false, []byte("news"))), "peer2 cancel")
 	m, err := eng.Recv(ctx)
-	if err != nil {
-		t.Fatalf("final cancel recv: %v", err)
-	}
+	require.NoError(t, err, "final cancel recv")
 	body := m.Frames()[0]
-	if body[0] != socket.UnsubscribeByte || string(body[1:]) != "news" {
-		t.Fatalf("cancel body = %v", body)
-	}
+	require.Equal(t, socket.UnsubscribeByte, body[0])
+	require.Equal(t, "news", string(body[1:]))
 }

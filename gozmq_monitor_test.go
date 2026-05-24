@@ -92,7 +92,7 @@ func TestMonitor_ServerLifecycle(t *testing.T) {
 
 	// Round-trip a message to guarantee the handshake completed on
 	// both ends before we assert on events.
-	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	callCtx, cancel := testCtx(t)
 	defer cancel()
 	if err := cli.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("hello"))); err != nil {
 		t.Fatalf("send: %v", err)

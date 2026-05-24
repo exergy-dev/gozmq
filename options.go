@@ -72,7 +72,7 @@ type optionFunc struct {
 
 func (f optionFunc) apply(c *socketConfig) error { return f.applyFn(c) }
 
-func newOption(_ string, fn func(*socketConfig) error) Option {
+func newOption(fn func(*socketConfig) error) Option {
 	return optionFunc{applyFn: fn}
 }
 
@@ -93,7 +93,7 @@ func copyBytes(b []byte) []byte {
 // leading byte; longer or zero-prefixed identities are rejected by ZMTP.
 // The slice is copied defensively.
 func WithIdentity(id []byte) Option {
-	return newOption("WithIdentity", func(c *socketConfig) error {
+	return newOption(func(c *socketConfig) error {
 		c.identity = copyBytes(id)
 		return nil
 	})
@@ -108,7 +108,7 @@ func WithIdentity(id []byte) Option {
 // while drop-on-overflow patterns (PUB, and ROUTER with mandatory plus an
 // unknown route) may return [ErrHWM] or silently drop per pattern policy.
 func WithSendHWM(n int) Option {
-	return newOption("WithSendHWM", func(c *socketConfig) error { c.sendHWM = n; return nil })
+	return newOption(func(c *socketConfig) error { c.sendHWM = n; return nil })
 }
 
 // WithRecvHWM sets the inbound high-water mark — the maximum number of
@@ -116,7 +116,7 @@ func WithSendHWM(n int) Option {
 // accepting frames from the wire and exerts TCP backpressure on the peer.
 // Default is 1000. Zero disables the limit.
 func WithRecvHWM(n int) Option {
-	return newOption("WithRecvHWM", func(c *socketConfig) error { c.recvHWM = n; return nil })
+	return newOption(func(c *socketConfig) error { c.recvHWM = n; return nil })
 }
 
 // WithLinger sets the grace period Socket.Close waits for outbound pipes
@@ -127,7 +127,7 @@ func WithRecvHWM(n int) Option {
 // never drains or reconnects, so pair it with a parallel shutdown
 // watchdog if you need it.
 func WithLinger(d time.Duration) Option {
-	return newOption("WithLinger", func(c *socketConfig) error { c.linger = d; return nil })
+	return newOption(func(c *socketConfig) error { c.linger = d; return nil })
 }
 
 // WithReconnectInterval sets the base delay between reconnection attempts
@@ -136,7 +136,7 @@ func WithLinger(d time.Duration) Option {
 // is jittered by 20% before each attempt, capped by
 // [WithReconnectIntervalMax].
 func WithReconnectInterval(d time.Duration) Option {
-	return newOption("WithReconnectInterval", func(c *socketConfig) error { c.reconnectInterval = d; return nil })
+	return newOption(func(c *socketConfig) error { c.reconnectInterval = d; return nil })
 }
 
 // WithReconnectIntervalMax caps the reconnection backoff. Default is 0,
@@ -144,7 +144,7 @@ func WithReconnectInterval(d time.Duration) Option {
 // 30 * time.Second bounds the longest wait while preserving fast recovery
 // on transient failures.
 func WithReconnectIntervalMax(d time.Duration) Option {
-	return newOption("WithReconnectIntervalMax", func(c *socketConfig) error { c.reconnectIntervalMax = d; return nil })
+	return newOption(func(c *socketConfig) error { c.reconnectIntervalMax = d; return nil })
 }
 
 // WithHeartbeat configures the ZMTP 3.1 heartbeat. interval is how often
@@ -157,7 +157,7 @@ func WithReconnectIntervalMax(d time.Duration) Option {
 // FIN, or a NAT that dropped the flow) — disabling it is discouraged on
 // long-lived connections.
 func WithHeartbeat(interval, timeout time.Duration) Option {
-	return newOption("WithHeartbeat", func(c *socketConfig) error {
+	return newOption(func(c *socketConfig) error {
 		c.heartbeatInterval = interval
 		c.heartbeatTimeout = timeout
 		return nil
@@ -174,7 +174,7 @@ func WithHeartbeat(interval, timeout time.Duration) Option {
 // because a hostile frame header can force an arbitrarily large
 // allocation.
 func WithMaxMessageSize(n int64) Option {
-	return newOption("WithMaxMessageSize", func(c *socketConfig) error { c.maxMessageSize = n; return nil })
+	return newOption(func(c *socketConfig) error { c.maxMessageSize = n; return nil })
 }
 
 // WithRouterMandatory controls ROUTER.Send behaviour for unroutable
@@ -184,7 +184,7 @@ func WithMaxMessageSize(n int64) Option {
 // safer default for request/response services that need to observe
 // delivery failures.
 func WithRouterMandatory(enabled bool) Option {
-	return newOption("WithRouterMandatory", func(c *socketConfig) error { c.routerMandatory = enabled; return nil })
+	return newOption(func(c *socketConfig) error { c.routerMandatory = enabled; return nil })
 }
 
 // WithXPubVerbose controls subscription deduplication on XPUB. Default is
@@ -195,7 +195,7 @@ func WithRouterMandatory(enabled bool) Option {
 // applications that track subscriber churn or implement their own
 // authorization on subscriptions.
 func WithXPubVerbose(enabled bool) Option {
-	return newOption("WithXPubVerbose", func(c *socketConfig) error { c.xpubVerbose = enabled; return nil })
+	return newOption(func(c *socketConfig) error { c.xpubVerbose = enabled; return nil })
 }
 
 // WithSubscribe adds a subscription prefix to a SUB (or XSUB) socket. May
@@ -207,7 +207,7 @@ func WithXPubVerbose(enabled bool) Option {
 // publishers. This enables independent components on the same socket to
 // manage their own subscriptions without interfering.
 func WithSubscribe(prefix []byte) Option {
-	return newOption("WithSubscribe", func(c *socketConfig) error {
+	return newOption(func(c *socketConfig) error {
 		c.subscriptions = append(c.subscriptions, copyBytes(prefix))
 		return nil
 	})
@@ -221,7 +221,7 @@ func WithSubscribe(prefix []byte) Option {
 // wrapped in tls+tcp://. For untrusted networks prefer [WithCurveServer]
 // / [WithCurveClient].
 func WithPlainAuth(fn func(user, pass string) bool) Option {
-	return newOption("WithPlainAuth", func(c *socketConfig) error { c.plainAuth = fn; return nil })
+	return newOption(func(c *socketConfig) error { c.plainAuth = fn; return nil })
 }
 
 // WithPlainClient configures the socket to present PLAIN credentials
@@ -229,7 +229,7 @@ func WithPlainAuth(fn func(user, pass string) bool) Option {
 // are sent in cleartext; wrap in tls+tcp:// or switch to CURVE for any
 // network you do not trust.
 func WithPlainClient(username, password string) Option {
-	return newOption("WithPlainClient", func(c *socketConfig) error {
+	return newOption(func(c *socketConfig) error {
 		c.plainClient = true
 		c.plainClientUser = username
 		c.plainClientPass = password
@@ -241,7 +241,7 @@ func WithPlainClient(username, password string) Option {
 // ZAP handler for server-side PLAIN or CURVE authorization. The default is
 // the empty domain, matching libzmq.
 func WithZapDomain(domain string) Option {
-	return newOption("WithZapDomain", func(c *socketConfig) error {
+	return newOption(func(c *socketConfig) error {
 		c.zapDomain = domain
 		return nil
 	})
@@ -255,7 +255,7 @@ func WithZapDomain(domain string) Option {
 // authentication against each connecting client's long-term public key.
 // Clients must present a matching public key via [WithCurveClient].
 func WithCurveServer(secretKey []byte) Option {
-	return newOption("WithCurveServer", func(c *socketConfig) error {
+	return newOption(func(c *socketConfig) error {
 		c.curveServer = true
 		c.curveSecretKey = copyBytes(secretKey)
 		return nil
@@ -271,7 +271,7 @@ func WithCurveServer(secretKey []byte) Option {
 // resulting channel is forward-secret (ephemeral session keys) and
 // mutually authenticated.
 func WithCurveClient(serverKey, publicKey, secretKey []byte) Option {
-	return newOption("WithCurveClient", func(c *socketConfig) error {
+	return newOption(func(c *socketConfig) error {
 		c.curveServer = false
 		c.curveServerKey = copyBytes(serverKey)
 		c.curvePublicKey = copyBytes(publicKey)
@@ -287,7 +287,7 @@ func WithCurveClient(serverKey, publicKey, secretKey []byte) Option {
 // and, on a client socket, the reconnector retries with the configured
 // backoff.
 func WithHandshakeTimeout(d time.Duration) Option {
-	return newOption("WithHandshakeTimeout", func(c *socketConfig) error { c.handshakeTimeout = d; return nil })
+	return newOption(func(c *socketConfig) error { c.handshakeTimeout = d; return nil })
 }
 
 // WithMonitor registers a channel to receive lifecycle [Event]s whose
@@ -297,7 +297,7 @@ func WithHandshakeTimeout(d time.Duration) Option {
 // the socket's hot path. A buffer of 64-256 events is recommended;
 // consumers that lag materially are responsible for their own drops.
 func WithMonitor(ch chan<- Event, mask EventType) Option {
-	return newOption("WithMonitor", func(c *socketConfig) error {
+	return newOption(func(c *socketConfig) error {
 		c.monitor = ch
 		c.monitorMask = mask
 		return nil
@@ -311,33 +311,40 @@ func WithMonitor(ch chan<- Event, mask EventType) Option {
 // is optional; it exists primarily so tests can capture structured log
 // output without mutating the process-wide default logger.
 func WithLogger(l *slog.Logger) Option {
-	return newOption("WithLogger", func(c *socketConfig) error { c.logger = l; return nil })
+	return newOption(func(c *socketConfig) error { c.logger = l; return nil })
+}
+
+func nonNeg(name string, v int) error {
+	if v < 0 {
+		return fmt.Errorf("gozmq: %s requires n >= 0", name)
+	}
+	return nil
+}
+
+func nonNegDur(name string, d time.Duration) error {
+	if d < 0 {
+		return fmt.Errorf("gozmq: %s requires d >= 0", name)
+	}
+	return nil
 }
 
 func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 	if cfg == nil {
 		return nil
 	}
-	if cfg.sendHWM < 0 {
-		return fmt.Errorf("gozmq: WithSendHWM requires n >= 0")
-	}
-	if cfg.recvHWM < 0 {
-		return fmt.Errorf("gozmq: WithRecvHWM requires n >= 0")
-	}
-	if cfg.maxMessageSize < 0 {
-		return fmt.Errorf("gozmq: WithMaxMessageSize requires n >= 0")
-	}
-	if cfg.handshakeTimeout < 0 {
-		return fmt.Errorf("gozmq: WithHandshakeTimeout requires d >= 0")
-	}
-	if cfg.reconnectInterval < 0 {
-		return fmt.Errorf("gozmq: WithReconnectInterval requires d >= 0")
-	}
-	if cfg.reconnectIntervalMax < 0 {
-		return fmt.Errorf("gozmq: WithReconnectIntervalMax requires d >= 0")
-	}
-	if cfg.heartbeatInterval < 0 || cfg.heartbeatTimeout < 0 {
-		return fmt.Errorf("gozmq: WithHeartbeat requires non-negative durations")
+	for _, check := range []error{
+		nonNeg("WithSendHWM", cfg.sendHWM),
+		nonNeg("WithRecvHWM", cfg.recvHWM),
+		nonNeg("WithMaxMessageSize", int(cfg.maxMessageSize)),
+		nonNegDur("WithHandshakeTimeout", cfg.handshakeTimeout),
+		nonNegDur("WithReconnectInterval", cfg.reconnectInterval),
+		nonNegDur("WithReconnectIntervalMax", cfg.reconnectIntervalMax),
+		nonNegDur("WithHeartbeat interval", cfg.heartbeatInterval),
+		nonNegDur("WithHeartbeat timeout", cfg.heartbeatTimeout),
+	} {
+		if check != nil {
+			return check
+		}
 	}
 	if len(cfg.identity) > 0 {
 		if len(cfg.identity) > 255 {

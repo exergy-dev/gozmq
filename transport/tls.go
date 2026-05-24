@@ -135,45 +135,12 @@ func (t *TLSTransport) Listen(_ context.Context, endpoint string) (iface.Listene
 	return newTLSListener(raw, t), nil
 }
 
-// parseDialAddress converts a "tls+tcp://host:port" endpoint into a net
-// address and rejects wildcard hosts on Dial.
 func (t *TLSTransport) parseDialAddress(endpoint string) (string, error) {
-	scheme, addr, err := splitEndpoint(endpoint)
-	if err != nil {
-		return "", err
-	}
-	if scheme != tlsScheme {
-		return "", fmt.Errorf("%w: scheme %q passed to %s transport", zmqerr.ErrEndpointInvalid, scheme, tlsScheme)
-	}
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return "", fmt.Errorf("%w: %s", zmqerr.ErrEndpointInvalid, err.Error())
-	}
-	if host == "*" {
-		return "", fmt.Errorf("%w: wildcard host %q not allowed on Dial", zmqerr.ErrEndpointInvalid, addr)
-	}
-	if port == "" || port == "0" {
-		return "", fmt.Errorf("%w: port must be specified for Dial", zmqerr.ErrEndpointInvalid)
-	}
-	return net.JoinHostPort(host, port), nil
+	return parseTCPEndpoint(endpoint, tlsScheme, true)
 }
 
 func (t *TLSTransport) parseListenAddress(endpoint string) (string, error) {
-	scheme, addr, err := splitEndpoint(endpoint)
-	if err != nil {
-		return "", err
-	}
-	if scheme != tlsScheme {
-		return "", fmt.Errorf("%w: scheme %q passed to %s transport", zmqerr.ErrEndpointInvalid, scheme, tlsScheme)
-	}
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return "", fmt.Errorf("%w: %s", zmqerr.ErrEndpointInvalid, err.Error())
-	}
-	if host == "*" {
-		host = ""
-	}
-	return net.JoinHostPort(host, port), nil
+	return parseTCPEndpoint(endpoint, tlsScheme, false)
 }
 
 // --------------------------------------------------------------------------

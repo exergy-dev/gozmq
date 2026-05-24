@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/pipe"
 )
@@ -166,35 +169,23 @@ func TestReconnector_DialRetriesThenSucceeds(t *testing.T) {
 	select {
 	case <-attached:
 	case <-time.After(2 * time.Second):
-		t.Fatalf("no attach after 2s; dials=%d", dialN.Load())
+		require.FailNow(t, "no attach after 2s", "dials=%d", dialN.Load())
 	}
-	if n := dialN.Load(); n != 3 {
-		t.Fatalf("expected 3 dials before first attach, got %d", n)
-	}
-	if a := attaches.Load(); a != 1 {
-		t.Errorf("attaches=%d, want 1", a)
-	}
+	require.Equal(t, int32(3), dialN.Load(), "expected 3 dials before first attach")
+	assert.Equal(t, int32(1), attaches.Load(), "attaches")
 
 	// Verify backoff grew: dial2 should happen ≥ 5ms after dial1,
 	// dial3 ≥ 10ms after dial2.
 	dialMu.Lock()
 	times := append([]time.Time(nil), dialTimes...)
 	dialMu.Unlock()
-	if len(times) < 3 {
-		t.Fatalf("got %d dial timestamps, want ≥3", len(times))
-	}
+	require.GreaterOrEqual(t, len(times), 3, "got too few dial timestamps")
 	gap1 := times[1].Sub(times[0])
 	gap2 := times[2].Sub(times[1])
 	// Backoff schedule: 5ms, then 10ms. Allow slack for scheduler.
-	if gap1 < 4*time.Millisecond {
-		t.Errorf("gap1=%v, want ≥4ms", gap1)
-	}
-	if gap2 < 8*time.Millisecond {
-		t.Errorf("gap2=%v, want ≥8ms", gap2)
-	}
-	if gap2 <= gap1/2 {
-		t.Errorf("backoff did not grow: gap1=%v, gap2=%v", gap1, gap2)
-	}
+	assert.GreaterOrEqual(t, gap1, 4*time.Millisecond, "gap1")
+	assert.GreaterOrEqual(t, gap2, 8*time.Millisecond, "gap2")
+	assert.Greater(t, gap2, gap1/2, "backoff did not grow: gap1=%v, gap2=%v", gap1, gap2)
 
 	// Simulate peer disconnect: close the session's engine-side pipe.
 	sessMu.Lock()
@@ -206,15 +197,11 @@ func TestReconnector_DialRetriesThenSucceeds(t *testing.T) {
 	select {
 	case <-attached:
 	case <-time.After(2 * time.Second):
-		t.Fatalf("no reconnect-attach after 2s; dials=%d attaches=%d detaches=%d",
-			dialN.Load(), attaches.Load(), detaches.Load())
+		require.FailNow(t, "no reconnect-attach after 2s",
+			"dials=%d attaches=%d detaches=%d", dialN.Load(), attaches.Load(), detaches.Load())
 	}
-	if a := attaches.Load(); a != 2 {
-		t.Errorf("attaches=%d, want 2", a)
-	}
-	if d := detaches.Load(); d < 1 {
-		t.Errorf("detaches=%d, want ≥1", d)
-	}
+	assert.Equal(t, int32(2), attaches.Load(), "attaches")
+	assert.GreaterOrEqual(t, detaches.Load(), int32(1), "detaches")
 }
 
 // TestReconnector_ContextCancellationStopsLoop verifies that an external
@@ -245,7 +232,7 @@ func TestReconnector_ContextCancellationStopsLoop(t *testing.T) {
 	select {
 	case <-dialCh:
 	case <-time.After(time.Second):
-		t.Fatal("no dial within 1s")
+		require.FailNow(t, "no dial within 1s")
 	}
 	cancel()
 
@@ -253,11 +240,11 @@ func TestReconnector_ContextCancellationStopsLoop(t *testing.T) {
 	go func() { stopped <- r.Stop() }()
 	select {
 	case err := <-stopped:
-		if err != nil && !errors.Is(err, context.Canceled) {
-			t.Errorf("Stop = %v", err)
+		if err != nil {
+			assert.ErrorIs(t, err, context.Canceled)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("Stop did not return within 1s after ctx cancel")
+		require.FailNow(t, "Stop did not return within 1s after ctx cancel")
 	}
 }
 
@@ -281,13 +268,9 @@ func TestReconnector_StopWakesSleepingBackoff(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	start := time.Now()
-	if err := r.Stop(); err != nil {
-		t.Fatalf("Stop = %v", err)
-	}
+	require.NoError(t, r.Stop())
 	elapsed := time.Since(start)
-	if elapsed > time.Second {
-		t.Errorf("Stop took %v; expected prompt wake from 10s backoff", elapsed)
-	}
+	assert.LessOrEqual(t, elapsed, time.Second, "Stop expected prompt wake from 10s backoff")
 }
 
 // TestReconnector_StopBeforeStart exercises the no-Start path.
@@ -301,11 +284,9 @@ func TestReconnector_StopBeforeStart(t *testing.T) {
 	go func() { done <- r.Stop() }()
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Errorf("Stop before Start: %v", err)
-		}
+		assert.NoError(t, err, "Stop before Start")
 	case <-time.After(time.Second):
-		t.Fatal("Stop before Start hung")
+		require.FailNow(t, "Stop before Start hung")
 	}
 }
 
@@ -336,7 +317,7 @@ func TestReconnector_HandshakeFailureTriggersBackoff(t *testing.T) {
 			return stubConn{}, nil
 		},
 		NewSession: func(c iface.Conn) iface.Session { return newStubSession(hsErr) },
-		OnAttach:   func(_ iface.Pipe) { t.Error("OnAttach should not fire on handshake failure") },
+		OnAttach:   func(_ iface.Pipe) { assert.Fail(t, "OnAttach should not fire on handshake failure") },
 	}
 
 	r := NewReconnector(cfg)
@@ -345,7 +326,7 @@ func TestReconnector_HandshakeFailureTriggersBackoff(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatalf("did not see 4 dial attempts; got %d", attempts.Load())
+		require.FailNow(t, "did not see 4 dial attempts", "got %d", attempts.Load())
 	}
 	_ = r.Stop()
 }
@@ -372,9 +353,8 @@ func TestApplyJitter_WithinBand(t *testing.T) {
 
 	lo := time.Duration(float64(base) * (1 - frac))
 	hi := time.Duration(float64(base) * (1 + frac))
-	if minV < lo-time.Microsecond || maxV > hi+time.Microsecond {
-		t.Errorf("jitter out of band: min=%v max=%v [want %v..%v]", minV, maxV, lo, hi)
-	}
+	assert.GreaterOrEqual(t, minV, lo-time.Microsecond, "jitter min out of band: min=%v [want ≥%v]", minV, lo)
+	assert.LessOrEqual(t, maxV, hi+time.Microsecond, "jitter max out of band: max=%v [want ≤%v]", maxV, hi)
 
 	// With N=4096 samples and ±20% window, the empirical mean should be
 	// well within 1% of base. Centered uniform has low variance at this N.
@@ -383,27 +363,20 @@ func TestApplyJitter_WithinBand(t *testing.T) {
 	if drift < 0 {
 		drift = -drift
 	}
-	if drift > time.Duration(float64(base)*0.02) {
-		t.Errorf("mean drifted too far: mean=%v base=%v drift=%v", mean, base, drift)
-	}
+	assert.LessOrEqual(t, drift, time.Duration(float64(base)*0.02),
+		"mean drifted too far: mean=%v base=%v drift=%v", mean, base, drift)
 
 	// And at least one sample should have landed in the lower half and
 	// one in the upper half — the distribution is symmetric.
-	if minV >= base {
-		t.Error("no sample below base; jitter not applied symmetrically")
-	}
-	if maxV <= base {
-		t.Error("no sample above base; jitter not applied symmetrically")
-	}
+	assert.Less(t, minV, base, "no sample below base; jitter not applied symmetrically")
+	assert.Greater(t, maxV, base, "no sample above base; jitter not applied symmetrically")
 }
 
 // TestApplyJitter_ZeroFractionIsIdentity: frac=0 must return base as-is.
 func TestApplyJitter_ZeroFractionIsIdentity(t *testing.T) {
 	base := 250 * time.Millisecond
 	for i := 0; i < 16; i++ {
-		if got := applyJitter(base, 0); got != base {
-			t.Errorf("applyJitter(base, 0) = %v, want %v", got, base)
-		}
+		assert.Equal(t, base, applyJitter(base, 0), "applyJitter(base, 0)")
 	}
 }
 
@@ -417,26 +390,18 @@ func TestApplyJitter_ZeroFractionIsIdentity(t *testing.T) {
 func TestApplyJitter_ClampedExtreme(t *testing.T) {
 	cfg := ReconnectConfig{JitterFraction: 5.0}
 	cfg.normalize()
-	if cfg.JitterFraction != 1.0 {
-		t.Fatalf("normalize clamped fraction = %v, want 1.0", cfg.JitterFraction)
-	}
+	require.Equal(t, 1.0, cfg.JitterFraction, "normalize clamped fraction")
 	// Negative values clamp to 0.
 	neg := ReconnectConfig{JitterFraction: -3.0}
 	neg.normalize()
-	if neg.JitterFraction != 0 {
-		t.Fatalf("normalize clamped negative = %v, want 0", neg.JitterFraction)
-	}
+	require.Equal(t, 0.0, neg.JitterFraction, "normalize clamped negative")
 
 	base := 100 * time.Millisecond
 	const N = 10000
 	for i := 0; i < N; i++ {
 		d := applyJitter(base, cfg.JitterFraction)
-		if d < 0 {
-			t.Fatalf("sample %d: negative duration %v", i, d)
-		}
-		if d > 2*base {
-			t.Fatalf("sample %d: %v exceeds 2*base=%v", i, d, 2*base)
-		}
+		require.GreaterOrEqual(t, d, time.Duration(0), "sample %d: negative duration %v", i, d)
+		require.LessOrEqual(t, d, 2*base, "sample %d: %v exceeds 2*base=%v", i, d, 2*base)
 	}
 }
 
@@ -449,10 +414,8 @@ func TestApplyJitter_NeverNegative(t *testing.T) {
 	const N = 10000
 	for i := 0; i < N; i++ {
 		d := applyJitter(base, 1.0)
-		if d < 0 {
-			t.Fatalf("sample %d: negative duration %v for base=%v frac=1.0",
-				i, d, base)
-		}
+		require.GreaterOrEqual(t, d, time.Duration(0),
+			"sample %d: negative duration %v for base=%v frac=1.0", i, d, base)
 	}
 
 	// Also check a few larger bases at frac=1.0 — the entire range
@@ -464,9 +427,8 @@ func TestApplyJitter_NeverNegative(t *testing.T) {
 		1 * time.Second,
 	} {
 		for i := 0; i < 1000; i++ {
-			if d := applyJitter(b, 1.0); d < 0 {
-				t.Fatalf("base=%v sample=%d: negative %v", b, i, d)
-			}
+			require.GreaterOrEqual(t, applyJitter(b, 1.0), time.Duration(0),
+				"base=%v sample=%d: negative", b, i)
 		}
 	}
 }
@@ -484,9 +446,8 @@ func TestApplyJitter_InRange(t *testing.T) {
 	var sawBelow, sawAbove bool
 	for i := 0; i < N; i++ {
 		d := applyJitter(base, frac)
-		if d < lo || d > hi {
-			t.Fatalf("sample %d: %v out of [%v, %v]", i, d, lo, hi)
-		}
+		require.GreaterOrEqual(t, d, lo, "sample %d: %v below [%v, %v]", i, d, lo, hi)
+		require.LessOrEqual(t, d, hi, "sample %d: %v above [%v, %v]", i, d, lo, hi)
 		if d < base {
 			sawBelow = true
 		}
@@ -495,12 +456,8 @@ func TestApplyJitter_InRange(t *testing.T) {
 		}
 	}
 	// Symmetry sanity: with 10k samples we should see both sides.
-	if !sawBelow {
-		t.Error("no sample below base; distribution not symmetric")
-	}
-	if !sawAbove {
-		t.Error("no sample above base; distribution not symmetric")
-	}
+	assert.True(t, sawBelow, "no sample below base; distribution not symmetric")
+	assert.True(t, sawAbove, "no sample above base; distribution not symmetric")
 }
 
 // TestReconnect_OnRetryPanic_DoesNotStall verifies the state-before-
@@ -549,29 +506,22 @@ func TestReconnect_OnRetryPanic_DoesNotStall(t *testing.T) {
 		case a := <-attemptsSeen:
 			seen = append(seen, a)
 		case <-deadline:
-			t.Fatalf("did not see ≥2 OnRetry invocations; got %v (n=%d)",
-				seen, onRetryN.Load())
+			require.FailNow(t, "did not see ≥2 OnRetry invocations",
+				"got %v (n=%d)", seen, onRetryN.Load())
 		}
 	}
 
-	if seen[0] != 1 {
-		t.Errorf("first OnRetry attempt=%d, want 1", seen[0])
-	}
-	if seen[1] != 2 {
-		t.Errorf("second OnRetry attempt=%d, want 2 (loop must advance past panic)",
-			seen[1])
-	}
+	assert.Equal(t, 1, seen[0], "first OnRetry attempt")
+	assert.Equal(t, 2, seen[1], "second OnRetry attempt (loop must advance past panic)")
 
 	// Loop must still be alive and Stop must return cleanly.
 	stopped := make(chan error, 1)
 	go func() { stopped <- r.Stop() }()
 	select {
 	case err := <-stopped:
-		if err != nil {
-			t.Errorf("Stop after panicking callback: %v", err)
-		}
+		assert.NoError(t, err, "Stop after panicking callback")
 	case <-time.After(2 * time.Second):
-		t.Fatal("Stop hung after panicking OnRetry — loop goroutine leaked")
+		require.FailNow(t, "Stop hung after panicking OnRetry — loop goroutine leaked")
 	}
 }
 
@@ -591,9 +541,7 @@ func TestNextBackoff(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := nextBackoff(tc.base, tc.maxCap)
-			if got != tc.wantNext {
-				t.Errorf("nextBackoff(%v,%v) = %v, want %v", tc.base, tc.maxCap, got, tc.wantNext)
-			}
+			assert.Equal(t, tc.wantNext, got, "nextBackoff(%v,%v)", tc.base, tc.maxCap)
 		})
 	}
 }

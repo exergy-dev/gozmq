@@ -3,13 +3,15 @@ package session
 import (
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
@@ -173,13 +175,10 @@ func TestWriter_BatchCoalescesMultipleMessages(t *testing.T) {
 	ccA.resetWriteCounters()
 
 	const N = 5
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t, 2*time.Second)
 	for i := 0; i < N; i++ {
 		m := msg.FromBytes([]byte(fmt.Sprintf("msg-%d", i)))
-		if err := sA.Pipe().Send(ctx, m); err != nil {
-			t.Fatalf("Send[%d]: %v", i, err)
-		}
+		require.NoError(t, sA.Pipe().Send(ctx, m), "Send[%d]", i)
 	}
 
 	// Release the gate: writer's pending flushBatch proceeds.
@@ -190,31 +189,21 @@ func TestWriter_BatchCoalescesMultipleMessages(t *testing.T) {
 	got := make([]string, 0, N)
 	for i := 0; i < N; i++ {
 		m, err := sB.Pipe().Recv(ctx)
-		if err != nil {
-			t.Fatalf("Recv[%d]: %v", i, err)
-		}
+		require.NoError(t, err, "Recv[%d]", i)
 		got = append(got, string(m.Bytes()))
 	}
 	for i, s := range got {
 		want := fmt.Sprintf("msg-%d", i)
-		if s != want {
-			t.Errorf("got[%d]=%q, want %q", i, s, want)
-		}
+		assert.Equal(t, want, s, "got[%d]", i)
 	}
 
 	// Coalescing: with N=5 messages queued before any Write proceeds,
 	// the writer's first batch should contain all 5 — one Write call
 	// for 5 messages.
 	writes := ccA.WriteCount()
-	if writes >= N {
-		t.Errorf("writer issued %d Writes for %d msgs; expected coalescing (<N)", writes, N)
-	}
-	if writes < 1 {
-		t.Errorf("writer issued 0 Writes; expected ≥1")
-	}
-	if writes > 2 {
-		t.Errorf("writer issued %d Writes; expected ≤2 for 5 queued msgs", writes)
-	}
+	assert.Less(t, writes, N, "writer issued %d Writes for %d msgs; expected coalescing (<N)", writes, N)
+	assert.GreaterOrEqual(t, writes, 1, "writer issued 0 Writes; expected ≥1")
+	assert.LessOrEqual(t, writes, 2, "writer issued %d Writes; expected ≤2 for 5 queued msgs", writes)
 	t.Logf("batched %d messages into %d Write calls (sizes=%v)", N, writes, ccA.Sizes())
 }
 
@@ -231,27 +220,18 @@ func TestWriter_InteractiveSingleMessage(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	ccA.resetWriteCounters()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+	ctx := testCtx(t, time.Second)
 
 	start := time.Now()
-	if err := sA.Pipe().Send(ctx, msg.FromBytes([]byte("solo"))); err != nil {
-		t.Fatalf("Send: %v", err)
-	}
+	require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("solo"))), "Send")
 	got, err := sB.Pipe().Recv(ctx)
-	if err != nil {
-		t.Fatalf("Recv: %v", err)
-	}
+	require.NoError(t, err, "Recv")
 	elapsed := time.Since(start)
 
-	if string(got.Bytes()) != "solo" {
-		t.Errorf("got %q, want %q", got.Bytes(), "solo")
-	}
+	assert.Equal(t, "solo", string(got.Bytes()))
 	// Interactivity: no coalescing wait. On a loopback fakeConn this
 	// round-trip should be well under 100ms even on a loaded CI.
-	if elapsed > 200*time.Millisecond {
-		t.Errorf("solo round-trip took %v; expected <200ms (no coalescing delay)", elapsed)
-	}
+	assert.LessOrEqual(t, elapsed, 200*time.Millisecond, "solo round-trip expected <200ms (no coalescing delay)")
 }
 
 // --------------------------------------------------------------------------
@@ -265,8 +245,7 @@ func TestWriter_OrderPreservation(t *testing.T) {
 	defer func() { _ = sA.Stop(); _ = sB.Stop() }()
 
 	const N = 20
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t, 2*time.Second)
 
 	// Producer
 	go func() {
@@ -281,13 +260,9 @@ func TestWriter_OrderPreservation(t *testing.T) {
 	// Consumer — must see the exact send order.
 	for i := 0; i < N; i++ {
 		m, err := sB.Pipe().Recv(ctx)
-		if err != nil {
-			t.Fatalf("Recv[%d]: %v", i, err)
-		}
+		require.NoError(t, err, "Recv[%d]", i)
 		want := fmt.Sprintf("seq-%03d", i)
-		if string(m.Bytes()) != want {
-			t.Fatalf("got[%d]=%q, want %q (ORDER VIOLATION)", i, m.Bytes(), want)
-		}
+		require.Equal(t, want, string(m.Bytes()), "got[%d] (ORDER VIOLATION)", i)
 	}
 }
 
@@ -351,27 +326,21 @@ func TestWriter_Backpressure(t *testing.T) {
 	// total number of messages we can push before Send blocks is
 	// bounded by (writer-batched) + HWM ≤ HWM + HWM = 2*HWM. Any push
 	// beyond that MUST block — demonstrating backpressure.
-	pushCtx, pushCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer pushCancel()
+	pushCtx := testCtx(t, 200*time.Millisecond)
 
 	var pushed int
 	for i := 0; i < 4*HWM; i++ {
 		err := sA.Pipe().Send(pushCtx, msg.FromBytes([]byte(fmt.Sprintf("bp-%d", i))))
 		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) {
-				break // expected — the pipe is full, Send blocks
-			}
-			t.Fatalf("Send[%d]: unexpected err %v", i, err)
+			require.ErrorIs(t, err, context.DeadlineExceeded, "Send[%d]: unexpected err", i)
+			break // expected — the pipe is full, Send blocks
 		}
 		pushed++
 	}
-	if pushed == 0 {
-		t.Fatal("no messages pushed; test setup failure")
-	}
+	require.Greater(t, pushed, 0, "no messages pushed; test setup failure")
 	// Backpressure: we must have blocked BEFORE pushing all 4*HWM.
-	if pushed >= 4*HWM {
-		t.Fatalf("pushed %d messages without blocking; backpressure broken (expected block after ≤%d)", pushed, 2*HWM)
-	}
+	require.Less(t, pushed, 4*HWM,
+		"pushed %d messages without blocking; backpressure broken (expected block after ≤%d)", pushed, 2*HWM)
 	t.Logf("backpressure kicked in after %d pushes (HWM=%d, batch cap=%d)", pushed, HWM, maxBatchMessages)
 }
 
@@ -394,19 +363,15 @@ func TestWriter_BatchCap(t *testing.T) {
 	// Enqueue exactly 2.5× maxBatchMessages so we're guaranteed to
 	// exceed the cap in at least one batch boundary.
 	N := maxBatchMessages*5/2 + 1
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	ctx := testCtx(t, 5*time.Second)
 	for i := 0; i < N; i++ {
-		if err := sA.Pipe().Send(ctx, msg.FromBytes([]byte(fmt.Sprintf("c-%d", i)))); err != nil {
-			t.Fatalf("Send[%d]: %v", i, err)
-		}
+		require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte(fmt.Sprintf("c-%d", i)))), "Send[%d]", i)
 	}
 
 	// Drain on B.
 	for i := 0; i < N; i++ {
-		if _, err := sB.Pipe().Recv(ctx); err != nil {
-			t.Fatalf("Recv[%d]: %v", i, err)
-		}
+		_, err := sB.Pipe().Recv(ctx)
+		require.NoError(t, err, "Recv[%d]", i)
 	}
 
 	// Each Write call is one batch's worth of bytes. Verify no single
@@ -416,13 +381,9 @@ func TestWriter_BatchCap(t *testing.T) {
 	// next message, so a message can push over by exactly its own
 	// size, bounded by whatever the message payload was — here <100 B).
 	sizes := ccA.Sizes()
-	if len(sizes) < 2 {
-		t.Errorf("expected ≥2 Write calls (multiple batches); got %d", len(sizes))
-	}
+	assert.GreaterOrEqual(t, len(sizes), 2, "expected ≥2 Write calls (multiple batches)")
 	for i, sz := range sizes {
-		if sz > maxBatchBytes+4096 {
-			t.Errorf("batch %d size=%d exceeds maxBatchBytes=%d by more than slack", i, sz, maxBatchBytes)
-		}
+		assert.LessOrEqual(t, sz, maxBatchBytes+4096, "batch %d size=%d exceeds maxBatchBytes=%d by more than slack", i, sz, maxBatchBytes)
 	}
 	t.Logf("N=%d messages emitted in %d batches, sizes=%v", N, len(sizes), sizes)
 }
@@ -444,53 +405,40 @@ func TestWriter_BatchLingerDrain(t *testing.T) {
 	// Enqueue messages WITHOUT having B drain: the writer runs normally
 	// and sends them. We want them on the wire before the CancelWriter.
 	const N = 10
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t, 2*time.Second)
 	for i := 0; i < N; i++ {
-		if err := sA.Pipe().Send(ctx, msg.FromBytes([]byte(fmt.Sprintf("d-%d", i)))); err != nil {
-			t.Fatalf("Send[%d]: %v", i, err)
-		}
+		require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte(fmt.Sprintf("d-%d", i)))), "Send[%d]", i)
 	}
 
 	// B drains to verify order + delivery.
 	for i := 0; i < N; i++ {
 		m, err := sB.Pipe().Recv(ctx)
-		if err != nil {
-			t.Fatalf("Recv[%d]: %v", i, err)
-		}
+		require.NoError(t, err, "Recv[%d]", i)
 		want := fmt.Sprintf("d-%d", i)
-		if string(m.Bytes()) != want {
-			t.Errorf("got[%d]=%q, want %q", i, m.Bytes(), want)
-		}
+		assert.Equal(t, want, string(m.Bytes()), "got[%d]", i)
 	}
 
 	// Now exercise the CancelWriter linger-drain path: push a few more
 	// messages, trigger CancelWriter; drain path should flush them.
 	if cw, ok := sA.(interface{ CancelWriter() }); ok {
 		for i := 0; i < 3; i++ {
-			if err := sA.Pipe().Send(ctx, msg.FromBytes([]byte(fmt.Sprintf("linger-%d", i)))); err != nil {
-				t.Fatalf("linger Send[%d]: %v", i, err)
-			}
+			require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte(fmt.Sprintf("linger-%d", i)))), "linger Send[%d]", i)
 		}
 		cw.CancelWriter()
 		// Expect WriterFlushed to fire after drain completes.
 		select {
 		case <-sA.WriterFlushed():
 		case <-time.After(2 * time.Second):
-			t.Fatal("WriterFlushed did not close after CancelWriter")
+			require.FailNow(t, "WriterFlushed did not close after CancelWriter")
 		}
 		// The linger messages should have been delivered to B.
 		for i := 0; i < 3; i++ {
 			recvCtx, rc := context.WithTimeout(context.Background(), time.Second)
 			m, err := sB.Pipe().Recv(recvCtx)
 			rc()
-			if err != nil {
-				t.Errorf("linger Recv[%d]: %v", i, err)
-				continue
-			}
-			want := fmt.Sprintf("linger-%d", i)
-			if string(m.Bytes()) != want {
-				t.Errorf("linger got[%d]=%q, want %q", i, m.Bytes(), want)
+			if assert.NoError(t, err, "linger Recv[%d]", i) {
+				want := fmt.Sprintf("linger-%d", i)
+				assert.Equal(t, want, string(m.Bytes()), "linger got[%d]", i)
 			}
 		}
 	}
@@ -506,22 +454,13 @@ func TestWriter_EmptyMessageStillEmitted(t *testing.T) {
 	sA, sB, _ := newWriterTestPair(t, 4, 4)
 	defer func() { _ = sA.Stop(); _ = sB.Stop() }()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+	ctx := testCtx(t, time.Second)
 
-	if err := sA.Pipe().Send(ctx, msg.New()); err != nil {
-		t.Fatalf("Send(empty): %v", err)
-	}
+	require.NoError(t, sA.Pipe().Send(ctx, msg.New()), "Send(empty)")
 	got, err := sB.Pipe().Recv(ctx)
-	if err != nil {
-		t.Fatalf("Recv: %v", err)
-	}
-	if got.NumFrames() != 1 {
-		t.Fatalf("empty msg surfaced as %d frames; want 1 zero-length frame", got.NumFrames())
-	}
-	if len(got.Frames()[0]) != 0 {
-		t.Fatalf("frame not zero-length: %q", got.Frames()[0])
-	}
+	require.NoError(t, err, "Recv")
+	require.Equal(t, 1, got.NumFrames(), "empty msg surfaced as wrong number of frames; want 1 zero-length frame")
+	require.Empty(t, got.Frames()[0], "frame not zero-length")
 }
 
 // --------------------------------------------------------------------------
@@ -533,8 +472,7 @@ func TestWriter_MultipartBatched(t *testing.T) {
 	sA, sB, _ := newWriterTestPair(t, 16, 16)
 	defer func() { _ = sA.Stop(); _ = sB.Stop() }()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t, 2*time.Second)
 
 	// Send 4 multipart messages; each has 3 frames.
 	for i := 0; i < 4; i++ {
@@ -543,28 +481,20 @@ func TestWriter_MultipartBatched(t *testing.T) {
 			[]byte(fmt.Sprintf("mid-%d", i)),
 			[]byte(fmt.Sprintf("tail-%d", i)),
 		)
-		if err := sA.Pipe().Send(ctx, m); err != nil {
-			t.Fatalf("Send[%d]: %v", i, err)
-		}
+		require.NoError(t, sA.Pipe().Send(ctx, m), "Send[%d]", i)
 	}
 
 	for i := 0; i < 4; i++ {
 		m, err := sB.Pipe().Recv(ctx)
-		if err != nil {
-			t.Fatalf("Recv[%d]: %v", i, err)
-		}
-		if m.NumFrames() != 3 {
-			t.Fatalf("msg[%d] frames=%d, want 3", i, m.NumFrames())
-		}
+		require.NoError(t, err, "Recv[%d]", i)
+		require.Equal(t, 3, m.NumFrames(), "msg[%d] frames", i)
 		want := []string{
 			fmt.Sprintf("hdr-%d", i),
 			fmt.Sprintf("mid-%d", i),
 			fmt.Sprintf("tail-%d", i),
 		}
 		for j, f := range m.Frames() {
-			if string(f) != want[j] {
-				t.Errorf("msg[%d].frame[%d]=%q, want %q", i, j, f, want[j])
-			}
+			assert.Equal(t, want[j], string(f), "msg[%d].frame[%d]", i, j)
 		}
 	}
 }

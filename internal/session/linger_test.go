@@ -2,9 +2,11 @@ package session
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/pipe"
@@ -43,12 +45,8 @@ func TestDrainOutbound_LingerZeroReturnsImmediately(t *testing.T) {
 	defer closeAll(session...)
 
 	start := time.Now()
-	if err := DrainOutbound(context.Background(), engine, 0); err != nil {
-		t.Fatalf("DrainOutbound(linger=0) = %v", err)
-	}
-	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
-		t.Errorf("linger=0 took %v; expected near-zero", elapsed)
-	}
+	require.NoError(t, DrainOutbound(context.Background(), engine, 0), "DrainOutbound(linger=0)")
+	assert.LessOrEqual(t, time.Since(start), 50*time.Millisecond, "linger=0 expected near-zero")
 }
 
 // TestDrainOutbound_LingerBoundedReturnsOnTimeout: a pipe that never
@@ -63,18 +61,12 @@ func TestDrainOutbound_LingerBoundedReturnsOnTimeout(t *testing.T) {
 	start := time.Now()
 	err := DrainOutbound(context.Background(), engine, linger)
 	elapsed := time.Since(start)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err = %v, want DeadlineExceeded", err)
-	}
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 	// We should have waited approximately `linger`. Allow schedule slack
 	// on the upper bound but the lower bound is tight — a premature
 	// return would be a real bug.
-	if elapsed < 60*time.Millisecond {
-		t.Errorf("returned after %v; expected ≥%v", elapsed, linger-20*time.Millisecond)
-	}
-	if elapsed > 400*time.Millisecond {
-		t.Errorf("returned after %v; expected ≤400ms", elapsed)
-	}
+	assert.GreaterOrEqual(t, elapsed, 60*time.Millisecond, "returned too early; expected ≥%v", linger-20*time.Millisecond)
+	assert.LessOrEqual(t, elapsed, 400*time.Millisecond, "returned too late; expected ≤400ms")
 }
 
 // TestDrainOutbound_DrainCompletesBeforeLinger: if the pipe closes
@@ -95,16 +87,10 @@ func TestDrainOutbound_DrainCompletesBeforeLinger(t *testing.T) {
 
 	linger := time.Second
 	start := time.Now()
-	if err := DrainOutbound(context.Background(), engine, linger); err != nil {
-		t.Fatalf("DrainOutbound = %v", err)
-	}
+	require.NoError(t, DrainOutbound(context.Background(), engine, linger))
 	elapsed := time.Since(start)
-	if elapsed < 20*time.Millisecond {
-		t.Errorf("returned in %v; expected ≥20ms (drain delay)", elapsed)
-	}
-	if elapsed > 500*time.Millisecond {
-		t.Errorf("returned in %v; expected <500ms (drain should have completed)", elapsed)
-	}
+	assert.GreaterOrEqual(t, elapsed, 20*time.Millisecond, "returned too early; expected ≥20ms (drain delay)")
+	assert.LessOrEqual(t, elapsed, 500*time.Millisecond, "returned too late; expected <500ms (drain should have completed)")
 }
 
 // TestDrainOutbound_NegativeLingerWaitsForCtx: linger<0 means wait
@@ -114,21 +100,14 @@ func TestDrainOutbound_NegativeLingerWaitsForCtx(t *testing.T) {
 	defer closeAll(engine...)
 	defer closeAll(session...)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
-	defer cancel()
+	ctx := testCtx(t, 60*time.Millisecond)
 
 	start := time.Now()
 	err := DrainOutbound(ctx, engine, -1)
 	elapsed := time.Since(start)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err = %v, want DeadlineExceeded from ctx", err)
-	}
-	if elapsed < 40*time.Millisecond {
-		t.Errorf("returned after %v; expected ≥40ms", elapsed)
-	}
-	if elapsed > 500*time.Millisecond {
-		t.Errorf("returned after %v; expected <500ms", elapsed)
-	}
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.GreaterOrEqual(t, elapsed, 40*time.Millisecond, "returned too early; expected ≥40ms")
+	assert.LessOrEqual(t, elapsed, 500*time.Millisecond, "returned too late; expected <500ms")
 }
 
 // TestDrainOutbound_NegativeLingerCompletesWhenPipeCloses: the
@@ -146,22 +125,14 @@ func TestDrainOutbound_NegativeLingerCompletesWhenPipeCloses(t *testing.T) {
 	start := time.Now()
 	err := DrainOutbound(context.Background(), engine, -1)
 	elapsed := time.Since(start)
-	if err != nil {
-		t.Fatalf("DrainOutbound = %v; want nil", err)
-	}
-	if elapsed > 300*time.Millisecond {
-		t.Errorf("returned after %v; expected <300ms", elapsed)
-	}
+	require.NoError(t, err, "DrainOutbound")
+	assert.LessOrEqual(t, elapsed, 300*time.Millisecond, "returned too late; expected <300ms")
 }
 
 // TestDrainOutbound_EmptyPipes: no pipes means nothing to drain.
 func TestDrainOutbound_EmptyPipes(t *testing.T) {
-	if err := DrainOutbound(context.Background(), nil, time.Second); err != nil {
-		t.Errorf("DrainOutbound(nil) = %v, want nil", err)
-	}
-	if err := DrainOutbound(context.Background(), []iface.Pipe{}, -1); err != nil {
-		t.Errorf("DrainOutbound([]) = %v, want nil", err)
-	}
+	assert.NoError(t, DrainOutbound(context.Background(), nil, time.Second), "DrainOutbound(nil)")
+	assert.NoError(t, DrainOutbound(context.Background(), []iface.Pipe{}, -1), "DrainOutbound([])")
 }
 
 // TestDrainOutbound_MultiplePipesAllMustDrain: return-nil requires
@@ -182,12 +153,8 @@ func TestDrainOutbound_MultiplePipesAllMustDrain(t *testing.T) {
 	start := time.Now()
 	err := DrainOutbound(context.Background(), engine, linger)
 	elapsed := time.Since(start)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err = %v, want DeadlineExceeded (one pipe did not drain)", err)
-	}
-	if elapsed < 60*time.Millisecond {
-		t.Errorf("returned after %v; expected ≥%v", elapsed, linger-20*time.Millisecond)
-	}
+	require.ErrorIs(t, err, context.DeadlineExceeded, "one pipe did not drain")
+	assert.GreaterOrEqual(t, elapsed, 60*time.Millisecond, "returned too early; expected ≥%v", linger-20*time.Millisecond)
 }
 
 // TestDrainOutbound_NilPipeInSliceIsSkipped: robustness against a
@@ -205,7 +172,5 @@ func TestDrainOutbound_NilPipeInSliceIsSkipped(t *testing.T) {
 		_ = engine[0].Close()
 	}()
 
-	if err := DrainOutbound(context.Background(), pipes, time.Second); err != nil {
-		t.Errorf("DrainOutbound with nil entry = %v, want nil", err)
-	}
+	assert.NoError(t, DrainOutbound(context.Background(), pipes, time.Second), "DrainOutbound with nil entry")
 }

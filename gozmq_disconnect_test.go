@@ -39,7 +39,7 @@ func TestSocketDisconnect_StopsReconnectAndDetachesPeer(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 
-	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	callCtx, cancel := testCtx(t)
 	defer cancel()
 	if err := cli.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("hello"))); err != nil {
 		t.Fatalf("send: %v", err)

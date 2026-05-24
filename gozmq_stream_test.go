@@ -2,11 +2,9 @@ package gozmq_test
 
 import (
 	"bytes"
-	"context"
 	"io"
 	"net"
 	"testing"
-	"time"
 
 	"github.com/rkm/gozmq"
 )
@@ -40,7 +38,7 @@ func TestSocketStream_TCP_HTTPEcho(t *testing.T) {
 	}
 	defer cli.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := testCtx(t)
 	defer cancel()
 
 	const request = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
@@ -133,7 +131,7 @@ func TestSocketStream_TCP_Connect(t *testing.T) {
 	}
 	defer a.c.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := testCtx(t)
 	defer cancel()
 
 	// Send via gozmq; read raw on the other side.

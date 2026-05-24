@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/rkm/gozmq/internal/iface"
 )
 
@@ -35,13 +38,10 @@ func fixedKeyPair(t *testing.T, seed uint64) (Key, Key) {
 	t.Helper()
 	var sec Key
 	r := newDeterministicReader(seed)
-	if _, err := io.ReadFull(r, sec[:]); err != nil {
-		t.Fatalf("read secret: %v", err)
-	}
+	_, err := io.ReadFull(r, sec[:])
+	require.NoError(t, err, "read secret")
 	pub, err := derivePublic(sec)
-	if err != nil {
-		t.Fatalf("derivePublic: %v", err)
-	}
+	require.NoError(t, err, "derivePublic")
 	return pub, sec
 }
 
@@ -61,103 +61,62 @@ func TestCurveHandshakeDeterministic(t *testing.T) {
 		cRand := newDeterministicReader(rngSeed)
 		sRand := newDeterministicReader(rngSeed ^ 0xDEADBEEF)
 		client, err := newMech(iface.RoleClient, clientSec, clientPub, serverPub, nil, cRand)
-		if err != nil {
-			t.Fatalf("newMech client: %v", err)
-		}
+		require.NoError(t, err, "newMech client")
 		server, err := newMech(iface.RoleServer, serverSec, Key{}, Key{}, nil, sRand)
-		if err != nil {
-			t.Fatalf("newMech server: %v", err)
-		}
+		require.NoError(t, err, "newMech server")
 		var done bool
 		hello, done, err = client.NextHandshake(nil)
-		if err != nil || done {
-			t.Fatalf("HELLO: err=%v done=%v", err, done)
-		}
-		if _, _, err := server.NextHandshake(nil); err != nil {
-			t.Fatalf("server seed: %v", err)
-		}
+		require.NoError(t, err, "HELLO")
+		require.False(t, done, "HELLO: done=true")
+		_, _, err = server.NextHandshake(nil)
+		require.NoError(t, err, "server seed")
 		welcome, done, err = server.NextHandshake(hello)
-		if err != nil || done {
-			t.Fatalf("WELCOME: err=%v done=%v", err, done)
-		}
+		require.NoError(t, err, "WELCOME")
+		require.False(t, done, "WELCOME: done=true")
 		initiate, done, err = client.NextHandshake(welcome)
-		if err != nil || done {
-			t.Fatalf("INITIATE: err=%v done=%v", err, done)
-		}
+		require.NoError(t, err, "INITIATE")
+		require.False(t, done, "INITIATE: done=true")
 		ready, done, err = server.NextHandshake(initiate)
-		if err != nil || !done {
-			t.Fatalf("READY: err=%v done=%v", err, done)
-		}
-		if _, done, err := client.NextHandshake(ready); err != nil || !done {
-			t.Fatalf("READY ingest: err=%v done=%v", err, done)
-		}
+		require.NoError(t, err, "READY")
+		require.True(t, done, "READY: done=false")
+		_, done, err = client.NextHandshake(ready)
+		require.NoError(t, err, "READY ingest")
+		require.True(t, done, "READY ingest: done=false")
 		// Traffic phase: one fixed frame per direction. Short-nonce
 		// counters are monotonic across the whole session (RFC 26 §3),
 		// so the first client MESSAGE carries counter=3 (after HELLO=1
 		// and INITIATE=2) and the first server MESSAGE carries
 		// counter=2 (after READY=1; WELCOME uses a long nonce).
 		_, msgCS, err = client.EncodeFrame(0, []byte("ping"))
-		if err != nil {
-			t.Fatalf("client MESSAGE: %v", err)
-		}
+		require.NoError(t, err, "client MESSAGE")
 		_, msgSC, err = server.EncodeFrame(0, []byte("pong"))
-		if err != nil {
-			t.Fatalf("server MESSAGE: %v", err)
-		}
+		require.NoError(t, err, "server MESSAGE")
 		return hello, welcome, initiate, ready, msgCS, msgSC
 	}
 
 	h1, w1, i1, r1, mcs1, msc1 := run(0xF00D1234CAFE5678)
 	h2, w2, i2, r2, mcs2, msc2 := run(0xF00D1234CAFE5678)
 
-	if !bytes.Equal(h1, h2) {
-		t.Fatalf("HELLO not deterministic:\n  run1=%x\n  run2=%x", h1, h2)
-	}
-	if !bytes.Equal(w1, w2) {
-		t.Fatalf("WELCOME not deterministic:\n  run1=%x\n  run2=%x", w1, w2)
-	}
-	if !bytes.Equal(i1, i2) {
-		t.Fatalf("INITIATE not deterministic:\n  run1=%x\n  run2=%x", i1, i2)
-	}
-	if !bytes.Equal(r1, r2) {
-		t.Fatalf("READY not deterministic:\n  run1=%x\n  run2=%x", r1, r2)
-	}
-	if !bytes.Equal(mcs1, mcs2) {
-		t.Fatalf("MESSAGE client->server not deterministic:\n  run1=%x\n  run2=%x", mcs1, mcs2)
-	}
-	if !bytes.Equal(msc1, msc2) {
-		t.Fatalf("MESSAGE server->client not deterministic:\n  run1=%x\n  run2=%x", msc1, msc2)
-	}
+	require.Equal(t, h1, h2, "HELLO not deterministic")
+	require.Equal(t, w1, w2, "WELCOME not deterministic")
+	require.Equal(t, i1, i2, "INITIATE not deterministic")
+	require.Equal(t, r1, r2, "READY not deterministic")
+	require.Equal(t, mcs1, mcs2, "MESSAGE client->server not deterministic")
+	require.Equal(t, msc1, msc2, "MESSAGE server->client not deterministic")
 
 	// Surface sanity checks on the recorded shapes. These catch layout
 	// regressions (e.g. an off-by-one in the padding) without requiring
 	// us to pin the exact byte string, which depends on the RNG and on
 	// the nacl/box version.
-	if len(h1) != helloBodySize {
-		t.Errorf("HELLO size %d != %d", len(h1), helloBodySize)
-	}
-	if string(h1[1:6]) != "HELLO" {
-		t.Errorf("HELLO name: %q", h1[1:6])
-	}
-	if len(w1) != welcomeBodySize {
-		t.Errorf("WELCOME size %d != %d", len(w1), welcomeBodySize)
-	}
-	if string(w1[1:8]) != "WELCOME" {
-		t.Errorf("WELCOME name: %q", w1[1:8])
-	}
+	assert.Len(t, h1, helloBodySize, "HELLO size")
+	assert.Equal(t, "HELLO", string(h1[1:6]), "HELLO name")
+	assert.Len(t, w1, welcomeBodySize, "WELCOME size")
+	assert.Equal(t, "WELCOME", string(w1[1:8]), "WELCOME name")
 	// INITIATE has variable metadata but a fixed header.
-	if string(i1[1:9]) != "INITIATE" {
-		t.Errorf("INITIATE name: %q", i1[1:9])
-	}
-	if len(i1) < 1+len("INITIATE")+cookieSize+8 {
-		t.Errorf("INITIATE truncated: %d", len(i1))
-	}
-	if string(r1[1:6]) != "READY" {
-		t.Errorf("READY name: %q", r1[1:6])
-	}
-	if string(mcs1[1:8]) != "MESSAGE" {
-		t.Errorf("MESSAGE name: %q", mcs1[1:8])
-	}
+	assert.Equal(t, "INITIATE", string(i1[1:9]), "INITIATE name")
+	assert.GreaterOrEqual(t, len(i1), 1+len("INITIATE")+cookieSize+8, "INITIATE truncated")
+	assert.Equal(t, "READY", string(r1[1:6]), "READY name")
+	assert.Equal(t, "MESSAGE", string(mcs1[1:8]), "MESSAGE name")
 }
 
 // TestCurveHandshakeGoldenBytes compares the deterministic handshake to a
@@ -186,43 +145,25 @@ func TestCurveHandshakeGoldenBytes(t *testing.T) {
 	sRand := newDeterministicReader(0xFEDCBA9876543210)
 
 	client, err := newMech(iface.RoleClient, clientSec, clientPub, serverPub, nil, cRand)
-	if err != nil {
-		t.Fatalf("client: %v", err)
-	}
+	require.NoError(t, err, "client")
 	server, err := newMech(iface.RoleServer, serverSec, Key{}, Key{}, nil, sRand)
-	if err != nil {
-		t.Fatalf("server: %v", err)
-	}
+	require.NoError(t, err, "server")
 	hello, _, err := client.NextHandshake(nil)
-	if err != nil {
-		t.Fatalf("HELLO: %v", err)
-	}
-	if _, _, err := server.NextHandshake(nil); err != nil {
-		t.Fatalf("server seed: %v", err)
-	}
+	require.NoError(t, err, "HELLO")
+	_, _, err = server.NextHandshake(nil)
+	require.NoError(t, err, "server seed")
 	welcome, _, err := server.NextHandshake(hello)
-	if err != nil {
-		t.Fatalf("WELCOME: %v", err)
-	}
+	require.NoError(t, err, "WELCOME")
 	initiate, _, err := client.NextHandshake(welcome)
-	if err != nil {
-		t.Fatalf("INITIATE: %v", err)
-	}
+	require.NoError(t, err, "INITIATE")
 	ready, _, err := server.NextHandshake(initiate)
-	if err != nil {
-		t.Fatalf("READY: %v", err)
-	}
-	if _, _, err := client.NextHandshake(ready); err != nil {
-		t.Fatalf("READY ingest: %v", err)
-	}
+	require.NoError(t, err, "READY")
+	_, _, err = client.NextHandshake(ready)
+	require.NoError(t, err, "READY ingest")
 	_, msgCS, err := client.EncodeFrame(0, []byte("ping"))
-	if err != nil {
-		t.Fatalf("MESSAGE-CS: %v", err)
-	}
+	require.NoError(t, err, "MESSAGE-CS")
 	_, msgSC, err := server.EncodeFrame(0, []byte("pong"))
-	if err != nil {
-		t.Fatalf("MESSAGE-SC: %v", err)
-	}
+	require.NoError(t, err, "MESSAGE-SC")
 
 	goldenPath := filepath.Join("testdata", "handshake_golden.hex")
 
@@ -241,12 +182,8 @@ func TestCurveHandshakeGoldenBytes(t *testing.T) {
 	writeHex("MESSAGE-SC", msgSC)
 
 	if os.Getenv("GOZMQ_CURVE_REGEN") == "1" {
-		if err := os.MkdirAll(filepath.Dir(goldenPath), 0o755); err != nil {
-			t.Fatalf("mkdir: %v", err)
-		}
-		if err := os.WriteFile(goldenPath, built.Bytes(), 0o644); err != nil {
-			t.Fatalf("write golden: %v", err)
-		}
+		require.NoError(t, os.MkdirAll(filepath.Dir(goldenPath), 0o755), "mkdir")
+		require.NoError(t, os.WriteFile(goldenPath, built.Bytes(), 0o644), "write golden")
 		t.Logf("regenerated %s", goldenPath)
 		return
 	}
@@ -257,11 +194,10 @@ func TestCurveHandshakeGoldenBytes(t *testing.T) {
 			t.Skipf("no golden fixture at %s; run with GOZMQ_CURVE_REGEN=1 to generate", goldenPath)
 			return
 		}
-		t.Fatalf("read golden: %v", err)
+		require.NoError(t, err, "read golden")
 	}
 
-	if !bytes.Equal(bytes.TrimRight(want, "\n"), bytes.TrimRight(built.Bytes(), "\n")) {
-		t.Errorf("golden mismatch:\n--- want\n%s--- got\n%s", want, built.Bytes())
+	if !assert.Equal(t, bytes.TrimRight(want, "\n"), bytes.TrimRight(built.Bytes(), "\n"), "golden mismatch") {
 		t.Logf("To regenerate after an intentional codec change:\n  GOZMQ_CURVE_REGEN=1 go test -run TestCurveHandshakeGoldenBytes ./security/curve/...")
 	}
 }
@@ -277,64 +213,36 @@ func TestCurveHandshakeRFC26ShapeBytes(t *testing.T) {
 	clientPub, clientSec := fixedKeyPair(t, 0xB0B0000000000002)
 
 	client, err := newMech(iface.RoleClient, clientSec, clientPub, serverPub, nil, newDeterministicReader(1))
-	if err != nil {
-		t.Fatalf("client: %v", err)
-	}
+	require.NoError(t, err, "client")
 	server, err := newMech(iface.RoleServer, serverSec, Key{}, Key{}, nil, newDeterministicReader(2))
-	if err != nil {
-		t.Fatalf("server: %v", err)
-	}
+	require.NoError(t, err, "server")
 	hello, _, err := client.NextHandshake(nil)
-	if err != nil {
-		t.Fatalf("HELLO: %v", err)
-	}
+	require.NoError(t, err, "HELLO")
 	// HELLO prefix: [5]"HELLO" + 0x01 0x00 + 72 zero bytes.
 	wantPrefix := append([]byte{0x05}, []byte("HELLO")...)
 	wantPrefix = append(wantPrefix, 0x01, 0x00)
 	wantPrefix = append(wantPrefix, make([]byte, 72)...)
-	if !bytes.HasPrefix(hello, wantPrefix) {
-		t.Errorf("HELLO prefix mismatch\n got: %s\nwant: %s",
-			hex.EncodeToString(hello[:len(wantPrefix)]),
-			hex.EncodeToString(wantPrefix))
-	}
+	assert.Equal(t, wantPrefix, hello[:len(wantPrefix)], "HELLO prefix mismatch")
 
-	if _, _, err := server.NextHandshake(nil); err != nil {
-		t.Fatalf("server seed: %v", err)
-	}
+	_, _, err = server.NextHandshake(nil)
+	require.NoError(t, err, "server seed")
 	welcome, _, err := server.NextHandshake(hello)
-	if err != nil {
-		t.Fatalf("WELCOME: %v", err)
-	}
+	require.NoError(t, err, "WELCOME")
 	// WELCOME prefix: [7]"WELCOME".
-	if !bytes.HasPrefix(welcome, append([]byte{0x07}, []byte("WELCOME")...)) {
-		t.Errorf("WELCOME prefix: %s", hex.EncodeToString(welcome[:8]))
-	}
+	assert.Equal(t, append([]byte{0x07}, []byte("WELCOME")...), welcome[:8], "WELCOME prefix")
 
 	initiate, _, err := client.NextHandshake(welcome)
-	if err != nil {
-		t.Fatalf("INITIATE: %v", err)
-	}
-	if !bytes.HasPrefix(initiate, append([]byte{0x08}, []byte("INITIATE")...)) {
-		t.Errorf("INITIATE prefix: %s", hex.EncodeToString(initiate[:9]))
-	}
+	require.NoError(t, err, "INITIATE")
+	assert.Equal(t, append([]byte{0x08}, []byte("INITIATE")...), initiate[:9], "INITIATE prefix")
 
 	ready, _, err := server.NextHandshake(initiate)
-	if err != nil {
-		t.Fatalf("READY: %v", err)
-	}
-	if !bytes.HasPrefix(ready, append([]byte{0x05}, []byte("READY")...)) {
-		t.Errorf("READY prefix: %s", hex.EncodeToString(ready[:6]))
-	}
-	if _, _, err := client.NextHandshake(ready); err != nil {
-		t.Fatalf("READY ingest: %v", err)
-	}
+	require.NoError(t, err, "READY")
+	assert.Equal(t, append([]byte{0x05}, []byte("READY")...), ready[:6], "READY prefix")
+	_, _, err = client.NextHandshake(ready)
+	require.NoError(t, err, "READY ingest")
 
 	// MESSAGE prefix: [7]"MESSAGE".
 	_, msg, err := client.EncodeFrame(0, []byte{})
-	if err != nil {
-		t.Fatalf("MESSAGE: %v", err)
-	}
-	if !bytes.HasPrefix(msg, append([]byte{0x07}, []byte("MESSAGE")...)) {
-		t.Errorf("MESSAGE prefix: %s", hex.EncodeToString(msg[:8]))
-	}
+	require.NoError(t, err, "MESSAGE")
+	assert.Equal(t, append([]byte{0x07}, []byte("MESSAGE")...), msg[:8], "MESSAGE prefix")
 }

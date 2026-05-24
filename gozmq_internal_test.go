@@ -2,11 +2,11 @@ package gozmq
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
 	"github.com/rkm/gozmq/internal/iface"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
 
@@ -37,14 +37,12 @@ func TestWaitWritersFlushed_LingerTimeoutDoesNotLeak(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	start := time.Now()
-	if err := waitWritersFlushed(context.Background(), []iface.Session{
+	err := waitWritersFlushed(context.Background(), []iface.Session{
 		waitStubSession{flushed: make(chan struct{})},
-	}, 20*time.Millisecond); err != nil {
-		t.Fatalf("waitWritersFlushed = %v, want nil on linger timeout", err)
-	}
-	if elapsed := time.Since(start); elapsed < 15*time.Millisecond {
-		t.Fatalf("returned after %v, want ~linger wait", elapsed)
-	}
+	}, 20*time.Millisecond)
+	require.NoError(t, err, "waitWritersFlushed on linger timeout")
+	elapsed := time.Since(start)
+	require.GreaterOrEqual(t, elapsed, 15*time.Millisecond, "returned after %v, want ~linger wait", elapsed)
 }
 
 func TestWaitWritersFlushed_CtxCancelDoesNotLeak(t *testing.T) {
@@ -56,7 +54,5 @@ func TestWaitWritersFlushed_CtxCancelDoesNotLeak(t *testing.T) {
 	err := waitWritersFlushed(ctx, []iface.Session{
 		waitStubSession{flushed: make(chan struct{})},
 	}, -1)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("waitWritersFlushed err = %v, want context.DeadlineExceeded", err)
-	}
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 }

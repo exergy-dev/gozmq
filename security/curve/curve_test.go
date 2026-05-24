@@ -2,9 +2,10 @@ package curve
 
 import (
 	"bytes"
-	"errors"
 	"math"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/zmqerr"
@@ -15,9 +16,7 @@ import (
 func genPair(t *testing.T) (Key, Key) {
 	t.Helper()
 	pub, sec, err := GenerateKeyPair()
-	if err != nil {
-		t.Fatalf("GenerateKeyPair: %v", err)
-	}
+	require.NoError(t, err, "GenerateKeyPair")
 	return pub, sec
 }
 
@@ -40,106 +39,58 @@ func TestCurveHandshakeEndToEnd(t *testing.T) {
 	}
 
 	client, err := NewCurveClient(serverPub, clientPub, clientSec, clientMeta)
-	if err != nil {
-		t.Fatalf("NewCurveClient: %v", err)
-	}
+	require.NoError(t, err, "NewCurveClient")
 	server, err := NewCurveServer(serverSec, serverMeta)
-	if err != nil {
-		t.Fatalf("NewCurveServer: %v", err)
-	}
+	require.NoError(t, err, "NewCurveServer")
 
-	if client.AsServer() {
-		t.Fatal("client.AsServer = true")
-	}
-	if !server.AsServer() {
-		t.Fatal("server.AsServer = false")
-	}
-	if client.Name() != "CURVE" || server.Name() != "CURVE" {
-		t.Fatalf("Name: client=%q server=%q", client.Name(), server.Name())
-	}
+	require.False(t, client.AsServer(), "client.AsServer = true")
+	require.True(t, server.AsServer(), "server.AsServer = false")
+	require.Equal(t, "CURVE", client.Name())
+	require.Equal(t, "CURVE", server.Name())
 
 	// Step 1: client seeds -> HELLO.
 	hello, done, err := client.NextHandshake(nil)
-	if err != nil {
-		t.Fatalf("client HELLO: %v", err)
-	}
-	if done {
-		t.Fatal("client HELLO: done=true")
-	}
-	if len(hello) == 0 {
-		t.Fatal("client HELLO: empty")
-	}
+	require.NoError(t, err, "client HELLO")
+	require.False(t, done, "client HELLO: done=true")
+	require.NotEmpty(t, hello, "client HELLO: empty")
 
 	// Server seed is passive; the session layer reads HELLO first.
 	sOut, sDone, err := server.NextHandshake(nil)
-	if err != nil {
-		t.Fatalf("server seed: %v", err)
-	}
-	if sOut != nil || sDone {
-		t.Fatalf("server seed: out=%v done=%v, want nil,false", sOut, sDone)
-	}
+	require.NoError(t, err, "server seed")
+	require.Nil(t, sOut, "server seed: out should be nil")
+	require.False(t, sDone, "server seed: done should be false")
 
 	// Step 2: server ingests HELLO, emits WELCOME.
 	welcome, done, err := server.NextHandshake(hello)
-	if err != nil {
-		t.Fatalf("server WELCOME: %v", err)
-	}
-	if done {
-		t.Fatal("server WELCOME: done=true")
-	}
-	if len(welcome) == 0 {
-		t.Fatal("server WELCOME: empty")
-	}
+	require.NoError(t, err, "server WELCOME")
+	require.False(t, done, "server WELCOME: done=true")
+	require.NotEmpty(t, welcome, "server WELCOME: empty")
 
 	// Step 3: client ingests WELCOME, emits INITIATE.
 	initiate, done, err := client.NextHandshake(welcome)
-	if err != nil {
-		t.Fatalf("client INITIATE: %v", err)
-	}
-	if done {
-		t.Fatal("client INITIATE: done=true")
-	}
-	if len(initiate) == 0 {
-		t.Fatal("client INITIATE: empty")
-	}
+	require.NoError(t, err, "client INITIATE")
+	require.False(t, done, "client INITIATE: done=true")
+	require.NotEmpty(t, initiate, "client INITIATE: empty")
 
 	// Step 4: server ingests INITIATE, emits READY; done on server.
 	ready, done, err := server.NextHandshake(initiate)
-	if err != nil {
-		t.Fatalf("server READY: %v", err)
-	}
-	if !done {
-		t.Fatal("server READY: done=false, want true")
-	}
-	if len(ready) == 0 {
-		t.Fatal("server READY: empty")
-	}
+	require.NoError(t, err, "server READY")
+	require.True(t, done, "server READY: done=false, want true")
+	require.NotEmpty(t, ready, "server READY: empty")
 
 	// Step 5: client ingests READY; done on client.
 	extra, done, err := client.NextHandshake(ready)
-	if err != nil {
-		t.Fatalf("client READY ingest: %v", err)
-	}
-	if !done {
-		t.Fatal("client READY ingest: done=false, want true")
-	}
-	if extra != nil {
-		t.Fatalf("client READY ingest: out=%v, want nil", extra)
-	}
+	require.NoError(t, err, "client READY ingest")
+	require.True(t, done, "client READY ingest: done=false, want true")
+	require.Nil(t, extra, "client READY ingest: out should be nil")
 
 	// Metadata round-tripped in both directions.
 	cImpl := client.(*curveMech)
 	sImpl := server.(*curveMech)
-	if !mapsEqual(cImpl.PeerMetadata(), serverMeta) {
-		t.Fatalf("client peer meta: got %v want %v", cImpl.PeerMetadata(), serverMeta)
-	}
-	if !mapsEqual(sImpl.PeerMetadata(), clientMeta) {
-		t.Fatalf("server peer meta: got %v want %v", sImpl.PeerMetadata(), clientMeta)
-	}
+	require.Equal(t, serverMeta, cImpl.PeerMetadata(), "client peer meta")
+	require.Equal(t, clientMeta, sImpl.PeerMetadata(), "server peer meta")
 	// Server learned the client long-term key during INITIATE.
-	if sImpl.PeerLongTermPublic() != clientPub {
-		t.Fatal("server did not recover client long-term public")
-	}
+	require.Equal(t, clientPub, sImpl.PeerLongTermPublic(), "server did not recover client long-term public")
 
 	// Traffic phase: exchange multiple frames in both directions and
 	// assert round-trip fidelity.
@@ -153,34 +104,18 @@ func TestCurveHandshakeEndToEnd(t *testing.T) {
 	for i, f := range frames {
 		// client -> server
 		wireFlags, wire, err := client.EncodeFrame(0, f)
-		if err != nil {
-			t.Fatalf("client EncodeFrame[%d]: %v", i, err)
-		}
+		require.NoError(t, err, "client EncodeFrame[%d]", i)
 		gotFlags, got, err := server.DecodeFrame(wireFlags, wire)
-		if err != nil {
-			t.Fatalf("server DecodeFrame[%d]: %v", i, err)
-		}
-		if gotFlags != 0 {
-			t.Fatalf("client->server frame %d flags: got %#x, want 0", i, gotFlags)
-		}
-		if !bytes.Equal(got, f) {
-			t.Fatalf("client->server frame %d round-trip: got %x, want %x", i, got, f)
-		}
+		require.NoError(t, err, "server DecodeFrame[%d]", i)
+		require.Equal(t, byte(0), gotFlags, "client->server frame %d flags", i)
+		require.True(t, bytes.Equal(got, f), "client->server frame %d round-trip: got %x, want %x", i, got, f)
 		// server -> client
 		wireFlags2, wire2, err := server.EncodeFrame(0, f)
-		if err != nil {
-			t.Fatalf("server EncodeFrame[%d]: %v", i, err)
-		}
+		require.NoError(t, err, "server EncodeFrame[%d]", i)
 		gotFlags2, got2, err := client.DecodeFrame(wireFlags2, wire2)
-		if err != nil {
-			t.Fatalf("client DecodeFrame[%d]: %v", i, err)
-		}
-		if gotFlags2 != 0 {
-			t.Fatalf("server->client frame %d flags: got %#x, want 0", i, gotFlags2)
-		}
-		if !bytes.Equal(got2, f) {
-			t.Fatalf("server->client frame %d round-trip: got %x, want %x", i, got2, f)
-		}
+		require.NoError(t, err, "client DecodeFrame[%d]", i)
+		require.Equal(t, byte(0), gotFlags2, "server->client frame %d flags", i)
+		require.True(t, bytes.Equal(got2, f), "server->client frame %d round-trip: got %x, want %x", i, got2, f)
 	}
 }
 
@@ -189,22 +124,12 @@ func TestCurveMessageFlagsRoundTrip(t *testing.T) {
 	payload := []byte("multipart")
 
 	wireFlags, wire, err := client.EncodeFrame(iface.FlagMore, payload)
-	if err != nil {
-		t.Fatalf("client EncodeFrame: %v", err)
-	}
-	if wireFlags&iface.FlagMore != 0 {
-		t.Fatalf("wire flags carried outer MORE: %#x", wireFlags)
-	}
+	require.NoError(t, err, "client EncodeFrame")
+	require.Zero(t, wireFlags&iface.FlagMore, "wire flags carried outer MORE: %#x", wireFlags)
 	gotFlags, got, err := server.DecodeFrame(wireFlags, wire)
-	if err != nil {
-		t.Fatalf("server DecodeFrame: %v", err)
-	}
-	if gotFlags&iface.FlagMore == 0 {
-		t.Fatalf("decoded flags missing MORE: %#x", gotFlags)
-	}
-	if !bytes.Equal(got, payload) {
-		t.Fatalf("decoded payload = %q, want %q", got, payload)
-	}
+	require.NoError(t, err, "server DecodeFrame")
+	require.NotZero(t, gotFlags&iface.FlagMore, "decoded flags missing MORE: %#x", gotFlags)
+	require.Equal(t, payload, got, "decoded payload")
 }
 
 // TestCurveMetadataIsolated confirms Metadata returns a copy so external
@@ -213,19 +138,13 @@ func TestCurveMetadataIsolated(t *testing.T) {
 	_, serverSec := genPair(t)
 	local := map[string]string{"Socket-Type": "ROUTER"}
 	m, err := NewCurveServer(serverSec, local)
-	if err != nil {
-		t.Fatalf("NewCurveServer: %v", err)
-	}
+	require.NoError(t, err, "NewCurveServer")
 	local["Socket-Type"] = "PUB" // mutation after construction
 	got := m.Metadata()
-	if got["Socket-Type"] != "ROUTER" {
-		t.Fatalf("Metadata leaked caller mutation: got %q", got["Socket-Type"])
-	}
+	require.Equal(t, "ROUTER", got["Socket-Type"], "Metadata leaked caller mutation")
 	got["Socket-Type"] = "SUB" // mutation of returned map
 	again := m.Metadata()
-	if again["Socket-Type"] != "ROUTER" {
-		t.Fatalf("Metadata leaked return-map mutation: got %q", again["Socket-Type"])
-	}
+	require.Equal(t, "ROUTER", again["Socket-Type"], "Metadata leaked return-map mutation")
 }
 
 // TestCurveEncodeBeforeHandshakeFails ensures EncodeFrame / DecodeFrame
@@ -234,19 +153,11 @@ func TestCurveEncodeBeforeHandshakeFails(t *testing.T) {
 	serverPub, _ := genPair(t)
 	clientPub, clientSec := genPair(t)
 	m, err := NewCurveClient(serverPub, clientPub, clientSec, nil)
-	if err != nil {
-		t.Fatalf("NewCurveClient: %v", err)
-	}
-	if _, _, err := m.EncodeFrame(0, []byte("x")); err == nil {
-		t.Fatal("EncodeFrame before handshake: expected error")
-	} else if !errors.Is(err, zmqerr.ErrFSMViolation) {
-		t.Fatalf("want ErrFSMViolation, got %v", err)
-	}
-	if _, _, err := m.DecodeFrame(0, []byte("x")); err == nil {
-		t.Fatal("DecodeFrame before handshake: expected error")
-	} else if !errors.Is(err, zmqerr.ErrFSMViolation) {
-		t.Fatalf("want ErrFSMViolation, got %v", err)
-	}
+	require.NoError(t, err, "NewCurveClient")
+	_, _, err = m.EncodeFrame(0, []byte("x"))
+	require.ErrorIs(t, err, zmqerr.ErrFSMViolation, "EncodeFrame before handshake")
+	_, _, err = m.DecodeFrame(0, []byte("x"))
+	require.ErrorIs(t, err, zmqerr.ErrFSMViolation, "DecodeFrame before handshake")
 }
 
 // TestCurveHelloRejectsMalformed checks that invalid HELLO bodies surface
@@ -254,21 +165,15 @@ func TestCurveEncodeBeforeHandshakeFails(t *testing.T) {
 func TestCurveHelloRejectsMalformed(t *testing.T) {
 	_, serverSec := genPair(t)
 	server, err := NewCurveServer(serverSec, nil)
-	if err != nil {
-		t.Fatalf("NewCurveServer: %v", err)
-	}
+	require.NoError(t, err, "NewCurveServer")
 	// Drive the server past its passive seed step so the next call
 	// expects a HELLO.
 	_, _, err = server.NextHandshake(nil)
-	if err != nil {
-		t.Fatalf("server seed: %v", err)
-	}
+	require.NoError(t, err, "server seed")
 
 	t.Run("short-body", func(t *testing.T) {
 		_, _, err := server.NextHandshake([]byte{0x05, 'H', 'E', 'L', 'L', 'O'})
-		if err == nil || !errors.Is(err, zmqerr.ErrMalformedFrame) {
-			t.Fatalf("want ErrMalformedFrame, got %v", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 	})
 }
 
@@ -278,87 +183,34 @@ func TestCurveClientSeedRejectsNonNil(t *testing.T) {
 	serverPub, _ := genPair(t)
 	clientPub, clientSec := genPair(t)
 	c, err := NewCurveClient(serverPub, clientPub, clientSec, nil)
-	if err != nil {
-		t.Fatalf("NewCurveClient: %v", err)
-	}
+	require.NoError(t, err, "NewCurveClient")
 	_, _, err = c.NextHandshake([]byte{0x00})
-	if err == nil {
-		t.Fatal("want error on non-nil seed input")
-	}
-	if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-		t.Fatalf("want ErrMalformedFrame, got %v", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrMalformedFrame, "non-nil seed input")
 }
 
 // TestCurveWelcomeTampering flips a byte in WELCOME and asserts the
 // client's box.Open fails with ErrAuthFailed.
 func TestCurveWelcomeTampering(t *testing.T) {
-	serverPub, serverSec := genPair(t)
-	clientPub, clientSec := genPair(t)
-	client, err := NewCurveClient(serverPub, clientPub, clientSec, nil)
-	if err != nil {
-		t.Fatalf("NewCurveClient: %v", err)
-	}
-	server, err := NewCurveServer(serverSec, nil)
-	if err != nil {
-		t.Fatalf("NewCurveServer: %v", err)
-	}
-	hello, _, err := client.NextHandshake(nil)
-	if err != nil {
-		t.Fatalf("HELLO: %v", err)
-	}
-	if _, _, err := server.NextHandshake(nil); err != nil {
-		t.Fatalf("server seed: %v", err)
-	}
-	welcome, _, err := server.NextHandshake(hello)
-	if err != nil {
-		t.Fatalf("WELCOME: %v", err)
-	}
+	client, server := newMechPair(t)
+	welcome := driveToWelcome(t, client, server)
 	// Flip a byte in the encrypted region (skip past command name + nonce
 	// prefix; index 32 sits inside the welcome box).
 	welcome[32] ^= 0xFF
-	if _, _, err := client.NextHandshake(welcome); err == nil {
-		t.Fatal("tampered WELCOME accepted")
-	} else if !errors.Is(err, zmqerr.ErrAuthFailed) {
-		t.Fatalf("want ErrAuthFailed, got %v", err)
-	}
+	_, _, err := client.NextHandshake(welcome)
+	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "tampered WELCOME")
 }
 
 // TestCurveInitiateTampering flips a byte in INITIATE and asserts the
 // server's box.Open fails with ErrAuthFailed.
 func TestCurveInitiateTampering(t *testing.T) {
-	serverPub, serverSec := genPair(t)
-	clientPub, clientSec := genPair(t)
-	client, err := NewCurveClient(serverPub, clientPub, clientSec, nil)
-	if err != nil {
-		t.Fatalf("NewCurveClient: %v", err)
-	}
-	server, err := NewCurveServer(serverSec, nil)
-	if err != nil {
-		t.Fatalf("NewCurveServer: %v", err)
-	}
-	hello, _, err := client.NextHandshake(nil)
-	if err != nil {
-		t.Fatalf("HELLO: %v", err)
-	}
-	if _, _, err := server.NextHandshake(nil); err != nil {
-		t.Fatalf("server seed: %v", err)
-	}
-	welcome, _, err := server.NextHandshake(hello)
-	if err != nil {
-		t.Fatalf("WELCOME: %v", err)
-	}
+	client, server := newMechPair(t)
+	welcome := driveToWelcome(t, client, server)
 	initiate, _, err := client.NextHandshake(welcome)
-	if err != nil {
-		t.Fatalf("INITIATE: %v", err)
-	}
+	require.NoError(t, err, "INITIATE")
 	// Flip a byte well past the fixed header into the initiate box.
 	initiate[len(initiate)-8] ^= 0x01
-	if _, _, err := server.NextHandshake(initiate); err == nil {
-		t.Fatal("tampered INITIATE accepted")
-	} else if !errors.Is(err, zmqerr.ErrAuthFailed) {
-		t.Fatalf("want ErrAuthFailed, got %v", err)
-	}
+	_, _, err = server.NextHandshake(initiate)
+	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "tampered INITIATE")
 }
 
 // TestCurveMessageTampering flips a byte in a MESSAGE payload and asserts
@@ -366,15 +218,10 @@ func TestCurveInitiateTampering(t *testing.T) {
 func TestCurveMessageTampering(t *testing.T) {
 	client, server := runHandshake(t)
 	wireFlags, wire, err := client.EncodeFrame(0, []byte("hello"))
-	if err != nil {
-		t.Fatalf("EncodeFrame: %v", err)
-	}
+	require.NoError(t, err, "EncodeFrame")
 	wire[len(wire)-4] ^= 0x80
-	if _, _, err := server.DecodeFrame(wireFlags, wire); err == nil {
-		t.Fatal("tampered MESSAGE accepted")
-	} else if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-		t.Fatalf("want ErrMalformedFrame, got %v", err)
-	}
+	_, _, err = server.DecodeFrame(wireFlags, wire)
+	require.ErrorIs(t, err, zmqerr.ErrMalformedFrame, "tampered MESSAGE")
 }
 
 // TestCurveMessageReplayRejected captures a valid MESSAGE envelope, lets the
@@ -387,21 +234,15 @@ func TestCurveMessageReplayRejected(t *testing.T) {
 	client, server := runHandshake(t)
 
 	flags, wire, err := client.EncodeFrame(0, []byte("first"))
-	if err != nil {
-		t.Fatalf("EncodeFrame: %v", err)
-	}
+	require.NoError(t, err, "EncodeFrame")
 	// Keep a pristine copy — DecodeFrame does not mutate its input but we
 	// want replay to be byte-identical regardless.
 	replay := append([]byte(nil), wire...)
 
-	if _, _, err := server.DecodeFrame(flags, wire); err != nil {
-		t.Fatalf("first DecodeFrame: %v", err)
-	}
-	if _, _, err := server.DecodeFrame(flags, replay); err == nil {
-		t.Fatal("replayed MESSAGE accepted")
-	} else if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-		t.Fatalf("replay: want ErrMalformedFrame, got %v", err)
-	}
+	_, _, err = server.DecodeFrame(flags, wire)
+	require.NoError(t, err, "first DecodeFrame")
+	_, _, err = server.DecodeFrame(flags, replay)
+	require.ErrorIs(t, err, zmqerr.ErrMalformedFrame, "replayed MESSAGE")
 }
 
 // TestCurveMessageReorderRejected: a counter older than peerShortNonce must
@@ -412,63 +253,58 @@ func TestCurveMessageReorderRejected(t *testing.T) {
 	client, server := runHandshake(t)
 
 	_, firstWire, err := client.EncodeFrame(0, []byte("first"))
-	if err != nil {
-		t.Fatalf("EncodeFrame first: %v", err)
-	}
+	require.NoError(t, err, "EncodeFrame first")
 	flags, secondWire, err := client.EncodeFrame(0, []byte("second"))
-	if err != nil {
-		t.Fatalf("EncodeFrame second: %v", err)
-	}
+	require.NoError(t, err, "EncodeFrame second")
 
 	// Deliver them out of order. The server accepts "second" (counter n+1),
 	// advancing peerShortNonce to n+2. "first" (counter n) must then be
 	// rejected as non-monotonic.
-	if _, _, err := server.DecodeFrame(flags, secondWire); err != nil {
-		t.Fatalf("deliver second: %v", err)
-	}
-	if _, _, err := server.DecodeFrame(flags, firstWire); err == nil {
-		t.Fatal("reordered MESSAGE accepted")
-	} else if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-		t.Fatalf("reorder: want ErrMalformedFrame, got %v", err)
-	}
+	_, _, err = server.DecodeFrame(flags, secondWire)
+	require.NoError(t, err, "deliver second")
+	_, _, err = server.DecodeFrame(flags, firstWire)
+	require.ErrorIs(t, err, zmqerr.ErrMalformedFrame, "reordered MESSAGE")
+}
+
+// newMechPair creates a fresh client/server mechanism pair with random keys.
+func newMechPair(t *testing.T) (client, server iface.SecurityMech) {
+	t.Helper()
+	serverPub, serverSec := genPair(t)
+	clientPub, clientSec := genPair(t)
+	client, err := NewCurveClient(serverPub, clientPub, clientSec, nil)
+	require.NoError(t, err, "NewCurveClient")
+	server, err = NewCurveServer(serverSec, nil)
+	require.NoError(t, err, "NewCurveServer")
+	return client, server
+}
+
+// driveToWelcome drives a client/server pair through HELLO + server seed +
+// WELCOME and returns the WELCOME bytes. Used by tests that need to inject
+// faults after the WELCOME step.
+func driveToWelcome(t *testing.T, client, server iface.SecurityMech) []byte {
+	t.Helper()
+	hello, _, err := client.NextHandshake(nil)
+	require.NoError(t, err, "HELLO")
+	_, _, err = server.NextHandshake(nil)
+	require.NoError(t, err, "server seed")
+	welcome, _, err := server.NextHandshake(hello)
+	require.NoError(t, err, "WELCOME")
+	return welcome
 }
 
 // runHandshake drives a fresh client/server pair through the five-step
 // handshake and returns them ready for traffic-phase tests.
 func runHandshake(t *testing.T) (iface.SecurityMech, iface.SecurityMech) {
 	t.Helper()
-	serverPub, serverSec := genPair(t)
-	clientPub, clientSec := genPair(t)
-	client, err := NewCurveClient(serverPub, clientPub, clientSec, nil)
-	if err != nil {
-		t.Fatalf("NewCurveClient: %v", err)
-	}
-	server, err := NewCurveServer(serverSec, nil)
-	if err != nil {
-		t.Fatalf("NewCurveServer: %v", err)
-	}
-	hello, _, err := client.NextHandshake(nil)
-	if err != nil {
-		t.Fatalf("HELLO: %v", err)
-	}
-	if _, _, err := server.NextHandshake(nil); err != nil {
-		t.Fatalf("server seed: %v", err)
-	}
-	welcome, _, err := server.NextHandshake(hello)
-	if err != nil {
-		t.Fatalf("WELCOME: %v", err)
-	}
+	client, server := newMechPair(t)
+	welcome := driveToWelcome(t, client, server)
 	initiate, _, err := client.NextHandshake(welcome)
-	if err != nil {
-		t.Fatalf("INITIATE: %v", err)
-	}
+	require.NoError(t, err, "INITIATE")
 	ready, _, err := server.NextHandshake(initiate)
-	if err != nil {
-		t.Fatalf("READY: %v", err)
-	}
-	if _, done, err := client.NextHandshake(ready); err != nil || !done {
-		t.Fatalf("READY ingest: err=%v done=%v", err, done)
-	}
+	require.NoError(t, err, "READY")
+	_, done, err := client.NextHandshake(ready)
+	require.NoError(t, err, "READY ingest")
+	require.True(t, done, "READY ingest: done=false")
 	return client, server
 }
 
@@ -482,28 +318,18 @@ func TestCurveWrongServerKey(t *testing.T) {
 		bogus[i] = byte(i + 1)
 	}
 	client, err := NewCurveClient(bogus, clientPub, clientSec, nil)
-	if err != nil {
-		t.Fatalf("NewCurveClient: %v", err)
-	}
+	require.NoError(t, err, "NewCurveClient")
 	server, err := NewCurveServer(serverSec, nil)
-	if err != nil {
-		t.Fatalf("NewCurveServer: %v", err)
-	}
+	require.NoError(t, err, "NewCurveServer")
 	hello, _, err := client.NextHandshake(nil)
-	if err != nil {
-		t.Fatalf("HELLO: %v", err)
-	}
+	require.NoError(t, err, "HELLO")
 	// Server's parseHello will fail because it decrypts the signature box
 	// with its own long-term secret expecting it to pair with c'. But the
 	// client boxed using the BOGUS server key; the signature won't open.
-	if _, _, err := server.NextHandshake(nil); err != nil {
-		t.Fatalf("server seed: %v", err)
-	}
-	if _, _, err := server.NextHandshake(hello); err == nil {
-		t.Fatal("bogus-server-key HELLO accepted")
-	} else if !errors.Is(err, zmqerr.ErrAuthFailed) {
-		t.Fatalf("want ErrAuthFailed, got %v", err)
-	}
+	_, _, err = server.NextHandshake(nil)
+	require.NoError(t, err, "server seed")
+	_, _, err = server.NextHandshake(hello)
+	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "bogus-server-key HELLO")
 }
 
 // TestCurveClientConstructorValidatesSecretPublic ensures the constructor
@@ -516,12 +342,7 @@ func TestCurveClientConstructorValidatesSecretPublic(t *testing.T) {
 		bogus[i] = 0x42
 	}
 	_, err := NewCurveClient(serverPub, bogus, clientSec, nil)
-	if err == nil {
-		t.Fatal("constructor accepted mismatched public")
-	}
-	if !errors.Is(err, zmqerr.ErrAuthFailed) {
-		t.Fatalf("want ErrAuthFailed, got %v", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "constructor accepted mismatched public")
 }
 
 // TestCurveSetPeerMetadataStores mirrors the NULL test: SetPeerMetadata is
@@ -529,36 +350,14 @@ func TestCurveClientConstructorValidatesSecretPublic(t *testing.T) {
 func TestCurveSetPeerMetadataStores(t *testing.T) {
 	_, serverSec := genPair(t)
 	m, err := NewCurveServer(serverSec, nil)
-	if err != nil {
-		t.Fatalf("NewCurveServer: %v", err)
-	}
+	require.NoError(t, err, "NewCurveServer")
 	props := map[string]string{"Socket-Type": "REQ"}
-	if err := m.SetPeerMetadata(props); err != nil {
-		t.Fatalf("SetPeerMetadata: %v", err)
-	}
+	require.NoError(t, m.SetPeerMetadata(props), "SetPeerMetadata")
 	props["Socket-Type"] = "REP"
 	impl := m.(*curveMech)
-	if impl.PeerMetadata()["Socket-Type"] != "REQ" {
-		t.Fatal("PeerMetadata not isolated from caller mutation")
-	}
-	if err := m.SetPeerMetadata(nil); err != nil {
-		t.Fatalf("SetPeerMetadata(nil): %v", err)
-	}
-	if impl.PeerMetadata() != nil {
-		t.Fatalf("PeerMetadata after nil-set: %v, want nil", impl.PeerMetadata())
-	}
-}
-
-func mapsEqual(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if bv, ok := b[k]; !ok || bv != v {
-			return false
-		}
-	}
-	return true
+	require.Equal(t, "REQ", impl.PeerMetadata()["Socket-Type"], "PeerMetadata not isolated from caller mutation")
+	require.NoError(t, m.SetPeerMetadata(nil), "SetPeerMetadata(nil)")
+	require.Nil(t, impl.PeerMetadata(), "PeerMetadata after nil-set")
 }
 
 // TestCurve_NonceExhaustion_Send asserts EncodeFrame refuses to emit a
@@ -575,16 +374,9 @@ func TestCurve_NonceExhaustion_Send(t *testing.T) {
 	cImpl.ourShortNonce = math.MaxUint64
 
 	_, _, err := client.EncodeFrame(0, []byte("should-not-emit"))
-	if err == nil {
-		t.Fatal("EncodeFrame at exhausted counter: expected error")
-	}
-	if !errors.Is(err, zmqerr.ErrNonceExhausted) {
-		t.Fatalf("want ErrNonceExhausted, got %v", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrNonceExhausted, "EncodeFrame at exhausted counter")
 	// Counter must not have advanced past MaxUint64 (i.e. no wrap).
-	if cImpl.ourShortNonce != math.MaxUint64 {
-		t.Fatalf("ourShortNonce advanced past MaxUint64: got %d", cImpl.ourShortNonce)
-	}
+	require.Equal(t, uint64(math.MaxUint64), cImpl.ourShortNonce, "ourShortNonce advanced past MaxUint64")
 }
 
 // TestCurve_NonceExhaustion_Recv asserts DecodeFrame rejects a frame
@@ -602,21 +394,14 @@ func TestCurve_NonceExhaustion_Recv(t *testing.T) {
 	// MAC would fail too, but the sentinel is specifically what we
 	// want so operators can distinguish wrap from tampering.
 	wireFlags, wire, err := server.EncodeFrame(0, []byte("nothing-important"))
-	if err != nil {
-		t.Fatalf("server EncodeFrame setup: %v", err)
-	}
+	require.NoError(t, err, "server EncodeFrame setup")
 	nameOff := 1 + len("MESSAGE") // layout: [len]"MESSAGE" | counter(8) | cipher
 	for i := 0; i < 8; i++ {
 		wire[nameOff+i] = 0xFF
 	}
 
 	_, _, err = client.DecodeFrame(wireFlags, wire)
-	if err == nil {
-		t.Fatal("client accepted MESSAGE with MaxUint64 counter")
-	}
-	if !errors.Is(err, zmqerr.ErrNonceExhausted) {
-		t.Fatalf("want ErrNonceExhausted, got %v", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrNonceExhausted, "client accepted MESSAGE with MaxUint64 counter")
 }
 
 // TestCurve_RejectsZeroClientLongKey: the server must refuse an
@@ -625,28 +410,8 @@ func TestCurve_NonceExhaustion_Recv(t *testing.T) {
 // complete the handshake with a key whose shared secret with any
 // server is a small-subgroup element.
 func TestCurve_RejectsZeroClientLongKey(t *testing.T) {
-	serverPub, serverSec := genPair(t)
-	clientPub, clientSec := genPair(t)
-	client, err := NewCurveClient(serverPub, clientPub, clientSec, nil)
-	if err != nil {
-		t.Fatalf("NewCurveClient: %v", err)
-	}
-	server, err := NewCurveServer(serverSec, nil)
-	if err != nil {
-		t.Fatalf("NewCurveServer: %v", err)
-	}
-	// Drive HELLO → WELCOME normally.
-	hello, _, err := client.NextHandshake(nil)
-	if err != nil {
-		t.Fatalf("HELLO: %v", err)
-	}
-	if _, _, err := server.NextHandshake(nil); err != nil {
-		t.Fatalf("server seed: %v", err)
-	}
-	welcome, _, err := server.NextHandshake(hello)
-	if err != nil {
-		t.Fatalf("WELCOME: %v", err)
-	}
+	client, server := newMechPair(t)
+	welcome := driveToWelcome(t, client, server)
 	// Before building INITIATE, overwrite the client's own long-term
 	// public key to all zeros. buildInitiate will embed the zero key
 	// in the INITIATE plaintext; the server must reject at the
@@ -654,97 +419,43 @@ func TestCurve_RejectsZeroClientLongKey(t *testing.T) {
 	cImpl := client.(*curveMech)
 	cImpl.ourPublic = Key{}
 	initiate, _, err := client.NextHandshake(welcome)
-	if err != nil {
-		t.Fatalf("client INITIATE build: %v", err)
-	}
+	require.NoError(t, err, "client INITIATE build")
 	_, _, err = server.NextHandshake(initiate)
-	if err == nil {
-		t.Fatal("server accepted zero client long-term key")
-	}
-	if !errors.Is(err, zmqerr.ErrAuthFailed) {
-		t.Fatalf("want ErrAuthFailed, got %v", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "server accepted zero client long-term key")
 	// Server must not have reached stateDone.
 	sImpl := server.(*curveMech)
-	if sImpl.state == stateDone {
-		t.Fatal("server reached stateDone despite invalid client key")
-	}
+	require.NotEqual(t, stateDone, sImpl.state, "server reached stateDone despite invalid client key")
 }
 
 // TestCurve_RejectsLowOrderClientLongKey: same as above but uses a
 // known order-8 point rather than zero. Confirms the low-order list
 // is consulted in addition to the all-zero fast-path.
 func TestCurve_RejectsLowOrderClientLongKey(t *testing.T) {
-	serverPub, serverSec := genPair(t)
-	clientPub, clientSec := genPair(t)
-	client, err := NewCurveClient(serverPub, clientPub, clientSec, nil)
-	if err != nil {
-		t.Fatalf("NewCurveClient: %v", err)
-	}
-	server, err := NewCurveServer(serverSec, nil)
-	if err != nil {
-		t.Fatalf("NewCurveServer: %v", err)
-	}
-	hello, _, err := client.NextHandshake(nil)
-	if err != nil {
-		t.Fatalf("HELLO: %v", err)
-	}
-	if _, _, err := server.NextHandshake(nil); err != nil {
-		t.Fatalf("server seed: %v", err)
-	}
-	welcome, _, err := server.NextHandshake(hello)
-	if err != nil {
-		t.Fatalf("WELCOME: %v", err)
-	}
+	client, server := newMechPair(t)
+	welcome := driveToWelcome(t, client, server)
 	// Inject the order-8 point A as the client's advertised C.
 	cImpl := client.(*curveMech)
 	cImpl.ourPublic = Key(lowOrderPoints[2])
 	initiate, _, err := client.NextHandshake(welcome)
-	if err != nil {
-		t.Fatalf("client INITIATE build: %v", err)
-	}
+	require.NoError(t, err, "client INITIATE build")
 	_, _, err = server.NextHandshake(initiate)
-	if err == nil {
-		t.Fatal("server accepted order-8 client long-term key")
-	}
-	if !errors.Is(err, zmqerr.ErrAuthFailed) {
-		t.Fatalf("want ErrAuthFailed, got %v", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "server accepted order-8 client long-term key")
 	sImpl := server.(*curveMech)
-	if sImpl.state == stateDone {
-		t.Fatal("server reached stateDone despite low-order client key")
-	}
+	require.NotEqual(t, stateDone, sImpl.state, "server reached stateDone despite low-order client key")
 }
 
 // TestCurve_RejectsZeroClientEphemeralKey: the server must refuse a
 // HELLO whose advertised client ephemeral (C') is all zero.
 func TestCurve_RejectsZeroClientEphemeralKey(t *testing.T) {
-	serverPub, serverSec := genPair(t)
-	clientPub, clientSec := genPair(t)
-	client, err := NewCurveClient(serverPub, clientPub, clientSec, nil)
-	if err != nil {
-		t.Fatalf("NewCurveClient: %v", err)
-	}
-	server, err := NewCurveServer(serverSec, nil)
-	if err != nil {
-		t.Fatalf("NewCurveServer: %v", err)
-	}
+	client, server := newMechPair(t)
 	cImpl := client.(*curveMech)
 	cImpl.ourEphPublic = Key{} // all-zero ephemeral public on the wire
 	hello, _, err := client.NextHandshake(nil)
-	if err != nil {
-		t.Fatalf("HELLO build: %v", err)
-	}
-	if _, _, err := server.NextHandshake(nil); err != nil {
-		t.Fatalf("server seed: %v", err)
-	}
+	require.NoError(t, err, "HELLO build")
+	_, _, err = server.NextHandshake(nil)
+	require.NoError(t, err, "server seed")
 	_, _, err = server.NextHandshake(hello)
-	if err == nil {
-		t.Fatal("server accepted HELLO with zero C'")
-	}
-	if !errors.Is(err, zmqerr.ErrAuthFailed) {
-		t.Fatalf("want ErrAuthFailed, got %v", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "server accepted HELLO with zero C'")
 }
 
 // TestCurve_RejectsZeroServerKey: the client constructor must fail
@@ -754,12 +465,7 @@ func TestCurve_RejectsZeroServerKey(t *testing.T) {
 	clientPub, clientSec := genPair(t)
 	var zero Key
 	_, err := NewCurveClient(zero, clientPub, clientSec, nil)
-	if err == nil {
-		t.Fatal("NewCurveClient accepted zero server key")
-	}
-	if !errors.Is(err, zmqerr.ErrAuthFailed) {
-		t.Fatalf("want ErrAuthFailed, got %v", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "NewCurveClient accepted zero server key")
 }
 
 // TestCurve_RejectsLowOrderServerKey: the client constructor must
@@ -768,12 +474,7 @@ func TestCurve_RejectsLowOrderServerKey(t *testing.T) {
 	clientPub, clientSec := genPair(t)
 	for i, pt := range lowOrderPoints {
 		_, err := NewCurveClient(Key(pt), clientPub, clientSec, nil)
-		if err == nil {
-			t.Fatalf("low-order point %d accepted", i)
-		}
-		if !errors.Is(err, zmqerr.ErrAuthFailed) {
-			t.Fatalf("low-order point %d: want ErrAuthFailed, got %v", i, err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "low-order point %d", i)
 	}
 }
 
@@ -781,14 +482,8 @@ func TestCurve_RejectsLowOrderServerKey(t *testing.T) {
 // directly — odd lengths must be rejected, and a fresh random key must
 // pass.
 func TestCurve_ValidatePeerPublicKey_Length_Happy(t *testing.T) {
-	if err := validatePeerPublicKey(nil); err == nil {
-		t.Fatal("nil key accepted")
-	}
-	if err := validatePeerPublicKey(make([]byte, 31)); err == nil {
-		t.Fatal("31-byte key accepted")
-	}
+	require.Error(t, validatePeerPublicKey(nil), "nil key accepted")
+	require.Error(t, validatePeerPublicKey(make([]byte, 31)), "31-byte key accepted")
 	pub, _ := genPair(t)
-	if err := validatePeerPublicKey(pub[:]); err != nil {
-		t.Fatalf("fresh random key rejected: %v", err)
-	}
+	require.NoError(t, validatePeerPublicKey(pub[:]), "fresh random key rejected")
 }

@@ -5,21 +5,19 @@ import (
 	"testing"
 
 	"github.com/rkm/gozmq/internal/socket"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSubTree_EmptyMatchesNothing(t *testing.T) {
 	t.Parallel()
 	tr := socket.NewSubTree()
-	if tr.Size() != 0 {
-		t.Fatalf("fresh tree size = %d, want 0", tr.Size())
-	}
+	require.Equal(t, 0, tr.Size(), "fresh tree size")
 	cases := [][]byte{
 		nil, {}, []byte("x"), []byte("foo"), []byte{0x00},
 	}
 	for _, c := range cases {
-		if tr.Match(c) {
-			t.Errorf("empty tree matched %q", c)
-		}
+		assert.False(t, tr.Match(c), "empty tree matched %q", c)
 	}
 }
 
@@ -27,16 +25,12 @@ func TestSubTree_EmptyPrefixMatchesEverything(t *testing.T) {
 	t.Parallel()
 	tr := socket.NewSubTree()
 	tr.Add([]byte{})
-	if tr.Size() != 1 {
-		t.Fatalf("size after Add(empty) = %d, want 1", tr.Size())
-	}
+	require.Equal(t, 1, tr.Size(), "size after Add(empty)")
 	cases := [][]byte{
 		nil, {}, []byte("x"), []byte("foo"), []byte{0x00, 0xff},
 	}
 	for _, c := range cases {
-		if !tr.Match(c) {
-			t.Errorf("empty-prefix tree did not match %q", c)
-		}
+		assert.True(t, tr.Match(c), "empty-prefix tree did not match %q", c)
 	}
 }
 
@@ -58,9 +52,7 @@ func TestSubTree_PrefixMatching(t *testing.T) {
 		{[]byte("Foo"), false}, // case-sensitive
 	}
 	for _, tc := range tests {
-		if got := tr.Match(tc.topic); got != tc.want {
-			t.Errorf("Match(%q) = %v, want %v", tc.topic, got, tc.want)
-		}
+		assert.Equal(t, tc.want, tr.Match(tc.topic), "Match(%q)", tc.topic)
 	}
 }
 
@@ -71,18 +63,12 @@ func TestSubTree_MultipleDistinctPrefixes(t *testing.T) {
 	tr.Add([]byte("bar"))
 	tr.Add([]byte("fooX"))
 
-	if tr.Size() != 3 {
-		t.Fatalf("size = %d, want 3", tr.Size())
-	}
+	require.Equal(t, 3, tr.Size())
 	for _, topic := range []string{"foo", "foobar", "fooX", "fooXy", "bar", "barbaz"} {
-		if !tr.Match([]byte(topic)) {
-			t.Errorf("Match(%q) = false, want true", topic)
-		}
+		assert.True(t, tr.Match([]byte(topic)), "Match(%q) = false, want true", topic)
 	}
 	for _, topic := range []string{"", "f", "fo", "ba", "baz"} {
-		if tr.Match([]byte(topic)) {
-			t.Errorf("Match(%q) = true, want false", topic)
-		}
+		assert.False(t, tr.Match([]byte(topic)), "Match(%q) = true, want false", topic)
 	}
 }
 
@@ -92,39 +78,19 @@ func TestSubTree_RefcountAddRemoveParity(t *testing.T) {
 
 	tr.Add([]byte("foo"))
 	tr.Add([]byte("foo"))
-	if tr.Size() != 1 {
-		t.Fatalf("size after two duplicate Adds = %d, want 1", tr.Size())
-	}
-	if !tr.Match([]byte("foobar")) {
-		t.Fatal("Match after two adds = false, want true")
-	}
+	require.Equal(t, 1, tr.Size(), "size after two duplicate Adds")
+	require.True(t, tr.Match([]byte("foobar")), "Match after two adds")
 	// First Remove decrements refcount but the prefix is still present.
-	if rem := tr.Remove([]byte("foo")); rem {
-		t.Fatal("first Remove returned true, want false (refcount still >0)")
-	}
-	if !tr.Match([]byte("foobar")) {
-		t.Fatal("Match after first Remove = false, want true")
-	}
-	if tr.Size() != 1 {
-		t.Fatalf("size after first Remove = %d, want 1", tr.Size())
-	}
+	require.False(t, tr.Remove([]byte("foo")), "first Remove should return false (refcount still >0)")
+	require.True(t, tr.Match([]byte("foobar")), "Match after first Remove")
+	require.Equal(t, 1, tr.Size(), "size after first Remove")
 	// Second Remove actually removes it.
-	if rem := tr.Remove([]byte("foo")); !rem {
-		t.Fatal("second Remove returned false, want true")
-	}
-	if tr.Match([]byte("foobar")) {
-		t.Fatal("Match after second Remove = true, want false")
-	}
-	if tr.Size() != 0 {
-		t.Fatalf("size after second Remove = %d, want 0", tr.Size())
-	}
+	require.True(t, tr.Remove([]byte("foo")), "second Remove should return true")
+	require.False(t, tr.Match([]byte("foobar")), "Match after second Remove")
+	require.Equal(t, 0, tr.Size(), "size after second Remove")
 	// Removing an absent prefix is a no-op.
-	if rem := tr.Remove([]byte("foo")); rem {
-		t.Fatal("Remove on absent prefix returned true, want false")
-	}
-	if rem := tr.Remove([]byte("never-added")); rem {
-		t.Fatal("Remove on never-added prefix returned true, want false")
-	}
+	require.False(t, tr.Remove([]byte("foo")), "Remove on absent prefix")
+	require.False(t, tr.Remove([]byte("never-added")), "Remove on never-added prefix")
 }
 
 func TestSubTree_PartialPathPruning(t *testing.T) {
@@ -133,27 +99,13 @@ func TestSubTree_PartialPathPruning(t *testing.T) {
 	// Add foo and foobar; remove foobar should not disturb foo.
 	tr.Add([]byte("foo"))
 	tr.Add([]byte("foobar"))
-	if tr.Size() != 2 {
-		t.Fatalf("size = %d, want 2", tr.Size())
-	}
-	if !tr.Remove([]byte("foobar")) {
-		t.Fatal("Remove(foobar) returned false")
-	}
-	if tr.Size() != 1 {
-		t.Fatalf("size after remove foobar = %d, want 1", tr.Size())
-	}
-	if !tr.Match([]byte("foo")) {
-		t.Fatal("Match(foo) = false, want true")
-	}
-	if !tr.Match([]byte("foobar")) {
-		t.Fatal("Match(foobar) after removing foobar-sub but keeping foo-sub = false, want true (foo is still a prefix)")
-	}
-	if !tr.Remove([]byte("foo")) {
-		t.Fatal("Remove(foo) returned false")
-	}
-	if tr.Match([]byte("foo")) {
-		t.Fatal("Match(foo) after removing both = true, want false")
-	}
+	require.Equal(t, 2, tr.Size())
+	require.True(t, tr.Remove([]byte("foobar")), "Remove(foobar)")
+	require.Equal(t, 1, tr.Size(), "size after remove foobar")
+	require.True(t, tr.Match([]byte("foo")), "Match(foo)")
+	require.True(t, tr.Match([]byte("foobar")), "Match(foobar) after removing foobar-sub but keeping foo-sub (foo is still a prefix)")
+	require.True(t, tr.Remove([]byte("foo")), "Remove(foo)")
+	require.False(t, tr.Match([]byte("foo")), "Match(foo) after removing both")
 }
 
 func TestSubTree_ConcurrentSafety(t *testing.T) {
@@ -192,12 +144,8 @@ func TestSubTree_ConcurrentSafety(t *testing.T) {
 	wg.Wait()
 
 	// After balanced Add/Remove, tree should be empty.
-	if tr.Size() != 0 {
-		t.Fatalf("size after balanced concurrent churn = %d, want 0", tr.Size())
-	}
+	require.Equal(t, 0, tr.Size(), "size after balanced concurrent churn")
 	for _, p := range prefixes {
-		if tr.Match(p) {
-			t.Errorf("Match(%q) after churn = true, want false", p)
-		}
+		assert.False(t, tr.Match(p), "Match(%q) after churn = true, want false", p)
 	}
 }

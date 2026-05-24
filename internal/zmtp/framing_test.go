@@ -3,11 +3,12 @@ package zmtp
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"io"
 	"net"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/zmqerr"
@@ -35,27 +36,21 @@ func TestFrameRoundTrip(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var buf bytes.Buffer
-			if err := codec.WriteFrame(&buf, tc.flags, tc.body); err != nil {
-				t.Fatalf("WriteFrame: %v", err)
-			}
+			require.NoError(t, codec.WriteFrame(&buf, tc.flags, tc.body), "WriteFrame")
 			gotFlags, gotBody, err := codec.ReadFrame(&buf, nil)
-			if err != nil {
-				t.Fatalf("ReadFrame: %v", err)
-			}
+			require.NoError(t, err, "ReadFrame")
 			// LONG may be promoted by the encoder; the other bits must round-trip.
 			wantFlags := tc.flags
 			if len(tc.body) > 255 {
 				wantFlags |= iface.FlagLong
 			}
-			if gotFlags != wantFlags {
-				t.Fatalf("flags: got 0x%02x want 0x%02x", gotFlags, wantFlags)
+			require.Equal(t, wantFlags, gotFlags, "flags")
+			if len(tc.body) == 0 {
+				require.Empty(t, gotBody, "body")
+			} else {
+				require.Equal(t, tc.body, gotBody, "body")
 			}
-			if !bytes.Equal(gotBody, tc.body) {
-				t.Fatalf("body mismatch: got %x want %x", gotBody, tc.body)
-			}
-			if buf.Len() != 0 {
-				t.Fatalf("trailing bytes: %d", buf.Len())
-			}
+			require.Equal(t, 0, buf.Len(), "trailing bytes")
 		})
 	}
 }
@@ -65,31 +60,19 @@ func TestFrameWireFormat(t *testing.T) {
 	codec := NewFrameCodec(MaxBodyUnlimited)
 	t.Run("short", func(t *testing.T) {
 		var buf bytes.Buffer
-		if err := codec.WriteFrame(&buf, iface.FlagCommand, []byte{1, 2, 3}); err != nil {
-			t.Fatalf("WriteFrame: %v", err)
-		}
+		require.NoError(t, codec.WriteFrame(&buf, iface.FlagCommand, []byte{1, 2, 3}), "WriteFrame")
 		want := []byte{iface.FlagCommand, 0x03, 0x01, 0x02, 0x03}
-		if !bytes.Equal(buf.Bytes(), want) {
-			t.Fatalf("bytes: got %x want %x", buf.Bytes(), want)
-		}
+		require.Equal(t, want, buf.Bytes())
 	})
 	t.Run("long", func(t *testing.T) {
 		body := bytes.Repeat([]byte{0xAB}, 300)
 		var buf bytes.Buffer
-		if err := codec.WriteFrame(&buf, 0, body); err != nil {
-			t.Fatalf("WriteFrame: %v", err)
-		}
+		require.NoError(t, codec.WriteFrame(&buf, 0, body), "WriteFrame")
 		got := buf.Bytes()
-		if got[0] != iface.FlagLong {
-			t.Fatalf("flags: got 0x%02x want 0x%02x", got[0], iface.FlagLong)
-		}
+		require.Equal(t, iface.FlagLong, got[0], "flags")
 		ln := binary.BigEndian.Uint64(got[1:9])
-		if ln != uint64(len(body)) {
-			t.Fatalf("length: got %d want %d", ln, len(body))
-		}
-		if !bytes.Equal(got[9:], body) {
-			t.Fatalf("body mismatch")
-		}
+		require.Equal(t, uint64(len(body)), ln, "length")
+		require.Equal(t, body, got[9:], "body")
 	})
 }
 
@@ -97,9 +80,7 @@ func TestFrameAppendBuffersMatchesWriteFrame(t *testing.T) {
 	t.Parallel()
 	codec := NewFrameCodec(MaxBodyUnlimited)
 	appender, ok := codec.(iface.FrameBufferAppender)
-	if !ok {
-		t.Fatalf("codec does not implement FrameBufferAppender")
-	}
+	require.True(t, ok, "codec does not implement FrameBufferAppender")
 
 	cases := []struct {
 		name  string
@@ -115,15 +96,11 @@ func TestFrameAppendBuffersMatchesWriteFrame(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			var want bytes.Buffer
-			if err := codec.WriteFrame(&want, tc.flags, tc.body); err != nil {
-				t.Fatalf("WriteFrame: %v", err)
-			}
+			require.NoError(t, codec.WriteFrame(&want, tc.flags, tc.body), "WriteFrame")
 
 			var buffers net.Buffers
 			release, _, err := appender.AppendFrameBuffers(&buffers, tc.flags, tc.body)
-			if err != nil {
-				t.Fatalf("AppendFrameBuffers: %v", err)
-			}
+			require.NoError(t, err, "AppendFrameBuffers")
 			t.Cleanup(func() {
 				if release != nil {
 					release()
@@ -131,12 +108,9 @@ func TestFrameAppendBuffersMatchesWriteFrame(t *testing.T) {
 			})
 
 			var got bytes.Buffer
-			if _, err := buffers.WriteTo(&got); err != nil {
-				t.Fatalf("WriteTo: %v", err)
-			}
-			if !bytes.Equal(got.Bytes(), want.Bytes()) {
-				t.Fatalf("wire mismatch: got %x want %x", got.Bytes(), want.Bytes())
-			}
+			_, err = buffers.WriteTo(&got)
+			require.NoError(t, err, "WriteTo")
+			require.Equal(t, want.Bytes(), got.Bytes(), "wire mismatch")
 		})
 	}
 }
@@ -146,31 +120,19 @@ func TestFrameReuseDst(t *testing.T) {
 	codec := NewFrameCodec(MaxBodyUnlimited)
 	body := []byte("hello-zmtp")
 	var buf bytes.Buffer
-	if err := codec.WriteFrame(&buf, 0, body); err != nil {
-		t.Fatalf("WriteFrame: %v", err)
-	}
+	require.NoError(t, codec.WriteFrame(&buf, 0, body), "WriteFrame")
 	dst := make([]byte, 0, 64)
 	_, got, err := codec.ReadFrame(&buf, dst)
-	if err != nil {
-		t.Fatalf("ReadFrame: %v", err)
-	}
-	if &got[:1][0] != &dst[:1][0] {
-		t.Fatalf("ReadFrame did not reuse dst backing array")
-	}
+	require.NoError(t, err, "ReadFrame")
+	require.True(t, &got[:1][0] == &dst[:1][0], "ReadFrame did not reuse dst backing array")
 	// Fresh allocation when capacity is insufficient.
 	var buf2 bytes.Buffer
 	big := bytes.Repeat([]byte{0xEF}, 200)
-	if err := codec.WriteFrame(&buf2, 0, big); err != nil {
-		t.Fatalf("WriteFrame: %v", err)
-	}
+	require.NoError(t, codec.WriteFrame(&buf2, 0, big), "WriteFrame")
 	small := make([]byte, 0, 8)
 	_, got2, err := codec.ReadFrame(&buf2, small)
-	if err != nil {
-		t.Fatalf("ReadFrame: %v", err)
-	}
-	if cap(got2) < len(big) {
-		t.Fatalf("expected fresh allocation; got cap=%d", cap(got2))
-	}
+	require.NoError(t, err, "ReadFrame")
+	require.GreaterOrEqual(t, cap(got2), len(big), "expected fresh allocation")
 }
 
 func TestFrameMaxBodyEnforced(t *testing.T) {
@@ -180,27 +142,21 @@ func TestFrameMaxBodyEnforced(t *testing.T) {
 	t.Run("encode-rejects-oversize", func(t *testing.T) {
 		var buf bytes.Buffer
 		err := codec.WriteFrame(&buf, 0, bytes.Repeat([]byte{0x00}, 17))
-		if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-			t.Fatalf("err: got %v want ErrMalformedFrame", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 	})
 
 	t.Run("decode-rejects-oversize", func(t *testing.T) {
 		// Hand-build a frame 17 bytes long that the strict codec must refuse.
 		raw := append([]byte{0x00, 17}, bytes.Repeat([]byte{0xAA}, 17)...)
 		_, _, err := codec.ReadFrame(bytes.NewReader(raw), nil)
-		if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-			t.Fatalf("err: got %v want ErrMalformedFrame", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 	})
 
 	t.Run("decode-rejects-oversize-long", func(t *testing.T) {
 		raw := []byte{iface.FlagLong, 0, 0, 0, 0, 0, 0, 0, 17}
 		raw = append(raw, bytes.Repeat([]byte{0xAA}, 17)...)
 		_, _, err := codec.ReadFrame(bytes.NewReader(raw), nil)
-		if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-			t.Fatalf("err: got %v want ErrMalformedFrame", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 	})
 }
 
@@ -208,12 +164,8 @@ func TestFrameRejectsReservedFlags(t *testing.T) {
 	t.Parallel()
 	codec := NewFrameCodec(MaxBodyUnlimited)
 	_, _, err := codec.ReadFrame(bytes.NewReader([]byte{0x80, 0}), nil)
-	if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-		t.Fatalf("decode err: got %v want ErrMalformedFrame", err)
-	}
-	if err := codec.WriteFrame(io.Discard, 0xF0, nil); !errors.Is(err, zmqerr.ErrMalformedFrame) {
-		t.Fatalf("encode err: got %v want ErrMalformedFrame", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrMalformedFrame, "decode")
+	require.ErrorIs(t, codec.WriteFrame(io.Discard, 0xF0, nil), zmqerr.ErrMalformedFrame, "encode")
 }
 
 func TestFrameTruncated(t *testing.T) {
@@ -222,38 +174,27 @@ func TestFrameTruncated(t *testing.T) {
 
 	t.Run("clean-eof", func(t *testing.T) {
 		_, _, err := codec.ReadFrame(strings.NewReader(""), nil)
-		if !errors.Is(err, io.EOF) {
-			t.Fatalf("err: got %v want io.EOF", err)
-		}
+		require.ErrorIs(t, err, io.EOF)
 	})
 	t.Run("missing-length", func(t *testing.T) {
 		_, _, err := codec.ReadFrame(bytes.NewReader([]byte{0x00}), nil)
-		if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-			t.Fatalf("err: got %v want ErrMalformedFrame", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 	})
 	t.Run("missing-body", func(t *testing.T) {
 		_, _, err := codec.ReadFrame(bytes.NewReader([]byte{0x00, 0x05, 'h', 'i'}), nil)
-		if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-			t.Fatalf("err: got %v want ErrMalformedFrame", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 	})
 	t.Run("missing-long-length", func(t *testing.T) {
 		_, _, err := codec.ReadFrame(bytes.NewReader([]byte{iface.FlagLong, 0, 0, 0}), nil)
-		if !errors.Is(err, zmqerr.ErrMalformedFrame) {
-			t.Fatalf("err: got %v want ErrMalformedFrame", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 	})
 }
 
 func TestFrameNewFrameCodecPanicsOnNegative(t *testing.T) {
 	t.Parallel()
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatalf("expected panic")
-		}
-	}()
-	NewFrameCodec(-1)
+	require.Panics(t, func() {
+		NewFrameCodec(-1)
+	})
 }
 
 // FuzzFrameDecode feeds arbitrary byte streams through the decoder. The
@@ -277,19 +218,11 @@ func FuzzFrameDecode(f *testing.F) {
 		// Invariant: a successful decode followed by encode + decode yields
 		// the same flags and body.
 		var buf bytes.Buffer
-		if werr := codec.WriteFrame(&buf, flags, body); werr != nil {
-			t.Fatalf("re-encode failed for accepted frame: %v", werr)
-		}
+		require.NoError(t, codec.WriteFrame(&buf, flags, body), "re-encode failed for accepted frame")
 		flags2, body2, err2 := codec.ReadFrame(&buf, nil)
-		if err2 != nil {
-			t.Fatalf("re-decode failed: %v", err2)
-		}
+		require.NoError(t, err2, "re-decode failed")
 		// LONG is always set by re-encode for the round-trip when forced; mask it.
-		if flags2 & ^iface.FlagLong != flags & ^iface.FlagLong {
-			t.Fatalf("flags drift: %02x → %02x", flags, flags2)
-		}
-		if !bytes.Equal(body, body2) {
-			t.Fatalf("body drift: %x → %x", body, body2)
-		}
+		require.Equal(t, flags & ^iface.FlagLong, flags2 & ^iface.FlagLong, "flags drift")
+		require.Equal(t, body, body2, "body drift")
 	})
 }

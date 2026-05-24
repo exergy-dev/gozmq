@@ -1,13 +1,13 @@
 package socket_test
 
 import (
-	"context"
 	"testing"
 	"time"
 
 	"github.com/rkm/gozmq/internal/msg"
 	"github.com/rkm/gozmq/internal/pipe"
 	"github.com/rkm/gozmq/internal/socket"
+	"github.com/stretchr/testify/require"
 )
 
 // TestLoadBalancer_SentCounter verifies that LoadBalancer.Sent advances by
@@ -18,33 +18,23 @@ func TestLoadBalancer_SentCounter(t *testing.T) {
 	lb := socket.NewLoadBalancer()
 	defer lb.Close()
 
-	if got := lb.Sent(); got != 0 {
-		t.Fatalf("initial Sent = %d, want 0", got)
-	}
+	require.Equal(t, uint64(0), lb.Sent(), "initial Sent")
 
 	const n = 5
 	engineEnds, peerEnds := makePairs(1, n, n)
 	defer closePipes(append(engineEnds, peerEnds...)...)
-	if err := lb.Attach(engineEnds[0]); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	require.NoError(t, lb.Attach(engineEnds[0]), "attach")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 	for i := 0; i < n; i++ {
-		if err := lb.Send(ctx, msg.FromBytes([]byte{byte(i)})); err != nil {
-			t.Fatalf("send %d: %v", i, err)
-		}
+		require.NoError(t, lb.Send(ctx, msg.FromBytes([]byte{byte(i)})), "send %d", i)
 	}
-	if got := lb.Sent(); got != n {
-		t.Fatalf("Sent = %d, want %d", got, n)
-	}
+	require.Equal(t, uint64(n), lb.Sent(), "Sent")
 
 	// Drain so HWM doesn't block further sends.
 	for i := 0; i < n; i++ {
-		if _, err := peerEnds[0].Recv(ctx); err != nil {
-			t.Fatalf("drain %d: %v", i, err)
-		}
+		_, err := peerEnds[0].Recv(ctx)
+		require.NoError(t, err, "drain %d", i)
 	}
 }
 
@@ -56,32 +46,22 @@ func TestFairQueue_RecvCounter(t *testing.T) {
 	fq := socket.NewFairQueue()
 	defer fq.Close()
 
-	if got := fq.Recvd(); got != 0 {
-		t.Fatalf("initial Recvd = %d, want 0", got)
-	}
+	require.Equal(t, uint64(0), fq.Recvd(), "initial Recvd")
 
 	const n = 4
 	engineEnds, peerEnds := makePairs(1, n, n)
 	defer closePipes(append(engineEnds, peerEnds...)...)
-	if err := fq.Attach(engineEnds[0]); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	require.NoError(t, fq.Attach(engineEnds[0]), "attach")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 	for i := 0; i < n; i++ {
-		if err := peerEnds[0].Send(ctx, msg.FromBytes([]byte{byte(i)})); err != nil {
-			t.Fatalf("peer send %d: %v", i, err)
-		}
+		require.NoError(t, peerEnds[0].Send(ctx, msg.FromBytes([]byte{byte(i)})), "peer send %d", i)
 	}
 	for i := 0; i < n; i++ {
-		if _, err := fq.Recv(ctx); err != nil {
-			t.Fatalf("recv %d: %v", i, err)
-		}
+		_, err := fq.Recv(ctx)
+		require.NoError(t, err, "recv %d", i)
 	}
-	if got := fq.Recvd(); got != n {
-		t.Fatalf("Recvd = %d, want %d", got, n)
-	}
+	require.Equal(t, uint64(n), fq.Recvd(), "Recvd")
 }
 
 // TestFairQueue_QueueDepthGauge verifies that QueueDepth reflects the
@@ -99,19 +79,12 @@ func TestFairQueue_QueueDepthGauge(t *testing.T) {
 	defer closePipes(engineEnd, peerEnd)
 	engineEnd2, peerEnd2 := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(engineEnd2, peerEnd2)
-	if err := fq.Attach(engineEnd); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
-	if err := fq.Attach(engineEnd2); err != nil {
-		t.Fatalf("attach2: %v", err)
-	}
+	require.NoError(t, fq.Attach(engineEnd), "attach")
+	require.NoError(t, fq.Attach(engineEnd2), "attach2")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 	// Send only on the first peer.
-	if err := peerEnd.Send(ctx, msg.FromBytes([]byte("hi"))); err != nil {
-		t.Fatalf("peer send: %v", err)
-	}
+	require.NoError(t, peerEnd.Send(ctx, msg.FromBytes([]byte("hi"))), "peer send")
 	_ = peerEnd2 // second peer is idle; forces forwarder mode
 
 	// Wait for the forwarder to hand the message into the inbound
@@ -123,16 +96,11 @@ func TestFairQueue_QueueDepthGauge(t *testing.T) {
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	if got := fq.QueueDepth(); got != 1 {
-		t.Fatalf("QueueDepth before drain = %d, want 1", got)
-	}
+	require.Equal(t, uint64(1), fq.QueueDepth(), "QueueDepth before drain")
 
-	if _, err := fq.Recv(ctx); err != nil {
-		t.Fatalf("recv: %v", err)
-	}
-	if got := fq.QueueDepth(); got != 0 {
-		t.Fatalf("QueueDepth after drain = %d, want 0", got)
-	}
+	_, err := fq.Recv(ctx)
+	require.NoError(t, err, "recv")
+	require.Equal(t, uint64(0), fq.QueueDepth(), "QueueDepth after drain")
 }
 
 // TestFairQueue_DroppedOnDetach verifies that messages pulled by a
@@ -148,16 +116,11 @@ func TestFairQueue_DroppedOnDetach(t *testing.T) {
 	// then block trying to hand off the second. Detach then cancels.
 	engineEnd, peerEnd := pipe.NewPair(2, 2, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(engineEnd, peerEnd)
-	if err := fq.Attach(engineEnd); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	require.NoError(t, fq.Attach(engineEnd), "attach")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 	for i := 0; i < 2; i++ {
-		if err := peerEnd.Send(ctx, msg.FromBytes([]byte{byte(i)})); err != nil {
-			t.Fatalf("peer send %d: %v", i, err)
-		}
+		require.NoError(t, peerEnd.Send(ctx, msg.FromBytes([]byte{byte(i)})), "peer send %d", i)
 	}
 
 	// Give the forwarder time to pull the second message and park on
@@ -172,15 +135,11 @@ func TestFairQueue_DroppedOnDetach(t *testing.T) {
 
 	// Detach mid-handoff. The forwarder's ctx cancels; the message it
 	// was about to hand off is dropped.
-	if err := fq.Detach(engineEnd); err != nil {
-		t.Fatalf("detach: %v", err)
-	}
+	require.NoError(t, fq.Detach(engineEnd), "detach")
 
 	// Wait for the forwarder to actually observe the cancel. (Forwarder
 	// might also have managed to enqueue before cancel won the race —
 	// in that case nothing drops. So we tolerate either 0 or 1.)
 	time.Sleep(50 * time.Millisecond)
-	if got := fq.Dropped(); got > 1 {
-		t.Fatalf("Dropped = %d, want 0 or 1", got)
-	}
+	require.LessOrEqual(t, fq.Dropped(), uint64(1), "Dropped")
 }

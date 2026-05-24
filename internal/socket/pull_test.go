@@ -2,7 +2,6 @@ package socket_test
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -10,6 +9,7 @@ import (
 	"github.com/rkm/gozmq/internal/pipe"
 	"github.com/rkm/gozmq/internal/socket"
 	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPull_FairQueues(t *testing.T) {
@@ -21,34 +21,23 @@ func TestPull_FairQueues(t *testing.T) {
 	engineEnds, peerEnds := makePairs(n, 4, 4)
 	defer closePipes(append(engineEnds, peerEnds...)...)
 
-	for _, p := range engineEnds {
-		if err := eng.AttachPipe(p); err != nil {
-			t.Fatalf("attach: %v", err)
-		}
-	}
+	mustAttach(t, eng, engineEnds...)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 	want := make(map[byte]bool)
 	for i := 0; i < n; i++ {
 		body := byte('a' + i)
 		want[body] = true
-		if err := peerEnds[i].Send(ctx, msg.FromBytes([]byte{body})); err != nil {
-			t.Fatalf("peer %d send: %v", i, err)
-		}
+		require.NoError(t, peerEnds[i].Send(ctx, msg.FromBytes([]byte{body})), "peer %d send", i)
 	}
 	got := make(map[byte]bool)
 	for i := 0; i < n; i++ {
 		m, err := eng.Recv(ctx)
-		if err != nil {
-			t.Fatalf("recv %d: %v", i, err)
-		}
+		require.NoError(t, err, "recv %d", i)
 		got[m.Bytes()[0]] = true
 	}
 	for b := range want {
-		if !got[b] {
-			t.Fatalf("missing message %c", b)
-		}
+		require.True(t, got[b], "missing message %c", b)
 	}
 }
 
@@ -57,8 +46,7 @@ func TestPull_RecvWakesOnAttach(t *testing.T) {
 	eng := socket.NewPullEngine()
 	defer eng.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := testCtx(t)
 	type result struct {
 		m   *msg.Msg
 		err error
@@ -70,27 +58,19 @@ func TestPull_RecvWakesOnAttach(t *testing.T) {
 	}()
 	select {
 	case <-done:
-		t.Fatal("recv returned before any pipe attached")
+		require.Fail(t, "recv returned before any pipe attached")
 	case <-time.After(50 * time.Millisecond):
 	}
 	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	if err := b.Send(ctx, msg.FromBytes([]byte("hi"))); err != nil {
-		t.Fatalf("peer send: %v", err)
-	}
-	if err := eng.AttachPipe(a); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	require.NoError(t, b.Send(ctx, msg.FromBytes([]byte("hi"))), "peer send")
+	mustAttach(t, eng, a)
 	select {
 	case r := <-done:
-		if r.err != nil {
-			t.Fatalf("recv: %v", r.err)
-		}
-		if string(r.m.Bytes()) != "hi" {
-			t.Fatalf("recv body = %q", r.m.Bytes())
-		}
+		require.NoError(t, r.err, "recv")
+		require.Equal(t, "hi", string(r.m.Bytes()))
 	case <-time.After(time.Second):
-		t.Fatal("recv did not wake on attach")
+		require.Fail(t, "recv did not wake on attach")
 	}
 }
 
@@ -99,9 +79,7 @@ func TestPull_SendIsFSMViolation(t *testing.T) {
 	eng := socket.NewPullEngine()
 	defer eng.Close()
 	err := eng.Send(context.Background(), msg.FromBytes([]byte("x")))
-	if !errors.Is(err, zmqerr.ErrFSMViolation) {
-		t.Fatalf("send err = %v, want ErrFSMViolation", err)
-	}
+	require.ErrorIs(t, err, zmqerr.ErrFSMViolation)
 }
 
 func TestPull_CloseUnblocksRecv(t *testing.T) {
@@ -113,15 +91,11 @@ func TestPull_CloseUnblocksRecv(t *testing.T) {
 		done <- err
 	}()
 	time.Sleep(50 * time.Millisecond)
-	if err := eng.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	require.NoError(t, eng.Close(), "close")
 	select {
 	case err := <-done:
-		if !errors.Is(err, zmqerr.ErrSocketClosed) {
-			t.Fatalf("recv err = %v, want ErrSocketClosed", err)
-		}
+		require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
 	case <-time.After(time.Second):
-		t.Fatal("recv did not unblock on close")
+		require.Fail(t, "recv did not unblock on close")
 	}
 }

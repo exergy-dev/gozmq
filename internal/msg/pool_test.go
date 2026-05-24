@@ -3,6 +3,9 @@ package msg
 import (
 	"sync"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPoolGetTierSizes(t *testing.T) {
@@ -27,16 +30,10 @@ func TestPoolGetTierSizes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			b := PoolGet(tc.size)
-			if len(b) != tc.size {
-				t.Fatalf("len: got %d want %d", len(b), tc.size)
-			}
-			if cap(b) < tc.wantCap {
-				t.Fatalf("cap: got %d want >= %d", cap(b), tc.wantCap)
-			}
+			require.Equal(t, tc.size, len(b))
+			require.GreaterOrEqual(t, cap(b), tc.wantCap)
 			// Tier buffers should have exactly tier capacity (not oversized).
-			if cap(b) != tc.wantCap {
-				t.Fatalf("cap: got %d want exactly %d", cap(b), tc.wantCap)
-			}
+			require.Equal(t, tc.wantCap, cap(b))
 			PoolPut(b)
 		})
 	}
@@ -48,20 +45,14 @@ func TestPoolGetOversizeFallback(t *testing.T) {
 	// plain make, so cap == len.
 	const oversize = 2 * 1024 * 1024
 	b := PoolGet(oversize)
-	if len(b) != oversize {
-		t.Fatalf("len: got %d want %d", len(b), oversize)
-	}
-	if cap(b) != oversize {
-		t.Fatalf("cap: got %d want %d (oversize should not be pooled)", cap(b), oversize)
-	}
+	require.Equal(t, oversize, len(b))
+	require.Equal(t, oversize, cap(b), "oversize should not be pooled")
 	// Putting an oversize slice must not panic and must not corrupt the pool.
 	PoolPut(b)
 
 	// A subsequent Get at the 1 MiB tier must still work.
 	next := PoolGet(1024 * 1024)
-	if cap(next) != 1024*1024 {
-		t.Fatalf("next cap: got %d want %d", cap(next), 1024*1024)
-	}
+	require.Equal(t, 1024*1024, cap(next))
 	PoolPut(next)
 }
 
@@ -75,9 +66,7 @@ func TestPoolPutGetReusesBuffer(t *testing.T) {
 	orig := &b1[:cap(b1)][0]
 	PoolPut(b1)
 	b2 := PoolGet(100)
-	if cap(b2) != 256 {
-		t.Fatalf("cap: got %d want 256", cap(b2))
-	}
+	require.Equal(t, 256, cap(b2))
 	if &b2[:cap(b2)][0] != orig {
 		// Not fatal — sync.Pool may have GC'd the entry — but log so CI
 		// operators can notice regressions under low-churn conditions.
@@ -95,20 +84,13 @@ func TestPoolPutIgnoresNonTierSlice(t *testing.T) {
 	junk := make([]byte, 200, 777) // cap 777 is not a tier
 	PoolPut(junk)
 	b := PoolGet(200)
-	if cap(b) != 256 {
-		t.Fatalf("cap: got %d want 256 (pool corrupted by non-tier Put)", cap(b))
-	}
+	require.Equal(t, 256, cap(b), "pool corrupted by non-tier Put")
 	PoolPut(b)
 }
 
 func TestPoolPutNilNoPanic(t *testing.T) {
 	t.Parallel()
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("PoolPut(nil) panicked: %v", r)
-		}
-	}()
-	PoolPut(nil)
+	require.NotPanics(t, func() { PoolPut(nil) })
 }
 
 func TestPoolGetReturnsUsableSlice(t *testing.T) {
@@ -119,9 +101,7 @@ func TestPoolGetReturnsUsableSlice(t *testing.T) {
 		b[i] = byte(i)
 	}
 	for i := range b {
-		if b[i] != byte(i) {
-			t.Fatalf("b[%d]: got %d want %d", i, b[i], byte(i))
-		}
+		require.Equal(t, byte(i), b[i], "b[%d] mismatch", i)
 	}
 	PoolPut(b)
 }
@@ -141,8 +121,7 @@ func TestPoolConcurrentGetPut(t *testing.T) {
 			for i := 0; i < iters; i++ {
 				n := sizes[(seed+i)%len(sizes)]
 				b := PoolGet(n)
-				if len(b) != n {
-					t.Errorf("worker %d: len got %d want %d", seed, len(b), n)
+				if !assert.Equal(t, n, len(b), "worker %d", seed) {
 					return
 				}
 				// Touch first and last byte to catch cap/len confusion.
