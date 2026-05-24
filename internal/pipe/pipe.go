@@ -212,5 +212,11 @@ func (e *end) RecvHWM() int { return e.recvHWM }
 func (e *end) PeerEndpoint() string { return e.peer.Endpoint }
 func (e *end) PeerIdentity() []byte { return e.peer.Identity }
 
+// RecvCh exposes the internal receive channel for direct use in select
+// statements. This allows callers to avoid context.WithCancel overhead
+// when multiplexing a pipe recv with other signals. The caller is
+// responsible for handling pipe-closed semantics (via Closed()).
+func (e *end) RecvCh() <-chan *msg.Msg { return e.recvCh }
+
 // Compile-time check.
 var _ iface.Pipe = (*end)(nil)
