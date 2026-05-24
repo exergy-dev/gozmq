@@ -97,6 +97,7 @@ func (s *sessionImpl) runWriter() {
 
 		var encErr error
 		batchBytes, encErr = batch.appendMessage(s, m, batchBytes)
+		msg.Recycle(m)
 		if encErr != nil {
 			batch.release()
 			if !isWriterShutdownErr(encErr) {
@@ -106,16 +107,13 @@ func (s *sessionImpl) runWriter() {
 			return
 		}
 
-		// Opportunistically coalesce additional queued messages so a
-		// rapid burst becomes one writev. Stop at the cap or when the
-		// pipe has nothing immediately available — preserves
-		// backpressure (never drains ahead of writes beyond the cap).
 		for msgCount < maxBatchMessages && batchBytes < maxBatchBytes {
 			next, ok := recvNonBlocking(s.sessionPipe)
 			if !ok {
 				break
 			}
 			batchBytes, encErr = batch.appendMessage(s, next, batchBytes)
+			msg.Recycle(next)
 			if encErr != nil {
 				batch.release()
 				if !isWriterShutdownErr(encErr) {

@@ -41,13 +41,13 @@ func (s *sessionImpl) runHeartbeat() {
 			return
 		case <-s.sessionPipe.Closed():
 			return
-		case now := <-ticker.C:
+		case <-ticker.C:
 			// Liveness check first — if we haven't heard from the peer
 			// within the timeout, tear down. We log the reason via
 			// slog rather than minting a new package error.
 			lastNs := s.lastInboundUnix.Load()
 			if lastNs > 0 {
-				idle := now.Sub(time.Unix(0, lastNs))
+				idle := time.Duration(monoNow() - lastNs)
 				if idle >= timeout {
 					s.cfg.Logger.Warn(
 						"gozmq/session: heartbeat timeout — tearing down",

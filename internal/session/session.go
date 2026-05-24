@@ -151,10 +151,11 @@ type sessionImpl struct {
 	// 3.1 (true) — heartbeats are only emitted when both ends agreed.
 	peerHeartbeats atomic.Bool
 
-	// lastInboundUnix records the wall-clock nanos of the last frame
-	// received during traffic phase. The heartbeat goroutine reads this
-	// to decide whether to fire a PING; the reader writes to it on every
-	// inbound frame.
+	// lastInboundUnix records the monotonic nanos (relative to
+	// monoEpoch) of the last frame received during traffic phase. The
+	// heartbeat goroutine reads this to decide whether to fire a PING;
+	// the reader writes to it on every first inbound message frame and
+	// on command frames.
 	lastInboundUnix atomic.Int64
 
 	// stopErr is the cumulative error from Stop (e.g. Conn.Close failure).
@@ -162,6 +163,21 @@ type sessionImpl struct {
 }
 
 const sessionReadBufferSize = 16 * 1024
+
+// monoEpoch is a fixed reference point captured once at package init.
+// monoNow returns time.Since(monoEpoch) as int64 nanoseconds, which
+// uses Go's monotonic clock (runtime.nanotime) -- cheaper than
+// time.Now().UnixNano() because it skips the wall-clock vDSO read and
+// subsequent conversion. The heartbeat timeout is 90 s, so monotonic
+// precision is more than adequate.
+var monoEpoch = time.Now()
+
+// monoNow returns a monotonic nanosecond timestamp relative to
+// monoEpoch. Strictly cheaper than time.Now().UnixNano() on the
+// hot path because time.Since uses the monotonic clock directly.
+func monoNow() int64 {
+	return int64(time.Since(monoEpoch))
+}
 
 type frameEncoder func(flags uint8, body []byte) (uint8, []byte, error)
 type frameDecoder func(flags uint8, body []byte) (uint8, []byte, error)
@@ -341,7 +357,7 @@ func (s *sessionImpl) run() {
 
 	// Seed the last-inbound clock so a heartbeat fired immediately
 	// after handshake doesn't trip the timeout.
-	s.lastInboundUnix.Store(time.Now().UnixNano())
+	s.lastInboundUnix.Store(monoNow())
 
 	// Reader and writer share the conn but on disjoint sides (reader
 	// only reads, writer only writes), so they don't need to

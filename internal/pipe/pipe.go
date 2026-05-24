@@ -74,19 +74,11 @@ type shared struct {
 }
 
 func newShared() *shared {
-	s := &shared{
+	return &shared{
 		aClosed: make(chan struct{}),
 		bClosed: make(chan struct{}),
 		either:  make(chan struct{}),
 	}
-	go func() {
-		select {
-		case <-s.aClosed:
-		case <-s.bClosed:
-		}
-		s.eitherOnce.Do(func() { close(s.either) })
-	}()
-	return s
 }
 
 type end struct {
@@ -200,6 +192,7 @@ func (e *end) Close() error {
 	e.closeOnce.Do(func() {
 		e.isClosed.Store(true)
 		close(e.myCh)
+		e.shared.eitherOnce.Do(func() { close(e.shared.either) })
 	})
 	return nil
 }
@@ -217,6 +210,11 @@ func (e *end) PeerIdentity() []byte { return e.peer.Identity }
 // when multiplexing a pipe recv with other signals. The caller is
 // responsible for handling pipe-closed semantics (via Closed()).
 func (e *end) RecvCh() <-chan *msg.Msg { return e.recvCh }
+
+// SendCh exposes the internal send channel for direct use in select
+// statements. This mirrors RecvCh and allows the LoadBalancer to inline
+// a channel send into its own select, eliminating a per-Send goroutine.
+func (e *end) SendCh() chan<- *msg.Msg { return e.sendCh }
 
 // Compile-time check.
 var _ iface.Pipe = (*end)(nil)

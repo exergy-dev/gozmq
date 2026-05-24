@@ -152,6 +152,10 @@ type recvChanner interface {
 	RecvCh() <-chan *msg.Msg
 }
 
+type sendChanner interface {
+	SendCh() chan<- *msg.Msg
+}
+
 // NewLoadBalancer returns an empty LoadBalancer.
 func NewLoadBalancer() *LoadBalancer {
 	return &LoadBalancer{
@@ -299,14 +303,45 @@ func (lb *LoadBalancer) Send(ctx context.Context, m *msg.Msg) error {
 			return nil
 		}
 
-		// Race the blocking Send against close and the notify (peer-set
-		// change). We need cancellation, so use a child context that we
-		// cancel when close fires or notify fires.
+		// Fast path: if the pipe exposes its send channel, inline the
+		// select directly — eliminates a per-Send goroutine + context
+		// allocation.
+		if sc, ok := p.(sendChanner); ok {
+			sCh := sc.SendCh()
+			var err error
+			select {
+			case sCh <- m:
+				// success
+			case <-closeCh:
+				err = fmt.Errorf("loadbalancer send: %w", zmqerr.ErrSocketClosed)
+			case <-notify:
+				err = errRetry
+			case <-ctx.Done():
+				err = ctx.Err()
+			}
+			if err == nil {
+				lb.mu.Lock()
+				if idx < len(lb.pipes) && lb.pipes[idx] == p {
+					lb.cursor = (idx + 1) % len(lb.pipes)
+				}
+				lb.mu.Unlock()
+				lb.sent.Add(1)
+				return nil
+			}
+			if errors.Is(err, errRetry) {
+				continue
+			}
+			if errors.Is(err, io.ErrClosedPipe) {
+				_ = lb.Detach(p)
+				continue
+			}
+			return err
+		}
+
+		// Fallback: goroutine-based send for pipes without SendCh.
 		err := lb.sendOne(ctx, p, m, closeCh, notify)
 		if err == nil {
 			lb.mu.Lock()
-			// Advance only if p is still at idx — defends against Detach
-			// racing with success.
 			if idx < len(lb.pipes) && lb.pipes[idx] == p {
 				lb.cursor = (idx + 1) % len(lb.pipes)
 			}
@@ -626,6 +661,10 @@ func (fq *FairQueue) Detach(p iface.Pipe) error {
 		fq.mu.Unlock()
 		if ds.wake != nil {
 			close(ds.wake)
+		}
+		select {
+		case fq.recvNotify <- struct{}{}:
+		default:
 		}
 		return nil
 	}

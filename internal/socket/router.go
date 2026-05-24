@@ -313,7 +313,9 @@ func (e *routerEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 	out = append(out, append([]byte(nil), id...))
 	out = append(out, orig...)
 	e.recv.Add(1)
-	return msg.FromFrames(out...), nil
+	result := msg.FromFrames(out...)
+	result.TransferPool(m)
+	return result, nil
 }
 
 // Metrics reports the ROUTER engine's counters. Dropped covers two

@@ -14,6 +14,7 @@ import (
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
+	"github.com/rkm/gozmq/internal/pipe"
 	secmech "github.com/rkm/gozmq/internal/security"
 	"github.com/rkm/gozmq/internal/session"
 	"github.com/rkm/gozmq/internal/socket"
@@ -254,7 +255,18 @@ func (c *Context) NewSocket(t SocketType, opts ...Option) (*Socket, error) {
 		engine:     engine,
 		subHandle:  subHandle,
 	}
+	// Transfer any monitor config set via options to the atomic pointer so
+	// emit() can read it lock-free.
+	if cfg.monitor != nil {
+		s.monitorCfg.Store(&monitorState{ch: cfg.monitor, mask: cfg.monitorMask})
+	}
 	c.mu.Lock()
+	if c.closed.Load() {
+		c.mu.Unlock()
+		cancel()
+		_ = engine.Close()
+		return nil, ErrContextClosed
+	}
 	c.sockets = append(c.sockets, s)
 	c.mu.Unlock()
 	return s, nil
@@ -300,6 +312,13 @@ func newEngineFor(t SocketType, cfg *socketConfig) (iface.SocketEngine, *socket.
 	return nil, nil, fmt.Errorf("gozmq: unknown socket type %d", t)
 }
 
+// monitorState bundles the monitor channel and event mask so they can be
+// swapped atomically without holding a mutex on the hot emit() path.
+type monitorState struct {
+	ch   chan<- Event
+	mask EventType
+}
+
 // Socket is the user-facing message endpoint.
 //
 // Concurrency: Send and Recv are thread-safe (serialized by the engine).
@@ -319,12 +338,15 @@ type Socket struct {
 
 	closed atomic.Bool
 
+	monitorCfg atomic.Pointer[monitorState]
+
 	mu             sync.Mutex
 	lastEndpoint   string
 	listeners      []iface.Listener
 	sessions       []iface.Session
 	reconnectors   []reconnectEntry
 	streamAdapters []*stream.Adapter // STREAM-only: one per raw-bytes peer
+	directPipes    []iface.Pipe      // inproc direct-pipe bypass: pipes to drain on close
 	acceptWG       sync.WaitGroup
 	connectWG      sync.WaitGroup
 }
@@ -395,6 +417,15 @@ func (s *Socket) Bind(endpoint string) error {
 
 	s.acceptWG.Add(1)
 	go s.acceptLoop(l)
+	// If the listener supports direct-pipe bypass (inproc), start a
+	// second accept loop that handles direct-pipe offers from connecting
+	// sockets. This runs in parallel with the regular acceptLoop so
+	// that legacy-path Dial (security configured, or other edge cases)
+	// still works.
+	if acceptor, ok := l.(iface.DirectPipeAcceptor); ok && !s.hasSecurityMech() {
+		s.acceptWG.Add(1)
+		go s.acceptDirectPipeLoop(acceptor)
+	}
 	return nil
 }
 
@@ -414,6 +445,18 @@ func (s *Socket) Connect(endpoint string) error {
 		// STREAM does not ride on ZMTP / session, so the Reconnector
 		// (which builds iface.Sessions) is not reusable here. Dial once.
 		return s.connectStream(tr, endpoint)
+	}
+	// Direct-pipe fast path: if the transport supports it (inproc within
+	// the same Context) AND no security mechanism is configured (CURVE /
+	// PLAIN require the session layer), skip sessions entirely and wire
+	// engine pipes directly. This eliminates ZMTP greeting, handshake,
+	// codec, and reader/writer goroutines.
+	if !s.hasSecurityMech() {
+		if dpd, ok := tr.(iface.DirectPipeDialer); ok {
+			if acceptor := dpd.LookupDirectAcceptor(endpoint); acceptor != nil {
+				return s.connectDirectPipe(acceptor, endpoint)
+			}
+		}
 	}
 	rc := session.NewReconnector(session.ReconnectConfig{
 		Dial: func(ctx context.Context) (iface.Conn, error) {
@@ -621,6 +664,20 @@ func (s *Socket) acceptLoop(l iface.Listener) {
 	}
 }
 
+// removeSession removes sess from the socket's session list so it can be
+// garbage collected after its goroutines exit. Without this, long-lived
+// bind sockets accumulate sessions for every peer that ever connected.
+func (s *Socket) removeSession(sess iface.Session) {
+	s.mu.Lock()
+	for i, existing := range s.sessions {
+		if existing == sess {
+			s.sessions = append(s.sessions[:i], s.sessions[i+1:]...)
+			break
+		}
+	}
+	s.mu.Unlock()
+}
+
 // startSession is the server-accept path: wraps conn in a session, spawns
 // a handshake goroutine, attaches the pipe on handshake success, detaches
 // on pipe close. The client-side (Connect) path uses Reconnector, not
@@ -643,6 +700,7 @@ func (s *Socket) startSession(conn iface.Conn, role iface.Role) {
 	s.connectWG.Add(1)
 	go func() {
 		defer s.connectWG.Done()
+		defer s.removeSession(sess)
 		select {
 		case <-sess.Handshaked():
 		case <-s.runCtx.Done():
@@ -664,6 +722,7 @@ func (s *Socket) startSession(conn iface.Conn, role iface.Role) {
 		<-sess.Pipe().Closed()
 		_ = s.engine.DetachPipe(sess.Pipe())
 		s.emit(EventDisconnected, remote, "")
+		_ = sess.Stop()
 	}()
 }
 
@@ -720,6 +779,135 @@ func (s *Socket) connectStream(tr iface.Transport, endpoint string) error {
 	s.emit(EventConnected, endpoint, "")
 	s.startStreamAdapter(conn)
 	return nil
+}
+
+// --------------------------------------------------------------------------
+// Direct-pipe (inproc session bypass)
+// --------------------------------------------------------------------------
+
+// hasSecurityMech reports whether the socket is configured with PLAIN or
+// CURVE security. Direct-pipe bypass is only safe when the transport is
+// in-process AND no security handshake is required.
+func (s *Socket) hasSecurityMech() bool {
+	return s.cfg.plainClient || s.cfg.plainAuth != nil ||
+		(len(s.cfg.curveSecretKey) == 32)
+}
+
+// connectDirectPipe is the inproc fast path that replaces the full
+// Reconnector+Session stack with a single pipe.NewPair wired directly
+// into both engines. The dialer creates the pair, attaches one end to
+// its own engine, and offers the other end to the bind-side listener via
+// the DirectPipeAcceptor interface.
+func (s *Socket) connectDirectPipe(acceptor iface.DirectPipeAcceptor, endpoint string) error {
+	localType := socketTypeName(s.socketType)
+
+	// Negotiate HWMs: use the socket's configured values.
+	sendHWM := s.cfg.sendHWM
+	recvHWM := s.cfg.recvHWM
+
+	// Build PeerInfo for each side.
+	dialerInfo := pipe.PeerInfo{
+		Endpoint: endpoint,
+		Identity: s.cfg.identity,
+	}
+	binderInfo := pipe.PeerInfo{
+		Endpoint: endpoint,
+	}
+
+	// Create the pipe pair. dialerPipe goes to our engine; binderPipe
+	// goes to the bind-side engine via the acceptor.
+	dialerPipe, binderPipe := pipe.NewPair(
+		sendHWM, recvHWM,
+		binderInfo, // what dialer sees as peer info
+		dialerInfo, // what binder sees as peer info
+	)
+
+	offer := &iface.DirectPipeOffer{
+		BindPipe:         binderPipe,
+		DialerSocketType: localType,
+		Endpoint:         endpoint,
+	}
+
+	// Push the offer to the bind side. If the listener is closed, clean up.
+	if err := acceptor.OfferDirectPipe(offer); err != nil {
+		_ = dialerPipe.Close()
+		_ = binderPipe.Close()
+		return err
+	}
+
+	// Track the pipe for linger drain in CloseCtx.
+	s.mu.Lock()
+	s.directPipes = append(s.directPipes, dialerPipe)
+	s.mu.Unlock()
+
+	// Attach our end to our engine.
+	s.emit(EventConnected, endpoint, "")
+	if err := s.engine.AttachPipe(dialerPipe); err != nil {
+		_ = dialerPipe.Close()
+		return err
+	}
+
+	// Spawn a watcher goroutine that DetachPipes when the pipe closes.
+	s.connectWG.Add(1)
+	go func() {
+		defer s.connectWG.Done()
+		select {
+		case <-dialerPipe.Closed():
+		case <-s.runCtx.Done():
+		}
+		_ = s.engine.DetachPipe(dialerPipe)
+		_ = dialerPipe.Close()
+		s.emit(EventDisconnected, endpoint, "")
+	}()
+
+	return nil
+}
+
+// acceptDirectPipeLoop runs alongside acceptLoop for inproc listeners
+// that support direct-pipe bypass. It accepts DirectPipeOffers from
+// connecting sockets and wires them directly into the engine without
+// going through the session layer.
+func (s *Socket) acceptDirectPipeLoop(acceptor iface.DirectPipeAcceptor) {
+	defer s.acceptWG.Done()
+	localType := socketTypeName(s.socketType)
+	for {
+		offer, err := acceptor.AcceptDirectPipe(s.runCtx)
+		if err != nil {
+			return
+		}
+
+		// Socket-type compatibility check.
+		if !session.SocketTypesCompatible(localType, offer.DialerSocketType) {
+			_ = offer.BindPipe.Close()
+			continue
+		}
+
+		// Track the pipe for linger drain in CloseCtx.
+		s.mu.Lock()
+		s.directPipes = append(s.directPipes, offer.BindPipe)
+		s.mu.Unlock()
+
+		// Attach the bind-side pipe end to our engine.
+		if err := s.engine.AttachPipe(offer.BindPipe); err != nil {
+			_ = offer.BindPipe.Close()
+			continue
+		}
+
+		// Spawn a watcher goroutine for teardown.
+		bindPipe := offer.BindPipe
+		ep := offer.Endpoint
+		s.connectWG.Add(1)
+		go func() {
+			defer s.connectWG.Done()
+			select {
+			case <-bindPipe.Closed():
+			case <-s.runCtx.Done():
+			}
+			_ = s.engine.DetachPipe(bindPipe)
+			_ = bindPipe.Close()
+			s.emit(EventDisconnected, ep, "")
+		}()
+	}
 }
 
 // SendMsg enqueues m for transmission per the socket's pattern policy.
@@ -806,8 +994,7 @@ func (s *Socket) Monitor(ch chan<- Event, mask EventType) error {
 	if s.closed.Load() {
 		return ErrSocketClosed
 	}
-	s.cfg.monitor = ch
-	s.cfg.monitorMask = mask
+	s.monitorCfg.Store(&monitorState{ch: ch, mask: mask})
 	return nil
 }
 
@@ -864,6 +1051,8 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 	s.sessions = nil
 	streamAdapters := s.streamAdapters
 	s.streamAdapters = nil
+	directPipes := s.directPipes
+	s.directPipes = nil
 	s.mu.Unlock()
 
 	var errs []error
@@ -920,6 +1109,12 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 			sess.CancelWriter() // signal: drain, then exit (no conn.Close yet)
 		}
 		ctxErr = waitWritersFlushed(ctx, sessions, s.cfg.linger)
+		// Direct pipes (inproc bypass): wait for the peer to close its
+		// end so buffered messages have a chance to be consumed. This
+		// mirrors the session-based linger drain for TCP/IPC sessions.
+		if ctxErr == nil && len(directPipes) > 0 {
+			ctxErr = waitDirectPipesDrained(ctx, directPipes, s.cfg.linger)
+		}
 	}
 
 	// 6. Now hard-stop: cancel the reconnector/accept context, then
@@ -938,6 +1133,11 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 	// reader/writer wg and surfaces any conn.Close error.
 	for _, ad := range streamAdapters {
 		addErr(ad.Close())
+	}
+	// Direct pipes: close our end so the peer's watcher goroutine
+	// detects the close and tears down.
+	for _, dp := range directPipes {
+		_ = dp.Close()
 	}
 
 	// 7. Wait on bookkeeping goroutines (accept loops, server-side
@@ -1011,6 +1211,37 @@ func waitWritersFlushed(ctx context.Context, sessions []iface.Session, linger ti
 	return nil
 }
 
+// waitDirectPipesDrained blocks until every direct pipe's Closed() channel
+// has fired (peer consumed/closed), bounded by linger and cancellable via
+// ctx. Semantics mirror waitWritersFlushed for session-based connections.
+func waitDirectPipesDrained(ctx context.Context, pipes []iface.Pipe, linger time.Duration) error {
+	if len(pipes) == 0 || linger == 0 {
+		return nil
+	}
+
+	waitCtx := ctx
+	cancel := func() {}
+	if linger > 0 {
+		waitCtx, cancel = context.WithTimeout(ctx, linger)
+	}
+	defer cancel()
+
+	for _, p := range pipes {
+		if p == nil {
+			continue
+		}
+		select {
+		case <-p.Closed():
+		case <-waitCtx.Done():
+			if linger > 0 && errors.Is(waitCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+				return nil
+			}
+			return waitCtx.Err()
+		}
+	}
+	return nil
+}
+
 // emit publishes a lifecycle Event on the socket's configured monitor
 // channel, non-blocking. Delivery is best-effort: if the channel is
 // full we drop the event because backpressuring the socket's hot path on
@@ -1021,11 +1252,11 @@ func waitWritersFlushed(ctx context.Context, sessions []iface.Session, linger ti
 // bit is not set in cfg.monitorMask are discarded silently (and not
 // counted as drops — they were never intended for delivery).
 func (s *Socket) emit(eventType EventType, endpoint, reason string) {
-	ch := s.cfg.monitor
-	if ch == nil {
+	ms := s.monitorCfg.Load()
+	if ms == nil || ms.ch == nil {
 		return
 	}
-	if s.cfg.monitorMask&eventType == 0 {
+	if ms.mask&eventType == 0 {
 		return
 	}
 	ev := Event{
@@ -1035,7 +1266,7 @@ func (s *Socket) emit(eventType EventType, endpoint, reason string) {
 		Reason:   reason,
 	}
 	select {
-	case ch <- ev:
+	case ms.ch <- ev:
 	default:
 	}
 }

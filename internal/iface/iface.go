@@ -72,6 +72,51 @@ type Listener interface {
 }
 
 // --------------------------------------------------------------------------
+// Direct-pipe (inproc bypass) layer
+// --------------------------------------------------------------------------
+
+// DirectPipeOffer represents a pre-created pipe pair offered to the bind-side
+// socket when the dialer detects that session-layer bypass is possible (e.g.
+// inproc transport within the same Context). The bind side calls Accept on its
+// DirectPipeAcceptor interface to receive these offers instead of raw Conns.
+type DirectPipeOffer struct {
+	// BindPipe is the pipe end for the bind-side (server) engine.
+	BindPipe Pipe
+	// DialerSocketType is the ZMTP Socket-Type name of the dialing socket
+	// (e.g. "PUSH", "SUB") for compatibility checking.
+	DialerSocketType string
+	// Endpoint is the resolved endpoint string (e.g. "inproc://foo").
+	Endpoint string
+}
+
+// DirectPipeAcceptor is an optional interface implemented by Listeners that
+// support session-layer bypass. When detected by Socket.Connect, the dialer
+// pushes a DirectPipeOffer through the acceptor instead of going through the
+// normal Dial->Conn->Session path. Socket.acceptLoop detects offers arriving
+// via AcceptDirectPipe and calls engine.AttachPipe directly, skipping ZMTP
+// greeting, handshake, and codec.
+type DirectPipeAcceptor interface {
+	// AcceptDirectPipe blocks until a direct-pipe offer arrives or ctx cancels.
+	AcceptDirectPipe(ctx context.Context) (*DirectPipeOffer, error)
+	// OfferDirectPipe pushes an offer to the bind side. Blocks if the accept
+	// buffer is full.
+	OfferDirectPipe(offer *DirectPipeOffer) error
+	// CloseCh returns a channel that closes when the listener is closed.
+	CloseCh() <-chan struct{}
+}
+
+// DirectPipeDialer is an optional interface implemented by transports that
+// support direct-pipe bypass (session-layer skip). The Socket layer probes
+// for this interface at Connect time; when present and the listener is
+// already bound, it uses the direct path instead of Dial+Session.
+type DirectPipeDialer interface {
+	// LookupDirectAcceptor returns the DirectPipeAcceptor for endpoint, or
+	// nil when the endpoint is not yet bound (in which case the caller falls
+	// back to the normal Dial path).
+	LookupDirectAcceptor(endpoint string) DirectPipeAcceptor
+}
+
+// --------------------------------------------------------------------------
 // Framing layer
 // --------------------------------------------------------------------------
 

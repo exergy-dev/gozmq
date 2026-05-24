@@ -319,7 +319,9 @@ func stripReqDelimiter(m *msg.Msg) (*msg.Msg, error) {
 	rest := frames[1:]
 	out := make([][]byte, len(rest))
 	copy(out, rest)
-	return msg.FromFrames(out...), nil
+	result := msg.FromFrames(out...)
+	result.TransferPool(m)
+	return result, nil
 }
 
 // Metrics reports the REQ engine's counters. REQ has no fair-queue;

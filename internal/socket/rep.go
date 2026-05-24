@@ -192,7 +192,9 @@ func splitRepEnvelope(m *msg.Msg) (envelope [][]byte, body *msg.Msg, ok bool) {
 			rest := frames[i+1:]
 			bodyFrames := make([][]byte, len(rest))
 			copy(bodyFrames, rest)
-			return env, msg.FromFrames(bodyFrames...), true
+			result := msg.FromFrames(bodyFrames...)
+			result.TransferPool(m)
+			return env, result, true
 		}
 	}
 	return nil, nil, false

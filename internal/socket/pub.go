@@ -87,7 +87,7 @@ type pubEngine struct {
 	// engine via newPubEngineBase so we share the fanout + subscription
 	// bookkeeping.
 	surfaceSubs bool
-	subInbound  chan *msg.Msg // XPUB-only; nil for PUB
+	subInbound  chan subInboundItem // XPUB-only; nil for PUB
 	closeCh     chan struct{}
 
 	// Metrics counters. sent increments once per Send call that has at
@@ -101,6 +101,14 @@ type pubEngine struct {
 	// Recv. Always zero for plain PUB (Recv is an FSM violation); for
 	// XPUB it tracks the SUBSCRIBE/CANCEL events the app has observed.
 	recv atomic.Uint64
+}
+
+// subInboundItem pairs a subscription message with the pipe that produced
+// it so XPUB's dedup layer can track per-peer subscriptions and clean up
+// on DetachPipe.
+type subInboundItem struct {
+	m    *msg.Msg
+	pipe iface.Pipe
 }
 
 // NewPubEngine returns a new PUB socket engine.
@@ -122,7 +130,7 @@ func newPubEngineBase(surface bool) *pubEngine {
 		// expected to drain promptly. A bigger buffer doesn't help
 		// because the synthetic messages are rare relative to data
 		// traffic.
-		e.subInbound = make(chan *msg.Msg, 16)
+		e.subInbound = make(chan subInboundItem, 16)
 	}
 	return e
 }
@@ -210,7 +218,7 @@ func (e *pubEngine) runPeerReader(peer *pubPeer) {
 			// on close; drop silently on overflow rather than block
 			// the peer reader indefinitely.
 			select {
-			case e.subInbound <- m:
+			case e.subInbound <- subInboundItem{m: m, pipe: peer.pipe}:
 			case <-peer.stop:
 				return
 			case <-e.closeCh:
@@ -253,26 +261,18 @@ func (e *pubEngine) Send(ctx context.Context, m *msg.Msg) error {
 	e.mu.Unlock()
 
 	for _, p := range targets {
-		// Non-blocking try-send per libzmq PUB default: if the peer's
-		// pipe is at HWM, we drop the message for that peer rather
-		// than back-pressuring the publisher across all subscribers.
-		// We can't strictly "try" on iface.Pipe (no non-blocking Send
-		// primitive), so we give the send a very short deadline. A
-		// peer with free buffer completes in <1µs; a peer at HWM
-		// times out and we continue. Using a deadline rather than a
-		// pre-cancelled context avoids a race between Go's select
-		// randomly picking ctx.Done() over a ready send channel, which
-		// would spuriously drop messages that would have fit.
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		// Fast path: if the pipe supports non-blocking send and has
+		// buffer space, skip the context+timeout overhead entirely.
+		if nb, ok := p.(nonBlockingSender); ok && nb.TrySend(m) {
+			continue
+		}
+		// Slow path: give the send a very short deadline so a peer at
+		// HWM doesn't block fan-out to other subscribers.
 		tryCtx, cancel := context.WithTimeout(ctx, pubTryTimeout)
 		if err := p.Send(tryCtx, m); err != nil {
-			// HWM-full peer (deadline exceeded) or pipe-closed
-			// mid-send. Either way, the message did not reach this
-			// peer — count it as one drop. We do not propagate the
-			// error to the caller: PUB fan-out is best-effort, and a
-			// single slow subscriber must not break the publish call.
 			e.dropped.Add(1)
 		}
 		cancel()
@@ -313,15 +313,15 @@ func (e *pubEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 	// XPUB path: block until a subscription event is available or the
 	// engine closes.
 	select {
-	case m := <-e.subInbound:
+	case item := <-e.subInbound:
 		e.recv.Add(1)
-		return m, nil
+		return item.m, nil
 	case <-e.closeCh:
 		// Drain any straggler before reporting closed.
 		select {
-		case m := <-e.subInbound:
+		case item := <-e.subInbound:
 			e.recv.Add(1)
-			return m, nil
+			return item.m, nil
 		default:
 			return nil, fmt.Errorf("pub recv: %w", zmqerr.ErrSocketClosed)
 		}

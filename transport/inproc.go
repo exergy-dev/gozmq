@@ -157,6 +157,23 @@ func (it *InprocTransport) Listen(_ context.Context, endpoint string) (iface.Lis
 	return l, nil
 }
 
+// LookupDirectAcceptor returns the DirectPipeAcceptor for a bound inproc
+// endpoint, or nil if no listener exists. Used by Socket.Connect to bypass
+// the session layer for inproc connections.
+func (it *InprocTransport) LookupDirectAcceptor(endpoint string) iface.DirectPipeAcceptor {
+	name, err := parseInprocName(endpoint)
+	if err != nil {
+		return nil
+	}
+	it.mu.Lock()
+	l, ok := it.listeners[name]
+	it.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	return l
+}
+
 // removeListener is called by inprocListener.Close.
 func (it *InprocTransport) removeListener(name string, l *inprocListener) {
 	it.mu.Lock()
@@ -229,7 +246,8 @@ type inprocListener struct {
 	name     string
 	endpoint string
 
-	acceptCh chan *inprocConn
+	acceptCh     chan *inprocConn
+	directPipeCh chan *iface.DirectPipeOffer
 
 	mu        sync.Mutex
 	closed    bool
@@ -245,8 +263,9 @@ func newInprocListener(t *InprocTransport, name string) *inprocListener {
 		// Buffer of 16 is plausible for short connect bursts; if the bind
 		// side is slow to Accept, additional Dials block (correct behavior
 		// for backpressure).
-		acceptCh: make(chan *inprocConn, 16),
-		closeCh:  make(chan struct{}),
+		acceptCh:     make(chan *inprocConn, 16),
+		directPipeCh: make(chan *iface.DirectPipeOffer, 16),
+		closeCh:      make(chan struct{}),
 	}
 }
 
@@ -266,6 +285,36 @@ func (l *inprocListener) Accept(ctx context.Context) (iface.Conn, error) {
 	}
 }
 
+// AcceptDirectPipe blocks until a direct-pipe offer arrives or ctx cancels.
+func (l *inprocListener) AcceptDirectPipe(ctx context.Context) (*iface.DirectPipeOffer, error) {
+	select {
+	case offer := <-l.directPipeCh:
+		if offer == nil {
+			return nil, fmt.Errorf("%w: listener closed", zmqerr.ErrEndpointInvalid)
+		}
+		return offer, nil
+	case <-l.closeCh:
+		return nil, fmt.Errorf("%w: listener closed", zmqerr.ErrEndpointInvalid)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// OfferDirectPipe pushes a direct-pipe offer to the bind side.
+func (l *inprocListener) OfferDirectPipe(offer *iface.DirectPipeOffer) error {
+	select {
+	case l.directPipeCh <- offer:
+		return nil
+	case <-l.closeCh:
+		return fmt.Errorf("%w: listener closed", zmqerr.ErrEndpointInvalid)
+	}
+}
+
+// CloseCh returns a channel that closes when the listener is closed.
+func (l *inprocListener) CloseCh() <-chan struct{} {
+	return l.closeCh
+}
+
 func (l *inprocListener) Close() error {
 	l.closeOnce.Do(func() {
 		l.mu.Lock()
@@ -280,6 +329,18 @@ func (l *inprocListener) Close() error {
 			case c := <-l.acceptCh:
 				if c != nil {
 					_ = c.Close()
+				}
+			default:
+				goto drainDirect
+			}
+		}
+	drainDirect:
+		// Drain & close any pending direct-pipe offers.
+		for {
+			select {
+			case offer := <-l.directPipeCh:
+				if offer != nil {
+					_ = offer.BindPipe.Close()
 				}
 			default:
 				return
@@ -482,8 +543,10 @@ func (e *timeoutError) Temporary() bool { return true }
 
 // Compile-time interface checks.
 var (
-	_ iface.Transport = (*InprocTransport)(nil)
-	_ iface.Listener  = (*inprocListener)(nil)
-	_ iface.Conn      = (*inprocConn)(nil)
-	_ net.Error       = (*timeoutError)(nil)
+	_ iface.Transport          = (*InprocTransport)(nil)
+	_ iface.DirectPipeDialer   = (*InprocTransport)(nil)
+	_ iface.Listener           = (*inprocListener)(nil)
+	_ iface.DirectPipeAcceptor = (*inprocListener)(nil)
+	_ iface.Conn               = (*inprocConn)(nil)
+	_ net.Error                = (*timeoutError)(nil)
 )

@@ -28,8 +28,11 @@ package msg
 
 import (
 	"runtime"
+	"sync"
 	"sync/atomic"
 )
+
+var msgPool = sync.Pool{New: func() any { return &Msg{} }}
 
 // Msg is a ZMTP message: an ordered sequence of binary frames. The zero value
 // is an empty message.
@@ -41,6 +44,7 @@ import (
 // is a no-op for *Msg values without pooled frames).
 type Msg struct {
 	frames [][]byte
+	inlineFrames [1][]byte
 	// pooled holds the original pool-allocated buffers that back
 	// entries in frames (possibly subsliced). Populated only by the
 	// session reader via AppendPooledFrame; reclamation walks this
@@ -55,17 +59,51 @@ type Msg struct {
 	refs atomic.Int32
 }
 
-// New returns an empty Msg.
-func New() *Msg { return &Msg{} }
+// New returns an empty Msg from the pool.
+func New() *Msg {
+	m := msgPool.Get().(*Msg)
+	m.frames = m.inlineFrames[:0]
+	return m
+}
 
 // FromBytes returns a single-frame Msg wrapping b without copying.
-func FromBytes(b []byte) *Msg { return &Msg{frames: [][]byte{b}} }
+func FromBytes(b []byte) *Msg {
+	m := msgPool.Get().(*Msg)
+	m.inlineFrames[0] = b
+	m.frames = m.inlineFrames[:1]
+	return m
+}
 
 // FromFrames returns a Msg whose frames are the provided slices, in order.
 func FromFrames(frames ...[]byte) *Msg {
-	out := &Msg{frames: make([][]byte, len(frames))}
-	copy(out.frames, frames)
+	out := msgPool.Get().(*Msg)
+	if len(frames) <= len(out.inlineFrames) {
+		copy(out.inlineFrames[:], frames)
+		out.frames = out.inlineFrames[:len(frames)]
+	} else {
+		out.frames = make([][]byte, len(frames))
+		copy(out.frames, frames)
+	}
 	return out
+}
+
+// Recycle returns the Msg struct to the pool after clearing all fields.
+// The caller must not access m after calling Recycle. Safe to call on
+// any *Msg, including nil (no-op).
+func Recycle(m *Msg) {
+	if m == nil {
+		return
+	}
+	if m.pooled != nil {
+		m.reclaimPooled()
+	}
+	m.refs.Store(0)
+	for i := range m.inlineFrames {
+		m.inlineFrames[i] = nil
+	}
+	m.frames = nil
+	m.pooled = nil
+	msgPool.Put(m)
 }
 
 // Frames returns the backing frame slice.
@@ -165,6 +203,24 @@ func finalizeMsg(m *Msg) {
 	m.reclaimPooled()
 }
 
+// TransferPool moves pool ownership from src to m, so that a newly
+// constructed *Msg (e.g. from FromFrames) inherits the pooled-buffer
+// bookkeeping of the original wire-read *Msg. This prevents use-after-free
+// when socket engines strip envelope frames and return a new *Msg to the
+// caller — the new *Msg becomes the owner of the pooled buffers, and the
+// original is disarmed.
+func (m *Msg) TransferPool(src *Msg) {
+	if src == nil || src.pooled == nil {
+		return
+	}
+	m.pooled = src.pooled
+	m.refs.Store(src.refs.Load())
+	src.pooled = nil
+	src.refs.Store(0)
+	runtime.SetFinalizer(src, nil)
+	runtime.SetFinalizer(m, finalizeMsg)
+}
+
 // TotalSize returns the sum of all frame lengths in bytes.
 func (m *Msg) TotalSize() int {
 	n := 0
@@ -180,6 +236,7 @@ func (m *Msg) TotalSize() int {
 // assert that no other reference to the *Msg remains.
 func (m *Msg) Reset() {
 	if m.pooled != nil {
+		m.refs.Store(0)
 		runtime.SetFinalizer(m, nil)
 		for _, b := range m.pooled {
 			PoolPut(b)
@@ -189,8 +246,5 @@ func (m *Msg) Reset() {
 	}
 	clear(m.frames)
 	m.frames = m.frames[:0]
-	if m.pooled != nil {
-		m.refs.Store(0)
-		m.reclaimPooled()
-	}
+	m.inlineFrames = [1][]byte{}
 }

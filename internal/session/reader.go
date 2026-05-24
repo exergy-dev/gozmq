@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
@@ -69,7 +68,7 @@ func (s *sessionImpl) runReader() {
 			// past return (SUBSCRIBE/CANCEL copy into a fresh slice
 			// before publishing), so PoolPut on body is safe whether
 			// decoded aliased body or not.
-			s.lastInboundUnix.Store(time.Now().UnixNano())
+			s.lastInboundUnix.Store(monoNow())
 			cmdErr := s.handleCommand(decoded)
 			msg.PoolPut(body)
 			if cmdErr != nil {
@@ -101,7 +100,7 @@ func (s *sessionImpl) runReader() {
 		//     pool buffer. Attach as an ordinary heap frame and PoolPut
 		//     the ciphertext scratch.
 		if current == nil {
-			s.lastInboundUnix.Store(time.Now().UnixNano())
+			s.lastInboundUnix.Store(monoNow())
 			current = msg.New()
 		}
 		switch {

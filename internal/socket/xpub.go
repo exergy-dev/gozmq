@@ -27,6 +27,7 @@ func NewXPubEngineV(verbose bool) iface.SocketEngine {
 		pub:      newPubEngineBase(true),
 		verbose:  verbose,
 		prefRefs: make(map[string]int),
+		peerSubs: make(map[iface.Pipe]map[string]int),
 	}
 }
 
@@ -47,14 +48,30 @@ type xpubEngine struct {
 	verbose bool
 
 	mu       sync.Mutex
-	prefRefs map[string]int // prefix -> number of peers currently subscribed
+	prefRefs map[string]int            // prefix -> number of peers currently subscribed
+	peerSubs map[iface.Pipe]map[string]int // pipe -> prefix -> sub count from that pipe
 }
 
 // AttachPipe delegates to the embedded pub engine.
 func (e *xpubEngine) AttachPipe(p iface.Pipe) error { return e.pub.AttachPipe(p) }
 
-// DetachPipe delegates to the embedded pub engine.
-func (e *xpubEngine) DetachPipe(p iface.Pipe) error { return e.pub.DetachPipe(p) }
+// DetachPipe removes a peer and decrements the aggregate prefRefs for
+// every prefix that peer was subscribed to, preventing a leak where
+// departed peers leave stale refcounts that suppress future surface events.
+func (e *xpubEngine) DetachPipe(p iface.Pipe) error {
+	e.mu.Lock()
+	if subs, ok := e.peerSubs[p]; ok {
+		for prefix, count := range subs {
+			e.prefRefs[prefix] -= count
+			if e.prefRefs[prefix] <= 0 {
+				delete(e.prefRefs, prefix)
+			}
+		}
+		delete(e.peerSubs, p)
+	}
+	e.mu.Unlock()
+	return e.pub.DetachPipe(p)
+}
 
 // Send delegates to the embedded pub engine's fanout path.
 func (e *xpubEngine) Send(ctx context.Context, m *msg.Msg) error { return e.pub.Send(ctx, m) }
@@ -80,12 +97,12 @@ func (e *xpubEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		// Read directly from the pub engine's internal sub channel.
 		// We share the package, so this is legal and lets us interpose
 		// a dedup filter without threading a new hook through pub.go.
-		var m *msg.Msg
+		var item subInboundItem
 		select {
-		case m = <-e.pub.subInbound:
+		case item = <-e.pub.subInbound:
 		case <-e.pub.closeCh:
 			select {
-			case m = <-e.pub.subInbound:
+			case item = <-e.pub.subInbound:
 			default:
 				return nil, fmt.Errorf("xpub recv: %w", zmqerr.ErrSocketClosed)
 			}
@@ -94,11 +111,11 @@ func (e *xpubEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		}
 		if e.verbose {
 			e.pub.recv.Add(1)
-			return m, nil
+			return item.m, nil
 		}
-		if e.shouldSurface(m) {
+		if e.shouldSurface(item.m, item.pipe) {
 			e.pub.recv.Add(1)
-			return m, nil
+			return item.m, nil
 		}
 		// Silently dropped; loop to await the next event.
 	}
@@ -108,7 +125,7 @@ func (e *xpubEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 // refcount per prefix, and only surface the first SUBSCRIBE for a given
 // prefix and the last CANCEL (when the refcount returns to zero). A
 // CANCEL for a prefix the engine has never surfaced is dropped.
-func (e *xpubEngine) shouldSurface(m *msg.Msg) bool {
+func (e *xpubEngine) shouldSurface(m *msg.Msg, p iface.Pipe) bool {
 	isSub, subscribe, prefix := isSubscriptionMsg(m)
 	if !isSub {
 		// Not a subscription command — pub.runPeerReader never pushes
@@ -123,6 +140,11 @@ func (e *xpubEngine) shouldSurface(m *msg.Msg) bool {
 	if subscribe {
 		prev := e.prefRefs[key]
 		e.prefRefs[key] = prev + 1
+		// Track per-peer subscription for cleanup on DetachPipe.
+		if e.peerSubs[p] == nil {
+			e.peerSubs[p] = make(map[string]int)
+		}
+		e.peerSubs[p][key]++
 		return prev == 0
 	}
 	// Cancel.
@@ -130,6 +152,13 @@ func (e *xpubEngine) shouldSurface(m *msg.Msg) bool {
 	if prev <= 0 {
 		// Unknown prefix — drop the spurious cancel.
 		return false
+	}
+	// Track per-peer unsubscription.
+	if ps := e.peerSubs[p]; ps != nil {
+		ps[key]--
+		if ps[key] <= 0 {
+			delete(ps, key)
+		}
 	}
 	if prev == 1 {
 		delete(e.prefRefs, key)

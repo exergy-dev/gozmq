@@ -259,6 +259,14 @@ func metadataValue(props map[string]string, name string) (string, bool) {
 	return "", false
 }
 
+// SocketTypesCompatible reports whether two ZMTP Socket-Type metadata
+// values form a valid pairing per the ZMTP 3.1 specification. Exported
+// so the inproc direct-pipe path can validate compatibility without
+// running a full ZMTP handshake.
+func SocketTypesCompatible(localType, peerType string) bool {
+	return socketTypesCompatible(localType, peerType)
+}
+
 func socketTypesCompatible(localType, peerType string) bool {
 	switch localType {
 	case "REQ":
