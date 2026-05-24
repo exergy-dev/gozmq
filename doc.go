@@ -74,6 +74,25 @@
 // linger defaults to 1s (not infinite) so a forgotten Close cannot hang the
 // process indefinitely.
 //
+// # STREAM sockets
+//
+// The STREAM socket type is a deliberate departure from the rest of the ZMTP
+// patterns and is best thought of as a raw-TCP bridge dressed up as a ZeroMQ
+// socket. Specifically, STREAM:
+//
+//   - carries raw bytes on the wire — there is no ZMTP frame envelope, so
+//     every byte sent or received corresponds 1:1 to TCP payload bytes;
+//   - does NOT perform a ZMTP greeting or security handshake with the peer,
+//     so it interoperates with any TCP server or client (HTTP, line-based
+//     protocols, opaque binary streams);
+//   - synthesises a per-connection routing identity. RecvMsg returns a two-
+//     frame message whose leading frame is the connection identity and whose
+//     second frame is the raw payload; SendMsg requires the same connection
+//     identity as the leading frame to address a specific peer (an empty
+//     payload closes that connection);
+//   - has no subscription, topic, or pub/sub semantics — WithSubscribe and
+//     XPUB verbose-mode options do not apply.
+//
 // # Concurrency model
 //
 // Socket.Send and Socket.Recv are safe for concurrent use across goroutines;
