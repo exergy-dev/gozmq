@@ -87,22 +87,32 @@ func TestFairQueue_RecvCounter(t *testing.T) {
 // TestFairQueue_QueueDepthGauge verifies that QueueDepth reflects the
 // transient inbound channel occupancy. With one pending message in the
 // channel-1 inbound buffer and no consumer, depth should be 1.
+// Two pipes are attached so the FairQueue uses forwarder-backed mode
+// (the single-pipe direct path bypasses the inbound channel entirely).
 func TestFairQueue_QueueDepthGauge(t *testing.T) {
 	t.Parallel()
 	fq := socket.NewFairQueue()
 	defer fq.Close()
 
+	// Attach two pipes to force forwarder-backed mode.
 	engineEnd, peerEnd := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(engineEnd, peerEnd)
+	engineEnd2, peerEnd2 := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(engineEnd2, peerEnd2)
 	if err := fq.Attach(engineEnd); err != nil {
 		t.Fatalf("attach: %v", err)
+	}
+	if err := fq.Attach(engineEnd2); err != nil {
+		t.Fatalf("attach2: %v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+	// Send only on the first peer.
 	if err := peerEnd.Send(ctx, msg.FromBytes([]byte("hi"))); err != nil {
 		t.Fatalf("peer send: %v", err)
 	}
+	_ = peerEnd2 // second peer is idle; forces forwarder mode
 
 	// Wait for the forwarder to hand the message into the inbound
 	// channel — that's when QueueDepth flips to 1.
