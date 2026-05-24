@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
@@ -46,6 +47,8 @@ func NewPair(aToB, bToA int, aInfo, bInfo PeerInfo) (a, b iface.Pipe) {
 		sendHWM: aToB,
 		recvHWM: bToA,
 		peer:    aInfo,
+		myCh:    s.aClosed,
+		peerCh:  s.bClosed,
 	}
 	endB := &end{
 		shared:  s,
@@ -55,7 +58,11 @@ func NewPair(aToB, bToA int, aInfo, bInfo PeerInfo) (a, b iface.Pipe) {
 		sendHWM: bToA,
 		recvHWM: aToB,
 		peer:    bInfo,
+		myCh:    s.bClosed,
+		peerCh:  s.aClosed,
 	}
+	endA.peerEnd = endB
+	endB.peerEnd = endA
 	return endA, endB
 }
 
@@ -94,32 +101,27 @@ type end struct {
 	peer    PeerInfo
 
 	closeOnce sync.Once
+
+	myCh    chan struct{}  // cached closed channel for this end
+	peerCh  chan struct{}  // cached closed channel for peer end
+	peerEnd *end          // peer end for atomic flag check
+	isClosed atomic.Bool  // set in Close()
 }
 
 func (e *end) myClosed() chan struct{} {
-	if e.isA {
-		return e.shared.aClosed
-	}
-	return e.shared.bClosed
+	return e.myCh
 }
 
 func (e *end) peerClosed() chan struct{} {
-	if e.isA {
-		return e.shared.bClosed
-	}
-	return e.shared.aClosed
+	return e.peerCh
 }
 
 func (e *end) Send(ctx context.Context, m *msg.Msg) error {
 	if m == nil {
 		return ErrNilMessage
 	}
-	select {
-	case <-e.myClosed():
+	if e.isClosed.Load() || e.peerEnd.isClosed.Load() {
 		return io.ErrClosedPipe
-	case <-e.peerClosed():
-		return io.ErrClosedPipe
-	default:
 	}
 	select {
 	case e.sendCh <- m:
@@ -129,9 +131,9 @@ func (e *end) Send(ctx context.Context, m *msg.Msg) error {
 	select {
 	case e.sendCh <- m:
 		return nil
-	case <-e.myClosed():
+	case <-e.myCh:
 		return io.ErrClosedPipe
-	case <-e.peerClosed():
+	case <-e.peerCh:
 		return io.ErrClosedPipe
 	case <-ctx.Done():
 		return ctx.Err()
@@ -144,12 +146,8 @@ func (e *end) TrySend(m *msg.Msg) bool {
 	if m == nil {
 		return false
 	}
-	select {
-	case <-e.myClosed():
+	if e.isClosed.Load() || e.peerEnd.isClosed.Load() {
 		return false
-	case <-e.peerClosed():
-		return false
-	default:
 	}
 	select {
 	case e.sendCh <- m:
@@ -160,7 +158,6 @@ func (e *end) TrySend(m *msg.Msg) bool {
 }
 
 func (e *end) Recv(ctx context.Context) (*msg.Msg, error) {
-	// Fast path: something already buffered.
 	select {
 	case m := <-e.recvCh:
 		return m, nil
@@ -169,10 +166,9 @@ func (e *end) Recv(ctx context.Context) (*msg.Msg, error) {
 	select {
 	case m := <-e.recvCh:
 		return m, nil
-	case <-e.myClosed():
+	case <-e.myCh:
 		return nil, io.EOF
-	case <-e.peerClosed():
-		// Peer closed — drain residual, then EOF.
+	case <-e.peerCh:
 		select {
 		case m := <-e.recvCh:
 			return m, nil
@@ -189,6 +185,9 @@ func (e *end) Recv(ctx context.Context) (*msg.Msg, error) {
 // it opportunistically via a local type assertion during linger drains
 // to avoid racing a pre-cancelled context against a ready receive.
 func (e *end) TryRecv() (*msg.Msg, bool) {
+	if e.isClosed.Load() {
+		return nil, false
+	}
 	select {
 	case m := <-e.recvCh:
 		return m, true
@@ -198,7 +197,10 @@ func (e *end) TryRecv() (*msg.Msg, bool) {
 }
 
 func (e *end) Close() error {
-	e.closeOnce.Do(func() { close(e.myClosed()) })
+	e.closeOnce.Do(func() {
+		e.isClosed.Store(true)
+		close(e.myCh)
+	})
 	return nil
 }
 
