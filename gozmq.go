@@ -746,6 +746,19 @@ func (s *Socket) SendMsg(ctx context.Context, m *Msg) error {
 	return s.engine.Send(ctx, m)
 }
 
+// SendBytes sends a single-frame message containing b. It is a
+// convenience shortcut equivalent to SendMsg(ctx, NewMsgFromBytes(b)).
+func (s *Socket) SendBytes(ctx context.Context, b []byte) error {
+	if s.closed.Load() {
+		return ErrSocketClosed
+	}
+	if maxSize := s.cfg.maxMessageSize; maxSize > 0 && int64(len(b)) > maxSize {
+		return fmt.Errorf("gozmq: frame length %d exceeds MaxMessageSize %d: %w",
+			len(b), maxSize, ErrMalformedFrame)
+	}
+	return s.engine.Send(ctx, msg.FromBytes(b))
+}
+
 // RecvMsg blocks until a message arrives or ctx cancels. The returned
 // *Msg owns its frame bytes. Call (*Msg).Release when done; this is
 // always safe and recycles any internal pool buffers backing large
