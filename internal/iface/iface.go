@@ -108,6 +108,21 @@ type FrameBufferAppender interface {
 	AppendFrameBuffers(dst *net.Buffers, flags uint8, body []byte) (release func(), frameBytes int, err error)
 }
 
+// FrameHeaderAppender is the allocation-free fast path used by the writer
+// batching loop. It appends the wire-format frame header (flags + length)
+// for a body of len(body) bytes onto scratch and returns the grown scratch.
+// Callers materialize net.Buffers entries from scratch + body slices after
+// the entire batch has been encoded — by that point scratch's underlying
+// array is stable, so subslices referencing scratch[off:off+hdrLen] do not
+// race with further appends.
+//
+// Unlike FrameBufferAppender, this method allocates no closures and uses
+// no internal sync.Pool: header bytes live in caller-owned scratch storage
+// that the caller recycles across batches.
+type FrameHeaderAppender interface {
+	AppendFrameHeader(scratch []byte, flags uint8, body []byte) (newScratch []byte, headerLen int, err error)
+}
+
 // MetadataCodec encodes and decodes the ZMTP READY property list (ZMTP 3.1
 // §2.3.1). Used by NULL, PLAIN, and CURVE — hence a dedicated interface.
 type MetadataCodec interface {
