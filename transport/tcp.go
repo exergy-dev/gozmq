@@ -45,30 +45,25 @@ type TCPTransport struct {
 	NoDelay bool
 }
 
-// NewTCPTransport returns a TCPTransport configured with the design's
-// defaults (keepalive on, nodelay on).
-func NewTCPTransport() *TCPTransport {
+// newTCP builds a TCPTransport for the given network ("tcp" or "tcp6") with
+// the design's defaults (keepalive on, nodelay on). The scheme equals the
+// network for both variants.
+func newTCP(network string) *TCPTransport {
 	return &TCPTransport{
-		Network:         "tcp",
-		scheme:          "tcp",
+		Network:         network,
+		scheme:          network,
 		KeepAlive:       defaultTCPKeepAlive,
 		KeepAlivePeriod: defaultTCPKeepAliveIdle,
 		NoDelay:         defaultTCPNoDelay,
 	}
 }
 
-// NewTCP6Transport returns a TCPTransport that forces IPv6 ("tcp6"). It
-// shares 95% of TCPTransport's behavior; the only difference is the network
-// passed to net.Dial / net.Listen.
-func NewTCP6Transport() *TCPTransport {
-	return &TCPTransport{
-		Network:         "tcp6",
-		scheme:          "tcp6",
-		KeepAlive:       defaultTCPKeepAlive,
-		KeepAlivePeriod: defaultTCPKeepAliveIdle,
-		NoDelay:         defaultTCPNoDelay,
-	}
-}
+// NewTCPTransport returns a TCPTransport that selects IPv4 or IPv6 per the OS
+// resolver ("tcp").
+func NewTCPTransport() *TCPTransport { return newTCP("tcp") }
+
+// NewTCP6Transport returns a TCPTransport that forces IPv6 ("tcp6").
+func NewTCP6Transport() *TCPTransport { return newTCP("tcp6") }
 
 // Scheme reports "tcp" or "tcp6".
 func (t *TCPTransport) Scheme() string { return t.scheme }

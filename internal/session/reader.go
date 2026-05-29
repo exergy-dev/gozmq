@@ -44,7 +44,7 @@ func (s *sessionImpl) runReader() {
 
 		flags, body, err := s.cfg.Codec.ReadFrame(s.reader, nil)
 		if err != nil {
-			if !isExpectedShutdownErr(err) {
+			if !isShutdownErr(err) {
 				s.cfg.Logger.Debug("gozmq/session: reader exit", "err", err)
 			}
 			// body is either nil on the header-error paths or a
@@ -120,7 +120,7 @@ func (s *sessionImpl) runReader() {
 
 		// Last frame in the logical message — publish.
 		if err := s.publishInbound(current); err != nil {
-			if !isExpectedShutdownErr(err) {
+			if !isShutdownErr(err) {
 				s.cfg.Logger.Debug("gozmq/session: publish inbound", "err", err)
 			}
 			return
@@ -189,7 +189,7 @@ func (s *sessionImpl) handleCommand(body []byte) error {
 		synth := msg.New()
 		synth.AppendFrame(body)
 		if err := s.publishInbound(synth); err != nil {
-			if !isExpectedShutdownErr(err) {
+			if !isShutdownErr(err) {
 				return fmt.Errorf("gozmq/session: publish subscription: %w", err)
 			}
 			return err
@@ -236,10 +236,10 @@ func (s *sessionImpl) sendCommand(name string, body []byte) error {
 	return nil
 }
 
-// isExpectedShutdownErr returns true for errors we expect to see during
-// a normal teardown (peer EOF, conn closed by Stop, ctx cancellation).
-// Used to suppress noisy logs.
-func isExpectedShutdownErr(err error) bool {
+// isShutdownErr returns true for errors we expect to see during a normal
+// teardown (peer EOF, conn closed by Stop, ctx cancellation). Used by both
+// the reader and writer loops to suppress noisy logs.
+func isShutdownErr(err error) bool {
 	if err == nil {
 		return false
 	}

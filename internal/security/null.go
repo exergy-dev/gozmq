@@ -19,11 +19,6 @@ import (
 // nullMechName is the greeting mechanism token for NULL (ZMTP 3.1 §3.2.1).
 const nullMechName = "NULL"
 
-// readyCommandName is the ZMTP command name used by NULL's handshake. It is
-// written in the command BODY we emit (1-byte length prefix + name), because
-// this file produces the READY command body without importing the ZMTP package.
-const readyCommandName = "READY"
-
 // nullMech implements iface.SecurityMech for the NULL mechanism. The
 // handshake is a strict lock-step exchange of a single READY command in
 // each direction; the mechanism is "done" once the peer's READY has been
@@ -87,12 +82,8 @@ func (m *nullMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		if in != nil {
 			return nil, false, fmt.Errorf("gozmq/security/null: unexpected input on seed step: %w", zmqerr.ErrMalformedFrame)
 		}
-		out, err := m.encodeReady()
-		if err != nil {
-			return nil, false, err
-		}
 		m.sentReady = true
-		return out, false, nil
+		return m.encodeReady(), false, nil
 	}
 
 	// Second direction: parse the peer's READY command body.
@@ -138,12 +129,8 @@ func (m *nullMech) nextServer(in []byte) ([]byte, bool, error) {
 		m.peerReady = true
 	}
 	if !m.sentReady {
-		out, err := m.encodeReady()
-		if err != nil {
-			return nil, false, err
-		}
 		m.sentReady = true
-		return out, true, nil
+		return m.encodeReady(), true, nil
 	}
 	return nil, true, nil
 }
@@ -190,39 +177,22 @@ func (m *nullMech) ConfigureZAP(authorizer iface.ZAPAuthorizer, domain, address 
 	m.zapAddr = address
 }
 
-// encodeReady builds a ZMTP READY command BODY: a single-byte name length,
-// the literal "READY", then the metadata property-list bytes. The session
-// layer wraps this in a COMMAND frame (flags 0x04 + length + this body).
-func (m *nullMech) encodeReady() ([]byte, error) {
-	meta := m.metaCodec.Encode(m.localMeta)
-	body := make([]byte, 0, 1+len(readyCommandName)+len(meta))
-	body = append(body, byte(len(readyCommandName)))
-	body = append(body, readyCommandName...)
-	body = append(body, meta...)
-	return body, nil
+// encodeReady builds a ZMTP READY command body (name + metadata property
+// list). The session layer wraps this in a COMMAND frame.
+func (m *nullMech) encodeReady() []byte {
+	return zmtp.EncodeCommand(zmtp.Command{Name: zmtp.CmdReady, Body: m.metaCodec.Encode(m.localMeta)})
 }
 
-// decodeReady parses a READY command body: [1 byte name-length][name][metadata].
-// The name must be "READY" (case-sensitive per ZMTP 3.1 §2.3 which defines
-// command names as ASCII tokens — tolerant case match is applied for
-// robustness since libzmq uppercases consistently).
+// decodeReady parses a READY command body and returns its metadata. The name
+// is matched case-insensitively since libzmq emits it uppercase.
 func (m *nullMech) decodeReady(body []byte) (map[string]string, error) {
-	if len(body) < 1 {
-		return nil, fmt.Errorf("gozmq/security/null: READY command body empty: %w", zmqerr.ErrMalformedFrame)
-	}
-	nameLen := int(body[0])
-	if 1+nameLen > len(body) {
-		return nil, fmt.Errorf("gozmq/security/null: READY command name truncated: %w", zmqerr.ErrMalformedFrame)
-	}
-	name := string(body[1 : 1+nameLen])
-	if !strings.EqualFold(name, readyCommandName) {
-		return nil, fmt.Errorf("gozmq/security/null: expected READY command, got %q: %w", name, zmqerr.ErrMalformedFrame)
-	}
-	metaBytes := body[1+nameLen:]
-	props, err := m.metaCodec.Decode(metaBytes)
+	cmd, err := zmtp.DecodeCommand(body)
 	if err != nil {
-		return nil, err // already wraps ErrMalformedFrame
+		return nil, fmt.Errorf("gozmq/security/null: parse READY: %w", err)
 	}
-	return props, nil
+	if !strings.EqualFold(cmd.Name, zmtp.CmdReady) {
+		return nil, fmt.Errorf("gozmq/security/null: expected READY command, got %q: %w", cmd.Name, zmqerr.ErrMalformedFrame)
+	}
+	return m.metaCodec.Decode(cmd.Body)
 }
 

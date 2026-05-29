@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"time"
 
@@ -70,7 +69,7 @@ func (s *sessionImpl) runWriter() {
 				// tearing down the conn. Socket.Close waits on
 				// WriterFlushed, then calls sess.Stop() to close the conn
 				// in a coordinated order.
-				if drainErr := s.drainSessionPipe(); drainErr != nil && !isWriterShutdownErr(drainErr) {
+				if drainErr := s.drainSessionPipe(); drainErr != nil && !isShutdownErr(drainErr) {
 					s.cfg.Logger.Debug("gozmq/session: writer drain exit", "err", drainErr)
 					s.shutdown()
 				} else if writerDrainSettleTime > 0 {
@@ -82,7 +81,7 @@ func (s *sessionImpl) runWriter() {
 					timer.Stop()
 				}
 			} else {
-				if !isWriterShutdownErr(err) {
+				if !isShutdownErr(err) {
 					s.cfg.Logger.Debug("gozmq/session: writer recv exit", "err", err)
 				}
 				s.shutdown()
@@ -100,7 +99,7 @@ func (s *sessionImpl) runWriter() {
 		msg.Recycle(m)
 		if encErr != nil {
 			batch.release()
-			if !isWriterShutdownErr(encErr) {
+			if !isShutdownErr(encErr) {
 				s.cfg.Logger.Debug("gozmq/session: writer encode exit", "err", encErr)
 				s.shutdown()
 			}
@@ -116,7 +115,7 @@ func (s *sessionImpl) runWriter() {
 			msg.Recycle(next)
 			if encErr != nil {
 				batch.release()
-				if !isWriterShutdownErr(encErr) {
+				if !isShutdownErr(encErr) {
 					s.cfg.Logger.Debug("gozmq/session: writer encode exit", "err", encErr)
 					s.shutdown()
 				}
@@ -128,7 +127,7 @@ func (s *sessionImpl) runWriter() {
 		batch.materializeBuffers()
 		if err := s.flushBatch(&batch.buffers); err != nil {
 			batch.release()
-			if !isWriterShutdownErr(err) {
+			if !isShutdownErr(err) {
 				s.cfg.Logger.Debug("gozmq/session: writer send exit", "err", err)
 				s.shutdown()
 			}
@@ -427,14 +426,4 @@ func (s *sessionImpl) writeFrame(flags uint8, body []byte) error {
 		return fmt.Errorf("gozmq/session: write frame: %w", err)
 	}
 	return nil
-}
-
-// isWriterShutdownErr identifies writer exits we don't want to log as
-// failures: context cancellation, pipe closed by either end, EOF.
-func isWriterShutdownErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	return errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) ||
-		errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed)
 }

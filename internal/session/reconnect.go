@@ -261,6 +261,19 @@ func (r *Reconnector) Stop() error {
 
 // loop is the top-level dial/run/backoff goroutine. It exits when the
 // Reconnector's context is cancelled (Stop, or external ctx).
+// retryAfterBackoff advances the attempt counter and backoff tier, fires
+// OnRetry, then sleeps for the pre-advance backoff. State is advanced BEFORE
+// the user callback so a panicking OnRetry (which fireOnRetry recovers) cannot
+// stall the schedule. Returns false if the sleep was interrupted by Stop/ctx
+// cancellation, in which case the caller must return.
+func (r *Reconnector) retryAfterBackoff(attempt *int, backoff *time.Duration) bool {
+	*attempt++
+	thisBackoff := *backoff
+	*backoff = nextBackoff(*backoff, r.cfg.MaxBackoff)
+	r.fireOnRetry(*attempt, thisBackoff)
+	return r.sleep(thisBackoff)
+}
+
 func (r *Reconnector) loop() {
 	defer close(r.done)
 
@@ -276,14 +289,7 @@ func (r *Reconnector) loop() {
 		conn, err := r.cfg.Dial(r.ctx)
 		if err != nil {
 			r.cfg.Logger.Debug("gozmq/reconnect: dial failed", "err", err, "backoff", backoff)
-			// Advance state BEFORE invoking user code: if OnRetry panics,
-			// the next iteration must still see an incremented attempt
-			// counter and the next backoff tier. fireOnRetry recovers.
-			attempt++
-			thisBackoff := backoff
-			backoff = nextBackoff(backoff, r.cfg.MaxBackoff)
-			r.fireOnRetry(attempt, thisBackoff)
-			if !r.sleep(thisBackoff) {
+			if !r.retryAfterBackoff(&attempt, &backoff) {
 				return
 			}
 			continue
@@ -317,13 +323,7 @@ func (r *Reconnector) loop() {
 			r.sessMu.Lock()
 			r.currentSess = nil
 			r.sessMu.Unlock()
-			// Same ordering rule as the dial-failure path: advance state
-			// first so an OnRetry panic cannot stall the schedule.
-			attempt++
-			thisBackoff := backoff
-			backoff = nextBackoff(backoff, r.cfg.MaxBackoff)
-			r.fireOnRetry(attempt, thisBackoff)
-			if !r.sleep(thisBackoff) {
+			if !r.retryAfterBackoff(&attempt, &backoff) {
 				return
 			}
 			continue
@@ -369,14 +369,7 @@ func (r *Reconnector) loop() {
 		// Otherwise reconnect: apply a (small, post-success-reset) delay
 		// with jitter. This prevents a hot-reconnect loop against a peer
 		// that immediately EOFs us.
-		//
-		// Same state-before-callback ordering as the other retry paths:
-		// a panicking OnRetry must not stall the reconnect schedule.
-		attempt++
-		thisBackoff := backoff
-		backoff = nextBackoff(backoff, r.cfg.MaxBackoff)
-		r.fireOnRetry(attempt, thisBackoff)
-		if !r.sleep(thisBackoff) {
+		if !r.retryAfterBackoff(&attempt, &backoff) {
 			return
 		}
 	}
