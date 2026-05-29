@@ -50,24 +50,6 @@ type IPCTransport struct {
 // settings: no file-permission override.
 func NewIPCTransport() *IPCTransport { return &IPCTransport{} }
 
-// IPCOption configures an IPCTransport at construction.
-type IPCOption func(*IPCTransport)
-
-// WithIPCFilePerm returns an option that chmods the socket file to mode
-// after Listen creates it. Ignored for abstract-namespace endpoints.
-func WithIPCFilePerm(mode os.FileMode) IPCOption {
-	return func(t *IPCTransport) { t.FilePerm = mode }
-}
-
-// NewIPCTransportWith returns an IPCTransport configured by opts.
-func NewIPCTransportWith(opts ...IPCOption) *IPCTransport {
-	t := NewIPCTransport()
-	for _, o := range opts {
-		o(t)
-	}
-	return t
-}
-
 // Scheme reports "ipc".
 func (t *IPCTransport) Scheme() string { return ipcScheme }
 

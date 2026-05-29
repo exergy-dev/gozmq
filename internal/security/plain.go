@@ -83,13 +83,6 @@ type plainMech struct {
 	zapDomain string
 	zapAddr   string
 	zapMeta   map[string]string
-
-	// metaSent tracks whether our metadata-bearing command has been emitted:
-	// INITIATE on the client, READY on the server.
-	metaSent bool
-	// metaRecv tracks whether the peer's metadata-bearing command has been
-	// parsed: READY on the client, INITIATE on the server.
-	metaRecv bool
 }
 
 // NewPlainClient returns a PLAIN mechanism configured as the initiator. It
@@ -221,7 +214,6 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 
 	case plainClientSendInitiate:
 		out := encodeCommand(plainCmdInitiate, m.metaCodec.Encode(m.localMeta))
-		m.metaSent = true
 		m.state = plainClientRecvReady
 		return out, false, nil
 
@@ -246,7 +238,6 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 				return nil, false, err
 			}
 			m.peerMeta = props
-			m.metaRecv = true
 			m.state = plainDone
 			return nil, true, nil
 		default:
@@ -317,13 +308,11 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 			return nil, false, err
 		}
 		m.peerMeta = zmtp.MergeMeta(props, m.zapMeta)
-		m.metaRecv = true
 		m.state = plainServerSendReady
 		return m.NextHandshake(nil)
 
 	case plainServerSendReady:
 		out := encodeCommand(plainCmdReady, m.metaCodec.Encode(m.localMeta))
-		m.metaSent = true
 		m.state = plainDone
 		return out, true, nil
 

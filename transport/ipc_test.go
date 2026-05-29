@@ -106,7 +106,7 @@ func TestIPC_FilePerm(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("ipc file-perm test is Linux-only")
 	}
-	tr := NewIPCTransportWith(WithIPCFilePerm(0o600))
+	tr := &IPCTransport{FilePerm: 0o600}
 	path := tmpSock(t, "perm.sock")
 	endpoint := "ipc://" + path
 

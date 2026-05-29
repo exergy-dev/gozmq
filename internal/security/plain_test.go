@@ -104,13 +104,6 @@ func TestPlainHandshakeSuccess(t *testing.T) {
 
 	require.Equal(t, serverMeta, clientImpl.PeerMetadata(), "client peer metadata")
 	require.Equal(t, clientMeta, serverImpl.PeerMetadata(), "server peer metadata")
-
-	// The client sends metadata in INITIATE and receives it in READY; the
-	// server receives metadata in INITIATE and sends it in READY.
-	require.True(t, clientImpl.metaSent, "client metadata sent flag")
-	require.True(t, clientImpl.metaRecv, "client metadata recv flag")
-	require.True(t, serverImpl.metaSent, "server metadata sent flag")
-	require.True(t, serverImpl.metaRecv, "server metadata recv flag")
 }
 
 func TestPlainHandshakeWrongPassword(t *testing.T) {
