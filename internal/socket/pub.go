@@ -89,6 +89,8 @@ type pubEngine struct {
 	surfaceSubs bool
 	subInbound  chan subInboundItem // XPUB-only; nil for PUB
 	closeCh     chan struct{}
+	readyR      chan struct{}
+	readyW      chan struct{}
 
 	// Metrics counters. sent increments once per Send call that has at
 	// least one frame; dropped increments per (message, peer) pair when
@@ -123,6 +125,8 @@ func newPubEngineBase(surface bool) *pubEngine {
 		peers:       make(map[iface.Pipe]*pubPeer),
 		surfaceSubs: surface,
 		closeCh:     make(chan struct{}),
+		readyR:      make(chan struct{}, 1),
+		readyW:      make(chan struct{}, 1),
 	}
 	if surface {
 		// Capacity-1 handoff buffer. HWM-style backpressure on the
@@ -152,6 +156,10 @@ func (e *pubEngine) AttachPipe(p iface.Pipe) error {
 		done: make(chan struct{}),
 	}
 	e.peers[p] = peer
+	select {
+	case e.readyW <- struct{}{}:
+	default:
+	}
 	e.mu.Unlock()
 
 	go e.runPeerReader(peer)
@@ -219,6 +227,10 @@ func (e *pubEngine) runPeerReader(peer *pubPeer) {
 			// the peer reader indefinitely.
 			select {
 			case e.subInbound <- subInboundItem{m: m, pipe: peer.pipe}:
+				select {
+				case e.readyR <- struct{}{}:
+				default:
+				}
 			case <-peer.stop:
 				return
 			case <-e.closeCh:
@@ -227,6 +239,41 @@ func (e *pubEngine) runPeerReader(peer *pubPeer) {
 		}
 	}
 }
+
+func (e *pubEngine) ReadyRecv() <-chan struct{} {
+	if e.CanRecvNow() {
+		select {
+		case e.readyR <- struct{}{}:
+		default:
+		}
+	}
+	if !e.surfaceSubs {
+		return nil
+	}
+	return e.readyR
+}
+
+func (e *pubEngine) ReadyWrite() <-chan struct{} {
+	if e.CanSendNow() {
+		select {
+		case e.readyW <- struct{}{}:
+		default:
+		}
+	}
+	return e.readyW
+}
+
+func (e *pubEngine) CanRecvNow() bool {
+	return e.surfaceSubs && e.subInbound != nil && len(e.subInbound) > 0
+}
+
+func (e *pubEngine) CanSendNow() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return !e.closed && len(e.peers) > 0
+}
+
+var _ Pollable = (*pubEngine)(nil)
 
 // Send fans out m to every attached peer whose SubTree matches the first
 // frame of m. Per libzmq, the first frame is the topic; multipart

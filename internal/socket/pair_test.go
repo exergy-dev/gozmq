@@ -77,9 +77,10 @@ func TestPair_CloseUnblocksSend(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewPairEngine()
 
-	a, b := pipe.NewPair(0, 0, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
+	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("fill"))))
 	done := make(chan error, 1)
 	go func() { done <- eng.Send(context.Background(), msg.FromBytes([]byte("x"))) }()
 	time.Sleep(50 * time.Millisecond)

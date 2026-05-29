@@ -8,6 +8,7 @@ package security
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/rkm/gozmq/internal/iface"
@@ -135,7 +136,7 @@ func (m *nullMech) nextServer(in []byte) ([]byte, bool, error) {
 			if err != nil {
 				return nil, false, fmt.Errorf("gozmq/security/null: ZAP rejected peer: %w", err)
 			}
-			m.zapMeta = copyMeta(meta)
+			m.zapMeta = maps.Clone(meta)
 		}
 		m.peerMeta = mergeMeta(props, m.zapMeta)
 		m.peerReady = true

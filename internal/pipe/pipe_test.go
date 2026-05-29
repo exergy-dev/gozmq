@@ -62,6 +62,43 @@ func TestHWM_Blocks_Send_On_Full(t *testing.T) {
 	require.NoError(t, a.Send(ctx, msg.FromBytes([]byte{byte(hwm)})), "a.Send post-drain")
 }
 
+func TestHWMZero_IsUnbounded(t *testing.T) {
+	a, b := NewPair(0, 0, PeerInfo{}, PeerInfo{})
+	defer a.Close()
+	defer b.Close()
+
+	ctx := context.Background()
+	for i := 0; i < 10000; i++ {
+		sendCtx, cancel := context.WithTimeout(ctx, time.Second)
+		err := a.Send(sendCtx, msg.FromBytes([]byte{byte(i)}))
+		cancel()
+		require.NoError(t, err, "a.Send[%d]", i)
+	}
+
+	for i := 0; i < 10000; i++ {
+		got, err := b.Recv(ctx)
+		require.NoError(t, err, "b.Recv[%d]", i)
+		require.Equal(t, byte(i), got.Bytes()[0], "b.Recv[%d]", i)
+	}
+}
+
+func TestHWMZero_MixedDirection(t *testing.T) {
+	a, b := NewPair(0, 1, PeerInfo{}, PeerInfo{})
+	defer a.Close()
+	defer b.Close()
+
+	ctx := context.Background()
+	for i := 0; i < 1000; i++ {
+		require.NoError(t, a.Send(ctx, msg.FromBytes([]byte{byte(i)})), "unbounded a.Send[%d]", i)
+	}
+
+	require.NoError(t, b.Send(ctx, msg.FromBytes([]byte("one"))))
+	blockCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	err := b.Send(blockCtx, msg.FromBytes([]byte("two")))
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
 // TestClose_Unblocks_Send asserts that closing either end wakes a Send
 // blocked on a full pipe with io.ErrClosedPipe.
 func TestClose_Unblocks_Send(t *testing.T) {

@@ -43,7 +43,7 @@ var msgPool = sync.Pool{New: func() any { return &Msg{} }}
 // return those buffers to the pool. Release is always safe to call (it
 // is a no-op for *Msg values without pooled frames).
 type Msg struct {
-	frames [][]byte
+	frames       [][]byte
 	inlineFrames [1][]byte
 	// pooled holds the original pool-allocated buffers that back
 	// entries in frames (possibly subsliced). Populated only by the
@@ -113,12 +113,22 @@ func (m *Msg) Frames() [][]byte { return m.frames }
 func (m *Msg) NumFrames() int { return len(m.frames) }
 
 // Bytes returns the first frame for single-frame messages. Panics if the
-// message has more than one frame; use Frames for multipart.
+// message has anything other than one frame; use SingleFrame for a safe
+// single-frame accessor or Frames for multipart.
 func (m *Msg) Bytes() []byte {
 	if len(m.frames) != 1 {
 		panic("gozmq: Msg.Bytes called on multipart message")
 	}
 	return m.frames[0]
+}
+
+// SingleFrame returns the only frame in m. The boolean is false when m is
+// empty or multipart.
+func (m *Msg) SingleFrame() ([]byte, bool) {
+	if len(m.frames) != 1 {
+		return nil, false
+	}
+	return m.frames[0], true
 }
 
 // AppendFrame appends a frame to the message. The frame is retained by

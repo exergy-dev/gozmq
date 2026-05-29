@@ -1,7 +1,7 @@
 // Package pipe provides the reference implementation of iface.Pipe — a
-// bounded bidirectional in-memory message queue between a socket engine
-// and a session. Channel-backed; HWM is expressed as channel capacity so
-// backpressure and context cancellation fall out of Go's select semantics.
+// bidirectional in-memory message queue between a socket engine and a
+// session. Positive HWM directions are channel-backed with HWM expressed as
+// channel capacity; HWM 0 directions use an unbounded FIFO queue.
 package pipe
 
 import (
@@ -27,8 +27,8 @@ type PeerInfo struct {
 
 // NewPair returns two Pipe ends bound to one another. aToB is the maximum
 // number of messages buffered in the A→B direction; bToA is the B→A
-// maximum. A HWM of 0 means a synchronous (unbuffered) direction; negative
-// values are rejected with a panic (programmer error).
+// maximum. A HWM of 0 disables the limit for that direction; negative values
+// are rejected with a panic (programmer error).
 //
 // aInfo describes the peer visible to the A end (i.e. B's endpoint/identity);
 // bInfo describes what A looks like from B's side.
@@ -37,13 +37,15 @@ func NewPair(aToB, bToA int, aInfo, bInfo PeerInfo) (a, b iface.Pipe) {
 		panic("gozmq/pipe: negative HWM")
 	}
 	s := newShared()
-	aChan := make(chan *msg.Msg, aToB)
-	bChan := make(chan *msg.Msg, bToA)
+	aToBq := newDirection(aToB)
+	bToAq := newDirection(bToA)
 	endA := &end{
 		shared:  s,
 		isA:     true,
-		sendCh:  aChan, // A writes → B reads
-		recvCh:  bChan, // A reads ← B writes
+		sendCh:  aToBq.in,  // A writes → B reads
+		recvCh:  bToAq.out, // A reads ← B writes
+		sendDir: aToBq,
+		recvDir: bToAq,
 		sendHWM: aToB,
 		recvHWM: bToA,
 		peer:    aInfo,
@@ -53,8 +55,10 @@ func NewPair(aToB, bToA int, aInfo, bInfo PeerInfo) (a, b iface.Pipe) {
 	endB := &end{
 		shared:  s,
 		isA:     false,
-		sendCh:  bChan,
-		recvCh:  aChan,
+		sendCh:  bToAq.in,
+		recvCh:  aToBq.out,
+		sendDir: bToAq,
+		recvDir: aToBq,
 		sendHWM: bToA,
 		recvHWM: aToB,
 		peer:    bInfo,
@@ -81,12 +85,93 @@ func newShared() *shared {
 	}
 }
 
+type direction struct {
+	in       chan *msg.Msg
+	out      chan *msg.Msg
+	stopIn   chan struct{}
+	done     chan struct{}
+	stopOnce sync.Once
+	doneOnce sync.Once
+}
+
+func newDirection(hwm int) *direction {
+	if hwm > 0 {
+		ch := make(chan *msg.Msg, hwm)
+		return &direction{in: ch, out: ch}
+	}
+	d := &direction{
+		in:     make(chan *msg.Msg, 1024),
+		out:    make(chan *msg.Msg, 1),
+		stopIn: make(chan struct{}),
+		done:   make(chan struct{}),
+	}
+	go d.run()
+	return d
+}
+
+func (d *direction) run() {
+	var q []*msg.Msg
+	for {
+		var out chan *msg.Msg
+		var next *msg.Msg
+		if len(q) > 0 {
+			out = d.out
+			next = q[0]
+		}
+		select {
+		case m := <-d.in:
+			q = append(q, m)
+		case out <- next:
+			q[0] = nil
+			q = q[1:]
+		case <-d.stopIn:
+			for {
+				select {
+				case m := <-d.in:
+					q = append(q, m)
+				default:
+					goto drain
+				}
+			}
+		drain:
+			for len(q) > 0 {
+				select {
+				case d.out <- q[0]:
+					q[0] = nil
+					q = q[1:]
+				case <-d.done:
+					return
+				}
+			}
+			return
+		case <-d.done:
+			return
+		}
+	}
+}
+
+func (d *direction) closeInput() {
+	if d.stopIn == nil {
+		return
+	}
+	d.stopOnce.Do(func() { close(d.stopIn) })
+}
+
+func (d *direction) close() {
+	if d.done == nil {
+		return
+	}
+	d.doneOnce.Do(func() { close(d.done) })
+}
+
 type end struct {
 	shared *shared
 	isA    bool
 
-	sendCh chan *msg.Msg
-	recvCh chan *msg.Msg
+	sendCh  chan *msg.Msg
+	recvCh  chan *msg.Msg
+	sendDir *direction
+	recvDir *direction
 
 	sendHWM int
 	recvHWM int
@@ -94,10 +179,10 @@ type end struct {
 
 	closeOnce sync.Once
 
-	myCh    chan struct{}  // cached closed channel for this end
-	peerCh  chan struct{}  // cached closed channel for peer end
-	peerEnd *end          // peer end for atomic flag check
-	isClosed atomic.Bool  // set in Close()
+	myCh     chan struct{} // cached closed channel for this end
+	peerCh   chan struct{} // cached closed channel for peer end
+	peerEnd  *end          // peer end for atomic flag check
+	isClosed atomic.Bool   // set in Close()
 }
 
 func (e *end) myClosed() chan struct{} {
@@ -193,6 +278,8 @@ func (e *end) Close() error {
 		e.isClosed.Store(true)
 		close(e.myCh)
 		e.shared.eitherOnce.Do(func() { close(e.shared.either) })
+		e.sendDir.closeInput()
+		e.recvDir.close()
 	})
 	return nil
 }

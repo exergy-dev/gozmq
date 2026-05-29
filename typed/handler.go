@@ -54,6 +54,7 @@ func (r *Receiver[T]) Handle(
 		} else if err := r.codec.Unmarshal(m.Bytes(), &v); err != nil {
 			decodeErr = fmt.Errorf("%w: %w", ErrDecode, err)
 		}
+		m.Release()
 		if decodeErr != nil {
 			if stop := o.report(decodeErr); stop != nil {
 				return stop
@@ -95,6 +96,7 @@ func (s *Subscriber[T]) Handle(
 		} else {
 			msg.Topic = string(frames[0])
 		}
+		m.Release()
 		if decodeErr != nil {
 			if stop := o.report(decodeErr); stop != nil {
 				return stop

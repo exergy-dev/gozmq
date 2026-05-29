@@ -3,6 +3,7 @@ package gozmq_test
 import (
 	"context"
 	"errors"
+	"net"
 	"testing"
 	"time"
 
@@ -81,6 +82,138 @@ func TestPoller_PullReadsAfterPush(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected DeadlineExceeded, got %v", err)
 	}
+}
+
+func TestPoller_ZeroValue(t *testing.T) {
+	_, server, client := newSocketPair(t, gozmq.Pair, "inproc://poller-zero-value")
+
+	sendCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := client.SendMsg(sendCtx, gozmq.NewMsgFromBytes([]byte("hi"))); err != nil {
+		t.Fatalf("client send: %v", err)
+	}
+
+	var p gozmq.Poller
+	p.Add(server, gozmq.PollIn)
+
+	events := waitPoll(t, &p, 2*time.Second)
+	if len(events) != 1 || events[0].Socket != server || events[0].Events&gozmq.PollIn == 0 {
+		t.Fatalf("unexpected poll events: %+v", events)
+	}
+}
+
+func TestPoller_PairPollOut(t *testing.T) {
+	_, _, client := newSocketPair(t, gozmq.Pair, "inproc://poller-pair-out")
+
+	p := gozmq.NewPoller()
+	p.Add(client, gozmq.PollOut)
+
+	events := waitPoll(t, p, 2*time.Second)
+	if len(events) != 1 || events[0].Socket != client || events[0].Events&gozmq.PollOut == 0 {
+		t.Fatalf("unexpected poll events: %+v", events)
+	}
+}
+
+func TestPoller_ReqPollInOut(t *testing.T) {
+	_, rep, req := newSocketPairTypes(t, gozmq.Rep, gozmq.Req, "inproc://poller-req", nil, nil)
+
+	pOut := gozmq.NewPoller()
+	pOut.Add(req, gozmq.PollOut)
+	events := waitPoll(t, pOut, 2*time.Second)
+	if len(events) != 1 || events[0].Socket != req || events[0].Events&gozmq.PollOut == 0 {
+		t.Fatalf("unexpected PollOut events: %+v", events)
+	}
+
+	callCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := req.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("request"))); err != nil {
+		t.Fatalf("req send: %v", err)
+	}
+	request, err := rep.RecvMsg(callCtx)
+	if err != nil {
+		t.Fatalf("rep recv: %v", err)
+	}
+	request.Release()
+	if err := rep.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("reply"))); err != nil {
+		t.Fatalf("rep send: %v", err)
+	}
+
+	pIn := gozmq.NewPoller()
+	pIn.Add(req, gozmq.PollIn)
+	events = waitPoll(t, pIn, 2*time.Second)
+	if len(events) != 1 || events[0].Socket != req || events[0].Events&gozmq.PollIn == 0 {
+		t.Fatalf("unexpected PollIn events: %+v", events)
+	}
+}
+
+func TestPoller_PubPollOut(t *testing.T) {
+	_, _, pub := newSocketPairTypes(t, gozmq.Sub, gozmq.Pub, "inproc://poller-pub",
+		[]gozmq.Option{gozmq.WithSubscribe(nil)}, nil)
+
+	p := gozmq.NewPoller()
+	p.Add(pub, gozmq.PollOut)
+	events := waitPoll(t, p, 2*time.Second)
+	if len(events) != 1 || events[0].Socket != pub || events[0].Events&gozmq.PollOut == 0 {
+		t.Fatalf("unexpected poll events: %+v", events)
+	}
+}
+
+func TestPoller_XPubPollIn(t *testing.T) {
+	_, xpub, xsub := newSocketPairTypes(t, gozmq.XPub, gozmq.XSub, "inproc://poller-xpub", nil, nil)
+
+	callCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := xsub.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte{1, 't'})); err != nil {
+		t.Fatalf("xsub subscribe: %v", err)
+	}
+
+	p := gozmq.NewPoller()
+	p.Add(xpub, gozmq.PollIn)
+	events := waitPoll(t, p, 2*time.Second)
+	if len(events) != 1 || events[0].Socket != xpub || events[0].Events&gozmq.PollIn == 0 {
+		t.Fatalf("unexpected poll events: %+v", events)
+	}
+}
+
+func TestPoller_StreamPollInOut(t *testing.T) {
+	ctx := gozmq.NewContext()
+	defer ctx.Close()
+
+	stream, err := ctx.NewSocket(gozmq.Stream)
+	if err != nil {
+		t.Fatalf("new stream: %v", err)
+	}
+	defer stream.Close()
+	if err := stream.Bind("tcp://127.0.0.1:0"); err != nil {
+		t.Fatalf("bind stream: %v", err)
+	}
+
+	conn, err := net.DialTimeout("tcp", stream.LastEndpoint()[len("tcp://"):], 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial stream: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("hello")); err != nil {
+		t.Fatalf("write stream peer: %v", err)
+	}
+
+	p := gozmq.NewPoller()
+	p.Add(stream, gozmq.PollIn|gozmq.PollOut)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		pollCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		events, err := p.Poll(pollCtx)
+		cancel()
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("poll stream: %v", err)
+		}
+		for _, ev := range events {
+			if ev.Socket == stream && ev.Events&gozmq.PollIn != 0 {
+				return
+			}
+		}
+	}
+	t.Fatalf("stream PollIn did not become ready")
 }
 
 // TestPoller_RemoveStopsReporting registers a PULL, then removes it,

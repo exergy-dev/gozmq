@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -107,7 +108,7 @@ func (s *sessionImpl) runReader() {
 		case len(decoded) > largeFrameThreshold && s.direct != nil:
 			current.AppendPooledFrame(decoded, body)
 		default:
-			frame := append([]byte(nil), decoded...)
+			frame := bytes.Clone(decoded)
 			current.AppendFrame(frame)
 			msg.PoolPut(body)
 		}

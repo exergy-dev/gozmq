@@ -119,11 +119,11 @@ func TestLoadBalancer_CloseUnblocksSend(t *testing.T) {
 	t.Parallel()
 	lb := socket.NewLoadBalancer()
 
-	a, b := pipe.NewPair(0, 0, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
 	require.NoError(t, lb.Attach(a), "attach")
+	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("fill"))))
 
-	// HWM=0 → unbuffered; Send blocks until a Recv on the other side.
 	ctx := context.Background()
 	sendErr := make(chan error, 1)
 	go func() { sendErr <- lb.Send(ctx, msg.FromBytes([]byte("x"))) }()
@@ -162,9 +162,10 @@ func TestLoadBalancer_CtxCancelUnblocksSend(t *testing.T) {
 	lb := socket.NewLoadBalancer()
 	defer lb.Close()
 
-	a, b := pipe.NewPair(0, 0, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
 	require.NoError(t, lb.Attach(a), "attach")
+	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("fill"))))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	sendErr := make(chan error, 1)

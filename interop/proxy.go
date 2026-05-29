@@ -3,6 +3,7 @@
 package interop
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net"
@@ -198,7 +199,7 @@ func (p *SniffingProxy) pipe(r, w net.Conn, clientToServer bool) {
 			}
 		}
 		p.mu.Lock()
-		snap := append([]byte(nil), body...)
+		snap := bytes.Clone(body)
 		if clientToServer {
 			p.clientBodies = append(p.clientBodies, snap)
 		} else {
@@ -244,11 +245,11 @@ func (p *SniffingProxy) bodiesSnapshot() (clientBodies, serverBodies [][]byte) {
 	defer p.mu.Unlock()
 	cb := make([][]byte, len(p.clientBodies))
 	for i, b := range p.clientBodies {
-		cb[i] = append([]byte(nil), b...)
+		cb[i] = bytes.Clone(b)
 	}
 	sb := make([][]byte, len(p.serverBodies))
 	for i, b := range p.serverBodies {
-		sb[i] = append([]byte(nil), b...)
+		sb[i] = bytes.Clone(b)
 	}
 	return cb, sb
 }
@@ -256,7 +257,7 @@ func (p *SniffingProxy) bodiesSnapshot() (clientBodies, serverBodies [][]byte) {
 func (p *SniffingProxy) snapshot() (clientOut, serverOut []byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return append([]byte(nil), p.clientOut...), append([]byte(nil), p.serverOut...)
+	return bytes.Clone(p.clientOut), bytes.Clone(p.serverOut)
 }
 
 func newFlagSniffingProxy(t *testing.T, upstream string) *SniffingProxy {

@@ -1,6 +1,7 @@
 package socket
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"sync"
@@ -77,6 +78,7 @@ type streamEngine struct {
 	// writer-wins on identity collisions; Detach clears only if the current
 	// mapping still points at the pipe being detached.
 	pipeOf map[string]iface.Pipe
+	readyW chan struct{}
 
 	sent atomic.Uint64
 	recv atomic.Uint64
@@ -103,6 +105,7 @@ func NewStreamEngine() iface.SocketEngine {
 		fq:     NewFairQueue(),
 		idOf:   make(map[iface.Pipe][]byte),
 		pipeOf: make(map[string]iface.Pipe),
+		readyW: make(chan struct{}, 1),
 	}
 }
 
@@ -129,9 +132,13 @@ func (e *streamEngine) AttachPipe(p iface.Pipe) error {
 		// address their peer tables the same way.
 		id = synthesizedIdentity()
 	}
-	idCopy := append([]byte(nil), id...)
+	idCopy := bytes.Clone(id)
 	e.idOf[p] = idCopy
 	e.pipeOf[string(idCopy)] = p
+	select {
+	case e.readyW <- struct{}{}:
+	default:
+	}
 	e.mu.Unlock()
 	return e.fq.Attach(p)
 }
@@ -229,7 +236,7 @@ func (e *streamEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 	}
 	orig := m.Frames()
 	out := make([][]byte, 0, len(orig)+1)
-	out = append(out, append([]byte(nil), id...))
+	out = append(out, bytes.Clone(id))
 	out = append(out, orig...)
 	e.recv.Add(1)
 	result := msg.FromFrames(out...)
@@ -268,5 +275,26 @@ func (e *streamEngine) Close() error {
 	return e.fq.Close()
 }
 
+func (e *streamEngine) ReadyRecv() <-chan struct{} { return e.fq.ReadyRecv() }
+
+func (e *streamEngine) ReadyWrite() <-chan struct{} {
+	if e.CanSendNow() {
+		select {
+		case e.readyW <- struct{}{}:
+		default:
+		}
+	}
+	return e.readyW
+}
+
+func (e *streamEngine) CanRecvNow() bool { return e.fq.HasPending() }
+
+func (e *streamEngine) CanSendNow() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return !e.closed && len(e.pipeOf) > 0
+}
+
 // Compile-time interface check.
 var _ iface.SocketEngine = (*streamEngine)(nil)
+var _ Pollable = (*streamEngine)(nil)

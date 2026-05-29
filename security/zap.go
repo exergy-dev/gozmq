@@ -56,6 +56,7 @@
 package security
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 
@@ -148,7 +149,7 @@ func (h *ZapHandler) ServeRequest(reqFrames [][]byte) [][]byte {
 		// it was readable (frame index 1), otherwise emit an empty one.
 		var reqID []byte
 		if len(reqFrames) >= 2 {
-			reqID = append([]byte(nil), reqFrames[1]...)
+			reqID = bytes.Clone(reqFrames[1])
 		}
 		return EncodeZapResponse(&ZapResponse{
 			Version:    zapVersion,
@@ -161,7 +162,7 @@ func (h *ZapHandler) ServeRequest(reqFrames [][]byte) [][]byte {
 	userID, metadata, perr := h.policy.Authenticate(req.Domain, req.Address, req.Mechanism, req.Credentials)
 	resp := &ZapResponse{
 		Version:   zapVersion,
-		RequestID: append([]byte(nil), req.RequestID...),
+		RequestID: bytes.Clone(req.RequestID),
 	}
 	switch {
 	case perr == nil:
@@ -278,11 +279,11 @@ func EncodeZapResponse(resp *ZapResponse) [][]byte {
 	metadataBytes := zmtp.MetadataCodec.Encode(resp.Metadata)
 
 	return [][]byte{
-		append([]byte(nil), []byte(version)...),
-		append([]byte(nil), resp.RequestID...),
-		append([]byte(nil), []byte(resp.StatusCode)...),
-		append([]byte(nil), []byte(resp.StatusText)...),
-		append([]byte(nil), []byte(resp.UserID)...),
+		bytes.Clone([]byte(version)),
+		bytes.Clone(resp.RequestID),
+		bytes.Clone([]byte(resp.StatusCode)),
+		bytes.Clone([]byte(resp.StatusText)),
+		bytes.Clone([]byte(resp.UserID)),
 		metadataBytes,
 	}
 }

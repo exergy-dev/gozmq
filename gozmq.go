@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -200,10 +201,11 @@ func (c *Context) RegisterTransport(t iface.Transport) {
 }
 
 // Close cancels the Context and tears down every socket created on it.
-// Subsequent NewSocket calls return ErrContextClosed.
+// It is idempotent; subsequent Close calls return nil. Subsequent
+// NewSocket calls return ErrContextClosed.
 func (c *Context) Close() error {
 	if !c.closed.CompareAndSwap(false, true) {
-		return ErrContextClosed
+		return nil
 	}
 	c.mu.Lock()
 	socks := append([]*Socket(nil), c.sockets...)
@@ -667,7 +669,7 @@ func (s *Socket) removeSession(sess iface.Session) {
 	s.mu.Lock()
 	for i, existing := range s.sessions {
 		if existing == sess {
-			s.sessions = append(s.sessions[:i], s.sessions[i+1:]...)
+			s.sessions = slices.Delete(s.sessions, i, i+1)
 			break
 		}
 	}

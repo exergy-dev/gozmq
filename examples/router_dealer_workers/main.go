@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -40,7 +41,7 @@ func main() {
 		if len(frames) != 2 {
 			log.Fatalf("ready frame count = %d, want identity + body", len(frames))
 		}
-		identity := append([]byte(nil), frames[0]...)
+		identity := bytes.Clone(frames[0])
 		identities = append(identities, identity)
 		fmt.Printf("router saw %s send %q\n", identity, frames[1])
 	}

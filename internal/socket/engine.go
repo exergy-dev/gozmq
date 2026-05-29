@@ -64,6 +64,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -235,7 +236,7 @@ func (lb *LoadBalancer) Detach(p iface.Pipe) error {
 	defer lb.mu.Unlock()
 	for i, existing := range lb.pipes {
 		if existing == p {
-			lb.pipes = append(lb.pipes[:i], lb.pipes[i+1:]...)
+			lb.pipes = slices.Delete(lb.pipes, i, i+1)
 			if len(lb.pipes) == 0 {
 				lb.cursor = 0
 			} else {

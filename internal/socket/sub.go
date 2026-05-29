@@ -3,6 +3,7 @@ package socket
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -190,7 +191,7 @@ func (e *SubEngine) Unsubscribe(prefix []byte) error {
 		delete(e.subs, key)
 		for i, s := range e.subList {
 			if string(s) == key {
-				e.subList = append(e.subList[:i], e.subList[i+1:]...)
+				e.subList = slices.Delete(e.subList, i, i+1)
 				break
 			}
 		}
@@ -275,7 +276,7 @@ func (e *SubEngine) xsubSend(ctx context.Context, m *msg.Msg) error {
 			delete(e.subs, key)
 			for i, s := range e.subList {
 				if string(s) == key {
-					e.subList = append(e.subList[:i], e.subList[i+1:]...)
+					e.subList = slices.Delete(e.subList, i, i+1)
 					break
 				}
 			}

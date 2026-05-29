@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -57,6 +58,8 @@ type reqEngine struct {
 	closed   bool
 	closeCh  chan struct{}
 	notifyCh chan struct{} // closed on attach; swapped for a fresh one after
+	readyR   chan struct{}
+	readyW   chan struct{}
 	state    reqState
 	pipes    []iface.Pipe
 	cursor   int
@@ -85,6 +88,8 @@ func NewReqEngine() iface.SocketEngine {
 	return &reqEngine{
 		closeCh:  make(chan struct{}),
 		notifyCh: make(chan struct{}),
+		readyR:   make(chan struct{}, 1),
+		readyW:   make(chan struct{}, 1),
 	}
 }
 
@@ -103,6 +108,12 @@ func (e *reqEngine) AttachPipe(p iface.Pipe) error {
 	// Wake any Send parked waiting for a peer.
 	close(e.notifyCh)
 	e.notifyCh = make(chan struct{})
+	if e.state == reqStateCanSend {
+		select {
+		case e.readyW <- struct{}{}:
+		default:
+		}
+	}
 	return nil
 }
 
@@ -111,7 +122,7 @@ func (e *reqEngine) DetachPipe(p iface.Pipe) error {
 	defer e.mu.Unlock()
 	for i, existing := range e.pipes {
 		if existing == p {
-			e.pipes = append(e.pipes[:i], e.pipes[i+1:]...)
+			e.pipes = slices.Delete(e.pipes, i, i+1)
 			if len(e.pipes) == 0 {
 				e.cursor = 0
 			} else {
@@ -243,6 +254,10 @@ func (e *reqEngine) stickyForward(p iface.Pipe, out chan<- stickyRecvResult) {
 	m, err := p.Recv(ctx)
 	close(watcherDone)
 	watcherWG.Wait()
+	select {
+	case e.readyR <- struct{}{}:
+	default:
+	}
 	out <- stickyRecvResult{m: m, err: err}
 }
 
@@ -298,6 +313,12 @@ func (e *reqEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		e.state = reqStateCanSend
 		e.sticky = nil
 		e.stickyCh = nil
+		if len(e.pipes) > 0 {
+			select {
+			case e.readyW <- struct{}{}:
+			default:
+			}
+		}
 		e.mu.Unlock()
 		e.recv.Add(1)
 		return stripped, nil
@@ -307,6 +328,40 @@ func (e *reqEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		return nil, ctx.Err()
 	}
 }
+
+func (e *reqEngine) ReadyRecv() <-chan struct{} {
+	if e.CanRecvNow() {
+		select {
+		case e.readyR <- struct{}{}:
+		default:
+		}
+	}
+	return e.readyR
+}
+
+func (e *reqEngine) ReadyWrite() <-chan struct{} {
+	if e.CanSendNow() {
+		select {
+		case e.readyW <- struct{}{}:
+		default:
+		}
+	}
+	return e.readyW
+}
+
+func (e *reqEngine) CanRecvNow() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return !e.closed && e.state == reqStateCanRecv && e.stickyCh != nil && len(e.stickyCh) > 0
+}
+
+func (e *reqEngine) CanSendNow() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return !e.closed && e.state == reqStateCanSend && len(e.pipes) > 0
+}
+
+var _ Pollable = (*reqEngine)(nil)
 
 // stripReqDelimiter removes the leading empty delimiter frame from an
 // inbound REP reply. The wire shape is [empty, body...]; we return a

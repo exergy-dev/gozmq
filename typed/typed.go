@@ -80,6 +80,7 @@ func (r *Receiver[T]) Recv(ctx context.Context) (T, error) {
 	if err != nil {
 		return zero, err
 	}
+	defer m.Release()
 	if m.NumFrames() != 1 {
 		return zero, fmt.Errorf("typed: expected 1 frame, got %d: %w", m.NumFrames(), ErrFrameCount)
 	}
@@ -151,6 +152,7 @@ func (s *Subscriber[T]) Recv(ctx context.Context) (Message[T], error) {
 	if err != nil {
 		return zero, err
 	}
+	defer m.Release()
 	frames := m.Frames()
 	if len(frames) != 2 {
 		return zero, fmt.Errorf("typed: expected [topic, payload], got %d frames: %w", len(frames), ErrFrameCount)

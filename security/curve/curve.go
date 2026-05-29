@@ -31,6 +31,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"strings"
 
@@ -793,7 +794,7 @@ func (m *curveMech) parseInitiate(body []byte) error {
 		if err != nil {
 			return fmt.Errorf("gozmq/security/curve: ZAP rejected client key: %w", err)
 		}
-		m.zapMeta = copyMeta(meta)
+		m.zapMeta = maps.Clone(meta)
 	}
 	m.peerMeta = mergeMeta(props, m.zapMeta)
 	m.peerShortNonce = counter + 1
@@ -1136,22 +1137,14 @@ func appendCounter(buf []byte, c uint64) []byte {
 	return append(buf, b[:]...)
 }
 
-func copyMeta(src map[string]string) map[string]string {
-	dst := make(map[string]string, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
-}
-
 func mergeMeta(base, overlay map[string]string) map[string]string {
 	if len(base) == 0 {
-		return copyMeta(overlay)
+		return maps.Clone(overlay)
 	}
 	if len(overlay) == 0 {
-		return copyMeta(base)
+		return maps.Clone(base)
 	}
-	out := copyMeta(base)
+	out := maps.Clone(base)
 	for k, v := range overlay {
 		out[k] = v
 	}

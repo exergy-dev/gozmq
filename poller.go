@@ -54,12 +54,8 @@ type PollEvent struct {
 // Poll calls return fresh readiness — there is no latched edge-trigger
 // state between calls.
 //
-// Engine support: PULL, SUB, XSUB, REP, PUSH, PAIR, DEALER, ROUTER
-// expose their internal queue primitives to the Poller. REQ, PUB,
-// XPUB, and STREAM currently do not — sockets of those types may be
-// registered but will never appear in Poll results. Future engines
-// may opt in by implementing the unexported pollable interface on
-// their internal/socket engine.
+// Engine support: every built-in socket type exposes non-consuming readiness
+// signals to the Poller.
 type Poller struct {
 	mu      sync.Mutex
 	entries map[*Socket]PollEvents
@@ -80,6 +76,9 @@ func (p *Poller) Add(sock *Socket, events PollEvents) {
 		return
 	}
 	p.mu.Lock()
+	if p.entries == nil {
+		p.entries = make(map[*Socket]PollEvents)
+	}
 	p.entries[sock] = events
 	p.mu.Unlock()
 }

@@ -48,7 +48,7 @@ type xpubEngine struct {
 	verbose bool
 
 	mu       sync.Mutex
-	prefRefs map[string]int            // prefix -> number of peers currently subscribed
+	prefRefs map[string]int                // prefix -> number of peers currently subscribed
 	peerSubs map[iface.Pipe]map[string]int // pipe -> prefix -> sub count from that pipe
 }
 
@@ -83,6 +83,13 @@ func (e *xpubEngine) Close() error { return e.pub.Close() }
 // sent (per Send call), dropped (per HWM-rejected peer), and recv (per
 // surfaced subscription event consumed by this engine's Recv below).
 func (e *xpubEngine) Metrics() iface.SocketMetrics { return e.pub.Metrics() }
+
+func (e *xpubEngine) ReadyRecv() <-chan struct{}  { return e.pub.ReadyRecv() }
+func (e *xpubEngine) ReadyWrite() <-chan struct{} { return e.pub.ReadyWrite() }
+func (e *xpubEngine) CanRecvNow() bool            { return e.pub.CanRecvNow() }
+func (e *xpubEngine) CanSendNow() bool            { return e.pub.CanSendNow() }
+
+var _ Pollable = (*xpubEngine)(nil)
 
 // Recv delivers the next SUBSCRIBE/CANCEL event to the application.
 //

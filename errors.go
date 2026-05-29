@@ -11,9 +11,10 @@ import "github.com/rkm/gozmq/internal/zmqerr"
 // wrap sentinels and the public gozmq package imports those internal
 // packages for wiring). errors.Is sees them as the same value.
 var (
-	// ErrContextClosed is returned by Context methods (NewSocket, Close)
-	// after the Context has already been closed, and by any in-flight
-	// operation whose root Context was cancelled by Context.Close.
+	// ErrContextClosed is returned by Context methods after the Context has
+	// already been closed, and by any in-flight operation whose root Context
+	// was cancelled by Context.Close. Context.Close itself is idempotent and
+	// returns nil on repeated calls.
 	ErrContextClosed = zmqerr.ErrContextClosed
 
 	// ErrSocketClosed is returned by every Socket method (Send, Recv,

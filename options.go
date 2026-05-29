@@ -1,6 +1,7 @@
 package gozmq
 
 import (
+	"bytes"
 	"fmt"
 	"log/slog"
 	"time"
@@ -76,15 +77,6 @@ func newOption(fn func(*socketConfig) error) Option {
 	return optionFunc{applyFn: fn}
 }
 
-// copyBytes returns a defensive heap copy of b. Used to prevent callers
-// from mutating bytes stored in socket config after option application.
-func copyBytes(b []byte) []byte {
-	if b == nil {
-		return nil
-	}
-	return append([]byte(nil), b...)
-}
-
 // WithIdentity sets the ROUTER/DEALER identity advertised during the ZMTP
 // handshake. The identity is the peer-visible name by which a ROUTER
 // addresses this DEALER (or by which a ROUTER peer appears in the leading
@@ -94,7 +86,7 @@ func copyBytes(b []byte) []byte {
 // The slice is copied defensively.
 func WithIdentity(id []byte) Option {
 	return newOption(func(c *socketConfig) error {
-		c.identity = copyBytes(id)
+		c.identity = bytes.Clone(id)
 		return nil
 	})
 }
@@ -208,7 +200,7 @@ func WithXPubVerbose(enabled bool) Option {
 // manage their own subscriptions without interfering.
 func WithSubscribe(prefix []byte) Option {
 	return newOption(func(c *socketConfig) error {
-		c.subscriptions = append(c.subscriptions, copyBytes(prefix))
+		c.subscriptions = append(c.subscriptions, bytes.Clone(prefix))
 		return nil
 	})
 }
@@ -257,7 +249,7 @@ func WithZapDomain(domain string) Option {
 func WithCurveServer(secretKey []byte) Option {
 	return newOption(func(c *socketConfig) error {
 		c.curveServer = true
-		c.curveSecretKey = copyBytes(secretKey)
+		c.curveSecretKey = bytes.Clone(secretKey)
 		return nil
 	})
 }
@@ -273,9 +265,9 @@ func WithCurveServer(secretKey []byte) Option {
 func WithCurveClient(serverKey, publicKey, secretKey []byte) Option {
 	return newOption(func(c *socketConfig) error {
 		c.curveServer = false
-		c.curveServerKey = copyBytes(serverKey)
-		c.curvePublicKey = copyBytes(publicKey)
-		c.curveSecretKey = copyBytes(secretKey)
+		c.curveServerKey = bytes.Clone(serverKey)
+		c.curvePublicKey = bytes.Clone(publicKey)
+		c.curveSecretKey = bytes.Clone(secretKey)
 		return nil
 	})
 }
@@ -328,6 +320,13 @@ func nonNegDur(name string, d time.Duration) error {
 	return nil
 }
 
+func nonNeg64(name string, v int64) error {
+	if v < 0 {
+		return fmt.Errorf("gozmq: %s requires n >= 0", name)
+	}
+	return nil
+}
+
 func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 	if cfg == nil {
 		return nil
@@ -335,7 +334,7 @@ func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 	for _, check := range []error{
 		nonNeg("WithSendHWM", cfg.sendHWM),
 		nonNeg("WithRecvHWM", cfg.recvHWM),
-		nonNeg("WithMaxMessageSize", int(cfg.maxMessageSize)),
+		nonNeg64("WithMaxMessageSize", cfg.maxMessageSize),
 		nonNegDur("WithHandshakeTimeout", cfg.handshakeTimeout),
 		nonNegDur("WithReconnectInterval", cfg.reconnectInterval),
 		nonNegDur("WithReconnectIntervalMax", cfg.reconnectIntervalMax),

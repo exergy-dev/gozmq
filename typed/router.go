@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -91,9 +92,7 @@ func Register[T any](
 	inserted := false
 	for i, e := range r.entries {
 		if len(topic) > len(e.topic) {
-			r.entries = append(r.entries, routerEntry{})
-			copy(r.entries[i+1:], r.entries[i:])
-			r.entries[i] = entry
+			r.entries = slices.Insert(r.entries, i, entry)
 			inserted = true
 			break
 		}
@@ -113,7 +112,7 @@ func (r *Router) Unregister(topic string) error {
 	}
 	for i, e := range r.entries {
 		if e.topic == topic {
-			r.entries = append(r.entries[:i], r.entries[i+1:]...)
+			r.entries = slices.Delete(r.entries, i, i+1)
 			return r.sock.Unsubscribe([]byte(topic))
 		}
 	}
@@ -142,6 +141,7 @@ func (r *Router) Run(ctx context.Context, opts ...Option) error {
 		}
 		frames := m.Frames()
 		if len(frames) != 2 {
+			m.Release()
 			if stop := o.report(fmt.Errorf("%w: expected [topic, payload], got %d frames: %w", ErrDecode, len(frames), ErrFrameCount)); stop != nil {
 				return stop
 			}
@@ -150,12 +150,14 @@ func (r *Router) Run(ctx context.Context, opts ...Option) error {
 		topic := string(frames[0])
 		entry, ok := r.match(topic)
 		if !ok {
+			m.Release()
 			if stop := o.report(fmt.Errorf("%w: %q", ErrNoRouterMatch, topic)); stop != nil {
 				return stop
 			}
 			continue
 		}
 		v, err := entry.decode(frames[1])
+		m.Release()
 		if err != nil {
 			if stop := o.report(fmt.Errorf("%w: topic %q: %w", ErrDecode, topic, err)); stop != nil {
 				return stop

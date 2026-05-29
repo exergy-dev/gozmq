@@ -1,11 +1,13 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -207,7 +209,7 @@ func (it *InprocTransport) cancelWaiter(name string, w *inprocWaiter) *inprocLis
 	q := it.pending[name]
 	for i, pw := range q {
 		if pw == w {
-			it.pending[name] = append(q[:i], q[i+1:]...)
+			it.pending[name] = slices.Delete(q, i, i+1)
 			break
 		}
 	}
@@ -489,7 +491,7 @@ func (c *inprocConn) Write(buf []byte) (int, error) {
 		defer cancel()
 	}
 	// Copy so the caller may safely reuse buf after Write returns.
-	body := append([]byte(nil), buf...)
+	body := bytes.Clone(buf)
 	if err := c.p.Send(ctx, msg.FromBytes(body)); err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return 0, &timeoutError{}

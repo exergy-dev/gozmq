@@ -26,6 +26,18 @@ func TestMsgBytesPanicsOnMultipart(t *testing.T) {
 	require.Panics(t, func() { _ = m.Bytes() }, "expected panic on multipart Bytes")
 }
 
+func TestMsgSingleFrame(t *testing.T) {
+	m := FromBytes([]byte("hello"))
+	b, ok := m.SingleFrame()
+	require.True(t, ok)
+	require.Equal(t, "hello", string(b))
+
+	m = FromFrames([]byte("a"), []byte("b"))
+	b, ok = m.SingleFrame()
+	require.False(t, ok)
+	require.Nil(t, b)
+}
+
 func TestMsgReset(t *testing.T) {
 	m := FromFrames([]byte("x"), []byte("y"))
 	m.Reset()

@@ -31,6 +31,8 @@ type pairEngine struct {
 	closed   bool
 	closeCh  chan struct{}
 	notifyCh chan struct{} // closed on attach; a fresh one is made if the pipe detaches
+	readyR   chan struct{}
+	readyW   chan struct{}
 
 	sent atomic.Uint64
 	recv atomic.Uint64
@@ -41,6 +43,8 @@ func NewPairEngine() iface.SocketEngine {
 	return &pairEngine{
 		closeCh:  make(chan struct{}),
 		notifyCh: make(chan struct{}),
+		readyR:   make(chan struct{}, 1),
+		readyW:   make(chan struct{}, 1),
 	}
 }
 
@@ -59,6 +63,10 @@ func (e *pairEngine) AttachPipe(p iface.Pipe) error {
 	// can wake new waiters.
 	close(e.notifyCh)
 	e.notifyCh = make(chan struct{})
+	select {
+	case e.readyW <- struct{}{}:
+	default:
+	}
 	return nil
 }
 
@@ -181,3 +189,43 @@ func (e *pairEngine) Close() error {
 	e.pipe = nil
 	return nil
 }
+
+func (e *pairEngine) ReadyRecv() <-chan struct{} {
+	if e.CanRecvNow() {
+		select {
+		case e.readyR <- struct{}{}:
+		default:
+		}
+	}
+	return e.readyR
+}
+
+func (e *pairEngine) ReadyWrite() <-chan struct{} {
+	if e.CanSendNow() {
+		select {
+		case e.readyW <- struct{}{}:
+		default:
+		}
+	}
+	return e.readyW
+}
+
+func (e *pairEngine) CanRecvNow() bool {
+	e.mu.Lock()
+	p := e.pipe
+	closed := e.closed
+	e.mu.Unlock()
+	if closed || p == nil {
+		return false
+	}
+	rc, ok := p.(recvChanner)
+	return ok && len(rc.RecvCh()) > 0
+}
+
+func (e *pairEngine) CanSendNow() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return !e.closed && e.pipe != nil
+}
+
+var _ Pollable = (*pairEngine)(nil)

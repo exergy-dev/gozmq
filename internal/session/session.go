@@ -99,9 +99,9 @@ func New(cfg Config) iface.Session {
 type sessionImpl struct {
 	cfg Config
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	reader io.Reader
+	ctx          context.Context
+	cancel       context.CancelFunc
+	reader       io.Reader
 	encode       frameEncoder
 	decode       frameDecoder
 	direct       iface.FrameBufferAppender
@@ -350,8 +350,6 @@ func (s *sessionImpl) run() {
 		Endpoint: s.cfg.Conn.RemoteEndpoint(),
 		Identity: identityFromMetadata(s.cfg.Mech),
 	}
-	// HWM of 0 makes the channel synchronous, which is acceptable but
-	// unusual; we honor whatever the caller passed.
 	s.sessionPipe, s.enginePipe = pipe.NewPair(s.cfg.RecvHWM, s.cfg.SendHWM, pipe.PeerInfo{}, peerInfo)
 	s.handshakedOnce.Do(func() { close(s.handshaked) })
 

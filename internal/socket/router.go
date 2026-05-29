@@ -1,9 +1,11 @@
 package socket
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -162,7 +164,7 @@ func (e *routerEngine) AttachPipe(p iface.Pipe) error {
 	}
 	// Copy defensively so later mutations on the peer-supplied slice
 	// don't corrupt our routing table.
-	idCopy := append([]byte(nil), id...)
+	idCopy := bytes.Clone(id)
 	e.idOf[p] = idCopy
 	e.pipeOf[string(idCopy)] = p
 	// A pipe value could theoretically be re-attached (same pointer)
@@ -230,7 +232,7 @@ func (e *routerEngine) removeDetachedLocked(p iface.Pipe) {
 	delete(e.detachedIdOf, p)
 	for i, q := range e.detachedOrder {
 		if q == p {
-			e.detachedOrder = append(e.detachedOrder[:i], e.detachedOrder[i+1:]...)
+			e.detachedOrder = slices.Delete(e.detachedOrder, i, i+1)
 			return
 		}
 	}
@@ -310,7 +312,7 @@ func (e *routerEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 	// avoid aliasing the caller-observable frame slice of m.
 	orig := m.Frames()
 	out := make([][]byte, 0, len(orig)+1)
-	out = append(out, append([]byte(nil), id...))
+	out = append(out, bytes.Clone(id))
 	out = append(out, orig...)
 	e.recv.Add(1)
 	result := msg.FromFrames(out...)

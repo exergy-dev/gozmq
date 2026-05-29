@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -98,7 +99,7 @@ func NewAdapter(parent context.Context, conn iface.Conn, cfg Config) *Adapter {
 
 	engInfo := pipe.PeerInfo{
 		Endpoint: cfg.Endpoint,
-		Identity: append([]byte(nil), cfg.Identity...),
+		Identity: bytes.Clone(cfg.Identity),
 	}
 	// admInfo is what the adapter end sees as "the peer" — the engine
 	// side. STREAM has no identity to advertise in that direction, so

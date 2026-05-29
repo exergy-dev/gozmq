@@ -22,6 +22,7 @@ package security
 import (
 	"bytes"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/rkm/gozmq/internal/iface"
@@ -101,7 +102,7 @@ func NewPlainClient(username, password string, localMeta map[string]string) ifac
 		state:     plainClientSendHello,
 		username:  username,
 		password:  password,
-		localMeta: copyMeta(localMeta),
+		localMeta: maps.Clone(localMeta),
 		metaCodec: zmtp.MetadataCodec,
 	}
 }
@@ -117,7 +118,7 @@ func NewPlainServer(authenticate func(user, pass string) bool, localMeta map[str
 		role:      iface.RoleServer,
 		state:     plainServerSeed,
 		authFn:    authenticate,
-		localMeta: copyMeta(localMeta),
+		localMeta: maps.Clone(localMeta),
 		metaCodec: zmtp.MetadataCodec,
 	}
 }
@@ -141,7 +142,7 @@ func (*plainMech) DecodeFrame(flags uint8, wire []byte) (uint8, []byte, error) {
 // Metadata returns a copy of the local metadata properties sent in the
 // metadata-bearing handshake command: INITIATE on the client, READY on the
 // server.
-func (m *plainMech) Metadata() map[string]string { return copyMeta(m.localMeta) }
+func (m *plainMech) Metadata() map[string]string { return maps.Clone(m.localMeta) }
 
 // SetPeerMetadata stores the peer's parsed metadata-bearing command
 // properties. PLAIN performs no additional validation; Socket-Type
@@ -151,7 +152,7 @@ func (m *plainMech) SetPeerMetadata(props map[string]string) error {
 		m.peerMeta = nil
 		return nil
 	}
-	m.peerMeta = copyMeta(props)
+	m.peerMeta = maps.Clone(props)
 	return nil
 }
 
@@ -162,7 +163,7 @@ func (m *plainMech) PeerMetadata() map[string]string {
 	if m.peerMeta == nil {
 		return nil
 	}
-	return copyMeta(m.peerMeta)
+	return maps.Clone(m.peerMeta)
 }
 
 // ConfigureZAP wires a server-side RFC 27 authorizer into the mechanism.
@@ -286,7 +287,7 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 				m.state = plainDone
 				return out, false, fmt.Errorf("gozmq/security/plain: ZAP rejected user %q: %w", user, err)
 			}
-			m.zapMeta = copyMeta(meta)
+			m.zapMeta = maps.Clone(meta)
 		case m.authFn == nil || !m.authFn(user, pass):
 			// Emit ERROR and tear down. The reason text is short and
 			// opaque per RFC 24's guidance not to leak authentication
@@ -456,26 +457,14 @@ func parseErrorReason(payload []byte) (string, error) {
 	return string(payload[1 : 1+reasonLen]), nil
 }
 
-// copyMeta is a small helper used by both NewPlainClient/Server and
-// Metadata/SetPeerMetadata to keep caller-visible maps isolated from stored
-// state. Nil in, fresh empty map out (so constructors never hold nil for the
-// local-metadata field, which simplifies the Encode path).
-func copyMeta(src map[string]string) map[string]string {
-	dst := make(map[string]string, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
-}
-
 func mergeMeta(base, overlay map[string]string) map[string]string {
 	if len(base) == 0 {
-		return copyMeta(overlay)
+		return maps.Clone(overlay)
 	}
 	if len(overlay) == 0 {
-		return copyMeta(base)
+		return maps.Clone(base)
 	}
-	out := copyMeta(base)
+	out := maps.Clone(base)
 	for k, v := range overlay {
 		out[k] = v
 	}
