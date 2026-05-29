@@ -193,30 +193,6 @@ func (c *tcpConn) SetLinger(sec int) error {
 	return nil
 }
 
-func (c *tcpConn) SetTCPKeepAlive(enabled bool, period time.Duration) error {
-	tc, ok := c.Conn.(*net.TCPConn)
-	if !ok {
-		return nil
-	}
-	if err := tc.SetKeepAlive(enabled); err != nil {
-		return err
-	}
-	if enabled && period > 0 {
-		if err := tc.SetKeepAlivePeriod(period); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (c *tcpConn) SetTCPNoDelay(enabled bool) error {
-	tc, ok := c.Conn.(*net.TCPConn)
-	if !ok {
-		return nil
-	}
-	return tc.SetNoDelay(enabled)
-}
-
 func (c *tcpConn) WriteBuffers(buffers *net.Buffers) (int64, error) {
 	return buffers.WriteTo(c.Conn)
 }
@@ -224,9 +200,6 @@ func (c *tcpConn) WriteBuffers(buffers *net.Buffers) (int64, error) {
 func formatTCPEndpoint(scheme string, a net.Addr) string {
 	if a == nil {
 		return ""
-	}
-	if ta, ok := a.(*net.TCPAddr); ok {
-		return scheme + "://" + ta.String()
 	}
 	return scheme + "://" + a.String()
 }

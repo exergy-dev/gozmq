@@ -198,15 +198,7 @@ func (e *streamEngine) Send(ctx context.Context, m *msg.Msg) error {
 	// close semantics. Bodies are concatenated so the raw stream sees
 	// one byte run, matching libzmq's behavior of coalescing multipart
 	// STREAM sends.
-	var buf []byte
-	total := 0
-	for _, f := range body {
-		total += len(f)
-	}
-	buf = make([]byte, 0, total)
-	for _, f := range body {
-		buf = append(buf, f...)
-	}
+	buf := bytes.Join(body, nil)
 	out := msg.FromBytes(buf)
 	if err := p.Send(ctx, out); err != nil {
 		return err

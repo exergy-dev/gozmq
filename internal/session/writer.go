@@ -435,12 +435,6 @@ func isWriterShutdownErr(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) ||
-		errors.Is(err, io.ErrClosedPipe) {
-		return true
-	}
-	if err.Error() == "use of closed network connection" {
-		return true
-	}
-	return false
+	return errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed)
 }

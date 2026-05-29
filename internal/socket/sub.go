@@ -1,6 +1,7 @@
 package socket
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"slices"
@@ -111,9 +112,7 @@ func (e *SubEngine) AttachPipe(p iface.Pipe) error {
 	// race with a concurrent Subscribe that also tries to forward.
 	snapshot := make([][]byte, len(e.subList))
 	for i, s := range e.subList {
-		cp := make([]byte, len(s))
-		copy(cp, s)
-		snapshot[i] = cp
+		snapshot[i] = bytes.Clone(s)
 	}
 	e.mu.Unlock()
 
@@ -152,9 +151,7 @@ func (e *SubEngine) Subscribe(prefix []byte) error {
 	e.tree.Add(prefix)
 	shouldForward := e.subs[key] == 1
 	if shouldForward {
-		cp := make([]byte, len(prefix))
-		copy(cp, prefix)
-		e.subList = append(e.subList, cp)
+		e.subList = append(e.subList, bytes.Clone(prefix))
 	}
 	peers := make([]iface.Pipe, 0, len(e.peers))
 	for p := range e.peers {
@@ -189,12 +186,7 @@ func (e *SubEngine) Unsubscribe(prefix []byte) error {
 	shouldForward := e.subs[key] == 0
 	if shouldForward {
 		delete(e.subs, key)
-		for i, s := range e.subList {
-			if string(s) == key {
-				e.subList = slices.Delete(e.subList, i, i+1)
-				break
-			}
-		}
+		e.removeSubFromList(key)
 	}
 	peers := make([]iface.Pipe, 0, len(e.peers))
 	for p := range e.peers {
@@ -207,6 +199,14 @@ func (e *SubEngine) Unsubscribe(prefix []byte) error {
 		}
 	}
 	return nil
+}
+
+// removeSubFromList drops the first subList entry equal to key. The caller
+// must hold e.mu.
+func (e *SubEngine) removeSubFromList(key string) {
+	if i := slices.IndexFunc(e.subList, func(s []byte) bool { return string(s) == key }); i >= 0 {
+		e.subList = slices.Delete(e.subList, i, i+1)
+	}
 }
 
 // forwardSubscription sends a synthetic single-frame subscription
@@ -265,21 +265,14 @@ func (e *SubEngine) xsubSend(ctx context.Context, m *msg.Msg) error {
 		e.subs[key]++
 		e.tree.Add(prefix)
 		if e.subs[key] == 1 {
-			cp := make([]byte, len(prefix))
-			copy(cp, prefix)
-			e.subList = append(e.subList, cp)
+			e.subList = append(e.subList, bytes.Clone(prefix))
 		}
 	} else if e.subs[key] > 0 {
 		e.subs[key]--
 		e.tree.Remove(prefix)
 		if e.subs[key] == 0 {
 			delete(e.subs, key)
-			for i, s := range e.subList {
-				if string(s) == key {
-					e.subList = slices.Delete(e.subList, i, i+1)
-					break
-				}
-			}
+			e.removeSubFromList(key)
 		}
 	}
 	peers := make([]iface.Pipe, 0, len(e.peers))

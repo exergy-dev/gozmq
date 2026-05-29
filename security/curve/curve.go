@@ -225,10 +225,7 @@ func newMech(role iface.Role, ownSecret, ownPublicHint, peerLongTerm Key, localM
 
 	// Copy the supplied metadata so caller mutation can't race with the
 	// mechanism.
-	copied := make(map[string]string, len(localMeta))
-	for k, v := range localMeta {
-		copied[k] = v
-	}
+	copied := maps.Clone(localMeta)
 
 	m := &curveMech{
 		role:           role,
@@ -285,26 +282,14 @@ func (m *curveMech) AsServer() bool { return m.role == iface.RoleServer }
 // Metadata returns a copy of the local properties sent in INITIATE (client)
 // or READY (server). Never returns the internal map.
 func (m *curveMech) Metadata() map[string]string {
-	out := make(map[string]string, len(m.localMeta))
-	for k, v := range m.localMeta {
-		out[k] = v
-	}
-	return out
+	return maps.Clone(m.localMeta)
 }
 
 // SetPeerMetadata stores the peer's parsed metadata. CURVE does not
 // validate here — the session layer handles Socket-Type compatibility —
 // but we copy to isolate state from caller mutation.
 func (m *curveMech) SetPeerMetadata(props map[string]string) error {
-	if props == nil {
-		m.peerMeta = nil
-		return nil
-	}
-	out := make(map[string]string, len(props))
-	for k, v := range props {
-		out[k] = v
-	}
-	m.peerMeta = out
+	m.peerMeta = maps.Clone(props)
 	return nil
 }
 
@@ -312,14 +297,7 @@ func (m *curveMech) SetPeerMetadata(props map[string]string) error {
 // (server side) or READY (client side), or nil before the handshake
 // completes. Not part of iface.SecurityMech but exposed for tests.
 func (m *curveMech) PeerMetadata() map[string]string {
-	if m.peerMeta == nil {
-		return nil
-	}
-	out := make(map[string]string, len(m.peerMeta))
-	for k, v := range m.peerMeta {
-		out[k] = v
-	}
-	return out
+	return maps.Clone(m.peerMeta)
 }
 
 // ConfigureZAP wires a server-side RFC 27 authorizer into the mechanism.

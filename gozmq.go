@@ -208,7 +208,7 @@ func (c *Context) Close() error {
 		return nil
 	}
 	c.mu.Lock()
-	socks := append([]*Socket(nil), c.sockets...)
+	socks := slices.Clone(c.sockets)
 	c.sockets = nil
 	c.mu.Unlock()
 	for _, s := range socks {
@@ -462,11 +462,7 @@ func (s *Socket) Connect(endpoint string) error {
 	}
 	rc := session.NewReconnector(session.ReconnectConfig{
 		Dial: func(ctx context.Context) (iface.Conn, error) {
-			conn, err := tr.Dial(ctx, endpoint)
-			if err != nil {
-				return nil, err
-			}
-			return conn, nil
+			return tr.Dial(ctx, endpoint)
 		},
 		NewSession: func(conn iface.Conn) iface.Session {
 			sess := s.buildSession(conn, iface.RoleClient)
@@ -667,11 +663,8 @@ func (s *Socket) acceptLoop(l iface.Listener) {
 // bind sockets accumulate sessions for every peer that ever connected.
 func (s *Socket) removeSession(sess iface.Session) {
 	s.mu.Lock()
-	for i, existing := range s.sessions {
-		if existing == sess {
-			s.sessions = slices.Delete(s.sessions, i, i+1)
-			break
-		}
+	if i := slices.Index(s.sessions, sess); i >= 0 {
+		s.sessions = slices.Delete(s.sessions, i, i+1)
 	}
 	s.mu.Unlock()
 }
@@ -989,7 +982,7 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 	}
 
 	s.mu.Lock()
-	reconnectors := append([]reconnectEntry(nil), s.reconnectors...)
+	reconnectors := slices.Clone(s.reconnectors)
 	s.reconnectors = nil
 	listeners := s.listeners
 	s.listeners = nil
@@ -1238,15 +1231,10 @@ func (s *Socket) logger() *slog.Logger {
 // protocol failure by convention — the user's monitor consumer can
 // inspect Reason for finer classification.
 func classifyHandshakeEvent(err error) EventType {
-	switch {
-	case errors.Is(err, zmqerr.ErrAuthFailed):
+	if errors.Is(err, zmqerr.ErrAuthFailed) {
 		return EventHandshakeFailedAuth
-	case errors.Is(err, zmqerr.ErrMalformedFrame), errors.Is(err, zmqerr.ErrProtocolVersion):
-		return EventHandshakeFailedProtocol
 	}
+	// ErrMalformedFrame, ErrProtocolVersion, and any other error (dial drop
+	// mid-handshake, timeout) all classify as a protocol failure.
 	return EventHandshakeFailedProtocol
 }
-
-// Compile-time sanity check: the public error aliases are the underlying
-// zmqerr values, so errors.Is works identically.
-var _ = zmqerr.ErrSocketClosed

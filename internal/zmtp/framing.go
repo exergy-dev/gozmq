@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"sync"
 
@@ -90,7 +91,7 @@ func (c *frameCodec) ReadFrame(r io.Reader, dst []byte) (uint8, []byte, error) {
 
 	// Reject lengths that would overflow Go's int on 32-bit hosts before
 	// touching the body slice.
-	if length > uint64(maxInt) {
+	if length > uint64(math.MaxInt) {
 		return flags, nil, fmt.Errorf("gozmq/zmtp: frame length %d exceeds platform int: %w", length, zmqerr.ErrMalformedFrame)
 	}
 	if c.maxBody > 0 && length > uint64(c.maxBody) {
@@ -225,7 +226,3 @@ func wrapEOF(err error) error {
 	}
 	return err
 }
-
-// maxInt is the largest int the host can hold; defined as a const expression
-// so the framing code stays portable to 32-bit builds.
-const maxInt = int(^uint(0) >> 1)

@@ -63,10 +63,8 @@ func Register[T any](
 	if r.started.Load() {
 		return ErrRouterRunning
 	}
-	for _, e := range r.entries {
-		if e.topic == topic {
-			return fmt.Errorf("%w: %q", ErrTopicAlreadyRegistered, topic)
-		}
+	if slices.ContainsFunc(r.entries, func(e routerEntry) bool { return e.topic == topic }) {
+		return fmt.Errorf("%w: %q", ErrTopicAlreadyRegistered, topic)
 	}
 
 	entry := routerEntry{
@@ -89,15 +87,9 @@ func Register[T any](
 
 	// Insert preserving descending-length order so Run's linear scan
 	// naturally picks the longest match first.
-	inserted := false
-	for i, e := range r.entries {
-		if len(topic) > len(e.topic) {
-			r.entries = slices.Insert(r.entries, i, entry)
-			inserted = true
-			break
-		}
-	}
-	if !inserted {
+	if i := slices.IndexFunc(r.entries, func(e routerEntry) bool { return len(topic) > len(e.topic) }); i >= 0 {
+		r.entries = slices.Insert(r.entries, i, entry)
+	} else {
 		r.entries = append(r.entries, entry)
 	}
 	return nil
@@ -110,11 +102,9 @@ func (r *Router) Unregister(topic string) error {
 	if r.started.Load() {
 		return ErrRouterRunning
 	}
-	for i, e := range r.entries {
-		if e.topic == topic {
-			r.entries = slices.Delete(r.entries, i, i+1)
-			return r.sock.Unsubscribe([]byte(topic))
-		}
+	if i := slices.IndexFunc(r.entries, func(e routerEntry) bool { return e.topic == topic }); i >= 0 {
+		r.entries = slices.Delete(r.entries, i, i+1)
+		return r.sock.Unsubscribe([]byte(topic))
 	}
 	return nil
 }

@@ -1,9 +1,11 @@
 package session
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"time"
 
@@ -67,9 +69,8 @@ func (s *sessionImpl) classifyHandshakeErr(err error) error {
 		return nil
 	}
 	// net.Error timeouts (the SetDeadline path) report Timeout()=true.
-	type timeouter interface{ Timeout() bool }
-	var to timeouter
-	if errors.As(err, &to) && to.Timeout() {
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
 		return fmt.Errorf("%w: %w", zmqerr.ErrHandshakeTimeout, err)
 	}
 	return err
@@ -345,12 +346,9 @@ func decodeGreeting(buf []byte) (mech string, minor byte, err error) {
 	}
 	// Mechanism: NUL-terminated, NUL-padded, printable ASCII.
 	raw := buf[greetingMechOff : greetingMechOff+greetingMechLen]
-	end := len(raw)
-	for i, b := range raw {
-		if b == 0 {
-			end = i
-			break
-		}
+	end := bytes.IndexByte(raw, 0)
+	if end < 0 {
+		end = len(raw)
 	}
 	for i := end; i < len(raw); i++ {
 		if raw[i] != 0 {

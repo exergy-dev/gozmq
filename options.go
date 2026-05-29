@@ -306,21 +306,7 @@ func WithLogger(l *slog.Logger) Option {
 	return newOption(func(c *socketConfig) error { c.logger = l; return nil })
 }
 
-func nonNeg(name string, v int) error {
-	if v < 0 {
-		return fmt.Errorf("gozmq: %s requires n >= 0", name)
-	}
-	return nil
-}
-
-func nonNegDur(name string, d time.Duration) error {
-	if d < 0 {
-		return fmt.Errorf("gozmq: %s requires d >= 0", name)
-	}
-	return nil
-}
-
-func nonNeg64(name string, v int64) error {
+func nonNeg[T int | int64 | time.Duration](name string, v T) error {
 	if v < 0 {
 		return fmt.Errorf("gozmq: %s requires n >= 0", name)
 	}
@@ -328,18 +314,15 @@ func nonNeg64(name string, v int64) error {
 }
 
 func validateSocketConfig(t SocketType, cfg *socketConfig) error {
-	if cfg == nil {
-		return nil
-	}
 	for _, check := range []error{
 		nonNeg("WithSendHWM", cfg.sendHWM),
 		nonNeg("WithRecvHWM", cfg.recvHWM),
-		nonNeg64("WithMaxMessageSize", cfg.maxMessageSize),
-		nonNegDur("WithHandshakeTimeout", cfg.handshakeTimeout),
-		nonNegDur("WithReconnectInterval", cfg.reconnectInterval),
-		nonNegDur("WithReconnectIntervalMax", cfg.reconnectIntervalMax),
-		nonNegDur("WithHeartbeat interval", cfg.heartbeatInterval),
-		nonNegDur("WithHeartbeat timeout", cfg.heartbeatTimeout),
+		nonNeg("WithMaxMessageSize", cfg.maxMessageSize),
+		nonNeg("WithHandshakeTimeout", cfg.handshakeTimeout),
+		nonNeg("WithReconnectInterval", cfg.reconnectInterval),
+		nonNeg("WithReconnectIntervalMax", cfg.reconnectIntervalMax),
+		nonNeg("WithHeartbeat interval", cfg.heartbeatInterval),
+		nonNeg("WithHeartbeat timeout", cfg.heartbeatTimeout),
 	} {
 		if check != nil {
 			return check

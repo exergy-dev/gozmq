@@ -72,21 +72,3 @@ func longNonce(prefix string, random []byte) [24]byte {
 	copy(n[8:], random[:16])
 	return n
 }
-
-// shortNonceSuffix extracts the 8-byte counter half of a short nonce as sent
-// on the wire (HELLO/INITIATE/READY/MESSAGE all transmit only the counter;
-// the receiver reconstructs the full 24-byte nonce by prepending the
-// known prefix).
-func shortNonceSuffix(full [24]byte) [8]byte {
-	var s [8]byte
-	copy(s[:], full[16:])
-	return s
-}
-
-// longNonceSuffix extracts the 16-byte random half of a long nonce as sent
-// on the wire.
-func longNonceSuffix(full [24]byte) [16]byte {
-	var s [16]byte
-	copy(s[:], full[8:])
-	return s
-}

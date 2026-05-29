@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
@@ -242,14 +243,7 @@ func isExpectedShutdownErr(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) ||
-		errors.Is(err, context.Canceled) || errors.Is(err, zmqerr.ErrSocketClosed) {
-		return true
-	}
-	// net.Conn close races sometimes report as "use of closed
-	// network connection"; check by string as a last resort.
-	if err.Error() == "use of closed network connection" {
-		return true
-	}
-	return false
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) ||
+		errors.Is(err, context.Canceled) || errors.Is(err, zmqerr.ErrSocketClosed) ||
+		errors.Is(err, net.ErrClosed)
 }

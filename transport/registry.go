@@ -73,12 +73,11 @@ func (r *registry) Lookup(endpoint string) (iface.Transport, error) {
 // splitEndpoint parses "scheme://address" into its parts. Returns
 // ErrEndpointInvalid if the separator is missing.
 func splitEndpoint(endpoint string) (scheme, address string, err error) {
-	const sep = "://"
-	i := strings.Index(endpoint, sep)
-	if i <= 0 {
+	scheme, address, ok := strings.Cut(endpoint, "://")
+	if !ok || scheme == "" {
 		return "", "", fmt.Errorf("%w: %q (missing scheme://)", zmqerr.ErrEndpointInvalid, endpoint)
 	}
-	return endpoint[:i], endpoint[i+len(sep):], nil
+	return scheme, address, nil
 }
 
 // parseTCPEndpoint parses a "scheme://host:port" endpoint into a net.Dial

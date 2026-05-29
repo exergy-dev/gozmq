@@ -249,15 +249,7 @@ func flattenBody(m *msg.Msg) []byte {
 	if len(frames) == 1 {
 		return frames[0]
 	}
-	total := 0
-	for _, f := range frames {
-		total += len(f)
-	}
-	out := make([]byte, 0, total)
-	for _, f := range frames {
-		out = append(out, f...)
-	}
-	return out
+	return bytes.Join(frames, nil)
 }
 
 // writeFull loops until every byte has been written or an error surfaces.

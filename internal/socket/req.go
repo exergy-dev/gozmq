@@ -99,10 +99,8 @@ func (e *reqEngine) AttachPipe(p iface.Pipe) error {
 	if e.closed {
 		return fmt.Errorf("req attach: %w", zmqerr.ErrSocketClosed)
 	}
-	for _, existing := range e.pipes {
-		if existing == p {
-			return nil
-		}
+	if slices.Contains(e.pipes, p) {
+		return nil
 	}
 	e.pipes = append(e.pipes, p)
 	// Wake any Send parked waiting for a peer.

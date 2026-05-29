@@ -247,12 +247,7 @@ func (m *Msg) TotalSize() int {
 func (m *Msg) Reset() {
 	if m.pooled != nil {
 		m.refs.Store(0)
-		runtime.SetFinalizer(m, nil)
-		for _, b := range m.pooled {
-			PoolPut(b)
-		}
-		clear(m.pooled)
-		m.pooled = nil
+		m.reclaimPooled()
 	}
 	clear(m.frames)
 	m.frames = m.frames[:0]

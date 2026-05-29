@@ -207,11 +207,8 @@ func (it *InprocTransport) cancelWaiter(name string, w *inprocWaiter) *inprocLis
 	it.mu.Lock()
 	defer it.mu.Unlock()
 	q := it.pending[name]
-	for i, pw := range q {
-		if pw == w {
-			it.pending[name] = slices.Delete(q, i, i+1)
-			break
-		}
+	if i := slices.Index(q, w); i >= 0 {
+		it.pending[name] = slices.Delete(q, i, i+1)
 	}
 	if len(it.pending[name]) == 0 {
 		delete(it.pending, name)
@@ -462,9 +459,7 @@ func (c *inprocConn) Read(buf []byte) (int, error) {
 	if m.NumFrames() == 1 {
 		data = m.Frames()[0]
 	} else {
-		for _, f := range m.Frames() {
-			data = append(data, f...)
-		}
+		data = bytes.Join(m.Frames(), nil)
 	}
 	n := copy(buf, data)
 	if n < len(data) {

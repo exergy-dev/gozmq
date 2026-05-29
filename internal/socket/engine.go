@@ -218,10 +218,8 @@ func (lb *LoadBalancer) Attach(p iface.Pipe) error {
 	if lb.closed {
 		return fmt.Errorf("loadbalancer attach: %w", zmqerr.ErrSocketClosed)
 	}
-	for _, existing := range lb.pipes {
-		if existing == p {
-			return nil
-		}
+	if slices.Contains(lb.pipes, p) {
+		return nil
 	}
 	lb.pipes = append(lb.pipes, p)
 	lb.signalLocked()

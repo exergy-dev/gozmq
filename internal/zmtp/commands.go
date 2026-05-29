@@ -45,10 +45,8 @@ type Command struct {
 // [nameLen byte][name bytes][body bytes...]. The frame flags byte and length
 // prefix belong to the framing layer, not this function.
 func EncodeCommand(c Command) []byte {
-	if len(c.Name) == 0 {
-		// Empty name is illegal per ZMTP 3.1 §2.2 but we emit the bytes the
-		// caller asked for; the receiver enforces non-emptiness on decode.
-	}
+	// An empty name is illegal per ZMTP 3.1 §2.2, but we emit the bytes the
+	// caller asked for; the receiver enforces non-emptiness on decode.
 	if len(c.Name) > MaxCommandNameLen {
 		// Programmer error (caller should validate before encode); panic so
 		// the bug surfaces in tests rather than producing invalid wire bytes.
@@ -92,14 +90,20 @@ func DecodeCommand(raw []byte) (Command, error) {
 // (hundredths of a second) followed by an opaque context blob (≤16 bytes).
 // Contexts longer than PingPongMaxContext are rejected with a malformed-frame
 // error so callers cannot silently produce invalid PINGs.
-func EncodePing(ttl uint16, context []byte) (Command, error) {
+// encodePingPong builds a PING or PONG command body (TTL + echoed context),
+// shared by EncodePing/EncodePong since the wire shape is identical.
+func encodePingPong(name string, ttl uint16, context []byte) (Command, error) {
 	if len(context) > PingPongMaxContext {
-		return Command{}, fmt.Errorf("gozmq/zmtp: PING context %d bytes exceeds %d: %w", len(context), PingPongMaxContext, zmqerr.ErrMalformedFrame)
+		return Command{}, fmt.Errorf("gozmq/zmtp: %s context %d bytes exceeds %d: %w", name, len(context), PingPongMaxContext, zmqerr.ErrMalformedFrame)
 	}
 	body := make([]byte, pingPongTTLBytes+len(context))
 	binary.BigEndian.PutUint16(body[:pingPongTTLBytes], ttl)
 	copy(body[pingPongTTLBytes:], context)
-	return Command{Name: CmdPing, Body: body}, nil
+	return Command{Name: name, Body: body}, nil
+}
+
+func EncodePing(ttl uint16, context []byte) (Command, error) {
+	return encodePingPong(CmdPing, ttl, context)
 }
 
 // DecodePing parses a PING command. The returned context aliases c.Body; copy
@@ -117,13 +121,7 @@ func DecodePing(c Command) (ttl uint16, context []byte, err error) {
 // PONG (the spec is silent on its semantics there) — encoding is symmetric
 // with EncodePing.
 func EncodePong(ttl uint16, context []byte) (Command, error) {
-	if len(context) > PingPongMaxContext {
-		return Command{}, fmt.Errorf("gozmq/zmtp: PONG context %d bytes exceeds %d: %w", len(context), PingPongMaxContext, zmqerr.ErrMalformedFrame)
-	}
-	body := make([]byte, pingPongTTLBytes+len(context))
-	binary.BigEndian.PutUint16(body[:pingPongTTLBytes], ttl)
-	copy(body[pingPongTTLBytes:], context)
-	return Command{Name: CmdPong, Body: body}, nil
+	return encodePingPong(CmdPong, ttl, context)
 }
 
 // DecodePong parses a PONG command. The returned context aliases c.Body.

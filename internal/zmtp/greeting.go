@@ -1,6 +1,7 @@
 package zmtp
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -137,12 +138,9 @@ func ReadGreeting(r io.Reader) (Greeting, error) {
 // protocol violation (per spec, padding must be NUL). All bytes must be
 // printable ASCII.
 func decodeMechanism(raw []byte) (string, error) {
-	end := len(raw)
-	for i, b := range raw {
-		if b == 0 {
-			end = i
-			break
-		}
+	end := bytes.IndexByte(raw, 0)
+	if end < 0 {
+		end = len(raw)
 	}
 	for i := end; i < len(raw); i++ {
 		if raw[i] != 0 {

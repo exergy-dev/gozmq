@@ -53,13 +53,9 @@ type nullMech struct {
 // an empty property list. The returned value is not safe for concurrent use;
 // the session layer drives NextHandshake single-threaded.
 func NewNull(role iface.Role, localMeta map[string]string) iface.SecurityMech {
-	copied := make(map[string]string, len(localMeta))
-	for k, v := range localMeta {
-		copied[k] = v
-	}
 	return &nullMech{
 		role:      role,
-		localMeta: copied,
+		localMeta: maps.Clone(localMeta),
 		metaCodec: zmtp.MetadataCodec,
 	}
 }
@@ -165,26 +161,14 @@ func (*nullMech) DecodeFrame(flags uint8, wire []byte) (uint8, []byte, error) {
 // Metadata returns a copy of the local metadata properties sent in READY.
 // The copy guards against external mutation after construction.
 func (m *nullMech) Metadata() map[string]string {
-	out := make(map[string]string, len(m.localMeta))
-	for k, v := range m.localMeta {
-		out[k] = v
-	}
-	return out
+	return maps.Clone(m.localMeta)
 }
 
 // SetPeerMetadata stores the peer's parsed READY properties. NULL performs
 // no validation here; Socket-Type compatibility checks live in the socket
 // engine layer per design §5.3.
 func (m *nullMech) SetPeerMetadata(props map[string]string) error {
-	if props == nil {
-		m.peerMeta = nil
-		return nil
-	}
-	out := make(map[string]string, len(props))
-	for k, v := range props {
-		out[k] = v
-	}
-	m.peerMeta = out
+	m.peerMeta = maps.Clone(props)
 	return nil
 }
 
@@ -192,14 +176,7 @@ func (m *nullMech) SetPeerMetadata(props map[string]string) error {
 // before the handshake completes. Not part of iface.SecurityMech but useful
 // for tests and for the session layer during metadata forwarding.
 func (m *nullMech) PeerMetadata() map[string]string {
-	if m.peerMeta == nil {
-		return nil
-	}
-	out := make(map[string]string, len(m.peerMeta))
-	for k, v := range m.peerMeta {
-		out[k] = v
-	}
-	return out
+	return maps.Clone(m.peerMeta)
 }
 
 // ConfigureZAP wires a server-side RFC 27 authorizer into the mechanism.

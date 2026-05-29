@@ -73,10 +73,7 @@ func (metadataCodec) Decode(raw []byte) (map[string]string, error) {
 	seen := make(map[string]struct{}) // lowercase names
 
 	for i := 0; i < len(raw); {
-		// Name length (1 byte).
-		if i+1 > len(raw) {
-			return nil, fmt.Errorf("gozmq/zmtp: metadata truncated at name length: %w", zmqerr.ErrMalformedFrame)
-		}
+		// Name length (1 byte). The loop guard guarantees raw[i] is in range.
 		nameLen := int(raw[i])
 		i++
 

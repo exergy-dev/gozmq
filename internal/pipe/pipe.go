@@ -185,14 +185,6 @@ type end struct {
 	isClosed atomic.Bool   // set in Close()
 }
 
-func (e *end) myClosed() chan struct{} {
-	return e.myCh
-}
-
-func (e *end) peerClosed() chan struct{} {
-	return e.peerCh
-}
-
 func (e *end) Send(ctx context.Context, m *msg.Msg) error {
 	if m == nil {
 		return ErrNilMessage
