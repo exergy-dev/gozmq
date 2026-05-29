@@ -316,7 +316,7 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		if err != nil {
 			return nil, false, err
 		}
-		m.peerMeta = mergeMeta(props, m.zapMeta)
+		m.peerMeta = zmtp.MergeMeta(props, m.zapMeta)
 		m.metaRecv = true
 		m.state = plainServerSendReady
 		return m.NextHandshake(nil)
@@ -455,18 +455,4 @@ func parseErrorReason(payload []byte) (string, error) {
 		return "", fmt.Errorf("gozmq/security/plain: ERROR reason truncated (declared %d, have %d): %w", reasonLen, len(payload)-1, zmqerr.ErrMalformedFrame)
 	}
 	return string(payload[1 : 1+reasonLen]), nil
-}
-
-func mergeMeta(base, overlay map[string]string) map[string]string {
-	if len(base) == 0 {
-		return maps.Clone(overlay)
-	}
-	if len(overlay) == 0 {
-		return maps.Clone(base)
-	}
-	out := maps.Clone(base)
-	for k, v := range overlay {
-		out[k] = v
-	}
-	return out
 }

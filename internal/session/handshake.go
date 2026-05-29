@@ -297,16 +297,17 @@ func socketTypesCompatible(localType, peerType string) bool {
 	}
 }
 
+// nonPrintableASCII reports whether r falls outside the printable ASCII range
+// [0x20, 0x7E]. ZMTP restricts the greeting mechanism name to printable ASCII.
+func nonPrintableASCII(r rune) bool { return r < 0x20 || r > 0x7E }
+
 // encodeGreeting builds the 64-byte ZMTP 3.1 greeting block.
 func encodeGreeting(mech string, asServer bool) ([]byte, error) {
 	if len(mech) > greetingMechLen {
 		return nil, fmt.Errorf("gozmq/session: mechanism %q exceeds %d bytes: %w", mech, greetingMechLen, zmqerr.ErrMalformedFrame)
 	}
-	for i := 0; i < len(mech); i++ {
-		c := mech[i]
-		if c < 0x20 || c > 0x7E {
-			return nil, fmt.Errorf("gozmq/session: mechanism %q non-printable byte 0x%02x: %w", mech, c, zmqerr.ErrMalformedFrame)
-		}
+	if i := strings.IndexFunc(mech, nonPrintableASCII); i >= 0 {
+		return nil, fmt.Errorf("gozmq/session: mechanism %q non-printable byte 0x%02x: %w", mech, mech[i], zmqerr.ErrMalformedFrame)
 	}
 	var buf [greetingSize]byte
 	buf[0] = greetingSigPrefix
@@ -355,11 +356,8 @@ func decodeGreeting(buf []byte) (mech string, minor byte, err error) {
 			return "", 0, fmt.Errorf("%w: mechanism padding non-zero at %d", zmqerr.ErrMalformedFrame, i)
 		}
 	}
-	for i := 0; i < end; i++ {
-		c := raw[i]
-		if c < 0x20 || c > 0x7E {
-			return "", 0, fmt.Errorf("%w: mechanism non-printable 0x%02x at %d", zmqerr.ErrMalformedFrame, c, i)
-		}
+	if i := bytes.IndexFunc(raw[:end], nonPrintableASCII); i >= 0 {
+		return "", 0, fmt.Errorf("%w: mechanism non-printable 0x%02x at %d", zmqerr.ErrMalformedFrame, raw[i], i)
 	}
 	return string(raw[:end]), minor, nil
 }

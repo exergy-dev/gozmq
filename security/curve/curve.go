@@ -774,7 +774,7 @@ func (m *curveMech) parseInitiate(body []byte) error {
 		}
 		m.zapMeta = maps.Clone(meta)
 	}
-	m.peerMeta = mergeMeta(props, m.zapMeta)
+	m.peerMeta = zmtp.MergeMeta(props, m.zapMeta)
 	m.peerShortNonce = counter + 1
 	return nil
 }
@@ -1113,18 +1113,4 @@ func appendCounter(buf []byte, c uint64) []byte {
 	var b [8]byte
 	binary.BigEndian.PutUint64(b[:], c)
 	return append(buf, b[:]...)
-}
-
-func mergeMeta(base, overlay map[string]string) map[string]string {
-	if len(base) == 0 {
-		return maps.Clone(overlay)
-	}
-	if len(overlay) == 0 {
-		return maps.Clone(base)
-	}
-	out := maps.Clone(base)
-	for k, v := range overlay {
-		out[k] = v
-	}
-	return out
 }

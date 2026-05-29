@@ -134,7 +134,7 @@ func (m *nullMech) nextServer(in []byte) ([]byte, bool, error) {
 			}
 			m.zapMeta = maps.Clone(meta)
 		}
-		m.peerMeta = mergeMeta(props, m.zapMeta)
+		m.peerMeta = zmtp.MergeMeta(props, m.zapMeta)
 		m.peerReady = true
 	}
 	if !m.sentReady {

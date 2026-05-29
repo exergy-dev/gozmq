@@ -5,9 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/rkm/gozmq/internal/zmqerr"
 )
+
+// nonPrintableASCII reports whether r falls outside the printable ASCII range
+// [0x20, 0x7E]. ZMTP restricts mechanism and command names to printable ASCII.
+func nonPrintableASCII(r rune) bool { return r < 0x20 || r > 0x7E }
 
 // Greeting layout constants per ZMTP 3.1 §2.1 (design.md §5.1).
 const (
@@ -52,11 +57,8 @@ func WriteGreeting(w io.Writer, g Greeting) error {
 	if len(g.Mechanism) > greetingMechLen {
 		return fmt.Errorf("gozmq/zmtp: mechanism %q exceeds %d bytes: %w", g.Mechanism, greetingMechLen, zmqerr.ErrMalformedFrame)
 	}
-	for i := 0; i < len(g.Mechanism); i++ {
-		c := g.Mechanism[i]
-		if c < 0x20 || c > 0x7E {
-			return fmt.Errorf("gozmq/zmtp: mechanism %q contains non-printable byte 0x%02x: %w", g.Mechanism, c, zmqerr.ErrMalformedFrame)
-		}
+	if i := strings.IndexFunc(g.Mechanism, nonPrintableASCII); i >= 0 {
+		return fmt.Errorf("gozmq/zmtp: mechanism %q contains non-printable byte 0x%02x: %w", g.Mechanism, g.Mechanism[i], zmqerr.ErrMalformedFrame)
 	}
 
 	var buf [GreetingSize]byte
@@ -147,11 +149,8 @@ func decodeMechanism(raw []byte) (string, error) {
 			return "", fmt.Errorf("gozmq/zmtp: mechanism padding non-zero at offset %d (0x%02x): %w", i, raw[i], zmqerr.ErrMalformedFrame)
 		}
 	}
-	for i := 0; i < end; i++ {
-		c := raw[i]
-		if c < 0x20 || c > 0x7E {
-			return "", fmt.Errorf("gozmq/zmtp: mechanism non-printable byte 0x%02x at offset %d: %w", c, i, zmqerr.ErrMalformedFrame)
-		}
+	if i := bytes.IndexFunc(raw[:end], nonPrintableASCII); i >= 0 {
+		return "", fmt.Errorf("gozmq/zmtp: mechanism non-printable byte 0x%02x at offset %d: %w", raw[i], i, zmqerr.ErrMalformedFrame)
 	}
 	return string(raw[:end]), nil
 }

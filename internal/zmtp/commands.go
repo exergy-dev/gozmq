@@ -1,6 +1,7 @@
 package zmtp
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 
@@ -74,11 +75,9 @@ func DecodeCommand(raw []byte) (Command, error) {
 		return Command{}, fmt.Errorf("gozmq/zmtp: command name length %d exceeds body %d: %w", nameLen, len(raw)-1, zmqerr.ErrMalformedFrame)
 	}
 	name := raw[1 : 1+nameLen]
-	for i, b := range name {
-		// Spec restricts command names to printable ASCII.
-		if b < 0x20 || b > 0x7E {
-			return Command{}, fmt.Errorf("gozmq/zmtp: command name non-printable byte 0x%02x at offset %d: %w", b, i, zmqerr.ErrMalformedFrame)
-		}
+	// Spec restricts command names to printable ASCII.
+	if i := bytes.IndexFunc(name, nonPrintableASCII); i >= 0 {
+		return Command{}, fmt.Errorf("gozmq/zmtp: command name non-printable byte 0x%02x at offset %d: %w", name[i], i, zmqerr.ErrMalformedFrame)
 	}
 	return Command{
 		Name: string(name),
