@@ -36,7 +36,6 @@ type nullMech struct {
 	peerMeta  map[string]string
 	sentReady bool
 	peerReady bool
-	metaCodec iface.MetadataCodec
 	zapAuth   iface.ZAPAuthorizer
 	zapDomain string
 	zapAddr   string
@@ -51,7 +50,6 @@ func NewNull(role iface.Role, localMeta map[string]string) iface.SecurityMech {
 	return &nullMech{
 		role:      role,
 		localMeta: maps.Clone(localMeta),
-		metaCodec: zmtp.MetadataCodec,
 	}
 }
 
@@ -180,7 +178,7 @@ func (m *nullMech) ConfigureZAP(authorizer iface.ZAPAuthorizer, domain, address 
 // encodeReady builds a ZMTP READY command body (name + metadata property
 // list). The session layer wraps this in a COMMAND frame.
 func (m *nullMech) encodeReady() []byte {
-	return zmtp.EncodeCommand(zmtp.Command{Name: zmtp.CmdReady, Body: m.metaCodec.Encode(m.localMeta)})
+	return zmtp.EncodeCommand(zmtp.Command{Name: zmtp.CmdReady, Body: zmtp.MetadataCodec.Encode(m.localMeta)})
 }
 
 // decodeReady parses a READY command body and returns its metadata. The name
@@ -193,6 +191,6 @@ func (m *nullMech) decodeReady(body []byte) (map[string]string, error) {
 	if !strings.EqualFold(cmd.Name, zmtp.CmdReady) {
 		return nil, fmt.Errorf("gozmq/security/null: expected READY command, got %q: %w", cmd.Name, zmqerr.ErrMalformedFrame)
 	}
-	return m.metaCodec.Decode(cmd.Body)
+	return zmtp.MetadataCodec.Decode(cmd.Body)
 }
 

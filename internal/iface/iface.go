@@ -168,13 +168,6 @@ type FrameHeaderAppender interface {
 	AppendFrameHeader(scratch []byte, flags uint8, body []byte) (newScratch []byte, headerLen int, err error)
 }
 
-// MetadataCodec encodes and decodes the ZMTP READY property list (ZMTP 3.1
-// §2.3.1). Used by NULL, PLAIN, and CURVE — hence a dedicated interface.
-type MetadataCodec interface {
-	Encode(props map[string]string) []byte
-	Decode(raw []byte) (map[string]string, error)
-}
-
 // --------------------------------------------------------------------------
 // Security layer
 // --------------------------------------------------------------------------
@@ -391,15 +384,3 @@ type SocketEngine interface {
 	Metrics() SocketMetrics
 }
 
-// --------------------------------------------------------------------------
-// Transport registry
-// --------------------------------------------------------------------------
-
-// Registry resolves an endpoint string to its Transport.
-type Registry interface {
-	// Lookup returns the Transport handling endpoint's scheme.
-	Lookup(endpoint string) (Transport, error)
-	// Register installs t for its declared Scheme. Overwrites any existing
-	// entry for the same scheme.
-	Register(t Transport)
-}

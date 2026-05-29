@@ -111,7 +111,7 @@ type Context struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	registry iface.Registry
+	registry *transport.Registry
 	zapAuth  iface.ZAPAuthorizer
 
 	mu      sync.Mutex

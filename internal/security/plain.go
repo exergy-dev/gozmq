@@ -78,7 +78,6 @@ type plainMech struct {
 	authFn    func(user, pass string) bool
 	localMeta map[string]string
 	peerMeta  map[string]string
-	metaCodec iface.MetadataCodec
 	zapAuth   iface.ZAPAuthorizer
 	zapDomain string
 	zapAddr   string
@@ -96,7 +95,6 @@ func NewPlainClient(username, password string, localMeta map[string]string) ifac
 		username:  username,
 		password:  password,
 		localMeta: maps.Clone(localMeta),
-		metaCodec: zmtp.MetadataCodec,
 	}
 }
 
@@ -112,7 +110,6 @@ func NewPlainServer(authenticate func(user, pass string) bool, localMeta map[str
 		state:     plainServerSeed,
 		authFn:    authenticate,
 		localMeta: maps.Clone(localMeta),
-		metaCodec: zmtp.MetadataCodec,
 	}
 }
 
@@ -213,7 +210,7 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		}
 
 	case plainClientSendInitiate:
-		out := encodeCommand(plainCmdInitiate, m.metaCodec.Encode(m.localMeta))
+		out := encodeCommand(plainCmdInitiate, zmtp.MetadataCodec.Encode(m.localMeta))
 		m.state = plainClientRecvReady
 		return out, false, nil
 
@@ -233,7 +230,7 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 			}
 			return nil, false, fmt.Errorf("gozmq/security/plain: server rejected INITIATE: %q: %w", reason, zmqerr.ErrAuthFailed)
 		case plainCmdReady:
-			props, err := m.metaCodec.Decode(payload)
+			props, err := zmtp.MetadataCodec.Decode(payload)
 			if err != nil {
 				return nil, false, err
 			}
@@ -303,7 +300,7 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		if name != plainCmdInitiate {
 			return nil, false, fmt.Errorf("gozmq/security/plain: expected INITIATE, got %q: %w", name, zmqerr.ErrMalformedFrame)
 		}
-		props, err := m.metaCodec.Decode(payload)
+		props, err := zmtp.MetadataCodec.Decode(payload)
 		if err != nil {
 			return nil, false, err
 		}
@@ -312,7 +309,7 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		return m.NextHandshake(nil)
 
 	case plainServerSendReady:
-		out := encodeCommand(plainCmdReady, m.metaCodec.Encode(m.localMeta))
+		out := encodeCommand(plainCmdReady, zmtp.MetadataCodec.Encode(m.localMeta))
 		m.state = plainDone
 		return out, true, nil
 

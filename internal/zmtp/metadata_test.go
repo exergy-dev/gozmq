@@ -48,7 +48,7 @@ func TestMetadataEncodeDecode(t *testing.T) {
 		}},
 	}
 
-	codec := NewMetadataCodec()
+	codec := MetadataCodec
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			wire := codec.Encode(tc.props)
@@ -64,7 +64,7 @@ func TestMetadataEncodeDecode(t *testing.T) {
 
 func TestMetadataEncodeLongValueOver255Bytes(t *testing.T) {
 	// Values >255 bytes exercise the 4-byte value-length encoding path.
-	codec := NewMetadataCodec()
+	codec := MetadataCodec
 	big := strings.Repeat("x", 1000)
 	wire := codec.Encode(map[string]string{"Big": big})
 
@@ -87,7 +87,7 @@ func TestMetadataDecodeCaseInsensitiveDuplicate(t *testing.T) {
 		encodeProp("socket-type", []byte("REP")),
 	}, nil)
 
-	_, err := NewMetadataCodec().Decode(wire)
+	_, err := MetadataCodec.Decode(wire)
 	require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 }
 
@@ -112,7 +112,7 @@ func TestMetadataDecodeTruncatedInputs(t *testing.T) {
 		}
 		i := i
 		t.Run(fmt.Sprintf("truncate-at-%d", i), func(t *testing.T) {
-			_, err := NewMetadataCodec().Decode(good[:i])
+			_, err := MetadataCodec.Decode(good[:i])
 			require.ErrorIs(t, err, zmqerr.ErrMalformedFrame, "Decode(truncated)")
 		})
 	}
@@ -120,10 +120,10 @@ func TestMetadataDecodeTruncatedInputs(t *testing.T) {
 
 func TestMetadataDecodeEmptyIsNotDuplicate(t *testing.T) {
 	// Zero-length property list decodes to an empty map without error.
-	got, err := NewMetadataCodec().Decode(nil)
+	got, err := MetadataCodec.Decode(nil)
 	require.NoError(t, err, "Decode(nil)")
 	require.Empty(t, got, "Decode(nil)")
-	got, err = NewMetadataCodec().Decode([]byte{})
+	got, err = MetadataCodec.Decode([]byte{})
 	require.NoError(t, err, "Decode(empty)")
 	require.Empty(t, got, "Decode(empty)")
 }
@@ -133,7 +133,7 @@ func TestMetadataDecodeZeroLengthName(t *testing.T) {
 	// on the wire (ZMTP doesn't forbid it). It must decode to a map entry
 	// with the empty-string key.
 	wire := encodeProp("", []byte{})
-	got, err := NewMetadataCodec().Decode(wire)
+	got, err := MetadataCodec.Decode(wire)
 	require.NoError(t, err, "Decode")
 	require.Len(t, got, 1, "Decode prop count")
 	v, ok := got[""]
@@ -145,7 +145,7 @@ func TestMetadataDecodeZeroLengthName(t *testing.T) {
 // check. Generates property maps with random ASCII names and random-length
 // values, encodes, decodes, and asserts equality.
 func TestMetadataRoundtripRandom(t *testing.T) {
-	codec := NewMetadataCodec()
+	codec := MetadataCodec
 	rng := rand.New(rand.NewSource(1))
 
 	for iter := 0; iter < 200; iter++ {
@@ -190,7 +190,7 @@ func FuzzMetadata(f *testing.F) {
 		encodeProp("socket-type", []byte("REP")),
 	}, nil))
 
-	codec := NewMetadataCodec()
+	codec := MetadataCodec
 	f.Fuzz(func(t *testing.T, raw []byte) {
 		props, err := codec.Decode(raw)
 		if err != nil {

@@ -6,13 +6,12 @@ import (
 	"maps"
 	"strings"
 
-	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/zmqerr"
 )
 
-// MetadataCodec is the package-level iface.MetadataCodec implementation for
-// the ZMTP 3.1 READY property list (§2.3.1). Encoding preserves name case;
-// decoding treats names case-insensitively for duplicate detection.
+// MetadataCodec is the package-level codec for the ZMTP 3.1 READY property
+// list (§2.3.1). Encoding preserves name case; decoding treats names
+// case-insensitively for duplicate detection.
 //
 // Wire format per property:
 //
@@ -20,15 +19,10 @@ import (
 //
 // Properties are concatenated; the list has no outer delimiter. An empty
 // property list is the zero-length byte slice.
-var MetadataCodec iface.MetadataCodec = metadataCodec{}
+var MetadataCodec = metadataCodec{}
 
-// NewMetadataCodec returns the package-level MetadataCodec. Kept as a factory
-// so callers that prefer constructor-style instantiation can obtain it
-// without reaching into package variables.
-func NewMetadataCodec() iface.MetadataCodec { return MetadataCodec }
-
-// metadataCodec implements iface.MetadataCodec. It is stateless; a single
-// value is safe to share across sessions.
+// metadataCodec is the stateless ZMTP metadata codec; a single value is safe
+// to share across sessions. It is exposed via the MetadataCodec var.
 type metadataCodec struct{}
 
 // Encode serializes props into the ZMTP 3.1 READY property-list wire form.
