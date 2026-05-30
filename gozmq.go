@@ -798,19 +798,22 @@ func (s *Socket) connectDirectPipe(acceptor iface.DirectPipeAcceptor, endpoint s
 		return err
 	}
 
-	// Track the pipe for linger drain in CloseCtx.
-	s.mu.Lock()
-	s.directPipes = append(s.directPipes, dialerPipe)
-	s.mu.Unlock()
-
-	// Attach our end to our engine.
 	s.emit(EventConnected, endpoint, "")
-	if err := s.engine.AttachPipe(dialerPipe); err != nil {
-		_ = dialerPipe.Close()
+	return s.trackAttachWatchPipe(dialerPipe, endpoint)
+}
+
+// trackAttachWatchPipe records p for the CloseCtx linger drain, attaches it to
+// the engine, and starts the close watcher. On attach failure it closes p and
+// returns the error. Shared by the dialer and acceptor direct-pipe paths.
+func (s *Socket) trackAttachWatchPipe(p iface.Pipe, endpoint string) error {
+	s.mu.Lock()
+	s.directPipes = append(s.directPipes, p)
+	s.mu.Unlock()
+	if err := s.engine.AttachPipe(p); err != nil {
+		_ = p.Close()
 		return err
 	}
-
-	s.watchPipeClose(dialerPipe, endpoint, func() { _ = dialerPipe.Close() })
+	s.watchPipeClose(p, endpoint, func() { _ = p.Close() })
 	return nil
 }
 
@@ -833,19 +836,7 @@ func (s *Socket) acceptDirectPipeLoop(acceptor iface.DirectPipeAcceptor) {
 			continue
 		}
 
-		// Track the pipe for linger drain in CloseCtx.
-		s.mu.Lock()
-		s.directPipes = append(s.directPipes, offer.BindPipe)
-		s.mu.Unlock()
-
-		// Attach the bind-side pipe end to our engine.
-		if err := s.engine.AttachPipe(offer.BindPipe); err != nil {
-			_ = offer.BindPipe.Close()
-			continue
-		}
-
-		bp := offer.BindPipe
-		s.watchPipeClose(bp, offer.Endpoint, func() { _ = bp.Close() })
+		_ = s.trackAttachWatchPipe(offer.BindPipe, offer.Endpoint)
 	}
 }
 
@@ -922,7 +913,7 @@ type SocketMetrics = iface.SocketMetrics
 // queue-depth gauge. Safe to call from any goroutine. Returns the zero
 // SocketMetrics if the socket has been closed.
 func (s *Socket) Metrics() SocketMetrics {
-	if s.closed.Load() || s.engine == nil {
+	if s.closed.Load() {
 		return SocketMetrics{}
 	}
 	return s.engine.Metrics()
@@ -1047,12 +1038,12 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 		for _, sess := range sessions {
 			sess.CancelWriter() // signal: drain, then exit (no conn.Close yet)
 		}
-		ctxErr = waitWritersFlushed(ctx, sessions, s.cfg.linger)
+		ctxErr = waitChannels(ctx, sessions, iface.Session.WriterFlushed, s.cfg.linger)
 		// Direct pipes (inproc bypass): wait for the peer to close its
 		// end so buffered messages have a chance to be consumed. This
 		// mirrors the session-based linger drain for TCP/IPC sessions.
 		if ctxErr == nil && len(directPipes) > 0 {
-			ctxErr = waitDirectPipesDrained(ctx, directPipes, s.cfg.linger)
+			ctxErr = waitChannels(ctx, directPipes, iface.Pipe.Closed, s.cfg.linger)
 		}
 	}
 
@@ -1148,23 +1139,6 @@ func waitChannels[T any](ctx context.Context, items []T, ch func(T) <-chan struc
 	return nil
 }
 
-func waitWritersFlushed(ctx context.Context, sessions []iface.Session, linger time.Duration) error {
-	return waitChannels(ctx, sessions, func(s iface.Session) <-chan struct{} {
-		if s == nil {
-			return nil
-		}
-		return s.WriterFlushed()
-	}, linger)
-}
-
-func waitDirectPipesDrained(ctx context.Context, pipes []iface.Pipe, linger time.Duration) error {
-	return waitChannels(ctx, pipes, func(p iface.Pipe) <-chan struct{} {
-		if p == nil {
-			return nil
-		}
-		return p.Closed()
-	}, linger)
-}
 
 // watchPipeClose spawns a goroutine that waits for p to close (or the
 // socket's run context to cancel), then detaches p, runs cleanup, and

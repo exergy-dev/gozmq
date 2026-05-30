@@ -37,10 +37,10 @@ func TestWaitWritersFlushed_LingerTimeoutDoesNotLeak(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	start := time.Now()
-	err := waitWritersFlushed(context.Background(), []iface.Session{
+	err := waitChannels(context.Background(), []iface.Session{
 		waitStubSession{flushed: make(chan struct{})},
-	}, 20*time.Millisecond)
-	require.NoError(t, err, "waitWritersFlushed on linger timeout")
+	}, iface.Session.WriterFlushed, 20*time.Millisecond)
+	require.NoError(t, err, "waitChannels on linger timeout")
 	elapsed := time.Since(start)
 	require.GreaterOrEqual(t, elapsed, 15*time.Millisecond, "returned after %v, want ~linger wait", elapsed)
 }
@@ -51,8 +51,8 @@ func TestWaitWritersFlushed_CtxCancelDoesNotLeak(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 
-	err := waitWritersFlushed(ctx, []iface.Session{
+	err := waitChannels(ctx, []iface.Session{
 		waitStubSession{flushed: make(chan struct{})},
-	}, -1)
+	}, iface.Session.WriterFlushed, -1)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }

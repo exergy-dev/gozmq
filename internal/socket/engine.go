@@ -178,12 +178,7 @@ func (lb *LoadBalancer) ReadyWrite() <-chan struct{} {
 	defer lb.mu.Unlock()
 	// Re-arm if currently ready (level-trigger): the chan may have
 	// been drained by a previous Poll call.
-	if len(lb.pipes) > 0 && !lb.closed {
-		select {
-		case lb.readyW <- struct{}{}:
-		default:
-		}
-	}
+	lb.signalReadyWriteLocked()
 	return lb.readyW
 }
 
@@ -198,9 +193,6 @@ func (lb *LoadBalancer) HasPeers() bool {
 // signalReadyWriteLocked re-arms the write-ready channel when peers
 // are present. Caller must hold lb.mu.
 func (lb *LoadBalancer) signalReadyWriteLocked() {
-	if lb.readyW == nil {
-		return
-	}
 	if len(lb.pipes) > 0 && !lb.closed {
 		select {
 		case lb.readyW <- struct{}{}:

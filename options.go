@@ -67,14 +67,12 @@ func newSocketConfig() *socketConfig {
 	}
 }
 
-type optionFunc struct {
-	applyFn func(*socketConfig) error
-}
+type optionFunc func(*socketConfig) error
 
-func (f optionFunc) apply(c *socketConfig) error { return f.applyFn(c) }
+func (f optionFunc) apply(c *socketConfig) error { return f(c) }
 
 func newOption(fn func(*socketConfig) error) Option {
-	return optionFunc{applyFn: fn}
+	return optionFunc(fn)
 }
 
 // WithIdentity sets the ROUTER/DEALER identity advertised during the ZMTP

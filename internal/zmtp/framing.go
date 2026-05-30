@@ -117,19 +117,10 @@ func (c *frameCodec) WriteFrame(w io.Writer, flags uint8, body []byte) error {
 	if err != nil {
 		return err
 	}
-	if useLong {
-		flags |= iface.FlagLong
-		var hdr [9]byte
-		hdr[0] = flags
-		binary.BigEndian.PutUint64(hdr[1:], uint64(n))
-		if _, err := w.Write(hdr[:]); err != nil {
-			return fmt.Errorf("gozmq/zmtp: write long header: %w", err)
-		}
-	} else {
-		hdr := [2]byte{flags, byte(n)}
-		if _, err := w.Write(hdr[:]); err != nil {
-			return fmt.Errorf("gozmq/zmtp: write short header: %w", err)
-		}
+	var hdr [9]byte
+	hl := packHeader(&hdr, flags, useLong, n)
+	if _, err := w.Write(hdr[:hl]); err != nil {
+		return fmt.Errorf("gozmq/zmtp: write header: %w", err)
 	}
 	if n > 0 {
 		if _, err := w.Write(body); err != nil {
@@ -182,15 +173,24 @@ func (c *frameCodec) AppendFrameHeader(scratch []byte, flags uint8, body []byte)
 	if err != nil {
 		return scratch, 0, err
 	}
+	var hdr [9]byte
+	hl := packHeader(&hdr, flags, useLong, n)
+	return append(scratch, hdr[:hl]...), hl, nil
+}
+
+// packHeader writes the ZMTP frame header (flags byte + 1- or 8-byte
+// big-endian length) into buf and returns the header length: 2 for the short
+// form, 9 for the long form. The caller guarantees useLong is consistent
+// with n (via validateWriteFrame).
+func packHeader(buf *[9]byte, flags uint8, useLong bool, n int) int {
 	if useLong {
-		scratch = append(scratch, flags|iface.FlagLong)
-		var lenBuf [8]byte
-		binary.BigEndian.PutUint64(lenBuf[:], uint64(n))
-		scratch = append(scratch, lenBuf[:]...)
-		return scratch, 9, nil
+		buf[0] = flags | iface.FlagLong
+		binary.BigEndian.PutUint64(buf[1:], uint64(n))
+		return 9
 	}
-	scratch = append(scratch, flags, byte(n))
-	return scratch, 2, nil
+	buf[0] = flags
+	buf[1] = byte(n)
+	return 2
 }
 
 func (c *frameCodec) validateWriteFrame(flags uint8, body []byte) (useLong bool, n int, err error) {

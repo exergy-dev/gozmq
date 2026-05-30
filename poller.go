@@ -156,14 +156,8 @@ func (p *Poller) Poll(ctx context.Context) ([]PollEvent, error) {
 		}
 
 		// Block on any of the registered ready channels (or ctx).
-		woken, err := waitForWake(ctx, regs)
-		if err != nil {
+		if err := waitForWake(ctx, regs); err != nil {
 			return nil, err
-		}
-		if !woken {
-			// Should not happen — waitForWake either returns true or
-			// surfaces ctx.Err(). Guard against a future refactor.
-			continue
 		}
 		// A wake fired; re-scan and either return non-empty or loop
 		// (level signals + churn race).
@@ -209,14 +203,14 @@ func scanReady(regs []pollerReg) []PollEvent {
 }
 
 // waitForWake parks until at least one registered ready channel fires
-// or ctx cancels. Returns (true, nil) on a successful wake and
-// (false, ctx.Err()) on cancellation.
+// or ctx cancels. Returns nil on a successful wake and ctx.Err() on
+// cancellation.
 //
 // We use reflect.Select because the channel set is dynamic in size
 // and the per-direction channels come from different engine types.
 // The overhead is negligible compared to the goroutine hops in the
 // underlying session/pipe layer.
-func waitForWake(ctx context.Context, regs []pollerReg) (bool, error) {
+func waitForWake(ctx context.Context, regs []pollerReg) error {
 	cases := make([]reflect.SelectCase, 0, 2*len(regs)+1)
 	for _, r := range regs {
 		eng, ok := r.sock.engine.(pollable)
@@ -249,7 +243,7 @@ func waitForWake(ctx context.Context, regs []pollerReg) (bool, error) {
 	})
 	chosen, _, _ := reflect.Select(cases)
 	if chosen == len(cases)-1 {
-		return false, ctx.Err()
+		return ctx.Err()
 	}
-	return true, nil
+	return nil
 }

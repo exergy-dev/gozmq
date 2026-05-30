@@ -90,9 +90,7 @@ func (t *IPCTransport) Listen(_ context.Context, endpoint string) (iface.Listene
 	if !abstract && t.FilePerm != 0 {
 		if err := os.Chmod(addr, t.FilePerm); err != nil {
 			_ = l.Close()
-			if !abstract {
-				_ = os.Remove(addr)
-			}
+			_ = os.Remove(addr)
 			return nil, fmt.Errorf("%w: chmod socket: %s", zmqerr.ErrEndpointInvalid, err.Error())
 		}
 	}

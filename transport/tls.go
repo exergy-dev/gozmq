@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 
 	"github.com/rkm/gozmq/internal/iface"
-	"github.com/rkm/gozmq/internal/zmqerr"
 )
 
 // tlsScheme is the URL scheme this transport claims. Per design §7.4 we
@@ -200,7 +199,7 @@ func (l *tlsListener) Endpoint() string { return l.endpoint }
 
 func (l *tlsListener) Accept(ctx context.Context) (iface.Conn, error) {
 	if l.closed.Load() {
-		return nil, fmt.Errorf("%w: listener closed", zmqerr.ErrEndpointInvalid)
+		return nil, listenerClosedErr()
 	}
 
 	type acceptResult struct {
@@ -218,7 +217,7 @@ func (l *tlsListener) Accept(ctx context.Context) (iface.Conn, error) {
 		c, err := l.l.Accept()
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) || l.closed.Load() {
-				resCh <- acceptResult{nil, fmt.Errorf("%w: listener closed", zmqerr.ErrEndpointInvalid)}
+				resCh <- acceptResult{nil, listenerClosedErr()}
 				return
 			}
 			resCh <- acceptResult{nil, err}
@@ -278,7 +277,7 @@ func (l *tlsListener) Accept(ctx context.Context) (iface.Conn, error) {
 				_ = r.c.Close()
 			}
 		}()
-		return nil, fmt.Errorf("%w: listener closed", zmqerr.ErrEndpointInvalid)
+		return nil, listenerClosedErr()
 	}
 }
 

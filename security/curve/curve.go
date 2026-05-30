@@ -450,7 +450,7 @@ func (m *curveMech) buildHello() ([]byte, error) {
 	body = append(body, curveVersionMajor, curveVersionMinor)
 	body = append(body, make([]byte, 72)...)
 	body = append(body, m.ourEphPublic[:]...)
-	body = appendCounter(body, counter)
+	body = binary.BigEndian.AppendUint64(body, counter)
 	body = append(body, sigBox...)
 	if len(body) != helloBodySize {
 		return nil, fmt.Errorf("gozmq/security/curve: HELLO body length %d != %d", len(body), helloBodySize)
@@ -658,7 +658,7 @@ func (m *curveMech) buildInitiate(cookie []byte) ([]byte, error) {
 	body = append(body, byte(len(cmdInitiate)))
 	body = append(body, cmdInitiate...)
 	body = append(body, cookie...)
-	body = appendCounter(body, counter)
+	body = binary.BigEndian.AppendUint64(body, counter)
 	body = append(body, initBox...)
 	return body, nil
 }
@@ -795,7 +795,7 @@ func (m *curveMech) buildReady() ([]byte, error) {
 	body := make([]byte, 0, 1+len(cmdReady)+8+len(readyBox))
 	body = append(body, byte(len(cmdReady)))
 	body = append(body, cmdReady...)
-	body = appendCounter(body, counter)
+	body = binary.BigEndian.AppendUint64(body, counter)
 	body = append(body, readyBox...)
 	return body, nil
 }
@@ -869,7 +869,7 @@ func (m *curveMech) EncodeFrame(flags uint8, plain []byte) (uint8, []byte, error
 	body := make([]byte, 0, 1+len(cmdMessage)+8+len(cipher))
 	body = append(body, byte(len(cmdMessage)))
 	body = append(body, cmdMessage...)
-	body = appendCounter(body, counter)
+	body = binary.BigEndian.AppendUint64(body, counter)
 	body = append(body, cipher...)
 	return flags &^ iface.FlagMore, body, nil
 }
@@ -1106,11 +1106,4 @@ func derivePublic(secret Key) (Key, error) {
 	var pub Key
 	copy(pub[:], pubBytes)
 	return pub, nil
-}
-
-
-func appendCounter(buf []byte, c uint64) []byte {
-	var b [8]byte
-	binary.BigEndian.PutUint64(b[:], c)
-	return append(buf, b[:]...)
 }

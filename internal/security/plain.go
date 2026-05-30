@@ -323,18 +323,10 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 // Wire helpers (RFC 24 §4 command bodies).
 // ---------------------------------------------------------------------------
 
-// encodeCommand builds a ZMTP command BODY: [1 byte name-length][name][payload].
-// The session layer wraps this in a COMMAND frame.
+// encodeCommand builds a ZMTP command BODY ([1 byte name-length][name][payload])
+// via the canonical zmtp codec. The session layer wraps this in a COMMAND frame.
 func encodeCommand(name string, payload []byte) []byte {
-	if len(name) > 255 {
-		// Programmer error: command names in ZMTP are short ASCII tokens.
-		panic(fmt.Sprintf("gozmq/security/plain: command name %q exceeds 255 bytes", name))
-	}
-	out := make([]byte, 0, 1+len(name)+len(payload))
-	out = append(out, byte(len(name)))
-	out = append(out, name...)
-	out = append(out, payload...)
-	return out
+	return zmtp.EncodeCommand(zmtp.Command{Name: name, Body: payload})
 }
 
 // parseCommand splits a command body into (name, payload).

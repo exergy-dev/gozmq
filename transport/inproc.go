@@ -274,11 +274,11 @@ func (l *inprocListener) Accept(ctx context.Context) (iface.Conn, error) {
 	select {
 	case c := <-l.acceptCh:
 		if c == nil {
-			return nil, fmt.Errorf("%w: listener closed", zmqerr.ErrEndpointInvalid)
+			return nil, listenerClosedErr()
 		}
 		return c, nil
 	case <-l.closeCh:
-		return nil, fmt.Errorf("%w: listener closed", zmqerr.ErrEndpointInvalid)
+		return nil, listenerClosedErr()
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -289,11 +289,11 @@ func (l *inprocListener) AcceptDirectPipe(ctx context.Context) (*iface.DirectPip
 	select {
 	case offer := <-l.directPipeCh:
 		if offer == nil {
-			return nil, fmt.Errorf("%w: listener closed", zmqerr.ErrEndpointInvalid)
+			return nil, listenerClosedErr()
 		}
 		return offer, nil
 	case <-l.closeCh:
-		return nil, fmt.Errorf("%w: listener closed", zmqerr.ErrEndpointInvalid)
+		return nil, listenerClosedErr()
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -305,7 +305,7 @@ func (l *inprocListener) OfferDirectPipe(offer *iface.DirectPipeOffer) error {
 	case l.directPipeCh <- offer:
 		return nil
 	case <-l.closeCh:
-		return fmt.Errorf("%w: listener closed", zmqerr.ErrEndpointInvalid)
+		return listenerClosedErr()
 	}
 }
 
@@ -356,7 +356,7 @@ func (l *inprocListener) dialIn(name string) (iface.Conn, error) {
 	l.mu.Lock()
 	if l.closed {
 		l.mu.Unlock()
-		return nil, fmt.Errorf("%w: listener closed", zmqerr.ErrEndpointInvalid)
+		return nil, listenerClosedErr()
 	}
 	l.mu.Unlock()
 
@@ -381,7 +381,7 @@ func (l *inprocListener) dialIn(name string) (iface.Conn, error) {
 	case <-l.closeCh:
 		_ = serverConn.Close()
 		_ = clientConn.Close()
-		return nil, fmt.Errorf("%w: listener closed", zmqerr.ErrEndpointInvalid)
+		return nil, listenerClosedErr()
 	}
 }
 

@@ -21,7 +21,6 @@ import (
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/pipe"
-	"github.com/rkm/gozmq/internal/zmqerr"
 )
 
 // Config bundles the inputs to New. All fields are required except the
@@ -260,10 +259,7 @@ func (s *sessionImpl) Stop() error {
 		// the TCP kernel send buffer to drain before the conn is torn
 		// down (otherwise rapid Close-then-process-exit loses in-flight
 		// data; see closeConnGraceful).
-		if ls, ok := s.cfg.Conn.(interface{ SetLinger(int) error }); ok {
-			_ = ls.SetLinger(2)
-		}
-		if err := s.cfg.Conn.Close(); err != nil && !errors.Is(err, io.ErrClosedPipe) {
+		if err := closeConnGraceful(s.cfg.Conn); err != nil && !errors.Is(err, io.ErrClosedPipe) {
 			s.stopErr.CompareAndSwap(nil, &err)
 		}
 		// If the handshake hasn't completed yet, signal so observers
@@ -406,7 +402,7 @@ func identityFromMetadata(m iface.SecurityMech) []byte {
 // closes the session-side pipe (waking the engine).
 func (s *sessionImpl) shutdown() {
 	s.cancel()
-	closeConnGraceful(s.cfg.Conn)
+	_ = closeConnGraceful(s.cfg.Conn)
 	if s.sessionPipe != nil {
 		_ = s.sessionPipe.Close()
 	}
@@ -421,25 +417,11 @@ func (s *sessionImpl) shutdown() {
 // can deliver it. The timeout is intentionally short (a few seconds):
 // user-space drain has already completed, so only the kernel send
 // buffer + in-flight ACKs remain.
-func closeConnGraceful(c io.Closer) {
+func closeConnGraceful(c io.Closer) error {
 	if ls, ok := c.(interface{ SetLinger(sec int) error }); ok {
 		_ = ls.SetLinger(2)
 	}
-	_ = c.Close()
-}
-
-// wrapClosed returns ErrSocketClosed when err looks like a normal
-// shutdown (the conn was closed by Stop or the peer EOF'd cleanly), and
-// the original error otherwise. Used to keep error reporting consistent
-// across the three goroutines.
-func wrapClosed(err error) error {
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
-		return zmqerr.ErrSocketClosed
-	}
-	return err
+	return c.Close()
 }
 
 // Compile-time check.

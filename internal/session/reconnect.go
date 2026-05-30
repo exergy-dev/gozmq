@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rkm/gozmq/internal/iface"
@@ -97,11 +98,6 @@ type Reconnector struct {
 	// done closes when the Start goroutine exits, so Stop can wait.
 	done chan struct{}
 
-	// wake unblocks an in-flight backoff sleep (used by Stop, and by
-	// future "reconnect now" hooks).
-	wakeMu sync.Mutex
-	wake   chan struct{}
-
 	// sessMu guards currentSess so Stop can tear down whichever session
 	// is live at the time.
 	sessMu      sync.Mutex
@@ -111,8 +107,7 @@ type Reconnector struct {
 	// session after the current one detaches. Used by Socket.Close to
 	// honor LINGER: close the engine-facing pipe, let the writer drain,
 	// then hard-stop.
-	quiesceMu sync.Mutex
-	quiesced  bool
+	quiesced atomic.Bool
 }
 
 // normalize applies defaults and clamps ranges on the config. It is
@@ -152,7 +147,6 @@ func NewReconnector(cfg ReconnectConfig) *Reconnector {
 		ctx:    ctx,
 		cancel: cancel,
 		done:   make(chan struct{}),
-		wake:   make(chan struct{}),
 	}
 }
 
@@ -200,15 +194,11 @@ func (r *Reconnector) CurrentSession() iface.Session {
 // then close its pipe and wait for Done() before hard-stopping with Stop.
 // Idempotent.
 func (r *Reconnector) Quiesce() {
-	r.quiesceMu.Lock()
-	r.quiesced = true
-	r.quiesceMu.Unlock()
+	r.quiesced.Store(true)
 }
 
 func (r *Reconnector) isQuiesced() bool {
-	r.quiesceMu.Lock()
-	defer r.quiesceMu.Unlock()
-	return r.quiesced
+	return r.quiesced.Load()
 }
 
 // Stop cancels the loop and tears down any live session. It blocks until
@@ -216,16 +206,9 @@ func (r *Reconnector) isQuiesced() bool {
 // simply marks the Reconnector as stopped).
 func (r *Reconnector) Stop() error {
 	r.stopOnce.Do(func() {
+		// cancel() unblocks any in-flight backoff sleep (it selects on
+		// r.ctx.Done()) as well as the dial loop.
 		r.cancel()
-		// Wake a sleeping backoff.
-		r.wakeMu.Lock()
-		select {
-		case <-r.wake:
-			// already closed
-		default:
-			close(r.wake)
-		}
-		r.wakeMu.Unlock()
 
 		// Tear down the current session, if any. Do this outside any
 		// goroutine the loop might be running in: the loop's Session.Stop
@@ -407,16 +390,8 @@ func (r *Reconnector) sleep(base time.Duration) bool {
 	}
 	t := time.NewTimer(d)
 	defer t.Stop()
-	// Snapshot the wake channel under the mutex so Stop's close-then-
-	// replace pattern (not used today but room for future "reconnect now")
-	// doesn't race with our select.
-	r.wakeMu.Lock()
-	wake := r.wake
-	r.wakeMu.Unlock()
 	select {
 	case <-t.C:
-		return r.ctx.Err() == nil
-	case <-wake:
 		return r.ctx.Err() == nil
 	case <-r.ctx.Done():
 		return false
