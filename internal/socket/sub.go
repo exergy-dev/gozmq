@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"slices"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/rkm/gozmq/internal/iface"
@@ -70,11 +69,10 @@ type SubEngine struct {
 	// recv counts messages SUB/XSUB returned to the caller (matches the
 	// local subscription filter). Filter-mismatch drops are NOT counted
 	// as "dropped" in metrics — they are routine SUB behavior, not a
-	// backpressure/close event. sent counts XSUB subscription-control
-	// messages accepted from the application (zero for plain SUB, which
-	// returns ErrFSMViolation on Send).
-	recv atomic.Uint64
-	sent atomic.Uint64
+	// backpressure/close event. counters.sent counts XSUB subscription-
+	// control messages accepted from the application (zero for plain SUB,
+	// which returns ErrFSMViolation on Send).
+	counters
 }
 
 // NewSubEngine returns a new SUB socket engine and a handle for driving
@@ -332,12 +330,7 @@ func (e *SubEngine) matches(topic []byte) bool {
 // the FairQueue's drop counter so ctx-cancel/close drops during fanout
 // are observable. QueueDepth samples the FairQueue's inbound channel.
 func (e *SubEngine) Metrics() iface.SocketMetrics {
-	return iface.SocketMetrics{
-		Sent:       e.sent.Load(),
-		Recv:       e.recv.Load(),
-		Dropped:    e.fq.Dropped(),
-		QueueDepth: e.fq.QueueDepth(),
-	}
+	return e.snapshot(e.fq.Dropped(), e.fq.QueueDepth())
 }
 
 func (e *SubEngine) Close() error {

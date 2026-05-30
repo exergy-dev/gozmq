@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"sync/atomic"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
@@ -61,8 +60,7 @@ type repEngine struct {
 	// canSend. Stored as a fresh slice independent of any caller *Msg.
 	envelope [][]byte
 
-	sent atomic.Uint64
-	recv atomic.Uint64
+	counters
 }
 
 // NewRepEngine returns a new REP socket engine.
@@ -204,12 +202,7 @@ func splitRepEnvelope(m *msg.Msg) (envelope [][]byte, body *msg.Msg, ok bool) {
 // each user-visible Recv (after envelope split); dropped delegates to
 // the underlying FairQueue. QueueDepth samples the FairQueue.
 func (e *repEngine) Metrics() iface.SocketMetrics {
-	return iface.SocketMetrics{
-		Sent:       e.sent.Load(),
-		Recv:       e.recv.Load(),
-		Dropped:    e.fq.Dropped(),
-		QueueDepth: e.fq.QueueDepth(),
-	}
+	return e.snapshot(e.fq.Dropped(), e.fq.QueueDepth())
 }
 
 func (e *repEngine) Close() error {

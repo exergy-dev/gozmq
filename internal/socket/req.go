@@ -7,7 +7,6 @@ import (
 	"io"
 	"slices"
 	"sync"
-	"sync/atomic"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
@@ -74,8 +73,7 @@ type reqEngine struct {
 	// Close can wait for it to exit and goleak stays clean.
 	forwarderWG sync.WaitGroup
 
-	sent atomic.Uint64
-	recv atomic.Uint64
+	counters
 }
 
 type stickyRecvResult struct {
@@ -377,10 +375,7 @@ func stripReqDelimiter(m *msg.Msg) (*msg.Msg, error) {
 // inbound replies are pulled from a per-request sticky channel which is
 // allocated on Send and consumed on Recv, so QueueDepth is always zero.
 func (e *reqEngine) Metrics() iface.SocketMetrics {
-	return iface.SocketMetrics{
-		Sent: e.sent.Load(),
-		Recv: e.recv.Load(),
-	}
+	return e.snapshot(0, 0)
 }
 
 func (e *reqEngine) Close() error {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"sync/atomic"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
@@ -34,8 +33,7 @@ type pairEngine struct {
 	readyR   chan struct{}
 	readyW   chan struct{}
 
-	sent atomic.Uint64
-	recv atomic.Uint64
+	counters
 }
 
 // NewPairEngine returns a new PAIR socket engine.
@@ -172,10 +170,7 @@ func (e *pairEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 // inbound queue (it reads directly from the attached pipe), so
 // QueueDepth is always zero.
 func (e *pairEngine) Metrics() iface.SocketMetrics {
-	return iface.SocketMetrics{
-		Sent: e.sent.Load(),
-		Recv: e.recv.Load(),
-	}
+	return e.snapshot(0, 0)
 }
 
 func (e *pairEngine) Close() error {

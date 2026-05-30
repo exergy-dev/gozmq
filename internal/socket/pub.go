@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/rkm/gozmq/internal/iface"
@@ -92,17 +91,13 @@ type pubEngine struct {
 	readyR      chan struct{}
 	readyW      chan struct{}
 
-	// Metrics counters. sent increments once per Send call that has at
-	// least one frame; dropped increments per (message, peer) pair when
-	// the peer's pipe rejects the send (HWM full). Tracks per-peer drops
-	// rather than per-message so observers can see fan-out drop pressure
-	// — one slow subscriber and ten fast ones still surface clearly.
-	sent    atomic.Uint64
-	dropped atomic.Uint64
-	// recv counts subscription events delivered to the application via
-	// Recv. Always zero for plain PUB (Recv is an FSM violation); for
-	// XPUB it tracks the SUBSCRIBE/CANCEL events the app has observed.
-	recv atomic.Uint64
+	// Metrics counters (embedded). sent increments once per Send call that
+	// has at least one frame; dropped increments per (message, peer) pair
+	// when the peer's pipe rejects the send (HWM full) — per-peer rather
+	// than per-message so observers see fan-out drop pressure. recv counts
+	// subscription events delivered to the application via Recv (zero for
+	// plain PUB; XPUB tracks observed SUBSCRIBE/CANCEL events).
+	counters
 }
 
 // subInboundItem pairs a subscription message with the pipe that produced
@@ -332,12 +327,7 @@ func (e *pubEngine) Metrics() iface.SocketMetrics {
 	if e.subInbound != nil {
 		depth = uint64(len(e.subInbound))
 	}
-	return iface.SocketMetrics{
-		Sent:       e.sent.Load(),
-		Recv:       e.recv.Load(),
-		Dropped:    e.dropped.Load(),
-		QueueDepth: depth,
-	}
+	return e.snapshot(e.dropped.Load(), depth)
 }
 
 // pubTryTimeout is the per-peer HWM-drop deadline for PUB fanout. Long

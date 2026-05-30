@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"sync/atomic"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
@@ -43,7 +42,8 @@ type routerEngine struct {
 	identityRouter
 
 	mandatory bool
-	dropped   atomic.Uint64 // non-mandatory routes with unknown identity
+	// dropped (promoted from identityRouter.counters) counts non-mandatory
+	// routes with an unknown identity.
 
 	// detachedIdOf retains, post-Detach, the identity in use for a pipe at
 	// Detach time, so Recv can still stamp in-flight messages correctly.

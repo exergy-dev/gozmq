@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"fmt"
 	"sync"
-	"sync/atomic"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
@@ -40,8 +39,7 @@ type identityRouter struct {
 	// least one peer is attached.
 	readyW chan struct{}
 
-	sent atomic.Uint64
-	recv atomic.Uint64
+	counters
 
 	// Optional hooks, all invoked while mu is held (nil = no-op).
 	postAttachLocked func(p iface.Pipe)            // after idOf/pipeOf set
@@ -191,12 +189,7 @@ func (e *identityRouter) Close() error {
 // metrics builds the engine's counters; extraDropped is folded into the
 // FairQueue's own drop count (ROUTER adds its route-miss drops; STREAM adds 0).
 func (e *identityRouter) metrics(extraDropped uint64) iface.SocketMetrics {
-	return iface.SocketMetrics{
-		Sent:       e.sent.Load(),
-		Recv:       e.recv.Load(),
-		Dropped:    extraDropped + e.fq.Dropped(),
-		QueueDepth: e.fq.QueueDepth(),
-	}
+	return e.snapshot(extraDropped+e.fq.Dropped(), e.fq.QueueDepth())
 }
 
 // synthesizedIdentity returns a 5-byte routing identity for an anonymous peer:

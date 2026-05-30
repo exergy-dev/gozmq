@@ -89,6 +89,26 @@ import (
 // one direction can omit the other entirely. The combined Pollable
 // interface is what the Poller asserts against; the per-direction
 // methods are convenience for engines that compose primitives.
+// counters holds the standard per-engine metric counters. Engines embed it so
+// the promoted sent/recv/dropped fields work in place (e.counters.sent ==
+// e.sent), and snapshot builds the iface.SocketMetrics. dropped and queueDepth
+// are passed explicitly because they usually combine an engine-local counter
+// with a FairQueue gauge.
+type counters struct {
+	sent    atomic.Uint64
+	recv    atomic.Uint64
+	dropped atomic.Uint64
+}
+
+func (c *counters) snapshot(dropped, queueDepth uint64) iface.SocketMetrics {
+	return iface.SocketMetrics{
+		Sent:       c.sent.Load(),
+		Recv:       c.recv.Load(),
+		Dropped:    dropped,
+		QueueDepth: queueDepth,
+	}
+}
+
 type Pollable interface {
 	// ReadyRecv returns a channel that is armed when at least one
 	// message is buffered and immediately available to Recv. Reads
