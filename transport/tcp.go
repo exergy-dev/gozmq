@@ -119,8 +119,11 @@ func (t *TCPTransport) keepAliveSetting() time.Duration {
 	return t.KeepAlivePeriod
 }
 
-// applySocketOptions tweaks per-connection settings the dialer does not
-// surface (TCP_NODELAY).
+// applySocketOptions sets per-connection knobs the Dialer/ListenConfig do
+// not surface (TCP_NODELAY and socket buffer sizes). Keepalive is NOT set
+// here: net.Dialer.KeepAlive (Dial) and net.ListenConfig.KeepAlive (Accept)
+// — both fed by keepAliveSetting() — already enable SO_KEEPALIVE and set the
+// idle period on dialed and accepted connections alike.
 func (t *TCPTransport) applySocketOptions(c net.Conn) error {
 	tc, ok := c.(*net.TCPConn)
 	if !ok {
@@ -132,18 +135,7 @@ func (t *TCPTransport) applySocketOptions(c net.Conn) error {
 	if err := tc.SetReadBuffer(defaultTCPReadBuffer); err != nil {
 		return err
 	}
-	if err := tc.SetWriteBuffer(defaultTCPWriteBuffer); err != nil {
-		return err
-	}
-	if t.KeepAlive {
-		if err := tc.SetKeepAlive(true); err != nil {
-			return err
-		}
-		if t.KeepAlivePeriod > 0 {
-			_ = tc.SetKeepAlivePeriod(t.KeepAlivePeriod)
-		}
-	}
-	return nil
+	return tc.SetWriteBuffer(defaultTCPWriteBuffer)
 }
 
 func (t *TCPTransport) parseAddress(endpoint string) (string, error) {
