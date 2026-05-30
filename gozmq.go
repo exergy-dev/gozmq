@@ -16,7 +16,6 @@ import (
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
 	"github.com/rkm/gozmq/internal/pipe"
-	secmech "github.com/rkm/gozmq/internal/security"
 	"github.com/rkm/gozmq/internal/session"
 	"github.com/rkm/gozmq/internal/socket"
 	"github.com/rkm/gozmq/internal/stream"
@@ -627,11 +626,11 @@ func (s *Socket) newMechanism(role iface.Role) iface.SecurityMech {
 			return m
 		}
 	case s.cfg.plainAuth != nil && role == iface.RoleServer:
-		return secmech.NewPlainServer(s.cfg.plainAuth, meta)
+		return security.NewPlainServer(s.cfg.plainAuth, meta)
 	case s.cfg.plainClient && role == iface.RoleClient:
-		return secmech.NewPlainClient(s.cfg.plainClientUser, s.cfg.plainClientPass, meta)
+		return security.NewPlainClient(s.cfg.plainClientUser, s.cfg.plainClientPass, meta)
 	}
-	return secmech.NewNull(role, meta)
+	return security.NewNull(role, meta)
 }
 
 func (s *Socket) acceptLoop(l iface.Listener) {

@@ -1,6 +1,8 @@
-// Package security hosts the internal ZMTP security mechanisms. Each
-// mechanism implements iface.SecurityMech so the session layer drives them
-// through the same state-machine loop.
+// Package security hosts the ZMTP security mechanisms NULL and PLAIN plus the
+// RFC 27 ZAP authorization codec. Each mechanism implements iface.SecurityMech
+// so the session layer drives them through the same state-machine loop. CURVE
+// lives in the security/curve subpackage because it also exposes key-pair
+// primitives to callers.
 //
 // This file implements NULL (ZMTP 3.1 §3.2, design §8.1). The handshake is
 // a single READY exchange — no cryptographic state, no per-frame rewriting.
