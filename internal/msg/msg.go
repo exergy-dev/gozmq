@@ -28,11 +28,8 @@ package msg
 
 import (
 	"runtime"
-	"sync"
 	"sync/atomic"
 )
-
-var msgPool = sync.Pool{New: func() any { return &Msg{} }}
 
 // Msg is a ZMTP message: an ordered sequence of binary frames. The zero value
 // is an empty message.
@@ -59,24 +56,31 @@ type Msg struct {
 	refs atomic.Int32
 }
 
-// New returns an empty Msg from the pool.
+// New returns an empty Msg. The *Msg struct is plain-allocated (not pooled):
+// a sync.Pool of *Msg was measured net-negative because messages are produced
+// on one goroutine and consumed on another, giving a ~0% pool hit rate while
+// still paying the cross-P poolChain steal cost. The size-tiered FRAME-BUFFER
+// pool (PoolGet/PoolPut) is unaffected — that one earns its keep on the
+// large-frame wire-read path.
 func New() *Msg {
-	m := msgPool.Get().(*Msg)
+	m := &Msg{}
 	m.frames = m.inlineFrames[:0]
 	return m
 }
 
 // FromBytes returns a single-frame Msg wrapping b without copying.
 func FromBytes(b []byte) *Msg {
-	m := msgPool.Get().(*Msg)
+	m := &Msg{}
 	m.inlineFrames[0] = b
 	m.frames = m.inlineFrames[:1]
 	return m
 }
 
-// FromFrames returns a Msg whose frames are the provided slices, in order.
+// FromFrames returns a Msg whose frames are a COPY of the provided slices, in
+// order. Use FromFramesOwned when the caller built the slice locally and can
+// hand off ownership without the copy.
 func FromFrames(frames ...[]byte) *Msg {
-	out := msgPool.Get().(*Msg)
+	out := &Msg{}
 	if len(frames) <= len(out.inlineFrames) {
 		copy(out.inlineFrames[:], frames)
 		out.frames = out.inlineFrames[:len(frames)]
@@ -87,9 +91,19 @@ func FromFrames(frames ...[]byte) *Msg {
 	return out
 }
 
-// Recycle returns the Msg struct to the pool after clearing all fields.
-// The caller must not access m after calling Recycle. Safe to call on
-// any *Msg, including nil (no-op).
+// FromFramesOwned returns a Msg that adopts the frames slice header directly,
+// without copying it. The caller must not retain or mutate frames afterward.
+// This avoids the redundant [][]byte allocation FromFrames makes for
+// multi-frame messages built locally and immediately handed off (the common
+// envelope-prepend/strip case in REQ/REP/ROUTER).
+func FromFramesOwned(frames [][]byte) *Msg {
+	return &Msg{frames: frames}
+}
+
+// Recycle returns any pool-backed frame buffers carried by m to the
+// size-tiered frame pool. The *Msg struct itself is left to the GC (it is no
+// longer pooled). A no-op for *Msg values that never carried pooled frames,
+// and safe on nil. The caller must not access m's frames after Recycle.
 func Recycle(m *Msg) {
 	if m == nil {
 		return
@@ -97,13 +111,6 @@ func Recycle(m *Msg) {
 	if m.pooled != nil {
 		m.reclaimPooled()
 	}
-	m.refs.Store(0)
-	for i := range m.inlineFrames {
-		m.inlineFrames[i] = nil
-	}
-	m.frames = nil
-	m.pooled = nil
-	msgPool.Put(m)
 }
 
 // Frames returns the backing frame slice.
