@@ -452,3 +452,48 @@ bytes packed densely into one reusable scratch buffer and one
 materialization pass at flush time. The latency improvement is broad
 and significant; the alloc-count gate is met to the floor of what is
 reclaimable in the targeted code region.
+
+---
+
+## Update (2026-05-30): allocation/latency round + fair libzmq comparison
+
+A profiling-driven round (see commits `perf: drop the net-negative *Msg
+sync.Pool …` through `perf: drop ROUTER recv identity clone …`) cut the
+hot-path costs that the original report could not reach:
+
+- Dropped the `*Msg` `sync.Pool` (≈0% hit rate on the producer→consumer
+  path; ~14% CPU in `sync.Pool` getSlow/popTail for zero reuse).
+- Rewrote REQ to read its sticky pipe's `RecvCh()` inline — removed a
+  `context.WithCancel` + two goroutines per Recv.
+- `FromFramesOwned` to drop the redundant `[][]byte` copy in REQ/REP/ROUTER
+  envelope build/strip; dropped ROUTER's per-Recv identity clone; lock-free
+  single-peer LoadBalancer send snapshot; PUB single-peer no-alloc send.
+
+In-repo bench deltas (inproc, 32B): ReqRepRoundTrip 3265→945 ns/op (19→9
+allocs), RouterDealerLatency 1286→893 ns/op (9→7), XPubXSubLatency 156→93
+ns/op, PushPullThroughput ~81→60 ns/op.
+
+### Fair native-vs-native throughput (gozmq vs libzmq)
+
+The earlier comparison used an external script that no longer exists. The
+*only* apples-to-apples method is two processes per side over TCP loopback
+with NO CGO (an in-process CGO binding adds a cgocall + a per-message buffer
+copy on every Send/Recv and understates native libzmq several-fold). The
+reproducible harness is `perf/libzmq_thr/compare.sh` (gozmq's perf/local_thr
++ remote_thr vs libzmq's own C local_thr/remote_thr). Representative run
+(libzmq 4.3.4, WSL2 loopback, PUSH→PULL streaming, best of 2):
+
+| size | gozmq        | libzmq (native C) | gozmq/libzmq |
+|------|--------------|-------------------|--------------|
+| 32B  | 4.6–5.0 Mmsg/s | 8.9–9.5 Mmsg/s  | ~0.5x        |
+| 256B | 4.3 Mmsg/s   | 4.3 Mmsg/s        | ~1.0x        |
+| 1KB  | 2.4 Mmsg/s   | 2.6 Mmsg/s        | ~0.9x        |
+| 8KB  | 0.56 Mmsg/s  | 0.52 Mmsg/s       | ~1.05x       |
+| 64KB | 0.09 Mmsg/s  | 0.10 Mmsg/s       | ~0.85x       |
+
+gozmq is now at parity with native libzmq from 256B–8KB, ~2x behind only at
+tiny 32B messages (per-message scheduling/handoff overhead dominates there),
+and within ~0.85x at 64KB — versus the original baseline where gozmq was
+~6x slower at 64B. The remaining 32B gap is the Go channel handoff +
+goroutine scheduling cost per message vs libzmq's hand-tuned C lock-free
+pipe; it shrinks to noise as payload (memory bandwidth) dominates.
