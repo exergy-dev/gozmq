@@ -84,6 +84,9 @@ type Reconnector struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+	// ctxWatchStop stops the context.AfterFunc that propagates an external
+	// ctx cancellation into r.cancel; released by Stop. Guarded by stateMu.
+	ctxWatchStop func() bool
 
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -163,19 +166,13 @@ func (r *Reconnector) Start(ctx context.Context) {
 			return
 		}
 		r.started = true
-		r.stateMu.Unlock()
 		if ctx != nil && ctx != context.Background() {
-			// Propagate external cancellation into our internal context
-			// without leaking a goroutine after Stop: the watcher exits
-			// when either ctx fires or r.ctx is cancelled by Stop.
-			go func() {
-				select {
-				case <-ctx.Done():
-					r.cancel()
-				case <-r.ctx.Done():
-				}
-			}()
+			// Propagate external cancellation into our internal context.
+			// AfterFunc spawns no goroutine until ctx fires; Stop releases
+			// the registration via ctxWatchStop so it doesn't outlive us.
+			r.ctxWatchStop = context.AfterFunc(ctx, r.cancel)
 		}
+		r.stateMu.Unlock()
 		go r.loop()
 	})
 }
@@ -209,6 +206,12 @@ func (r *Reconnector) Stop() error {
 		// cancel() unblocks any in-flight backoff sleep (it selects on
 		// r.ctx.Done()) as well as the dial loop.
 		r.cancel()
+		r.stateMu.Lock()
+		stop := r.ctxWatchStop
+		r.stateMu.Unlock()
+		if stop != nil {
+			stop()
+		}
 
 		// Tear down the current session, if any. Do this outside any
 		// goroutine the loop might be running in: the loop's Session.Stop
