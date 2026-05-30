@@ -177,10 +177,30 @@ type LoadBalancer struct {
 	closeCh chan struct{}
 	closed  bool
 
+	// single is an atomically-swapped snapshot of the sole attached peer.
+	// When exactly one pipe is attached it holds that peer's send channel;
+	// Send reads it without holding mu, inlines the blocking select, and
+	// skips both the peer-pick lock and the cursor-advance lock. It is
+	// nil whenever 0 or 2+ pipes are attached (forcing the locked
+	// round-robin path) and is cleared atomically on Detach/Close so a
+	// Send can never use a stale pipe. Mirrors FairQueue.direct on the
+	// recv side. Round-robin fairness with a single peer is trivial, so
+	// no cursor math is needed here.
+	single atomic.Pointer[singleSnapshot]
+
 	// sent is the count of messages successfully dispatched. Incremented
 	// after Pipe.Send returns nil. Send-side errors do NOT increment this
 	// — they are surfaced to the caller.
 	sent atomic.Uint64
+}
+
+// singleSnapshot holds the lock-free send state for the single-peer
+// LoadBalancer fast path. A nil *singleSnapshot means the locked
+// round-robin path must be used (0 or 2+ peers, or the peer's pipe does
+// not expose a send channel).
+type singleSnapshot struct {
+	pipe   iface.Pipe
+	sendCh chan<- *msg.Msg
 }
 
 // Sent reports the number of messages this LoadBalancer has successfully
@@ -232,6 +252,26 @@ func (lb *LoadBalancer) HasPeers() bool {
 	return len(lb.pipes) > 0 && !lb.closed
 }
 
+// refreshSingleLocked recomputes the single-peer send snapshot. Caller
+// must hold lb.mu. When exactly one pipe is attached (and not closed) and
+// that pipe exposes a send channel, the snapshot is populated so Send can
+// take the lock-free fast path; otherwise it is cleared, forcing the
+// locked round-robin path. Pipes without a SendCh fall through to the
+// locked goroutine-based fallback even when alone.
+func (lb *LoadBalancer) refreshSingleLocked() {
+	if lb.closed || len(lb.pipes) != 1 {
+		lb.single.Store(nil)
+		return
+	}
+	p := lb.pipes[0]
+	sc, ok := p.(sendChanner)
+	if !ok {
+		lb.single.Store(nil)
+		return
+	}
+	lb.single.Store(&singleSnapshot{pipe: p, sendCh: sc.SendCh()})
+}
+
 // signalReadyWriteLocked re-arms the write-ready channel when peers
 // are present. Caller must hold lb.mu.
 func (lb *LoadBalancer) signalReadyWriteLocked() {
@@ -256,6 +296,7 @@ func (lb *LoadBalancer) Attach(p iface.Pipe) error {
 		return nil
 	}
 	lb.pipes = append(lb.pipes, p)
+	lb.refreshSingleLocked()
 	lb.signalLocked()
 	lb.signalReadyWriteLocked()
 	return nil
@@ -279,6 +320,7 @@ func (lb *LoadBalancer) Detach(p iface.Pipe) error {
 				}
 				lb.cursor %= len(lb.pipes)
 			}
+			lb.refreshSingleLocked()
 			lb.signalLocked()
 			lb.signalReadyWriteLocked()
 			return nil
@@ -294,6 +336,40 @@ func (lb *LoadBalancer) Detach(p iface.Pipe) error {
 // Returns zmqerr.ErrSocketClosed (wrapped) after Close, ctx.Err() on
 // cancellation, or the underlying Pipe.Send error.
 func (lb *LoadBalancer) Send(ctx context.Context, m *msg.Msg) error {
+	// Single-peer fast path: when exactly one peer is attached we read its
+	// send channel from an atomic snapshot and inline the blocking select,
+	// skipping BOTH the peer-pick lock and the cursor-advance lock. Round-
+	// robin with one peer is trivially satisfied. The closeCh arm preserves
+	// the Close-unblocks-a-blocked-Send guarantee; the notify arm wakes us
+	// if the peer set changes (e.g. Detach/Attach) so we re-snapshot via the
+	// locked path rather than blocking on a stale pipe.
+	if s := lb.single.Load(); s != nil {
+		// Try the non-blocking fast send first to avoid arming a select at
+		// all when the pipe has room.
+		if nb, ok := s.pipe.(nonBlockingSender); ok && nb.TrySend(m) {
+			lb.sent.Add(1)
+			return nil
+		}
+		select {
+		case s.sendCh <- m:
+			lb.sent.Add(1)
+			return nil
+		case <-lb.closeCh:
+			return fmt.Errorf("loadbalancer send: %w", zmqerr.ErrSocketClosed)
+		case <-lb.notify:
+			// Peer set changed (Attach/Detach/Close signalled notify).
+			// Re-broadcast so any other parked waiter still wakes, then
+			// fall through to the locked round-robin path which re-reads
+			// the current peer set under the mutex.
+			select {
+			case lb.notify <- struct{}{}:
+			default:
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
 	for {
 		lb.mu.Lock()
 		if lb.closed {
@@ -466,6 +542,7 @@ func (lb *LoadBalancer) Close() error {
 		return nil
 	}
 	lb.closed = true
+	lb.single.Store(nil)
 	close(lb.closeCh)
 	lb.signalLocked()
 	return nil
@@ -746,18 +823,12 @@ func (fq *FairQueue) RecvWithSource(ctx context.Context) (*msg.Msg, iface.Pipe, 
 	for {
 		ds := fq.direct.Load()
 
-		// Non-blocking closed check via the closeCh channel (avoids
-		// reading fq.closed without the mutex).
-		select {
-		case <-fq.closeCh:
-			select {
-			case it := <-fq.inbound:
-				return it.m, it.p, nil
-			default:
-				return nil, nil, fmt.Errorf("fairqueue recv: %w", zmqerr.ErrSocketClosed)
-			}
-		default:
-		}
+		// The direct-pipe branches below bypass fq.inbound entirely, so
+		// there is nothing to drain on close — their in-select closeCh arm
+		// already handles the close race. The leading non-blocking closeCh
+		// pre-check (which drains a buffered inbound item on close) is only
+		// needed for the multi-pipe path, so it is gated into the ds == nil
+		// branch to save one selectgo per direct Recv.
 
 		if ds != nil && ds.recvCh != nil {
 			rch := ds.recvCh
@@ -808,7 +879,21 @@ func (fq *FairQueue) RecvWithSource(ctx context.Context) (*msg.Msg, iface.Pipe, 
 			return nil, nil, err
 		}
 
-		// Multi-pipe path: read from the shared inbound channel.
+		// Multi-pipe path: read from the shared inbound channel. The
+		// non-blocking closeCh pre-check guards the close-with-buffered-item
+		// drain: on close we must hand back any item already sitting in
+		// fq.inbound before reporting ErrSocketClosed.
+		select {
+		case <-fq.closeCh:
+			select {
+			case it := <-fq.inbound:
+				return it.m, it.p, nil
+			default:
+				return nil, nil, fmt.Errorf("fairqueue recv: %w", zmqerr.ErrSocketClosed)
+			}
+		default:
+		}
+
 		select {
 		case it := <-fq.inbound:
 			return it.m, it.p, nil
