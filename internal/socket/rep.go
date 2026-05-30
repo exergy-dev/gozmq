@@ -163,7 +163,9 @@ func (e *repEngine) Send(ctx context.Context, m *msg.Msg) error {
 	wireFrames := make([][]byte, 0, len(envelope)+len(body))
 	wireFrames = append(wireFrames, envelope...)
 	wireFrames = append(wireFrames, body...)
-	wire := msg.FromFrames(wireFrames...)
+	// wireFrames is built locally and handed off; FromFramesOwned adopts it
+	// without the extra copy FromFrames would make.
+	wire := msg.FromFramesOwned(wireFrames)
 	if err := peer.Send(ctx, wire); err != nil {
 		return err
 	}
@@ -184,13 +186,19 @@ func splitRepEnvelope(m *msg.Msg) (envelope [][]byte, body *msg.Msg, ok bool) {
 	frames := m.Frames()
 	for i, f := range frames {
 		if len(f) == 0 {
-			// Envelope is frames[0:i+1] (includes the empty delimiter).
+			// Envelope is frames[0:i+1] (includes the empty delimiter). It is
+			// stashed into e.envelope and outlives m, so it MUST be an
+			// independent copy that cannot alias a recyclable backing slice.
 			env := make([][]byte, i+1)
 			copy(env, frames[:i+1])
-			rest := frames[i+1:]
-			bodyFrames := make([][]byte, len(rest))
-			copy(bodyFrames, rest)
-			result := msg.FromFrames(bodyFrames...)
+			// Body is frames[i+1:]. The engine solely owns m here and disarms
+			// it via result.TransferPool below (m is dropped immediately
+			// after), so we can reslice m's frame-slice header in place
+			// instead of make+copy — the body *Msg becomes the sole owner of
+			// the pooled buffers. (Frame byte contents are shared either way;
+			// only the slice header allocation is saved.)
+			bodyFrames := frames[i+1:]
+			result := msg.FromFramesOwned(bodyFrames)
 			result.TransferPool(m)
 			return env, result, true
 		}

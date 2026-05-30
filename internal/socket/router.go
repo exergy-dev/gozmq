@@ -129,8 +129,10 @@ func (e *routerEngine) Send(ctx context.Context, m *msg.Msg) error {
 	}
 
 	// Route everything after the identity frame. Clone the frame-slice header
-	// so we don't share backing storage with the caller's message.
-	routed := msg.FromFrames(slices.Clone(rest)...)
+	// so we don't share backing storage with the caller's message, then hand
+	// the locally-built slice off directly (FromFramesOwned avoids the second
+	// copy FromFrames would make).
+	routed := msg.FromFramesOwned(slices.Clone(rest))
 	if err := p.Send(ctx, routed); err != nil {
 		return err
 	}

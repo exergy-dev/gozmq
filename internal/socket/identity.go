@@ -152,13 +152,17 @@ func (e *identityRouter) Recv(ctx context.Context) (*msg.Msg, error) {
 		id = src.PeerIdentity()
 	}
 	// Build a fresh frame slice to avoid aliasing m's caller-observable
-	// frames, then transfer pooled-buffer ownership.
+	// frames, then transfer pooled-buffer ownership. id is already the
+	// defensive clone made once at AttachPipe (or the post-detach cache /
+	// PeerIdentity fallback) and is never mutated afterward, so prepend it
+	// directly without re-cloning per Recv. The out slice is built locally
+	// and handed off, so FromFramesOwned adopts it without a second copy.
 	orig := m.Frames()
 	out := make([][]byte, 0, len(orig)+1)
-	out = append(out, bytes.Clone(id))
+	out = append(out, id)
 	out = append(out, orig...)
 	e.recv.Add(1)
-	result := msg.FromFrames(out...)
+	result := msg.FromFramesOwned(out)
 	result.TransferPool(m)
 	return result, nil
 }

@@ -269,6 +269,29 @@ func (e *pubEngine) Send(ctx context.Context, m *msg.Msg) error {
 	}
 	topic := m.Frames()[0]
 
+	// Single-peer fast path (the common XPubXSub-pair case): capture the one
+	// pipe and its match decision under the lock, then release the lock and
+	// send without materializing a slice. Preserves the "match under lock,
+	// send outside lock" property — a slow subscriber never blocks
+	// Attach/Detach — and the PUB drop-on-HWM semantics.
+	if len(e.peers) == 1 {
+		var single iface.Pipe
+		var match bool
+		for p, peer := range e.peers {
+			single = p
+			match = peer.tree.Match(topic)
+		}
+		e.mu.Unlock()
+		if match {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			e.sendToPeer(ctx, single, m)
+		}
+		e.sent.Add(1)
+		return nil
+	}
+
 	// Snapshot the matching peers under the lock, then do the actual
 	// non-blocking sends outside the lock to avoid a slow pipe blocking
 	// unrelated engine operations (Attach/Detach).
@@ -284,21 +307,29 @@ func (e *pubEngine) Send(ctx context.Context, m *msg.Msg) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		// Fast path: if the pipe supports non-blocking send and has
-		// buffer space, skip the context+timeout overhead entirely.
-		if nb, ok := p.(nonBlockingSender); ok && nb.TrySend(m) {
-			continue
-		}
-		// Slow path: give the send a very short deadline so a peer at
-		// HWM doesn't block fan-out to other subscribers.
-		tryCtx, cancel := context.WithTimeout(ctx, pubTryTimeout)
-		if err := p.Send(tryCtx, m); err != nil {
-			e.dropped.Add(1)
-		}
-		cancel()
+		e.sendToPeer(ctx, p, m)
 	}
 	e.sent.Add(1)
 	return nil
+}
+
+// sendToPeer delivers m to a single matched peer with PUB drop-on-HWM
+// semantics: a non-blocking TrySend fast path, falling back to a
+// short-deadline Send so a peer at HWM never stalls fan-out. Called outside
+// e.mu. Increments the dropped counter when the peer rejects the send.
+func (e *pubEngine) sendToPeer(ctx context.Context, p iface.Pipe, m *msg.Msg) {
+	// Fast path: if the pipe supports non-blocking send and has buffer
+	// space, skip the context+timeout overhead entirely.
+	if nb, ok := p.(nonBlockingSender); ok && nb.TrySend(m) {
+		return
+	}
+	// Slow path: give the send a very short deadline so a peer at HWM
+	// doesn't block fan-out to other subscribers.
+	tryCtx, cancel := context.WithTimeout(ctx, pubTryTimeout)
+	if err := p.Send(tryCtx, m); err != nil {
+		e.dropped.Add(1)
+	}
+	cancel()
 }
 
 // Metrics reports the PUB engine's counters. QueueDepth samples the
