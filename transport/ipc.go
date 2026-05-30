@@ -7,8 +7,6 @@ import (
 	"net"
 	"os"
 	"runtime"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/rkm/gozmq/internal/iface"
@@ -132,26 +130,24 @@ func parseIPCAddress(endpoint string) (addr, displayAddr string, abstract bool, 
 // ipcListener follows the tcpListener poll pattern. Close removes the
 // socket file (filesystem namespace only) and unblocks pending Accept.
 type ipcListener struct {
-	l         net.Listener
-	t         *IPCTransport
-	path      string // the raw address we passed to net.Listen (for Remove)
-	display   string // "@name" or "/path" for endpoint-string reporting
-	abstract  bool
-	endpoint  string
-	closed    atomic.Bool
-	closeCh   chan struct{}
-	closeOnce sync.Once
+	l        net.Listener
+	t        *IPCTransport
+	path     string // the raw address we passed to net.Listen (for Remove)
+	display  string // "@name" or "/path" for endpoint-string reporting
+	abstract bool
+	endpoint string
+	listenerCloseState
 }
 
 func newIPCListener(l net.Listener, t *IPCTransport, path, display string, abstract bool) *ipcListener {
 	return &ipcListener{
-		l:        l,
-		t:        t,
-		path:     path,
-		display:  display,
-		abstract: abstract,
-		endpoint: "ipc://" + display,
-		closeCh:  make(chan struct{}),
+		l:                  l,
+		t:                  t,
+		path:               path,
+		display:            display,
+		abstract:           abstract,
+		endpoint:           "ipc://" + display,
+		listenerCloseState: newListenerCloseState(),
 	}
 }
 
@@ -183,17 +179,14 @@ func (l *ipcListener) Accept(ctx context.Context) (iface.Conn, error) {
 // repeated bind/unbind cycles do not accumulate cruft. Abstract sockets
 // have no inode and need no cleanup. Idempotent.
 func (l *ipcListener) Close() error {
-	var firstErr error
-	l.closeOnce.Do(func() {
-		l.closed.Store(true)
-		close(l.closeCh)
+	return l.closeWith(func() error {
 		// net.UnixListener.Close already removes the socket file by
 		// default when SetUnlinkOnClose(true) is set (Go default). We
 		// still call os.Remove defensively below in case the listener
 		// was constructed by some future path that disables it, and to
 		// guarantee our contract ("listener close removes the socket
 		// file if we created it").
-		firstErr = l.l.Close()
+		firstErr := l.l.Close()
 		if !l.abstract {
 			if err := os.Remove(l.path); err != nil && !errors.Is(err, os.ErrNotExist) {
 				if firstErr == nil {
@@ -201,8 +194,8 @@ func (l *ipcListener) Close() error {
 				}
 			}
 		}
+		return firstErr
 	})
-	return firstErr
 }
 
 // --------------------------------------------------------------------------

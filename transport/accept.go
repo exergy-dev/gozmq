@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rkm/gozmq/internal/zmqerr"
@@ -17,6 +19,31 @@ type acceptResult struct {
 
 func listenerClosedErr() error {
 	return fmt.Errorf("%w: listener closed", zmqerr.ErrEndpointInvalid)
+}
+
+// listenerCloseState is the shared close machinery for the net-based listeners
+// (tcp/tls/ipc). It is embedded so the listener exposes closed/closeCh to
+// acceptWithDeadline and a single idempotent closeWith for teardown.
+type listenerCloseState struct {
+	closed    atomic.Bool
+	closeCh   chan struct{}
+	closeOnce sync.Once
+}
+
+func newListenerCloseState() listenerCloseState {
+	return listenerCloseState{closeCh: make(chan struct{})}
+}
+
+// closeWith marks the listener closed, wakes any parked acceptWithDeadline via
+// closeCh, and runs teardown exactly once. Later calls are no-ops returning nil.
+func (s *listenerCloseState) closeWith(teardown func() error) error {
+	var err error
+	s.closeOnce.Do(func() {
+		s.closed.Store(true)
+		close(s.closeCh)
+		err = teardown()
+	})
+	return err
 }
 
 func acceptWithDeadline(

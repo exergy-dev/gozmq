@@ -3,8 +3,6 @@ package transport
 import (
 	"context"
 	"net"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/rkm/gozmq/internal/iface"
@@ -206,19 +204,15 @@ type tcpListener struct {
 	l        net.Listener
 	t        *TCPTransport
 	endpoint string
-
-	closed atomic.Bool
-	// closeCh fires when Close runs; pollers listen for it.
-	closeCh   chan struct{}
-	closeOnce sync.Once
+	listenerCloseState
 }
 
 func newTCPListener(l net.Listener, t *TCPTransport) *tcpListener {
 	return &tcpListener{
-		l:        l,
-		t:        t,
-		endpoint: formatTCPEndpoint(t.scheme, l.Addr()),
-		closeCh:  make(chan struct{}),
+		l:                  l,
+		t:                  t,
+		endpoint:           formatTCPEndpoint(t.scheme, l.Addr()),
+		listenerCloseState: newListenerCloseState(),
 	}
 }
 
@@ -251,11 +245,5 @@ func (l *tcpListener) Accept(ctx context.Context) (iface.Conn, error) {
 }
 
 func (l *tcpListener) Close() error {
-	var err error
-	l.closeOnce.Do(func() {
-		l.closed.Store(true)
-		close(l.closeCh)
-		err = l.l.Close()
-	})
-	return err
+	return l.closeWith(l.l.Close)
 }

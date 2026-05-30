@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"sync"
-	"sync/atomic"
 
 	"github.com/rkm/gozmq/internal/iface"
 )
@@ -180,18 +178,15 @@ type tlsListener struct {
 	l        net.Listener
 	t        *TLSTransport
 	endpoint string
-
-	closed    atomic.Bool
-	closeCh   chan struct{}
-	closeOnce sync.Once
+	listenerCloseState
 }
 
 func newTLSListener(l net.Listener, t *TLSTransport) *tlsListener {
 	return &tlsListener{
-		l:        l,
-		t:        t,
-		endpoint: formatTCPEndpoint(tlsScheme, l.Addr()),
-		closeCh:  make(chan struct{}),
+		l:                  l,
+		t:                  t,
+		endpoint:           formatTCPEndpoint(tlsScheme, l.Addr()),
+		listenerCloseState: newListenerCloseState(),
 	}
 }
 
@@ -281,26 +276,15 @@ func (l *tlsListener) Accept(ctx context.Context) (iface.Conn, error) {
 	}
 }
 
-// closeListener closes the underlying net.Listener exactly once. Used by
-// both Close (explicit) and Accept (on ctx cancel) to unblock a parked
-// l.l.Accept call. Safe to call any number of times; net.Listener.Close
-// returning a non-nil error on the second call is swallowed via sync.Once.
+// closeListener closes the underlying net.Listener exactly once. Used by both
+// Close (explicit) and Accept (on ctx cancel) to unblock a parked l.l.Accept
+// call. Idempotent via the embedded listenerCloseState.
 func (l *tlsListener) closeListener() {
-	l.closeOnce.Do(func() {
-		l.closed.Store(true)
-		close(l.closeCh)
-		// net.Listener.Close per the Go docs unblocks any concurrent
-		// Accept calls. We intentionally discard the error: the only
-		// interesting failure here is "already closed" which sync.Once
-		// already prevents, and any other error is not actionable at
-		// this point (the listener is torn down regardless).
-		_ = l.l.Close()
-	})
+	_ = l.closeWith(l.l.Close)
 }
 
 func (l *tlsListener) Close() error {
-	l.closeListener()
-	return nil
+	return l.closeWith(l.l.Close)
 }
 
 // Compile-time interface checks.

@@ -187,27 +187,23 @@ func (e *pubEngine) DetachPipe(p iface.Pipe) error {
 // application via subInbound.
 func (e *pubEngine) runPeerReader(peer *pubPeer) {
 	defer close(peer.done)
-	for {
-		// Cancel the Recv as soon as peer stops or the engine closes, so
-		// Pipe.Recv unblocks and we don't leak this goroutine.
-		ctx, cancel := context.WithCancel(context.Background())
-		watcherDone := make(chan struct{})
-		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			select {
-			case <-peer.stop:
-				cancel()
-			case <-e.closeCh:
-				cancel()
-			case <-watcherDone:
-			}
-		}()
-		m, err := peer.pipe.Recv(ctx)
-		close(watcherDone)
-		wg.Wait()
+	// One watcher for the whole peer lifetime: it cancels the per-Recv ctx as
+	// soon as the peer stops, the engine closes, or this reader exits — so a
+	// blocked Pipe.Recv unblocks and neither goroutine leaks.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	readerDone := make(chan struct{})
+	defer close(readerDone)
+	go func() {
+		select {
+		case <-peer.stop:
+		case <-e.closeCh:
+		case <-readerDone:
+		}
 		cancel()
+	}()
+	for {
+		m, err := peer.pipe.Recv(ctx)
 		if err != nil {
 			return
 		}

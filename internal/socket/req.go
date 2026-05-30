@@ -238,20 +238,16 @@ func (e *reqEngine) stickyForward(p iface.Pipe, out chan<- stickyRecvResult) {
 	// race p.Recv against e.closeCh via a child context.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	watcherDone := make(chan struct{})
-	var watcherWG sync.WaitGroup
-	watcherWG.Add(1)
+	done := make(chan struct{})
+	defer close(done)
 	go func() {
-		defer watcherWG.Done()
 		select {
 		case <-e.closeCh:
 			cancel()
-		case <-watcherDone:
+		case <-done:
 		}
 	}()
 	m, err := p.Recv(ctx)
-	close(watcherDone)
-	watcherWG.Wait()
 	select {
 	case e.readyR <- struct{}{}:
 	default:

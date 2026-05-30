@@ -321,32 +321,34 @@ func (l *inprocListener) Close() error {
 		close(l.closeCh)
 		l.mu.Unlock()
 		l.t.removeListener(l.name, l)
-		// Drain & close any pending accepts so their dialing peer fails
-		// promptly.
-		for {
-			select {
-			case c := <-l.acceptCh:
-				if c != nil {
-					_ = c.Close()
-				}
-			default:
-				goto drainDirect
+		// Drain & close any pending accepts and direct-pipe offers so their
+		// dialing peers fail promptly.
+		drainChan(l.acceptCh, func(c *inprocConn) {
+			if c != nil {
+				_ = c.Close()
 			}
-		}
-	drainDirect:
-		// Drain & close any pending direct-pipe offers.
-		for {
-			select {
-			case offer := <-l.directPipeCh:
-				if offer != nil {
-					_ = offer.BindPipe.Close()
-				}
-			default:
-				return
+		})
+		drainChan(l.directPipeCh, func(offer *iface.DirectPipeOffer) {
+			if offer != nil {
+				_ = offer.BindPipe.Close()
 			}
-		}
+		})
 	})
 	return nil
+}
+
+// drainChan non-blockingly receives every immediately-available value from ch,
+// applying fn to each, and returns once ch has nothing buffered. Callers hold
+// whatever invariant prevents new sends (here: closeCh is closed first).
+func drainChan[T any](ch <-chan T, fn func(T)) {
+	for {
+		select {
+		case v := <-ch:
+			fn(v)
+		default:
+			return
+		}
+	}
 }
 
 // dialIn is the Dial-side hand-off into an established Listener. We forge
