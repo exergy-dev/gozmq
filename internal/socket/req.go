@@ -49,9 +49,10 @@ const (
 // canSend so the caller may retry.
 //
 // Thread-safe: Send and Recv serialize against each other via the engine
-// mutex plus the FSM state. A per-request forwarder goroutine
-// (stickyForward) pumps the sticky pipe's Recv into a channel; Close
-// waits for any in-flight forwarder to drain.
+// mutex plus the FSM state. Recv reads the sticky pipe's receive channel
+// inline (via the recvChanner fast path) — no per-request goroutine or
+// context is allocated; the parked Recv unblocks on the sticky pipe's
+// Closed() signal or on the engine's closeCh.
 type reqEngine struct {
 	mu       sync.Mutex
 	closed   bool
@@ -62,32 +63,29 @@ type reqEngine struct {
 	state    reqState
 	pipes    []iface.Pipe
 	cursor   int
-	// sticky is the pipe picked by the most recent Send; Recv filters on
-	// it. Cleared after a successful Recv.
+	// sticky is the pipe picked by the most recent Send; Recv reads its
+	// reply directly. Cleared after a successful Recv (or on detach).
 	sticky iface.Pipe
-	// stickyCh receives the peer's reply for the sticky pipe; fed by a
-	// per-request goroutine that pumps sticky.Recv until it sees the
-	// reply or the engine closes. A fresh channel is allocated per Send.
-	stickyCh chan stickyRecvResult
-	// forwarderWG tracks the per-request stickyForward goroutine so that
-	// Close can wait for it to exit and goleak stays clean.
-	forwarderWG sync.WaitGroup
+	// recvCtx is a single long-lived context derived from closeCh; it is
+	// cancelled in Close. Recv uses it only for the fallback path where the
+	// sticky pipe does not implement recvChanner (so p.Recv can be unblocked
+	// by Close without a per-Recv context allocation).
+	recvCtx    context.Context
+	cancelRecv context.CancelFunc
 
 	counters
 }
 
-type stickyRecvResult struct {
-	m   *msg.Msg
-	err error
-}
-
 // NewReqEngine returns a new REQ socket engine.
 func NewReqEngine() iface.SocketEngine {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &reqEngine{
-		closeCh:  make(chan struct{}),
-		notifyCh: make(chan struct{}),
-		recvGate: newReadyGate(),
-		sendGate: newReadyGate(),
+		closeCh:    make(chan struct{}),
+		notifyCh:   make(chan struct{}),
+		recvGate:   newReadyGate(),
+		sendGate:   newReadyGate(),
+		recvCtx:    ctx,
+		cancelRecv: cancel,
 	}
 }
 
@@ -129,8 +127,9 @@ func (e *reqEngine) DetachPipe(p iface.Pipe) error {
 	}
 	// If the detached pipe was our sticky peer, the pending request is
 	// unanswerable: drop the stickiness so the next Send can pick a new
-	// peer. (The in-flight Recv will surface io.EOF via the stickyCh
-	// feeder.) Actual libzmq drops the outstanding request here too.
+	// peer. A Recv parked on the sticky pipe unblocks via the pipe's
+	// Closed() signal (the session closes the pipe on detach) and surfaces
+	// ErrSocketClosed. Actual libzmq drops the outstanding request here too.
 	if e.sticky == p {
 		e.sticky = nil
 	}
@@ -149,8 +148,8 @@ func (e *reqEngine) Send(ctx context.Context, m *msg.Msg) error {
 	}
 	e.mu.Unlock()
 
-	// Build wire message: empty delimiter + caller's frames. Copy the
-	// slice header so the caller's *Msg is untouched.
+	// Build wire message: empty delimiter + caller's frames. The slice is
+	// built locally and handed off, so adopt it directly (no extra copy).
 	var body [][]byte
 	if m != nil {
 		body = m.Frames()
@@ -158,7 +157,7 @@ func (e *reqEngine) Send(ctx context.Context, m *msg.Msg) error {
 	wireFrames := make([][]byte, 0, len(body)+1)
 	wireFrames = append(wireFrames, []byte{})
 	wireFrames = append(wireFrames, body...)
-	wire := msg.FromFrames(wireFrames...)
+	wire := msg.FromFramesOwned(wireFrames)
 
 	// Pick a peer and deliver. Retry on peer churn / closed pipe.
 	for {
@@ -188,10 +187,8 @@ func (e *reqEngine) Send(ctx context.Context, m *msg.Msg) error {
 		if err == nil {
 			e.mu.Lock()
 			if e.closed {
-				// Close won this race; don't launch a forwarder (it
-				// would outlive Close's WaitGroup drain). The peer
-				// received the request; the caller will see
-				// ErrSocketClosed on the subsequent Recv.
+				// Close won this race. The peer received the request; the
+				// caller will see ErrSocketClosed on the subsequent Recv.
 				e.mu.Unlock()
 				return fmt.Errorf("req send: %w", zmqerr.ErrSocketClosed)
 			}
@@ -199,13 +196,10 @@ func (e *reqEngine) Send(ctx context.Context, m *msg.Msg) error {
 			if idx < len(e.pipes) && e.pipes[idx] == p {
 				e.cursor = (idx + 1) % len(e.pipes)
 			}
-			// Transition to canRecv with p as the sticky pipe.
+			// Transition to canRecv with p as the sticky pipe. Recv reads
+			// p's reply directly — no forwarder goroutine.
 			e.sticky = p
-			e.stickyCh = make(chan stickyRecvResult, 1)
 			e.state = reqStateCanRecv
-			// Launch the dedicated forwarder for this request.
-			e.forwarderWG.Add(1)
-			go e.stickyForward(p, e.stickyCh)
 			e.mu.Unlock()
 			e.sent.Add(1)
 			return nil
@@ -219,34 +213,6 @@ func (e *reqEngine) Send(ctx context.Context, m *msg.Msg) error {
 	}
 }
 
-// stickyForward pumps p.Recv into out until it produces a result or the
-// engine closes. The engine sets state back to canSend on a successful
-// drain in Recv; if the engine closes first, the goroutine exits on
-// io.EOF / ErrClosedPipe from p.Recv (after the pipe is closed by
-// Close), and the result is still written to the channel so a parked
-// Recv can unblock.
-func (e *reqEngine) stickyForward(p iface.Pipe, out chan<- stickyRecvResult) {
-	defer e.forwarderWG.Done()
-	// The engine's Recv owns the context; we read with Background here
-	// and rely on the engine closing either the pipe or signalling
-	// through closeCh. To unblock this goroutine on engine.Close, we
-	// race p.Recv against e.closeCh via a child context.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-e.closeCh:
-			cancel()
-		case <-done:
-		}
-	}()
-	m, err := p.Recv(ctx)
-	e.recvGate.arm()
-	out <- stickyRecvResult{m: m, err: err}
-}
-
 func (e *reqEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 	e.mu.Lock()
 	if e.closed {
@@ -257,58 +223,140 @@ func (e *reqEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		e.mu.Unlock()
 		return nil, fmt.Errorf("req recv: out of order (Send expected next): %w", zmqerr.ErrFSMViolation)
 	}
-	stickyCh := e.stickyCh
+	sticky := e.sticky
 	closeCh := e.closeCh
 	e.mu.Unlock()
 
-	select {
-	case r := <-stickyCh:
-		if r.err != nil {
-			// Don't flip state on error — caller may retry. But clear
-			// stickiness so a fresh Send can pick a new peer.
-			e.mu.Lock()
-			if e.state == reqStateCanRecv {
-				e.state = reqStateCanSend
-				e.sticky = nil
-				e.stickyCh = nil
-			}
-			e.mu.Unlock()
-			// If the engine itself closed, surface ErrSocketClosed
-			// regardless of which underlying error the forwarder saw.
-			select {
-			case <-closeCh:
-				return nil, fmt.Errorf("req recv: %w", zmqerr.ErrSocketClosed)
-			default:
-			}
-			if errors.Is(r.err, io.EOF) || errors.Is(r.err, io.ErrClosedPipe) {
-				return nil, fmt.Errorf("req recv: peer gone: %w", zmqerr.ErrSocketClosed)
-			}
-			return nil, r.err
-		}
-		stripped, err := stripReqDelimiter(r.m)
-		if err != nil {
-			// Malformed reply — still flip state so the FSM can continue.
-			e.mu.Lock()
+	m, err := e.recvSticky(ctx, sticky, closeCh)
+	if err != nil {
+		// Don't flip the FSM on error — the caller may retry the Recv. But
+		// clear stickiness so a fresh Send can pick a new peer, matching the
+		// original ctx.Done/error behavior.
+		e.mu.Lock()
+		if e.state == reqStateCanRecv {
 			e.state = reqStateCanSend
 			e.sticky = nil
-			e.stickyCh = nil
-			e.mu.Unlock()
-			return nil, err
 		}
+		e.mu.Unlock()
+		return nil, err
+	}
+
+	stripped, serr := stripReqDelimiter(m)
+	if serr != nil {
+		// Malformed reply — still flip state so the FSM can continue.
 		e.mu.Lock()
 		e.state = reqStateCanSend
 		e.sticky = nil
-		e.stickyCh = nil
 		if len(e.pipes) > 0 {
 			e.sendGate.arm()
 		}
 		e.mu.Unlock()
-		e.recv.Add(1)
-		return stripped, nil
-	case <-closeCh:
-		return nil, fmt.Errorf("req recv: %w", zmqerr.ErrSocketClosed)
-	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, serr
+	}
+	e.mu.Lock()
+	e.state = reqStateCanSend
+	e.sticky = nil
+	if len(e.pipes) > 0 {
+		e.sendGate.arm()
+	}
+	e.mu.Unlock()
+	e.recv.Add(1)
+	return stripped, nil
+}
+
+// recvSticky reads one reply from the sticky pipe, racing the read against
+// engine close, peer detach (pipe close), and the caller's context. It
+// allocates no per-call context or goroutine when the pipe exposes its
+// receive channel (the common case). The returned error is already wrapped
+// with the REQ recv prefix where appropriate.
+func (e *reqEngine) recvSticky(ctx context.Context, sticky iface.Pipe, closeCh <-chan struct{}) (*msg.Msg, error) {
+	if sticky == nil {
+		// Sticky peer detached between Send and Recv. Treat as peer gone.
+		select {
+		case <-closeCh:
+			return nil, fmt.Errorf("req recv: %w", zmqerr.ErrSocketClosed)
+		default:
+		}
+		return nil, fmt.Errorf("req recv: peer gone: %w", zmqerr.ErrSocketClosed)
+	}
+
+	if rc, ok := sticky.(recvChanner); ok {
+		recvCh := rc.RecvCh()
+		var closedCh <-chan struct{}
+		if c, ok := sticky.(interface{ Closed() <-chan struct{} }); ok {
+			closedCh = c.Closed()
+		}
+		// Non-blocking fast path: reply already buffered.
+		select {
+		case m := <-recvCh:
+			if m != nil {
+				return m, nil
+			}
+		default:
+		}
+		select {
+		case m := <-recvCh:
+			if m != nil {
+				return m, nil
+			}
+			// Channel yielded a nil (closed); fall through to peer-gone.
+			return nil, fmt.Errorf("req recv: peer gone: %w", zmqerr.ErrSocketClosed)
+		case <-closedCh:
+			// Peer gone — but drain any reply that landed before close.
+			select {
+			case m := <-recvCh:
+				if m != nil {
+					return m, nil
+				}
+			default:
+			}
+			return nil, fmt.Errorf("req recv: peer gone: %w", zmqerr.ErrSocketClosed)
+		case <-closeCh:
+			return nil, fmt.Errorf("req recv: %w", zmqerr.ErrSocketClosed)
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	// Fallback for pipes without a receive channel: race p.Recv against the
+	// engine's long-lived recvCtx (cancelled by Close) and the caller's ctx.
+	// A child context is needed to merge the two cancellation sources, but
+	// it is derived once around this single blocking call rather than per
+	// forwarder goroutine.
+	mergedCtx, cancel := mergeCancel(ctx, e.recvCtx)
+	defer cancel()
+	m, err := sticky.Recv(mergedCtx)
+	if err != nil {
+		select {
+		case <-closeCh:
+			return nil, fmt.Errorf("req recv: %w", zmqerr.ErrSocketClosed)
+		default:
+		}
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
+			return nil, fmt.Errorf("req recv: peer gone: %w", zmqerr.ErrSocketClosed)
+		}
+		return nil, err
+	}
+	return m, nil
+}
+
+// mergeCancel returns a context cancelled when either parent or extra is
+// cancelled. It spawns one watcher goroutine that exits as soon as the
+// returned cancel runs (which the caller defers), so no goroutine leaks
+// past the single blocking Recv it guards.
+func mergeCancel(parent, extra context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	stop := make(chan struct{})
+	go func() {
+		select {
+		case <-extra.Done():
+			cancel()
+		case <-stop:
+		}
+	}()
+	return ctx, func() {
+		cancel()
+		close(stop)
 	}
 }
 
@@ -323,7 +371,15 @@ func (e *reqEngine) ReadyWrite() <-chan struct{} {
 func (e *reqEngine) CanRecvNow() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return !e.closed && e.state == reqStateCanRecv && e.stickyCh != nil && len(e.stickyCh) > 0
+	if e.closed || e.state != reqStateCanRecv || e.sticky == nil {
+		return false
+	}
+	// A Recv is non-blocking-ready iff a reply is already buffered on the
+	// sticky pipe's receive channel.
+	if rc, ok := e.sticky.(recvChanner); ok {
+		return len(rc.RecvCh()) > 0
+	}
+	return false
 }
 
 func (e *reqEngine) CanSendNow() bool {
@@ -336,23 +392,22 @@ var _ Pollable = (*reqEngine)(nil)
 
 // stripReqDelimiter removes the leading empty delimiter frame from an
 // inbound REP reply. The wire shape is [empty, body...]; we return a
-// fresh *Msg holding just the body frames.
+// fresh *Msg holding just the body frames. The engine solely owns the
+// inbound *Msg (it is about to TransferPool it), so the resliced frame
+// header can be adopted directly without a copy.
 func stripReqDelimiter(m *msg.Msg) (*msg.Msg, error) {
 	frames := m.Frames()
 	if len(frames) < 1 || len(frames[0]) != 0 {
 		return nil, fmt.Errorf("req recv: missing empty delimiter: %w", zmqerr.ErrMalformedFrame)
 	}
-	rest := frames[1:]
-	out := make([][]byte, len(rest))
-	copy(out, rest)
-	result := msg.FromFrames(out...)
+	result := msg.FromFramesOwned(frames[1:])
 	result.TransferPool(m)
 	return result, nil
 }
 
 // Metrics reports the REQ engine's counters. REQ has no fair-queue;
-// inbound replies are pulled from a per-request sticky channel which is
-// allocated on Send and consumed on Recv, so QueueDepth is always zero.
+// inbound replies are read directly off the sticky pipe, so QueueDepth is
+// always zero.
 func (e *reqEngine) Metrics() iface.SocketMetrics {
 	return e.snapshot(0, 0)
 }
@@ -365,13 +420,9 @@ func (e *reqEngine) Close() error {
 	}
 	e.closed = true
 	close(e.closeCh)
+	e.cancelRecv()
 	e.pipes = nil
 	e.sticky = nil
-	// Leave stickyCh alone — the forwarder goroutine (if running) will
-	// write to it and exit when p.Recv unblocks via the closed ctx.
 	e.mu.Unlock()
-	// Wait for any in-flight sticky forwarder to exit so goleak stays
-	// clean. The forwarder unblocks via the ctx cancelled on closeCh.
-	e.forwarderWG.Wait()
 	return nil
 }
