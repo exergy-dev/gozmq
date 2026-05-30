@@ -341,15 +341,17 @@ type Socket struct {
 
 	monitorCfg atomic.Pointer[monitorState]
 
-	mu             sync.Mutex
-	lastEndpoint   string
-	listeners      []iface.Listener
-	sessions       []iface.Session
-	reconnectors   []reconnectEntry
-	streamAdapters []*stream.Adapter // STREAM-only: one per raw-bytes peer
-	directPipes    []iface.Pipe      // inproc direct-pipe bypass: pipes to drain on close
-	acceptWG       sync.WaitGroup
-	connectWG      sync.WaitGroup
+	mu           sync.Mutex
+	lastEndpoint string
+	listeners    []iface.Listener
+	reconnectors []reconnectEntry
+	// links holds every attached peer (server-accepted sessions, STREAM
+	// adapters, and direct inproc pipes) behind one teardown contract. Client
+	// sessions are NOT here — they are owned by their reconnector and
+	// collected via CurrentSession() at close time.
+	links    []peerLink
+	acceptWG sync.WaitGroup
+	connectWG sync.WaitGroup
 }
 
 type reconnectEntry struct {
@@ -657,13 +659,26 @@ func (s *Socket) acceptLoop(l iface.Listener) {
 	}
 }
 
-// removeSession removes sess from the socket's session list so it can be
-// garbage collected after its goroutines exit. Without this, long-lived
-// bind sockets accumulate sessions for every peer that ever connected.
-func (s *Socket) removeSession(sess iface.Session) {
+// addLink registers an attached peer for teardown. Returns false if the
+// socket is already closing, in which case the caller must tear the link down
+// itself.
+func (s *Socket) addLink(l peerLink) bool {
 	s.mu.Lock()
-	if i := slices.Index(s.sessions, sess); i >= 0 {
-		s.sessions = slices.Delete(s.sessions, i, i+1)
+	defer s.mu.Unlock()
+	if s.closed.Load() {
+		return false
+	}
+	s.links = append(s.links, l)
+	return true
+}
+
+// removeLink drops a previously-added link. Server sessions self-remove on
+// disconnect so long-lived bind sockets don't accumulate them; direct pipes
+// and stream adapters stay until Close (matching the original behavior).
+func (s *Socket) removeLink(l peerLink) {
+	s.mu.Lock()
+	if i := slices.Index(s.links, l); i >= 0 {
+		s.links = slices.Delete(s.links, i, i+1)
 	}
 	s.mu.Unlock()
 }
@@ -675,22 +690,18 @@ func (s *Socket) removeSession(sess iface.Session) {
 func (s *Socket) startSession(conn iface.Conn, role iface.Role) {
 	remote := conn.RemoteEndpoint()
 	sess := s.buildSession(conn, role)
-
-	s.mu.Lock()
-	if s.closed.Load() {
-		s.mu.Unlock()
+	link := sessionLink{sess}
+	if !s.addLink(link) {
 		_ = conn.Close()
 		return
 	}
-	s.sessions = append(s.sessions, sess)
-	s.mu.Unlock()
 
 	sess.Start()
 
 	s.connectWG.Add(1)
 	go func() {
 		defer s.connectWG.Done()
-		defer s.removeSession(sess)
+		defer s.removeLink(link)
 		select {
 		case <-sess.Handshaked():
 		case <-s.runCtx.Done():
@@ -729,14 +740,10 @@ func (s *Socket) startStreamAdapter(conn iface.Conn) {
 		RecvHWM:  s.cfg.recvHWM,
 	})
 
-	s.mu.Lock()
-	if s.closed.Load() {
-		s.mu.Unlock()
+	if !s.addLink(streamLink{ad}) {
 		_ = ad.Close()
 		return
 	}
-	s.streamAdapters = append(s.streamAdapters, ad)
-	s.mu.Unlock()
 
 	p := ad.EnginePipe()
 	if err := s.engine.AttachPipe(p); err != nil {
@@ -805,9 +812,10 @@ func (s *Socket) connectDirectPipe(acceptor iface.DirectPipeAcceptor, endpoint s
 // the engine, and starts the close watcher. On attach failure it closes p and
 // returns the error. Shared by the dialer and acceptor direct-pipe paths.
 func (s *Socket) trackAttachWatchPipe(p iface.Pipe, endpoint string) error {
-	s.mu.Lock()
-	s.directPipes = append(s.directPipes, p)
-	s.mu.Unlock()
+	if !s.addLink(pipeLink{p}) {
+		_ = p.Close()
+		return ErrSocketClosed
+	}
 	if err := s.engine.AttachPipe(p); err != nil {
 		_ = p.Close()
 		return err
@@ -976,12 +984,8 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 	s.reconnectors = nil
 	listeners := s.listeners
 	s.listeners = nil
-	acceptSessions := s.sessions
-	s.sessions = nil
-	streamAdapters := s.streamAdapters
-	s.streamAdapters = nil
-	directPipes := s.directPipes
-	s.directPipes = nil
+	links := s.links
+	s.links = nil
 	s.mu.Unlock()
 
 	var errs []error
@@ -1002,71 +1006,53 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 		addErr(l.Close())
 	}
 
-	// 3. Collect every live session (server-accept + client-reconnect).
-	sessions := make([]iface.Session, 0, len(acceptSessions)+len(reconnectors))
-	sessions = append(sessions, acceptSessions...)
+	// 3. Add each reconnector's current client session as a link (client
+	// sessions are owned by their reconnector, not the links slice).
 	for _, entry := range reconnectors {
 		if sess := entry.rc.CurrentSession(); sess != nil {
-			sessions = append(sessions, sess)
+			links = append(links, sessionLink{sess})
 		}
 	}
 
 	// 4–5. LINGER drain (design §6.4):
 	//
-	//   engine.Close()       → no new engine.Sends enqueue messages
-	//   CancelWriter()       → writer's blocking Recv wakes, drains remaining
-	//                          queued messages to conn, exits (conn stays open)
-	//   waitWritersFlushed() → wait up to linger for all writers to exit
-	//   runCancel()          → cascades into reconnector ctx → loop exits
-	//   sess.Stop()          → conn.Close → reader exits → session Done fires
+	//   engine.Close()  → no new engine.Sends enqueue messages
+	//   beginDrain()    → session writers drain queued messages to conn and
+	//                     exit (conn stays open); direct/stream: no-op
+	//   drained()       → wait up to linger for each link's flush to finish
+	//                     (session WriterFlushed; direct pipe peer-close;
+	//                     stream: immediate)
+	//   runCancel()     → cascades into reconnector ctx → loop exits
+	//   stop()          → conn.Close / pipe.Close → readers exit, Done fires
 	//
-	// We call engine.Close BEFORE CancelWriter so any messages the engine
-	// had queued before Close are fully in the pipe channel — none can
-	// arrive after engine.Close returns.
+	// We call engine.Close BEFORE beginDrain so any messages the engine had
+	// queued before Close are fully in the pipe channel — none can arrive
+	// after engine.Close returns.
 	//
 	// CRUCIAL: runCancel MUST NOT fire before the drain finishes. The
 	// Reconnector watches s.runCtx, and when it cancels, the loop's
 	// `<-r.ctx.Done()` branch calls sess.Stop() — which closes the conn
-	// and aborts the writer mid-drain. Holding runCancel until after
-	// waitWritersFlushed keeps the reconnector loop parked in its
-	// pipeClosed/ctx select until the writer finishes flushing.
+	// and aborts the writer mid-drain. Holding runCancel until after the
+	// drain keeps the reconnector loop parked until the writer finishes.
 	_ = s.engine.Close()
 
 	var ctxErr error
 	if s.cfg.linger != 0 {
-		for _, sess := range sessions {
-			sess.CancelWriter() // signal: drain, then exit (no conn.Close yet)
+		for _, l := range links {
+			l.beginDrain()
 		}
-		ctxErr = waitChannels(ctx, sessions, iface.Session.WriterFlushed, s.cfg.linger)
-		// Direct pipes (inproc bypass): wait for the peer to close its
-		// end so buffered messages have a chance to be consumed. This
-		// mirrors the session-based linger drain for TCP/IPC sessions.
-		if ctxErr == nil && len(directPipes) > 0 {
-			ctxErr = waitChannels(ctx, directPipes, iface.Pipe.Closed, s.cfg.linger)
-		}
+		ctxErr = waitChannels(ctx, links, peerLink.drained, s.cfg.linger)
 	}
 
-	// 6. Now hard-stop: cancel the reconnector/accept context, then
-	// explicitly stop each reconnector and session. conn.Close → readers
-	// exit → full cleanup. Teardown continues even if the linger drain
-	// was cancelled — callers observe a fully-closed Socket on return.
+	// 6. Now hard-stop: cancel the reconnector/accept context, then stop
+	// each reconnector and link. Teardown continues even if the linger
+	// drain was cancelled — callers observe a fully-closed Socket on return.
 	s.runCancel()
 	for _, entry := range reconnectors {
 		addErr(entry.rc.Stop())
 	}
-	for _, sess := range sessions {
-		addErr(sess.Stop())
-	}
-	// STREAM adapters were created with runCtx as parent — runCancel
-	// already signalled their goroutines to exit. Close waits on the
-	// reader/writer wg and surfaces any conn.Close error.
-	for _, ad := range streamAdapters {
-		addErr(ad.Close())
-	}
-	// Direct pipes: close our end so the peer's watcher goroutine
-	// detects the close and tears down.
-	for _, dp := range directPipes {
-		_ = dp.Close()
+	for _, l := range links {
+		addErr(l.stop())
 	}
 
 	// 7. Wait on bookkeeping goroutines (accept loops, server-side
