@@ -35,9 +35,9 @@ type identityRouter struct {
 	// Last-writer-wins on collision (a reconnecting peer displaces the
 	// stale entry), matching libzmq.
 	pipeOf map[string]iface.Pipe
-	// readyW is the Poller-facing PollOut signal, level-armed while at
+	// sendGate is the Poller-facing PollOut signal, level-armed while at
 	// least one peer is attached.
-	readyW chan struct{}
+	sendGate readyGate
 
 	counters
 
@@ -54,7 +54,7 @@ func newIdentityRouter(name string) identityRouter {
 		name:   name,
 		idOf:   make(map[iface.Pipe][]byte),
 		pipeOf: make(map[string]iface.Pipe),
-		readyW: make(chan struct{}, 1),
+		sendGate: newReadyGate(),
 	}
 }
 
@@ -76,16 +76,12 @@ func (e *identityRouter) ReadyWrite() <-chan struct{} {
 	e.mu.Lock()
 	e.signalReadyWriteLocked()
 	e.mu.Unlock()
-	return e.readyW
+	return e.sendGate.ch
 }
 
 func (e *identityRouter) signalReadyWriteLocked() {
-	if e.readyW == nil || e.closed || len(e.idOf) == 0 {
-		return
-	}
-	select {
-	case e.readyW <- struct{}{}:
-	default:
+	if !e.closed && len(e.idOf) > 0 {
+		e.sendGate.arm()
 	}
 }
 

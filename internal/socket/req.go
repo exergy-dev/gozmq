@@ -57,8 +57,8 @@ type reqEngine struct {
 	closed   bool
 	closeCh  chan struct{}
 	notifyCh chan struct{} // closed on attach; swapped for a fresh one after
-	readyR   chan struct{}
-	readyW   chan struct{}
+	recvGate readyGate
+	sendGate readyGate
 	state    reqState
 	pipes    []iface.Pipe
 	cursor   int
@@ -86,8 +86,8 @@ func NewReqEngine() iface.SocketEngine {
 	return &reqEngine{
 		closeCh:  make(chan struct{}),
 		notifyCh: make(chan struct{}),
-		readyR:   make(chan struct{}, 1),
-		readyW:   make(chan struct{}, 1),
+		recvGate: newReadyGate(),
+		sendGate: newReadyGate(),
 	}
 }
 
@@ -105,10 +105,7 @@ func (e *reqEngine) AttachPipe(p iface.Pipe) error {
 	close(e.notifyCh)
 	e.notifyCh = make(chan struct{})
 	if e.state == reqStateCanSend {
-		select {
-		case e.readyW <- struct{}{}:
-		default:
-		}
+		e.sendGate.arm()
 	}
 	return nil
 }
@@ -246,10 +243,7 @@ func (e *reqEngine) stickyForward(p iface.Pipe, out chan<- stickyRecvResult) {
 		}
 	}()
 	m, err := p.Recv(ctx)
-	select {
-	case e.readyR <- struct{}{}:
-	default:
-	}
+	e.recvGate.arm()
 	out <- stickyRecvResult{m: m, err: err}
 }
 
@@ -306,10 +300,7 @@ func (e *reqEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		e.sticky = nil
 		e.stickyCh = nil
 		if len(e.pipes) > 0 {
-			select {
-			case e.readyW <- struct{}{}:
-			default:
-			}
+			e.sendGate.arm()
 		}
 		e.mu.Unlock()
 		e.recv.Add(1)
@@ -322,23 +313,11 @@ func (e *reqEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 }
 
 func (e *reqEngine) ReadyRecv() <-chan struct{} {
-	if e.CanRecvNow() {
-		select {
-		case e.readyR <- struct{}{}:
-		default:
-		}
-	}
-	return e.readyR
+	return e.recvGate.signal(e.CanRecvNow())
 }
 
 func (e *reqEngine) ReadyWrite() <-chan struct{} {
-	if e.CanSendNow() {
-		select {
-		case e.readyW <- struct{}{}:
-		default:
-		}
-	}
-	return e.readyW
+	return e.sendGate.signal(e.CanSendNow())
 }
 
 func (e *reqEngine) CanRecvNow() bool {

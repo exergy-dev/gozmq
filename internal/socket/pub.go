@@ -88,8 +88,8 @@ type pubEngine struct {
 	surfaceSubs bool
 	subInbound  chan subInboundItem // XPUB-only; nil for PUB
 	closeCh     chan struct{}
-	readyR      chan struct{}
-	readyW      chan struct{}
+	recvGate    readyGate
+	sendGate    readyGate
 
 	// Metrics counters (embedded). sent increments once per Send call that
 	// has at least one frame; dropped increments per (message, peer) pair
@@ -120,8 +120,8 @@ func newPubEngineBase(surface bool) *pubEngine {
 		peers:       make(map[iface.Pipe]*pubPeer),
 		surfaceSubs: surface,
 		closeCh:     make(chan struct{}),
-		readyR:      make(chan struct{}, 1),
-		readyW:      make(chan struct{}, 1),
+		recvGate:    newReadyGate(),
+		sendGate:    newReadyGate(),
 	}
 	if surface {
 		// Capacity-1 handoff buffer. HWM-style backpressure on the
@@ -151,10 +151,7 @@ func (e *pubEngine) AttachPipe(p iface.Pipe) error {
 		done: make(chan struct{}),
 	}
 	e.peers[p] = peer
-	select {
-	case e.readyW <- struct{}{}:
-	default:
-	}
+	e.sendGate.arm()
 	e.mu.Unlock()
 
 	go e.runPeerReader(peer)
@@ -218,10 +215,7 @@ func (e *pubEngine) runPeerReader(peer *pubPeer) {
 			// the peer reader indefinitely.
 			select {
 			case e.subInbound <- subInboundItem{m: m, pipe: peer.pipe}:
-				select {
-				case e.readyR <- struct{}{}:
-				default:
-				}
+				e.recvGate.arm()
 			case <-peer.stop:
 				return
 			case <-e.closeCh:
@@ -232,26 +226,14 @@ func (e *pubEngine) runPeerReader(peer *pubPeer) {
 }
 
 func (e *pubEngine) ReadyRecv() <-chan struct{} {
-	if e.CanRecvNow() {
-		select {
-		case e.readyR <- struct{}{}:
-		default:
-		}
-	}
 	if !e.surfaceSubs {
 		return nil
 	}
-	return e.readyR
+	return e.recvGate.signal(e.CanRecvNow())
 }
 
 func (e *pubEngine) ReadyWrite() <-chan struct{} {
-	if e.CanSendNow() {
-		select {
-		case e.readyW <- struct{}{}:
-		default:
-		}
-	}
-	return e.readyW
+	return e.sendGate.signal(e.CanSendNow())
 }
 
 func (e *pubEngine) CanRecvNow() bool {

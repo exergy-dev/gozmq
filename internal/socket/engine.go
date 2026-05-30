@@ -109,6 +109,28 @@ func (c *counters) snapshot(dropped, queueDepth uint64) iface.SocketMetrics {
 	}
 }
 
+// readyGate is a level-triggered, single-slot readiness signal for the Poller.
+// arm makes the gate readable (idempotent, non-blocking); signal re-arms the
+// gate iff ready and returns the channel — the canonical Ready{Recv,Write}
+// body. The Poller drains the channel and the next signal/arm re-arms it.
+type readyGate struct{ ch chan struct{} }
+
+func newReadyGate() readyGate { return readyGate{ch: make(chan struct{}, 1)} }
+
+func (g readyGate) arm() {
+	select {
+	case g.ch <- struct{}{}:
+	default:
+	}
+}
+
+func (g readyGate) signal(ready bool) <-chan struct{} {
+	if ready {
+		g.arm()
+	}
+	return g.ch
+}
+
 type Pollable interface {
 	// ReadyRecv returns a channel that is armed when at least one
 	// message is buffered and immediately available to Recv. Reads
