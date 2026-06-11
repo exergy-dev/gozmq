@@ -180,3 +180,97 @@ func TestNullMetadataIsolated(t *testing.T) {
 	again := m.Metadata()
 	require.Equal(t, "REQ", again["Socket-Type"], "Metadata not isolated from returned-map mutation")
 }
+
+// pumpNull drives a NULL client/server pair to completion, returning any
+// errors each side produced. Mirrors pumpPlain but for NULL's two-step
+// READY exchange.
+func pumpNull(t *testing.T, client, server iface.SecurityMech) (clientErr, serverErr error) {
+	t.Helper()
+	clientReady, _, err := client.NextHandshake(nil)
+	require.NoError(t, err, "client seed")
+	_, _, err = server.NextHandshake(nil)
+	require.NoError(t, err, "server seed")
+	serverOut, _, serr := server.NextHandshake(clientReady)
+	if serr != nil {
+		// Failure-path: the server may still have emitted an ERROR body;
+		// deliver it so the client can observe the rejection.
+		if len(serverOut) > 0 {
+			_, _, cerr := client.NextHandshake(serverOut)
+			return cerr, serr
+		}
+		return nil, serr
+	}
+	_, _, cerr := client.NextHandshake(serverOut)
+	return cerr, serr
+}
+
+// TestNullZAP_AcceptMergesMetadata wires a ZAP authorizer into a NULL
+// server and asserts (a) the authorizer is consulted with the configured
+// domain/address, and (b) the metadata from the ZAP reply is merged into
+// the peer metadata, overlaying the peer-supplied properties.
+func TestNullZAP_AcceptMergesMetadata(t *testing.T) {
+	client := NewNull(iface.RoleClient, map[string]string{
+		"Socket-Type": "PAIR",
+		"Identity":    "client-1",
+	})
+	server := NewNull(iface.RoleServer, map[string]string{"Socket-Type": "PAIR"})
+
+	var gotDomain, gotAddr, gotMech string
+	server.(*nullMech).ConfigureZAP(func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
+		gotDomain, gotAddr, gotMech = domain, address, mech
+		require.Empty(t, credentials, "NULL carries no credentials")
+		return "anon", map[string]string{"User-Id": "anon", "Identity": "zap-overrides"}, nil
+	}, "global", "127.0.0.1:1234")
+
+	cerr, serr := pumpNull(t, client, server)
+	require.NoError(t, cerr, "client handshake")
+	require.NoError(t, serr, "server handshake")
+
+	require.Equal(t, "global", gotDomain)
+	require.Equal(t, "127.0.0.1:1234", gotAddr)
+	require.Equal(t, "NULL", gotMech)
+
+	peer := server.(*nullMech).PeerMetadata()
+	require.Equal(t, "PAIR", peer["Socket-Type"], "peer-supplied property lost")
+	require.Equal(t, "anon", peer["User-Id"], "ZAP metadata not merged")
+	require.Equal(t, "zap-overrides", peer["Identity"], "ZAP metadata must win on collision")
+}
+
+// TestNullZAP_RejectEmitsError asserts that a ZAP rejection surfaces an
+// error wrapping ErrAuthFailed AND hands back an encoded ZMTP ERROR command
+// body, so the peer learns it was refused instead of seeing an abrupt close.
+func TestNullZAP_RejectEmitsError(t *testing.T) {
+	client := NewNull(iface.RoleClient, nil)
+	server := NewNull(iface.RoleServer, nil)
+	server.(*nullMech).ConfigureZAP(func(string, string, string, [][]byte) (string, map[string]string, error) {
+		return "", nil, zmqerr.ErrAuthFailed
+	}, "global", "127.0.0.1:1234")
+
+	clientReady, _, err := client.NextHandshake(nil)
+	require.NoError(t, err, "client seed")
+	_, _, err = server.NextHandshake(nil)
+	require.NoError(t, err, "server seed")
+
+	out, done, err := server.NextHandshake(clientReady)
+	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "server error")
+	require.False(t, done, "rejected handshake must not be done")
+	require.NotEmpty(t, out, "rejection must carry an ERROR command body")
+	require.Equal(t, byte(5), out[0], "ERROR name-length byte")
+	require.Equal(t, "ERROR", string(out[1:6]), "ERROR command name")
+
+	// The server must not have accepted the peer.
+	require.Nil(t, server.(*nullMech).PeerMetadata(), "peer metadata stored despite rejection")
+}
+
+// TestNullClientIgnoresConfigureZAP: the hook is server-only.
+func TestNullClientIgnoresConfigureZAP(t *testing.T) {
+	client := NewNull(iface.RoleClient, nil)
+	client.(*nullMech).ConfigureZAP(func(string, string, string, [][]byte) (string, map[string]string, error) {
+		require.Fail(t, "client-side ZAP hook must never fire")
+		return "", nil, nil
+	}, "global", "addr")
+	server := NewNull(iface.RoleServer, nil)
+	cerr, serr := pumpNull(t, client, server)
+	require.NoError(t, cerr)
+	require.NoError(t, serr)
+}

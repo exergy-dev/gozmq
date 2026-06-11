@@ -3,6 +3,7 @@ package socket
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync"
 
 	"github.com/rkm/gozmq/internal/iface"
@@ -26,7 +27,7 @@ import (
 // ErrFSMViolation for the "a peer is already attached" attach failure.
 type pairEngine struct {
 	mu       sync.Mutex
-	pipe     iface.Pipe
+	pipe     chanPipe
 	closed   bool
 	closeCh  chan struct{}
 	notifyCh chan struct{} // closed on attach; a fresh one is made if the pipe detaches
@@ -55,7 +56,11 @@ func (e *pairEngine) AttachPipe(p iface.Pipe) error {
 	if e.pipe != nil {
 		return fmt.Errorf("pair attach: already bound to a peer: %w", zmqerr.ErrFSMViolation)
 	}
-	e.pipe = p
+	e.pipe = asChanPipe(p)
+	// Arm the Poller's recv gate straight from the pipe's data path so a
+	// blocking Poll wakes when a message arrives (no forwarder goroutine
+	// exists to do it).
+	e.pipe.SetRecvReady(e.recvGate.ch)
 	// Wake any Send/Recv goroutines parked waiting for a peer. Swap the
 	// notify channel for a fresh one so a future detach/reattach cycle
 	// can wake new waiters.
@@ -68,7 +73,7 @@ func (e *pairEngine) AttachPipe(p iface.Pipe) error {
 func (e *pairEngine) DetachPipe(p iface.Pipe) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.pipe == p {
+	if iface.Pipe(e.pipe) == p {
 		e.pipe = nil
 	}
 	return nil
@@ -97,21 +102,20 @@ func (e *pairEngine) Send(ctx context.Context, m *msg.Msg) error {
 				return ctx.Err()
 			}
 		}
-		// Race the blocking Send against close.
-		childCtx, cancel := context.WithCancel(ctx)
-		done := make(chan error, 1)
-		go func() { done <- p.Send(childCtx, m) }()
+		// Inline the channel send instead of spawning a per-Send goroutine.
+		// We race it against engine close, pipe close (the peer detached —
+		// mirrors p.Send returning io.ErrClosedPipe), and ctx. This is the
+		// same blocking semantics as p.Send, just without the goroutine hop.
 		select {
-		case err := <-done:
-			cancel()
-			if err == nil {
-				e.sent.Add(1)
-			}
-			return err
+		case p.SendCh() <- m:
+			e.sent.Add(1)
+			return nil
 		case <-closeCh:
-			cancel()
-			<-done
 			return fmt.Errorf("pair send: %w", zmqerr.ErrSocketClosed)
+		case <-p.Closed():
+			return io.ErrClosedPipe
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
 }
@@ -138,27 +142,25 @@ func (e *pairEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 				return nil, ctx.Err()
 			}
 		}
-		childCtx, cancel := context.WithCancel(ctx)
-		type result struct {
-			m   *msg.Msg
-			err error
-		}
-		done := make(chan result, 1)
-		go func() {
-			m, err := p.Recv(childCtx)
-			done <- result{m: m, err: err}
-		}()
+		// Inline the channel read instead of spawning a per-Recv goroutine.
+		// On pipe close we drain one buffered message if present, else
+		// return io.EOF — mirroring internal/pipe end.Recv's close handling.
 		select {
-		case r := <-done:
-			cancel()
-			if r.err == nil {
-				e.recv.Add(1)
-			}
-			return r.m, r.err
+		case rm := <-p.RecvCh():
+			e.recv.Add(1)
+			return rm, nil
 		case <-closeCh:
-			cancel()
-			<-done
 			return nil, fmt.Errorf("pair recv: %w", zmqerr.ErrSocketClosed)
+		case <-p.Closed():
+			select {
+			case rm := <-p.RecvCh():
+				e.recv.Add(1)
+				return rm, nil
+			default:
+				return nil, io.EOF
+			}
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
 	}
 }
@@ -198,8 +200,7 @@ func (e *pairEngine) CanRecvNow() bool {
 	if closed || p == nil {
 		return false
 	}
-	rc, ok := p.(recvChanner)
-	return ok && len(rc.RecvCh()) > 0
+	return len(p.RecvCh()) > 0
 }
 
 func (e *pairEngine) CanSendNow() bool {

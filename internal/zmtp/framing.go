@@ -11,8 +11,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"net"
-	"sync"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
@@ -36,11 +34,6 @@ const validFlagBits uint8 = iface.FlagMore | iface.FlagLong | iface.FlagCommand
 type frameCodec struct {
 	maxBody int64
 }
-
-var (
-	shortFrameHeaderPool = sync.Pool{New: func() any { return new([2]byte) }}
-	longFrameHeaderPool  = sync.Pool{New: func() any { return new([9]byte) }}
-)
 
 // NewFrameCodec returns a ZMTP 3.1 frame codec. maxBody bounds the size of
 // any body the codec will accept on the read side; bodies larger than maxBody
@@ -128,35 +121,6 @@ func (c *frameCodec) WriteFrame(w io.Writer, flags uint8, body []byte) error {
 		}
 	}
 	return nil
-}
-
-// AppendFrameBuffers implements iface.FrameBufferAppender for the native
-// ZMTP framing codec. It appends a borrowed header plus the caller-owned
-// body slice directly into dst so the writer can issue one writev without
-// first copying header+body into a temporary blob.
-func (c *frameCodec) AppendFrameBuffers(dst *net.Buffers, flags uint8, body []byte) (func(), int, error) {
-	useLong, n, err := c.validateWriteFrame(flags, body)
-	if err != nil {
-		return nil, 0, err
-	}
-	if useLong {
-		hdr := longFrameHeaderPool.Get().(*[9]byte)
-		hdr[0] = flags | iface.FlagLong
-		binary.BigEndian.PutUint64(hdr[1:], uint64(n))
-		*dst = append(*dst, hdr[:])
-		if n > 0 {
-			*dst = append(*dst, body)
-		}
-		return func() { longFrameHeaderPool.Put(hdr) }, len(hdr) + n, nil
-	}
-	hdr := shortFrameHeaderPool.Get().(*[2]byte)
-	hdr[0] = flags
-	hdr[1] = byte(n)
-	*dst = append(*dst, hdr[:])
-	if n > 0 {
-		*dst = append(*dst, body)
-	}
-	return func() { shortFrameHeaderPool.Put(hdr) }, len(hdr) + n, nil
 }
 
 // AppendFrameHeader implements iface.FrameHeaderAppender. It appends the

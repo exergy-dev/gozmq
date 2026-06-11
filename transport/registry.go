@@ -1,9 +1,20 @@
 // Package transport provides concrete iface.Transport implementations for
-// the schemes the gozmq library understands: tcp, tcp6, and inproc.
+// the schemes the gozmq library understands: tcp, tcp6, inproc, and
+// (opt-in) tls+tcp.
 //
 // Each transport turns an endpoint string into Dial / Listen operations and
 // adapts the underlying primitive (a net.Conn for TCP, an in-memory pipe for
 // inproc) to the iface.Conn / iface.Listener contracts.
+//
+// Closed set: the transport implementations are an intentional, first-party
+// set. iface.Transport (the interface RegisterTransport accepts) lives under
+// internal/, so it cannot be implemented by code outside this module; the
+// supported schemes are exactly those constructed here. RegisterTransport is
+// an injection point for transports that need caller-supplied configuration
+// (most notably TLS, via NewTLSTransport), NOT a plugin boundary for
+// arbitrary third-party transports. Adding a new transport (e.g. a future
+// PGM/EPGM) is an in-module change. This keeps the wire/handshake surface
+// auditable and matches the closed mechanism set in package security.
 package transport
 
 import (

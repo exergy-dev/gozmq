@@ -41,6 +41,12 @@ type TCPTransport struct {
 	KeepAlivePeriod time.Duration
 	// NoDelay toggles TCP_NODELAY (Nagle disable).
 	NoDelay bool
+	// ReadBufferSize / WriteBufferSize set SO_RCVBUF / SO_SNDBUF on every
+	// dialed and accepted connection. The constructors default both to
+	// 8 MiB (throughput headroom for high-bandwidth-delay paths); set to 0
+	// to keep the OS default sizing instead.
+	ReadBufferSize  int
+	WriteBufferSize int
 }
 
 // newTCP builds a TCPTransport for the given network ("tcp" or "tcp6") with
@@ -53,6 +59,8 @@ func newTCP(network string) *TCPTransport {
 		KeepAlive:       defaultTCPKeepAlive,
 		KeepAlivePeriod: defaultTCPKeepAliveIdle,
 		NoDelay:         defaultTCPNoDelay,
+		ReadBufferSize:  defaultTCPReadBuffer,
+		WriteBufferSize: defaultTCPWriteBuffer,
 	}
 }
 
@@ -130,10 +138,15 @@ func (t *TCPTransport) applySocketOptions(c net.Conn) error {
 	if err := tc.SetNoDelay(t.NoDelay); err != nil {
 		return err
 	}
-	if err := tc.SetReadBuffer(defaultTCPReadBuffer); err != nil {
-		return err
+	if t.ReadBufferSize > 0 {
+		if err := tc.SetReadBuffer(t.ReadBufferSize); err != nil {
+			return err
+		}
 	}
-	return tc.SetWriteBuffer(defaultTCPWriteBuffer)
+	if t.WriteBufferSize > 0 {
+		return tc.SetWriteBuffer(t.WriteBufferSize)
+	}
+	return nil
 }
 
 func (t *TCPTransport) parseAddress(endpoint string) (string, error) {

@@ -54,6 +54,16 @@ type Msg struct {
 	// decrements. When refs drops to zero, the pooled buffers are
 	// returned to their size-tiered pool.
 	refs atomic.Int32
+	// subscription marks this *Msg as a genuine ZMTP SUBSCRIBE/CANCEL
+	// command surfaced by the session reader (handleCommand), as opposed
+	// to ordinary data that merely happens to begin with 0x01/0x00. It is
+	// a process-local hint that never crosses the wire: the receiving SUB
+	// (drop) / XSUB (surface) Recv path checks it instead of sniffing the
+	// payload, so data frames starting with 0x00/0x01 are delivered
+	// intact. The PUB/XPUB receive side still classifies by content
+	// because legacy peers send subscriptions as plain 0x00/0x01 data
+	// frames (ZMTP 3.0) which never carry this flag.
+	subscription bool
 }
 
 // New returns an empty Msg. The *Msg struct is plain-allocated (not pooled):
@@ -100,18 +110,43 @@ func FromFramesOwned(frames [][]byte) *Msg {
 	return &Msg{frames: frames}
 }
 
-// Recycle returns any pool-backed frame buffers carried by m to the
-// size-tiered frame pool. The *Msg struct itself is left to the GC (it is no
-// longer pooled). A no-op for *Msg values that never carried pooled frames,
-// and safe on nil. The caller must not access m's frames after Recycle.
+// Recycle releases one reference to m, returning its pool-backed frame
+// buffers to the size-tiered frame pool when the last reference drops
+// (it is the function-form equivalent of Release). The *Msg struct itself
+// is left to the GC (it is not pooled). A no-op for *Msg values that never
+// carried pooled frames, and safe on nil. The caller must not access m's
+// frames after Recycle.
+//
+// Refcount-aware and safe for concurrent use: when an engine fans one
+// *Msg out to N pipes it Retains N-1 extra references, and the N session
+// writers may Recycle concurrently post-flush — exactly one of them
+// (the last) reclaims the pooled buffers. The fast path for the common
+// single-reference case is one atomic decrement.
 func Recycle(m *Msg) {
 	if m == nil {
 		return
 	}
-	if m.pooled != nil {
-		m.reclaimPooled()
-	}
+	m.Release()
 }
+
+// IsPooled reports whether m carries any pool-backed frame buffers that
+// require reclamation (via Recycle/Release). It is false for every
+// caller-constructed message (New / FromBytes / FromFrames / FromFramesOwned)
+// and true only for large inbound frames the session reader backed with a
+// pool buffer. The writer uses this to skip deferred-recycle bookkeeping for
+// the common non-pooled case, where Recycle would be a no-op anyway.
+func (m *Msg) IsPooled() bool { return m.pooled != nil }
+
+// MarkSubscription flags m as a genuine subscription command (see the
+// subscription field). Set by the session reader when it converts a
+// wire SUBSCRIBE/CANCEL command into a synthetic single-frame message.
+func (m *Msg) MarkSubscription() { m.subscription = true }
+
+// IsSubscription reports whether m was flagged as a genuine subscription
+// command via MarkSubscription. The SUB/XSUB Recv path uses this instead
+// of payload sniffing so ordinary data starting with 0x00/0x01 is not
+// mistaken for a subscription.
+func (m *Msg) IsSubscription() bool { return m.subscription }
 
 // Frames returns the backing frame slice.
 func (m *Msg) Frames() [][]byte { return m.frames }
@@ -176,10 +211,11 @@ func (m *Msg) Retain() {
 
 // Release decrements the refcount. When the count reaches zero and the
 // *Msg has pooled-backed frames, those buffers are returned to the
-// size-tiered pool. Release is idempotent only in the sense that it is
-// safe to call on a *Msg with no pooled frames (it is a no-op there);
-// double-Release of a pooled *Msg drives the count negative and is a
-// programming error.
+// size-tiered pool. Concurrent Release calls from holders of distinct
+// references are safe: exactly one (the last) reclaims. Release after
+// reclamation is a no-op (pooled is nil by then); releasing more
+// references than were ever held is a programming error, though it
+// cannot double-reclaim.
 func (m *Msg) Release() {
 	if m.pooled == nil {
 		// Construction path never installed a refcount; nothing to do.
@@ -226,8 +262,28 @@ func finalizeMsg(m *Msg) {
 // when socket engines strip envelope frames and return a new *Msg to the
 // caller — the new *Msg becomes the owner of the pooled buffers, and the
 // original is disarmed.
+//
+// Per-*Msg state and how each field is handled across the ownership
+// primitives (keep in sync when adding fields):
+//
+//   - frames / inlineFrames: the message payload. Set by the constructors
+//     and Append*; cleared by Reset.
+//   - pooled / refs: pooled-buffer reclamation bookkeeping. Installed by
+//     AppendPooledFrame; MOVED here (transferred, src disarmed); reclaimed
+//     by Release/Reset/finalizeMsg.
+//   - subscription: process-local SUBSCRIBE/CANCEL hint (see the field
+//     doc). Propagated here so a stripped/re-wrapped *Msg keeps the flag;
+//     cleared by Reset. Never crosses the wire.
+//
+// TransferPool returns early when src carries no pooled frames; the
+// subscription flag is propagated regardless so the hint survives an
+// envelope rewrite even on non-pooled messages.
 func (m *Msg) TransferPool(src *Msg) {
-	if src == nil || src.pooled == nil {
+	if src == nil {
+		return
+	}
+	m.subscription = src.subscription
+	if src.pooled == nil {
 		return
 	}
 	m.pooled = src.pooled
@@ -259,4 +315,5 @@ func (m *Msg) Reset() {
 	clear(m.frames)
 	m.frames = m.frames[:0]
 	m.inlineFrames = [1][]byte{}
+	m.subscription = false
 }

@@ -11,63 +11,65 @@ import (
 	"github.com/rkm/gozmq"
 )
 
-// ErrNoRouterMatch is fed to the Router's error handler when a received
+// ErrNoTopicMatch is fed to the TopicMux's error handler when a received
 // [topic, payload] message carries a topic that matches no registered
 // prefix. Consumers can errors.Is against it in a WithErrorHandler
 // callback.
-var ErrNoRouterMatch = errors.New("typed: no handler registered for topic")
+var ErrNoTopicMatch = errors.New("typed: no handler registered for topic")
 
-// ErrRouterRunning is returned by Register and Unregister after
-// Router.Run has started. Registration must happen before Run.
-var ErrRouterRunning = errors.New("typed: router is running")
+// ErrTopicMuxRunning is returned by Register and Unregister while
+// TopicMux.Run is executing. Registration is allowed before the first
+// Run and again after a Run returns.
+var ErrTopicMuxRunning = errors.New("typed: topic mux is running")
 
 // ErrTopicAlreadyRegistered is returned by Register when topic is
 // already bound to a handler.
 var ErrTopicAlreadyRegistered = errors.New("typed: topic already registered")
 
-// Router dispatches incoming messages on a SUB/XSUB socket to typed
+// TopicMux dispatches incoming messages on a SUB/XSUB socket to typed
 // handlers registered by topic prefix. Topic matching uses prefix
 // semantics mirroring ZMQ SUB filtering: a handler registered for
 // "orders." matches "orders.created", "orders.cancelled", etc. When
 // multiple prefixes match, the longest one wins.
 //
-// Registration must happen before Run is called. Register or
-// Unregister calls made after Run has started return ErrRouterRunning.
-type Router struct {
+// Registration is frozen while Run executes: Register or Unregister
+// calls made mid-Run return ErrTopicMuxRunning. Once Run returns,
+// registration is available again ahead of a subsequent Run.
+type TopicMux struct {
 	sock    *gozmq.Socket
 	codec   Codec
-	entries []routerEntry
+	entries []muxEntry
 	started atomic.Bool
 }
 
-type routerEntry struct {
+type muxEntry struct {
 	topic  string
 	decode func([]byte) (any, error)
 	invoke func(ctx context.Context, topic string, v any) error
 }
 
-// NewRouter returns a Router bound to sock. sock should be a SUB or
+// NewTopicMux returns a TopicMux bound to sock. sock should be a SUB or
 // XSUB socket; Register subscribes topic prefixes on it.
-func NewRouter(sock *gozmq.Socket, codec Codec) *Router {
-	return &Router{sock: sock, codec: codec}
+func NewTopicMux(sock *gozmq.Socket, codec Codec) *TopicMux {
+	return &TopicMux{sock: sock, codec: codec}
 }
 
 // Register binds topic (a prefix) to handler and subscribes sock to
-// that prefix. Returns ErrRouterRunning if Run has started, or
+// that prefix. Returns ErrTopicMuxRunning while Run is executing, or
 // ErrTopicAlreadyRegistered if topic is already bound.
 func Register[T any](
-	r *Router,
+	r *TopicMux,
 	topic string,
 	handler func(context.Context, Message[T]) error,
 ) error {
 	if r.started.Load() {
-		return ErrRouterRunning
+		return ErrTopicMuxRunning
 	}
-	if slices.ContainsFunc(r.entries, func(e routerEntry) bool { return e.topic == topic }) {
+	if slices.ContainsFunc(r.entries, func(e muxEntry) bool { return e.topic == topic }) {
 		return fmt.Errorf("%w: %q", ErrTopicAlreadyRegistered, topic)
 	}
 
-	entry := routerEntry{
+	entry := muxEntry{
 		topic: topic,
 		decode: func(b []byte) (any, error) {
 			var v T
@@ -87,7 +89,7 @@ func Register[T any](
 
 	// Insert preserving descending-length order so Run's linear scan
 	// naturally picks the longest match first.
-	if i := slices.IndexFunc(r.entries, func(e routerEntry) bool { return len(topic) > len(e.topic) }); i >= 0 {
+	if i := slices.IndexFunc(r.entries, func(e muxEntry) bool { return len(topic) > len(e.topic) }); i >= 0 {
 		r.entries = slices.Insert(r.entries, i, entry)
 	} else {
 		r.entries = append(r.entries, entry)
@@ -96,13 +98,13 @@ func Register[T any](
 }
 
 // Unregister removes the handler for topic and unsubscribes sock from
-// that prefix. Returns ErrRouterRunning if Run has started. Unknown
+// that prefix. Returns ErrTopicMuxRunning while Run is executing. Unknown
 // topics are a no-op.
-func (r *Router) Unregister(topic string) error {
+func (r *TopicMux) Unregister(topic string) error {
 	if r.started.Load() {
-		return ErrRouterRunning
+		return ErrTopicMuxRunning
 	}
-	if i := slices.IndexFunc(r.entries, func(e routerEntry) bool { return e.topic == topic }); i >= 0 {
+	if i := slices.IndexFunc(r.entries, func(e muxEntry) bool { return e.topic == topic }); i >= 0 {
 		r.entries = slices.Delete(r.entries, i, i+1)
 		return r.sock.Unsubscribe([]byte(topic))
 	}
@@ -112,61 +114,52 @@ func (r *Router) Unregister(topic string) error {
 // Run blocks and dispatches messages received on sock to the
 // registered handlers. Shape / decode / handler errors are passed to
 // the configured WithErrorHandler, with classification via ErrDecode,
-// ErrHandler, and ErrNoRouterMatch. Socket-level errors are always
+// ErrHandler, and ErrNoTopicMatch. Socket-level errors are always
 // fatal; ctx cancellation returns ctx.Err().
 //
-// Calling Run a second time on the same Router is supported only if
+// Calling Run a second time on the same TopicMux is supported only if
 // the previous Run returned; concurrent Run calls are not supported.
-func (r *Router) Run(ctx context.Context, opts ...Option) error {
+func (r *TopicMux) Run(ctx context.Context, opts ...Option) error {
 	r.started.Store(true)
-	o := apply(opts)
+	defer r.started.Store(false)
 
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		m, err := r.sock.RecvMsg(ctx)
-		if err != nil {
-			return err
-		}
+	// muxDispatch carries a decoded message through handleLoop: the
+	// matched entry plus the decoded value, ready to invoke.
+	type muxDispatch struct {
+		topic string
+		entry muxEntry
+		value any
+	}
+	return handleLoop(ctx, r.sock, func(m *gozmq.Msg) (muxDispatch, error) {
+		var d muxDispatch
 		frames := m.Frames()
 		if len(frames) != 2 {
-			m.Release()
-			if stop := o.report(fmt.Errorf("%w: expected [topic, payload], got %d frames: %w", ErrDecode, len(frames), ErrFrameCount)); stop != nil {
-				return stop
-			}
-			continue
+			return d, fmt.Errorf("%w: expected [topic, payload], got %d frames: %w", ErrDecode, len(frames), ErrFrameCount)
 		}
-		topic := string(frames[0])
-		entry, ok := r.match(topic)
+		d.topic = string(frames[0])
+		entry, ok := r.match(d.topic)
 		if !ok {
-			m.Release()
-			if stop := o.report(fmt.Errorf("%w: %q", ErrNoRouterMatch, topic)); stop != nil {
-				return stop
-			}
-			continue
+			return d, fmt.Errorf("%w: %q", ErrNoTopicMatch, d.topic)
 		}
 		v, err := entry.decode(frames[1])
-		m.Release()
 		if err != nil {
-			if stop := o.report(fmt.Errorf("%w: topic %q: %w", ErrDecode, topic, err)); stop != nil {
-				return stop
-			}
-			continue
+			return d, fmt.Errorf("%w: topic %q: %w", ErrDecode, d.topic, err)
 		}
-		if err := entry.invoke(ctx, topic, v); err != nil {
-			if stop := o.report(fmt.Errorf("%w: topic %q: %w", ErrHandler, topic, err)); stop != nil {
-				return stop
-			}
+		d.entry, d.value = entry, v
+		return d, nil
+	}, func(ctx context.Context, d muxDispatch) error {
+		if err := d.entry.invoke(ctx, d.topic, d.value); err != nil {
+			return fmt.Errorf("topic %q: %w", d.topic, err)
 		}
-	}
+		return nil
+	}, apply(opts))
 }
 
-func (r *Router) match(topic string) (routerEntry, bool) {
+func (r *TopicMux) match(topic string) (muxEntry, bool) {
 	for _, e := range r.entries {
 		if strings.HasPrefix(topic, e.topic) {
 			return e, true
 		}
 	}
-	return routerEntry{}, false
+	return muxEntry{}, false
 }

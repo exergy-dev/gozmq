@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"math/rand"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -553,4 +554,115 @@ func TestInproc_ManyConcurrentDials(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// ---------------------------------------------------------------------------
+// Deadline-poke semantics (net.Conn contract: SetXDeadline applies to
+// in-flight calls).
+// ---------------------------------------------------------------------------
+
+// dialInprocPair binds name, dials it, and returns the dialer-side and
+// accepted-side conns, all cleaned up with the test.
+func dialInprocPair(t *testing.T, name string) (*inprocConn, *inprocConn) {
+	t.Helper()
+	tr := NewInprocTransport(0)
+	l, err := tr.Listen(context.Background(), "inproc://"+name)
+	require.NoError(t, err, "Listen")
+	t.Cleanup(func() { _ = l.Close() })
+
+	ctx := testCtx(t, 2*time.Second)
+	acceptCh := make(chan *inprocConn, 1)
+	go func() {
+		c, err := l.Accept(ctx)
+		if err != nil {
+			acceptCh <- nil
+			return
+		}
+		acceptCh <- c.(*inprocConn)
+	}()
+	d, err := tr.Dial(ctx, "inproc://"+name)
+	require.NoError(t, err, "Dial")
+	t.Cleanup(func() { _ = d.Close() })
+	a := <-acceptCh
+	require.NotNil(t, a, "Accept failed")
+	t.Cleanup(func() { _ = a.Close() })
+	return d.(*inprocConn), a
+}
+
+// TestInproc_SetReadDeadline_WakesBlockedRead parks a Read with no deadline
+// and then sets an already-expired deadline from another goroutine. Per the
+// net.Conn contract the parked Read must wake with a timeout error rather
+// than staying blocked forever.
+func TestInproc_SetReadDeadline_WakesBlockedRead(t *testing.T) {
+	d, _ := dialInprocPair(t, "deadline-read-poke")
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_ = d.SetReadDeadline(time.Now()) // expired: must wake the parked Read
+	}()
+
+	start := time.Now()
+	_, err := d.Read(make([]byte, 8)) // peer never writes
+	elapsed := time.Since(start)
+
+	var ne net.Error
+	require.ErrorAs(t, err, &ne, "Read error %v is not a net.Error", err)
+	require.True(t, ne.Timeout(), "Read error %v is not a timeout", err)
+	require.Less(t, elapsed, 2*time.Second, "Read not woken promptly by SetReadDeadline")
+}
+
+// TestInproc_SetReadDeadline_AppliesToInFlightRead sets a FUTURE deadline
+// while a Read is parked: the in-flight call must adopt it and time out at
+// (roughly) the new deadline.
+func TestInproc_SetReadDeadline_AppliesToInFlightRead(t *testing.T) {
+	d, _ := dialInprocPair(t, "deadline-read-inflight")
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		_ = d.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	}()
+
+	start := time.Now()
+	_, err := d.Read(make([]byte, 8))
+	elapsed := time.Since(start)
+
+	var ne net.Error
+	require.ErrorAs(t, err, &ne, "Read error %v is not a net.Error", err)
+	require.True(t, ne.Timeout(), "Read error %v is not a timeout", err)
+	require.GreaterOrEqual(t, elapsed, 150*time.Millisecond, "Read returned before the in-flight deadline")
+	require.Less(t, elapsed, 3*time.Second, "Read ignored the in-flight deadline")
+}
+
+// TestInproc_SetWriteDeadline_WakesBlockedWrite fills the transport pipe to
+// its HWM so a Write parks, then sets an expired write deadline and asserts
+// the parked Write wakes with a timeout.
+func TestInproc_SetWriteDeadline_WakesBlockedWrite(t *testing.T) {
+	d, _ := dialInprocPair(t, "deadline-write-poke")
+
+	errCh := make(chan error, 1)
+	go func() {
+		payload := []byte("x")
+		// transportPipeHWM is 64; 1024 writes guarantee the writer parks
+		// (the accepted side never reads).
+		for i := 0; i < 1024; i++ {
+			if _, err := d.Write(payload); err != nil {
+				errCh <- err
+				return
+			}
+		}
+		errCh <- nil
+	}()
+
+	// Let the writer park at the HWM, then poke it.
+	time.Sleep(100 * time.Millisecond)
+	require.NoError(t, d.SetWriteDeadline(time.Now()))
+
+	select {
+	case err := <-errCh:
+		var ne net.Error
+		require.ErrorAs(t, err, &ne, "Write error %v is not a net.Error", err)
+		require.True(t, ne.Timeout(), "Write error %v is not a timeout", err)
+	case <-time.After(2 * time.Second):
+		require.Fail(t, "blocked Write not woken by SetWriteDeadline")
+	}
 }

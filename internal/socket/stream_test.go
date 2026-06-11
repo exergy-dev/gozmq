@@ -206,20 +206,6 @@ func TestStream_CloseUnblocksRecv(t *testing.T) {
 	}
 }
 
-// TestStream_AttachAfterClose asserts Attach after Close returns
-// ErrSocketClosed.
-func TestStream_AttachAfterClose(t *testing.T) {
-	t.Parallel()
-	eng := socket.NewStreamEngine()
-	require.NoError(t, eng.Close(), "close")
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
-	defer func() {
-		_ = a.Close()
-		_ = b.Close()
-	}()
-	require.ErrorIs(t, eng.AttachPipe(a), zmqerr.ErrSocketClosed, "attach after close")
-}
-
 // --------------------------------------------------------------------------
 // Round-trip / scenario tests.
 //

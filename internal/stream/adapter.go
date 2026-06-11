@@ -37,7 +37,7 @@ type Config struct {
 	Identity []byte
 
 	// Endpoint is the peer's ZMQ endpoint string (e.g. "tcp://host:port").
-	// Surfaces through pipe.PeerEndpoint() for monitoring/logging.
+	// Stored in the pipe's PeerInfo for monitoring/logging.
 	Endpoint string
 
 	// ReadBufSize caps each conn.Read. Defaults to 32 KiB when <= 0.

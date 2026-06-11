@@ -2,7 +2,6 @@ package gozmq_test
 
 import (
 	"context"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,50 +54,30 @@ func waitForEvents(t *testing.T, ch <-chan gozmq.Event, timeout time.Duration, p
 
 // hasType reports whether any event in the slice matches the given type.
 func hasType(events []gozmq.Event, t gozmq.EventType) bool {
-	for _, e := range events {
-		if e.Type == t {
-			return true
-		}
-	}
-	return false
+	return indexOfType(events, t) >= 0
 }
 
 // TestMonitor_ServerLifecycle verifies the full server-side event
 // sequence on a single PAIR/TCP round trip: Listening → Accepted →
 // HandshakeSucceeded → (client connect-side events) → Closed.
 func TestMonitor_ServerLifecycle(t *testing.T) {
-	ctxZmq := gozmq.NewContext()
-	defer ctxZmq.Close()
-
 	srvEvents := make(chan gozmq.Event, 64)
-	srv, err := ctxZmq.NewSocket(gozmq.Pair, gozmq.WithMonitor(srvEvents, gozmq.EventAll))
-	if err != nil {
-		t.Fatalf("new server: %v", err)
-	}
-
-	if err := srv.Bind("tcp://127.0.0.1:0"); err != nil {
-		t.Fatalf("bind: %v", err)
-	}
-	ep := srv.LastEndpoint()
-
 	cliEvents := make(chan gozmq.Event, 64)
-	cli, err := ctxZmq.NewSocket(gozmq.Pair, gozmq.WithMonitor(cliEvents, gozmq.EventAll))
-	if err != nil {
-		t.Fatalf("new client: %v", err)
-	}
-	if err := cli.Connect(ep); err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	_, srv, cli := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair, "tcp://127.0.0.1:0",
+		[]gozmq.Option{gozmq.WithMonitor(srvEvents, gozmq.EventAll)},
+		[]gozmq.Option{gozmq.WithMonitor(cliEvents, gozmq.EventAll)},
+	)
 
 	// Round-trip a message to guarantee the handshake completed on
 	// both ends before we assert on events.
-	callCtx, cancel := testCtx(t)
-	defer cancel()
+	callCtx := testCtx(t)
 	if err := cli.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("hello"))); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	if _, err := srv.RecvMsg(callCtx); err != nil {
+	if m, err := srv.RecvMsg(callCtx); err != nil {
 		t.Fatalf("recv: %v", err)
+	} else {
+		m.Release()
 	}
 
 	// Wait for the server to observe Listening + Accepted +
@@ -172,15 +151,8 @@ func TestMonitor_ServerLifecycle(t *testing.T) {
 // malformed endpoint produces an error and a monitor event with a
 // non-empty Reason.
 func TestMonitor_BindFailed(t *testing.T) {
-	ctxZmq := gozmq.NewContext()
-	defer ctxZmq.Close()
-
 	evts := make(chan gozmq.Event, 16)
-	s, err := ctxZmq.NewSocket(gozmq.Pair, gozmq.WithMonitor(evts, gozmq.EventAll))
-	if err != nil {
-		t.Fatalf("new socket: %v", err)
-	}
-	defer s.Close()
+	_, s := newTestSocket(t, gozmq.Pair, gozmq.WithMonitor(evts, gozmq.EventAll))
 
 	// Unknown scheme — Registry.Lookup returns ErrTransportUnknown.
 	if err := s.Bind("bogus://nothing"); err == nil {
@@ -203,21 +175,13 @@ func TestMonitor_BindFailed(t *testing.T) {
 // on. We cap the test to a short window and assert the Reconnects
 // metric was bumped.
 func TestMonitor_ConnectRetryOnRefused(t *testing.T) {
-	ctxZmq := gozmq.NewContext()
-	defer ctxZmq.Close()
-
 	evts := make(chan gozmq.Event, 64)
-	s, err := ctxZmq.NewSocket(
-		gozmq.Pair,
+	_, s := newTestSocket(t, gozmq.Pair,
 		gozmq.WithMonitor(evts, gozmq.EventAll),
 		// Small backoff so this test stays fast.
 		gozmq.WithReconnectInterval(5*time.Millisecond),
 		gozmq.WithReconnectIntervalMax(20*time.Millisecond),
 	)
-	if err != nil {
-		t.Fatalf("new socket: %v", err)
-	}
-	defer s.Close()
 
 	// 127.0.0.1:1 is reserved; connections reliably refuse or time
 	// out fast enough for the Reconnector to fire multiple cycles.
@@ -257,16 +221,10 @@ func eventTypes(events []gozmq.Event) []uint32 {
 // TestMonitor_MaskFiltersEvents verifies WithMonitor's mask argument
 // keeps events off the channel when their Type bit is unset.
 func TestMonitor_MaskFiltersEvents(t *testing.T) {
-	ctxZmq := gozmq.NewContext()
-	defer ctxZmq.Close()
-
 	evts := make(chan gozmq.Event, 16)
 	// Subscribe only to EventListening — no other event should
 	// reach the channel.
-	s, err := ctxZmq.NewSocket(gozmq.Pair, gozmq.WithMonitor(evts, gozmq.EventListening))
-	if err != nil {
-		t.Fatalf("new socket: %v", err)
-	}
+	_, s := newTestSocket(t, gozmq.Pair, gozmq.WithMonitor(evts, gozmq.EventListening))
 
 	if err := s.Bind("tcp://127.0.0.1:0"); err != nil {
 		t.Fatalf("bind: %v", err)
@@ -295,14 +253,8 @@ func TestMonitor_MaskFiltersEvents(t *testing.T) {
 // skew could break it on exotic platforms) but catches accidental
 // zero-Time events.
 func TestMonitor_EventTimestampsPopulated(t *testing.T) {
-	ctxZmq := gozmq.NewContext()
-	defer ctxZmq.Close()
-
 	evts := make(chan gozmq.Event, 16)
-	s, err := ctxZmq.NewSocket(gozmq.Pair, gozmq.WithMonitor(evts, gozmq.EventAll))
-	if err != nil {
-		t.Fatalf("new socket: %v", err)
-	}
+	_, s := newTestSocket(t, gozmq.Pair, gozmq.WithMonitor(evts, gozmq.EventAll))
 	if err := s.Bind("tcp://127.0.0.1:0"); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -317,15 +269,15 @@ func TestMonitor_EventTimestampsPopulated(t *testing.T) {
 		t.Fatal("no events collected")
 	}
 	var lastTime time.Time
-	var seen atomic.Bool
+	seen := false
 	for _, ev := range collected {
 		if ev.Time.IsZero() {
 			t.Errorf("event type=%d has zero Time", ev.Type)
 		}
-		if seen.Load() && ev.Time.Before(lastTime) {
+		if seen && ev.Time.Before(lastTime) {
 			t.Errorf("event time went backward: prev=%v now=%v", lastTime, ev.Time)
 		}
 		lastTime = ev.Time
-		seen.Store(true)
+		seen = true
 	}
 }

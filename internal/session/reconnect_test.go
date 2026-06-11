@@ -85,8 +85,6 @@ func (s *stubSession) Stop() error {
 func (s *stubSession) Handshaked() <-chan struct{}    { return s.handshaked }
 func (s *stubSession) HandshakeErr() error            { return s.hsErr }
 func (s *stubSession) Pipe() iface.Pipe               { return s.enginePipe }
-func (s *stubSession) Endpoint() string               { return "stub://peer" }
-func (s *stubSession) Role() iface.Role               { return iface.RoleClient }
 func (s *stubSession) Done() <-chan struct{}          { return s.done }
 func (s *stubSession) WriterFlushed() <-chan struct{} { return s.done } // stub: same as Done
 func (s *stubSession) CancelWriter()                  {}                // stub: no-op
@@ -142,12 +140,12 @@ func TestReconnector_DialRetriesThenSucceeds(t *testing.T) {
 			}
 			return stubConn{}, nil
 		},
-		NewSession: func(c iface.Conn) iface.Session {
+		NewSession: func(c iface.Conn) (iface.Session, error) {
 			s := newStubSession(nil)
 			sessMu.Lock()
 			sessions = append(sessions, s)
 			sessMu.Unlock()
-			return s
+			return s, nil
 		},
 		OnAttach: func(p iface.Pipe) {
 			attaches.Add(1)
@@ -221,7 +219,7 @@ func TestReconnector_ContextCancellationStopsLoop(t *testing.T) {
 				return nil, errors.New("still refused")
 			}
 		},
-		NewSession: func(c iface.Conn) iface.Session { return newStubSession(nil) },
+		NewSession: func(c iface.Conn) (iface.Session, error) { return newStubSession(nil), nil },
 	}
 
 	r := NewReconnector(cfg)
@@ -257,7 +255,7 @@ func TestReconnector_StopWakesSleepingBackoff(t *testing.T) {
 		Dial: func(ctx context.Context) (iface.Conn, error) {
 			return nil, errors.New("always refused")
 		},
-		NewSession: func(c iface.Conn) iface.Session { return newStubSession(nil) },
+		NewSession: func(c iface.Conn) (iface.Session, error) { return newStubSession(nil), nil },
 	}
 
 	r := NewReconnector(cfg)
@@ -278,7 +276,7 @@ func TestReconnector_StopBeforeStart(t *testing.T) {
 	r := NewReconnector(ReconnectConfig{
 		InitialBackoff: time.Millisecond,
 		Dial:           func(ctx context.Context) (iface.Conn, error) { return nil, errors.New("x") },
-		NewSession:     func(c iface.Conn) iface.Session { return newStubSession(nil) },
+		NewSession:     func(c iface.Conn) (iface.Session, error) { return newStubSession(nil), nil },
 	})
 	done := make(chan error, 1)
 	go func() { done <- r.Stop() }()
@@ -316,7 +314,7 @@ func TestReconnector_HandshakeFailureTriggersBackoff(t *testing.T) {
 			}
 			return stubConn{}, nil
 		},
-		NewSession: func(c iface.Conn) iface.Session { return newStubSession(hsErr) },
+		NewSession: func(c iface.Conn) (iface.Session, error) { return newStubSession(hsErr), nil },
 		OnAttach:   func(_ iface.Pipe) { assert.Fail(t, "OnAttach should not fire on handshake failure") },
 	}
 
@@ -329,6 +327,43 @@ func TestReconnector_HandshakeFailureTriggersBackoff(t *testing.T) {
 		require.FailNow(t, "did not see 4 dial attempts", "got %d", attempts.Load())
 	}
 	_ = r.Stop()
+}
+
+// TestReconnector_QuiesceDuringDialBackoff: Quiesce arriving while the
+// loop sleeps off a dial failure must prevent the NEXT dial attempt —
+// otherwise a closing socket would get a brand-new session attached.
+func TestReconnector_QuiesceDuringDialBackoff(t *testing.T) {
+	var dials atomic.Int32
+	dialed := make(chan struct{}, 16)
+	cfg := ReconnectConfig{
+		InitialBackoff: 20 * time.Millisecond,
+		JitterFraction: 0,
+		Dial: func(ctx context.Context) (iface.Conn, error) {
+			dials.Add(1)
+			select {
+			case dialed <- struct{}{}:
+			default:
+			}
+			return nil, errors.New("refused")
+		},
+		NewSession: func(c iface.Conn) (iface.Session, error) { return newStubSession(nil), nil },
+		OnAttach:   func(_ iface.Pipe) { assert.Fail(t, "OnAttach must not fire after Quiesce") },
+	}
+
+	r := NewReconnector(cfg)
+	r.Start(context.Background())
+	defer r.Stop()
+
+	// Wait for the first (failing) dial; the loop is now in (or headed
+	// for) its backoff sleep. Quiesce before the sleep elapses.
+	waitClosed(t, dialed, time.Second, "no dial within 1s")
+	r.Quiesce()
+
+	// The loop must exit at the top of the next iteration instead of
+	// dialing again. r.done is in-package; observing it directly proves
+	// the loop exited rather than parked.
+	waitClosed(t, r.done, time.Second, "loop did not exit after Quiesce during backoff")
+	require.LessOrEqual(t, dials.Load(), int32(2), "loop kept dialing after Quiesce")
 }
 
 // TestApplyJitter_WithinBand samples the jitter helper many times and
@@ -481,7 +516,7 @@ func TestReconnect_OnRetryPanic_DoesNotStall(t *testing.T) {
 		Dial: func(ctx context.Context) (iface.Conn, error) {
 			return nil, errors.New("always refused")
 		},
-		NewSession: func(c iface.Conn) iface.Session { return newStubSession(nil) },
+		NewSession: func(c iface.Conn) (iface.Session, error) { return newStubSession(nil), nil },
 		OnRetry: func(attempt int, backoff time.Duration) {
 			n := onRetryN.Add(1)
 			// Record what we saw (non-blocking) regardless of panic path.

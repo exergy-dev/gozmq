@@ -3,12 +3,17 @@ package transport
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/rkm/gozmq/internal/iface"
 )
+
+// defaultTLSHandshakeTimeout bounds the server-side TLS handshake performed
+// inside Accept. A client that connects at the TCP level but never speaks
+// TLS would otherwise pin an Accept call indefinitely.
+const defaultTLSHandshakeTimeout = 10 * time.Second
 
 // tlsScheme is the URL scheme this transport claims. Per design §7.4 we
 // spell it "tls+tcp" so the presence of TLS is explicit at the endpoint
@@ -16,10 +21,10 @@ import (
 const tlsScheme = "tls+tcp"
 
 // TLSTransport wraps a base TCPTransport with crypto/tls. Dial runs the
-// TLS client handshake after the underlying TCP connect; Listen wraps the
-// underlying net.Listener with tls.NewListener so every Accept returns an
-// already-wrapped *tls.Conn. Users supply a *tls.Config at construction
-// time — we do not synthesize one.
+// TLS client handshake after the underlying TCP connect; Listen returns a
+// listener whose Accept wraps each raw conn with tls.Server and completes
+// the server-side handshake before handing the conn back. Users supply a
+// *tls.Config at construction time — we do not synthesize one.
 //
 // Scheme: "tls+tcp". Endpoints look like "tls+tcp://host:port"; wildcards
 // and ephemeral-port semantics follow TCP.
@@ -43,6 +48,13 @@ type TLSTransport struct {
 	// transport holds its own copy.
 	Config *tls.Config
 
+	// HandshakeTimeout caps how long Accept spends on the server-side TLS
+	// handshake for a single accepted connection. Zero selects the 10s
+	// default. A peer that exceeds the cap has its connection closed and
+	// the Accept call returns a timeout error; the listener remains
+	// usable, so one stalling client cannot wedge the endpoint.
+	HandshakeTimeout time.Duration
+
 	// base carries the TCP-level knobs (KeepAlive, NoDelay). We reuse
 	// TCPTransport to pick up its ctx-aware Dial/Accept without duplicating
 	// the net.Dialer / net.ListenConfig wiring.
@@ -60,14 +72,34 @@ type TLSTransport struct {
 // construction (rather than lazily per Dial/Accept) avoids a data race
 // between a caller mutating their original cfg and the transport's clone
 // reading it.
+//
+// MinVersion floor: a zero cfg.MinVersion is upgraded to TLS 1.2 on the
+// stored clone, and any explicit MinVersion below TLS 1.2 is rejected with
+// an error — TLS 1.0/1.1 are deprecated (RFC 8996) and have no place under
+// a security-oriented transport.
 func NewTLSTransport(cfg *tls.Config) (*TLSTransport, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("tls: config required")
 	}
+	cfg = cfg.Clone()
+	switch {
+	case cfg.MinVersion == 0:
+		cfg.MinVersion = tls.VersionTLS12
+	case cfg.MinVersion < tls.VersionTLS12:
+		return nil, fmt.Errorf("tls: MinVersion %#04x is below TLS 1.2 (deprecated by RFC 8996); refusing", cfg.MinVersion)
+	}
 	return &TLSTransport{
-		Config: cfg.Clone(),
+		Config: cfg,
 		base:   NewTCPTransport(),
 	}, nil
+}
+
+// handshakeTimeout resolves the effective per-connection handshake cap.
+func (t *TLSTransport) handshakeTimeout() time.Duration {
+	if t.HandshakeTimeout > 0 {
+		return t.HandshakeTimeout
+	}
+	return defaultTLSHandshakeTimeout
 }
 
 // Scheme reports "tls+tcp".
@@ -113,11 +145,11 @@ func (t *TLSTransport) Dial(ctx context.Context, endpoint string) (iface.Conn, e
 	return newTLSConn(tc), nil
 }
 
-// Listen binds endpoint on TCP and wraps the resulting listener with
-// tls.NewListener so Accept yields *tls.Conn values that have completed
-// the server-side handshake on first I/O (Go's tls.Conn runs the
-// handshake lazily; our tlsListener forces it eagerly inside Accept so
-// Accept never hands back an unhandshaken connection).
+// Listen binds endpoint on TCP and wraps the resulting listener in a
+// tlsListener whose Accept wraps each raw conn with tls.Server and runs
+// the server-side handshake eagerly (Go's tls.Conn would otherwise run it
+// lazily on first I/O), so Accept never hands back an unhandshaken
+// connection.
 func (t *TLSTransport) Listen(_ context.Context, endpoint string) (iface.Listener, error) {
 	addr, err := t.parseListenAddress(endpoint)
 	if err != nil {
@@ -171,9 +203,13 @@ func (c *tlsConn) WriteBuffers(buffers *net.Buffers) (int64, error) {
 
 // tlsListener owns a raw net.Listener and wraps every accepted net.Conn
 // with tls.Server; the handshake runs eagerly inside Accept so a bad
-// client cert fails here rather than at first Read. Accept is ctx-aware:
-// ctx cancel closes the underlying listener, causing the blocked
-// Accept goroutine to return with net.ErrClosed and exit immediately.
+// client cert fails here rather than at first Read. Accept follows the
+// tcp/ipc poll-with-deadline pattern (accept.go): ctx cancellation and
+// Close both wake a parked Accept within bounded latency, and a
+// ctx-cancelled Accept leaves the listener fully usable for later
+// Accept calls. Each handshake is capped by the transport's
+// HandshakeTimeout so a connected-but-silent peer cannot pin Accept
+// beyond that bound.
 type tlsListener struct {
 	l        net.Listener
 	t        *TLSTransport
@@ -193,94 +229,48 @@ func newTLSListener(l net.Listener, t *TLSTransport) *tlsListener {
 func (l *tlsListener) Endpoint() string { return l.endpoint }
 
 func (l *tlsListener) Accept(ctx context.Context) (iface.Conn, error) {
-	if l.closed.Load() {
-		return nil, listenerClosedErr()
+	c, err := acceptWithDeadline(
+		ctx,
+		l.l,
+		l.closeCh,
+		l.closed.Load,
+		tcpAcceptPollInterval,
+		func(t time.Time) error {
+			if tl, ok := l.l.(*net.TCPListener); ok {
+				return tl.SetDeadline(t)
+			}
+			return nil
+		},
+		func(c net.Conn) (net.Conn, error) {
+			if err := l.t.base.applySocketOptions(c); err != nil {
+				return nil, err
+			}
+			// Run the server-side handshake inside Accept so a failure is
+			// reported here, not at first Read. A hard deadline on the raw
+			// conn caps a connected-but-silent peer at HandshakeTimeout;
+			// HandshakeContext additionally aborts promptly on ctx cancel.
+			// On error acceptWithDeadline closes the raw conn for us.
+			// t.Config is a construction-time clone so handing the pointer
+			// directly is safe; tls.Server does not mutate it.
+			if err := c.SetDeadline(time.Now().Add(l.t.handshakeTimeout())); err != nil {
+				return nil, err
+			}
+			tc := tls.Server(c, l.t.Config)
+			if err := tc.HandshakeContext(ctx); err != nil {
+				return nil, err
+			}
+			// Clear the handshake deadline; traffic-phase deadlines are the
+			// session layer's business.
+			if err := tc.SetDeadline(time.Time{}); err != nil {
+				return nil, err
+			}
+			return tc, nil
+		},
+	)
+	if err != nil {
+		return nil, err
 	}
-
-	type acceptResult struct {
-		c   net.Conn
-		err error
-	}
-	resCh := make(chan acceptResult, 1)
-	// Accept goroutine: a bare l.l.Accept() blocks until either a peer
-	// arrives or the underlying listener is closed. Closing the listener
-	// (via closeListener below) unblocks the call with net.ErrClosed, which
-	// we detect to exit cleanly. This avoids the earlier poll-with-deadline
-	// pattern that could linger for up to tcpAcceptPollInterval after ctx
-	// cancel.
-	go func() {
-		c, err := l.l.Accept()
-		if err != nil {
-			if errors.Is(err, net.ErrClosed) || l.closed.Load() {
-				resCh <- acceptResult{nil, listenerClosedErr()}
-				return
-			}
-			resCh <- acceptResult{nil, err}
-			return
-		}
-		if err := l.t.base.applySocketOptions(c); err != nil {
-			_ = c.Close()
-			resCh <- acceptResult{nil, err}
-			return
-		}
-		resCh <- acceptResult{c, nil}
-	}()
-
-	select {
-	case r := <-resCh:
-		if r.err != nil {
-			return nil, r.err
-		}
-		// Run the server-side handshake inside Accept so a failure is
-		// reported here, not at first Read. Bound by ctx for timely
-		// cancellation and ctx-aware peer verification. t.Config is a
-		// construction-time clone so handing the pointer directly is safe;
-		// tls.Server does not mutate it.
-		tc := tls.Server(r.c, l.t.Config)
-		if err := tc.HandshakeContext(ctx); err != nil {
-			_ = tc.Close()
-			// Distinguish "ctx tripped" from "bad cert" so callers can
-			// react appropriately. errors.Is on context.Canceled works
-			// because HandshakeContext surfaces ctx errors verbatim.
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return nil, ctx.Err()
-			}
-			return nil, err
-		}
-		return newTLSConn(tc), nil
-	case <-ctx.Done():
-		// Ctx cancel: close the underlying listener so the blocked
-		// Accept goroutine returns with net.ErrClosed and exits rather
-		// than lingering past our return. Close is idempotent via
-		// closeOnce so a caller Close on the same listener is still
-		// safe. The tradeoff: a ctx-cancelled Accept leaves the listener
-		// unusable for further Accepts. Callers who want a re-usable
-		// listener should scope ctx to the listener's lifetime, not to a
-		// single Accept attempt.
-		l.closeListener()
-		go func() {
-			r := <-resCh
-			if r.c != nil {
-				_ = r.c.Close()
-			}
-		}()
-		return nil, ctx.Err()
-	case <-l.closeCh:
-		go func() {
-			r := <-resCh
-			if r.c != nil {
-				_ = r.c.Close()
-			}
-		}()
-		return nil, listenerClosedErr()
-	}
-}
-
-// closeListener closes the underlying net.Listener exactly once. Used by both
-// Close (explicit) and Accept (on ctx cancel) to unblock a parked l.l.Accept
-// call. Idempotent via the embedded listenerCloseState.
-func (l *tlsListener) closeListener() {
-	_ = l.closeWith(l.l.Close)
+	return newTLSConn(c.(*tls.Conn)), nil
 }
 
 func (l *tlsListener) Close() error {

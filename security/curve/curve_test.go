@@ -13,7 +13,7 @@ import (
 
 // genPair is a tiny helper wrapping GenerateKeyPair with a fatal-on-error
 // to keep test bodies uncluttered.
-func genPair(t *testing.T) (Key, Key) {
+func genPair(t testing.TB) (Key, Key) {
 	t.Helper()
 	pub, sec, err := GenerateKeyPair()
 	require.NoError(t, err, "GenerateKeyPair")
@@ -267,7 +267,7 @@ func TestCurveMessageReorderRejected(t *testing.T) {
 }
 
 // newMechPair creates a fresh client/server mechanism pair with random keys.
-func newMechPair(t *testing.T) (client, server iface.SecurityMech) {
+func newMechPair(t testing.TB) (client, server iface.SecurityMech) {
 	t.Helper()
 	serverPub, serverSec := genPair(t)
 	clientPub, clientSec := genPair(t)
@@ -281,7 +281,7 @@ func newMechPair(t *testing.T) (client, server iface.SecurityMech) {
 // driveToWelcome drives a client/server pair through HELLO + server seed +
 // WELCOME and returns the WELCOME bytes. Used by tests that need to inject
 // faults after the WELCOME step.
-func driveToWelcome(t *testing.T, client, server iface.SecurityMech) []byte {
+func driveToWelcome(t testing.TB, client, server iface.SecurityMech) []byte {
 	t.Helper()
 	hello, _, err := client.NextHandshake(nil)
 	require.NoError(t, err, "HELLO")
@@ -294,7 +294,7 @@ func driveToWelcome(t *testing.T, client, server iface.SecurityMech) []byte {
 
 // runHandshake drives a fresh client/server pair through the five-step
 // handshake and returns them ready for traffic-phase tests.
-func runHandshake(t *testing.T) (iface.SecurityMech, iface.SecurityMech) {
+func runHandshake(t testing.TB) (iface.SecurityMech, iface.SecurityMech) {
 	t.Helper()
 	client, server := newMechPair(t)
 	welcome := driveToWelcome(t, client, server)
@@ -486,4 +486,105 @@ func TestCurve_ValidatePeerPublicKey_Length_Happy(t *testing.T) {
 	require.Error(t, validatePeerPublicKey(make([]byte, 31)), "31-byte key accepted")
 	pub, _ := genPair(t)
 	require.NoError(t, validatePeerPublicKey(pub[:]), "fresh random key rejected")
+}
+
+// TestCurveInitiateCorruptedCookie flips a byte inside the echoed cookie
+// field of INITIATE and asserts the server's secretbox open of the cookie
+// fails with ErrAuthFailed (curve.go parseInitiate cookie-open path).
+func TestCurveInitiateCorruptedCookie(t *testing.T) {
+	client, server := newMechPair(t)
+	welcome := driveToWelcome(t, client, server)
+	initiate, _, err := client.NextHandshake(welcome)
+	require.NoError(t, err, "INITIATE build")
+
+	// Cookie field layout: [1+len("INITIATE")] .. +cookieSize, of which the
+	// first 16 bytes are the cookie nonce. Offset +20 sits inside the
+	// secretbox ciphertext.
+	initiate[1+len(cmdInitiate)+20] ^= 0xFF
+	_, _, err = server.NextHandshake(initiate)
+	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "corrupted cookie accepted")
+	require.ErrorContains(t, err, "cookie open failed")
+	require.NotEqual(t, stateDone, server.(*curveMech).state, "server reached stateDone despite corrupted cookie")
+}
+
+// TestCurveVouchWrongServerKeyRejected tampers the C'||S binding inside the
+// vouch: the client is made to vouch for a DIFFERENT (but valid) server
+// long-term key. The vouch box still opens — it is sealed to our ephemeral —
+// but the server must reject the S half as not matching its own identity.
+func TestCurveVouchWrongServerKeyRejected(t *testing.T) {
+	client, server := newMechPair(t)
+	welcome := driveToWelcome(t, client, server)
+
+	// Swap the client's record of the server long-term public for another
+	// valid key after WELCOME is consumed but before INITIATE is built;
+	// buildInitiate embeds it as the S half of the vouch plaintext. Both
+	// steps run inside one NextHandshake call (parseWelcome opens the box
+	// with the genuine S), so drive them individually.
+	cImpl := client.(*curveMech)
+	cookie, err := cImpl.parseWelcome(welcome)
+	require.NoError(t, err, "parseWelcome")
+	otherPub, _ := genPair(t)
+	cImpl.peerPublic = otherPub
+
+	initiate, err := cImpl.buildInitiate(cookie)
+	require.NoError(t, err, "INITIATE build")
+	_, _, err = server.NextHandshake(initiate)
+	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "wrong-S vouch accepted")
+	require.ErrorContains(t, err, "vouch S mismatch")
+	require.NotEqual(t, stateDone, server.(*curveMech).state, "server reached stateDone despite wrong-S vouch")
+}
+
+// TestCurveZAP_RejectEmitsError asserts that a ZAP rejection during
+// INITIATE returns an encoded ZMTP ERROR command body alongside the
+// wrapped ErrAuthFailed, mirroring PLAIN's auth-failure path.
+func TestCurveZAP_RejectEmitsError(t *testing.T) {
+	client, server := newMechPair(t)
+	server.(*curveMech).ConfigureZAP(func(string, string, string, [][]byte) (string, map[string]string, error) {
+		return "", nil, zmqerr.ErrAuthFailed
+	}, "global", "127.0.0.1:1")
+
+	welcome := driveToWelcome(t, client, server)
+	initiate, _, err := client.NextHandshake(welcome)
+	require.NoError(t, err, "INITIATE build")
+
+	out, done, err := server.NextHandshake(initiate)
+	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "server error")
+	require.False(t, done, "rejected handshake must not be done")
+	require.NotEmpty(t, out, "rejection must carry an ERROR command body")
+	require.Equal(t, byte(5), out[0], "ERROR name-length byte")
+	require.Equal(t, "ERROR", string(out[1:6]), "ERROR command name")
+	require.NotEqual(t, stateDone, server.(*curveMech).state, "server reached stateDone despite ZAP rejection")
+}
+
+// TestCurveZAP_AcceptMergesMetadata asserts the metadata returned by the
+// ZAP authorizer is merged into the server's peer metadata, overlaying the
+// client's INITIATE properties.
+func TestCurveZAP_AcceptMergesMetadata(t *testing.T) {
+	serverPub, serverSec := genPair(t)
+	clientPub, clientSec := genPair(t)
+	client, err := NewCurveClient(serverPub, clientPub, clientSec, map[string]string{
+		"Socket-Type": "DEALER",
+		"Identity":    "client-1",
+	})
+	require.NoError(t, err, "NewCurveClient")
+	server, err := NewCurveServer(serverSec, nil)
+	require.NoError(t, err, "NewCurveServer")
+
+	server.(*curveMech).ConfigureZAP(func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
+		require.Equal(t, "CURVE", mech)
+		require.Len(t, credentials, 1)
+		require.Equal(t, clientPub[:], credentials[0], "ZAP credential is not the client long-term public")
+		return "alice", map[string]string{"User-Id": "alice"}, nil
+	}, "global", "127.0.0.1:1")
+
+	welcome := driveToWelcome(t, client, server)
+	initiate, _, err := client.NextHandshake(welcome)
+	require.NoError(t, err, "INITIATE")
+	_, done, err := server.NextHandshake(initiate)
+	require.NoError(t, err, "READY")
+	require.True(t, done, "server not done")
+
+	peer := server.(*curveMech).PeerMetadata()
+	require.Equal(t, "DEALER", peer["Socket-Type"], "client property lost")
+	require.Equal(t, "alice", peer["User-Id"], "ZAP metadata not merged")
 }

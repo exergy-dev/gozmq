@@ -39,8 +39,7 @@ func TestSocketDisconnect_StopsReconnectAndDetachesPeer(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 
-	callCtx, cancel := testCtx(t)
-	defer cancel()
+	callCtx := testCtx(t)
 	if err := cli.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("hello"))); err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -85,7 +84,7 @@ func TestSocketDisconnect_StopsReconnectAndDetachesPeer(t *testing.T) {
 		t.Fatalf("client retried after Disconnect; tail=%v", eventTypes(cliTail))
 	}
 
-	if err := cli.Disconnect(ep); !errors.Is(err, gozmq.ErrEndpointInvalid) {
-		t.Fatalf("second Disconnect err = %v, want ErrEndpointInvalid", err)
+	if err := cli.Disconnect(ep); !errors.Is(err, gozmq.ErrEndpointUnknown) {
+		t.Fatalf("second Disconnect err = %v, want ErrEndpointUnknown", err)
 	}
 }

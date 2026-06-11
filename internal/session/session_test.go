@@ -1,8 +1,8 @@
 package session
 
 import (
+	"bytes"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -15,6 +15,7 @@ import (
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
+	"github.com/rkm/gozmq/internal/zmtp"
 )
 
 // --------------------------------------------------------------------------
@@ -195,31 +196,25 @@ func (m *fakeMech) NextHandshake(in []byte) ([]byte, bool, error) {
 }
 
 // --------------------------------------------------------------------------
-// startSessionPair builds a client/server pair over fakeConns, starts both,
+// startPair builds a client/server pair from two caller-supplied configs
+// (Conn and Mech must be set; Codec and Role are defaulted), starts both,
 // registers t.Cleanup to stop them, and waits for both handshakes.
+// startSessionPair is the common fakeConn shorthand.
 // --------------------------------------------------------------------------
 
-func startSessionPair(t *testing.T, propsA, propsB map[string]string, hwm int) (sA, sB iface.Session, connA, connB *fakeConn) {
+func startPair(t *testing.T, cfgA, cfgB Config) (sA, sB iface.Session) {
 	t.Helper()
-	connA, connB = newFakeConnPair()
+	if cfgA.Codec == nil {
+		cfgA.Codec = fakeCodec{}
+	}
+	if cfgB.Codec == nil {
+		cfgB.Codec = fakeCodec{}
+	}
+	cfgA.Role = iface.RoleClient
+	cfgB.Role = iface.RoleServer
 
-	sA = New(Config{
-		Conn:    connA,
-		Mech:    newFakeMech("NULL", false, propsA),
-		Codec:   fakeCodec{},
-		Role:    iface.RoleClient,
-		SendHWM: hwm,
-		RecvHWM: hwm,
-	})
-	sB = New(Config{
-		Conn:    connB,
-		Mech:    newFakeMech("NULL", true, propsB),
-		Codec:   fakeCodec{},
-		Role:    iface.RoleServer,
-		SendHWM: hwm,
-		RecvHWM: hwm,
-	})
-
+	sA = New(cfgA)
+	sB = New(cfgB)
 	sA.Start()
 	sB.Start()
 	t.Cleanup(func() {
@@ -229,6 +224,16 @@ func startSessionPair(t *testing.T, propsA, propsB map[string]string, hwm int) (
 
 	waitHandshake(t, sA, "A")
 	waitHandshake(t, sB, "B")
+	return sA, sB
+}
+
+func startSessionPair(t *testing.T, propsA, propsB map[string]string, hwm int) (sA, sB iface.Session, connA, connB *fakeConn) {
+	t.Helper()
+	connA, connB = newFakeConnPair()
+	sA, sB = startPair(t,
+		Config{Conn: connA, Mech: newFakeMech("NULL", false, propsA), SendHWM: hwm, RecvHWM: hwm},
+		Config{Conn: connB, Mech: newFakeMech("NULL", true, propsB), SendHWM: hwm, RecvHWM: hwm},
+	)
 	return sA, sB, connA, connB
 }
 
@@ -245,8 +250,11 @@ func TestSession_Handshake_AndRoundTrip(t *testing.T) {
 
 	// Verify the engine-facing pipe surfaces the peer's identity from
 	// metadata propagated through SetPeerMetadata after the handshake.
-	assert.Equal(t, "fake://b", sA.Pipe().PeerEndpoint(), "A pipe peer endpoint")
-	assert.Equal(t, "fake://a", sB.Pipe().PeerEndpoint(), "B pipe peer endpoint")
+	// PeerEndpoint is a concrete *pipe.end accessor, not part of
+	// iface.Pipe — assert through a focused interface.
+	type peerEndpointer interface{ PeerEndpoint() string }
+	assert.Equal(t, "fake://b", sA.Pipe().(peerEndpointer).PeerEndpoint(), "A pipe peer endpoint")
+	assert.Equal(t, "fake://a", sB.Pipe().(peerEndpointer).PeerEndpoint(), "B pipe peer endpoint")
 	mechA := sA.(*sessionImpl).cfg.Mech.(*fakeMech)
 	mechB := sB.(*sessionImpl).cfg.Mech.(*fakeMech)
 	require.Equal(t, 1, mechA.setPeerCalls, "A SetPeerMetadata calls")
@@ -376,12 +384,12 @@ func TestSession_StopBeforeHandshake(t *testing.T) {
 
 	// Handshaked must be closed; HandshakeErr must be non-nil since
 	// the handshake aborted.
-	select {
-	case <-s.Handshaked():
-	case <-time.After(time.Second):
-		require.FailNow(t, "Handshaked not closed after Stop")
-	}
+	waitClosed(t, s.Handshaked(), time.Second, "Handshaked not closed after Stop")
 	assert.Error(t, s.HandshakeErr(), "HandshakeErr = nil after Stop-before-handshake; want non-nil")
+	// Regression (writerExited once-guard): a session stopped during a
+	// hung handshake never spawns its writer, but WriterFlushed must
+	// still close promptly or linger drains would hang forever.
+	waitClosed(t, s.WriterFlushed(), time.Second, "WriterFlushed not closed after Stop-during-handshake")
 }
 
 // TestSession_StopWithoutStart ensures the no-Start path is leak-free
@@ -400,12 +408,9 @@ func TestSession_StopWithoutStart(t *testing.T) {
 	})
 	require.NoError(t, s.Stop(), "Stop without Start")
 	require.NoError(t, s.Stop(), "Stop second call without Start")
-	// Handshaked must close so observers don't hang.
-	select {
-	case <-s.Handshaked():
-	case <-time.After(time.Second):
-		require.FailNow(t, "Handshaked not closed by Stop-without-Start")
-	}
+	// Handshaked and WriterFlushed must close so observers don't hang.
+	waitClosed(t, s.Handshaked(), time.Second, "Handshaked not closed by Stop-without-Start")
+	waitClosed(t, s.WriterFlushed(), time.Second, "WriterFlushed not closed by Stop-without-Start")
 }
 
 func TestSession_CancelWriter_DoesNotCloseConnUntilStop(t *testing.T) {
@@ -421,11 +426,7 @@ func TestSession_CancelWriter_DoesNotCloseConnUntilStop(t *testing.T) {
 	}
 
 	sA.CancelWriter()
-	select {
-	case <-sA.WriterFlushed():
-	case <-time.After(2 * time.Second):
-		require.FailNow(t, "WriterFlushed did not fire after CancelWriter")
-	}
+	waitClosed(t, sA.WriterFlushed(), 2*time.Second, "WriterFlushed did not fire after CancelWriter")
 
 	select {
 	case <-connA.Closed():
@@ -441,24 +442,27 @@ func TestSession_CancelWriter_DoesNotCloseConnUntilStop(t *testing.T) {
 	}
 
 	require.NoError(t, sA.Stop(), "Stop")
-	select {
-	case <-connA.Closed():
-	case <-time.After(time.Second):
-		require.FailNow(t, "Stop did not close the conn")
-	}
+	waitClosed(t, connA.Closed(), time.Second, "Stop did not close the conn")
 }
 
 // --------------------------------------------------------------------------
 // helpers
 // --------------------------------------------------------------------------
 
-func waitHandshake(t *testing.T, s iface.Session, label string) {
+// waitClosed fails the test if ch has not closed (or received) within
+// timeout.
+func waitClosed(t *testing.T, ch <-chan struct{}, timeout time.Duration, msg string) {
 	t.Helper()
 	select {
-	case <-s.Handshaked():
-	case <-time.After(2 * time.Second):
-		require.FailNow(t, label+": handshake did not complete within 2s")
+	case <-ch:
+	case <-time.After(timeout):
+		require.FailNow(t, msg)
 	}
+}
+
+func waitHandshake(t *testing.T, s iface.Session, label string) {
+	t.Helper()
+	waitClosed(t, s.Handshaked(), 2*time.Second, label+": handshake did not complete within 2s")
 	require.NoError(t, s.HandshakeErr(), "%s: HandshakeErr", label)
 }
 
@@ -502,61 +506,16 @@ func TestSession_HandshakeErr_ProtocolViolation(t *testing.T) {
 		_, _ = connB.Write(bad)
 	}()
 
-	select {
-	case <-sA.Handshaked():
-	case <-time.After(2 * time.Second):
-		require.FailNow(t, "handshake did not complete (or fail) within 2s")
-	}
+	waitClosed(t, sA.Handshaked(), 2*time.Second, "handshake did not complete (or fail) within 2s")
 	err := sA.HandshakeErr()
 	require.Error(t, err, "expected handshake to fail")
 	// Confirm the error chain is well-formed.
-	assert.True(t, errorsContains(err, "malformed") || errorsContains(err, "signature"),
+	errStr := strings.ToLower(err.Error())
+	assert.True(t, strings.Contains(errStr, "malformed") || strings.Contains(errStr, "signature"),
 		"HandshakeErr = %v; expected malformed/signature wording", err)
 
 	wg.Wait()
 }
-
-// errorsContains is a tiny helper that checks for a substring in the
-// error chain's printed form. Used in lieu of a sentinel comparison
-// when the test cares about the diagnostic, not the type.
-func errorsContains(err error, sub string) bool {
-	if err == nil {
-		return false
-	}
-	return containsFold(err.Error(), sub)
-}
-
-func containsFold(s, sub string) bool {
-	if len(sub) == 0 || len(s) < len(sub) {
-		return len(sub) == 0
-	}
-	for i := 0; i+len(sub) <= len(s); i++ {
-		match := true
-		for j := 0; j < len(sub); j++ {
-			a := s[i+j]
-			b := sub[j]
-			if a >= 'A' && a <= 'Z' {
-				a += 32
-			}
-			if b >= 'A' && b <= 'Z' {
-				b += 32
-			}
-			if a != b {
-				match = false
-				break
-			}
-		}
-		if match {
-			return true
-		}
-	}
-	return false
-}
-
-// Compile-time guard: make sure the unused err type stays in scope so
-// future refactors can rely on errors.Is availability. (No-op at runtime.)
-var _ = errors.Is
-var _ = fmt.Errorf
 
 // --------------------------------------------------------------------------
 // Done() contract tests
@@ -580,11 +539,7 @@ func TestSession_Done_FiresOnNormalStop(t *testing.T) {
 	}
 
 	require.NoError(t, sA.Stop(), "Stop")
-	select {
-	case <-sA.Done():
-	case <-time.After(time.Second):
-		require.FailNow(t, "Done did not fire after Stop")
-	}
+	waitClosed(t, sA.Done(), time.Second, "Done did not fire after Stop")
 }
 
 // TestSession_Done_FiresOnReaderEOF covers a peer disconnecting mid-
@@ -598,11 +553,7 @@ func TestSession_Done_FiresOnReaderEOF(t *testing.T) {
 	// (io.Pipe closed), shutdown cascades, Done fires.
 	_ = connB.Close()
 
-	select {
-	case <-sA.Done():
-	case <-time.After(2 * time.Second):
-		require.FailNow(t, "Done did not fire after peer EOF")
-	}
+	waitClosed(t, sA.Done(), 2*time.Second, "Done did not fire after peer EOF")
 }
 
 // TestSession_Done_FiresOnHandshakeFailure verifies Done closes even
@@ -626,19 +577,14 @@ func TestSession_Done_FiresOnHandshakeFailure(t *testing.T) {
 		_, _ = connB.Write(bad)
 	}()
 
-	select {
-	case <-sA.Handshaked():
-	case <-time.After(2 * time.Second):
-		require.FailNow(t, "handshake did not settle")
-	}
+	waitClosed(t, sA.Handshaked(), 2*time.Second, "handshake did not settle")
 	require.Error(t, sA.HandshakeErr(), "expected HandshakeErr, got nil")
 	// Done fires on run() exit without Stop being called; no traffic-
 	// phase goroutines were spawned, so wg drains as soon as run returns.
-	select {
-	case <-sA.Done():
-	case <-time.After(2 * time.Second):
-		require.FailNow(t, "Done did not fire after handshake failure")
-	}
+	waitClosed(t, sA.Done(), 2*time.Second, "Done did not fire after handshake failure")
+	// WriterFlushed must close too — no writer ever ran, but linger
+	// waiters cannot be allowed to hang on a failed handshake.
+	waitClosed(t, sA.WriterFlushed(), time.Second, "WriterFlushed not closed after handshake failure")
 	// Stop still idempotent afterwards.
 	assert.NoError(t, sA.Stop(), "Stop after handshake failure")
 }
@@ -661,11 +607,7 @@ func TestSession_Done_FiresOnStopBeforeHandshake(t *testing.T) {
 	// Give the run goroutine a moment to reach the blocking greeting read.
 	time.Sleep(10 * time.Millisecond)
 	require.NoError(t, s.Stop(), "Stop")
-	select {
-	case <-s.Done():
-	case <-time.After(2 * time.Second):
-		require.FailNow(t, "Done did not fire after Stop-before-handshake")
-	}
+	waitClosed(t, s.Done(), 2*time.Second, "Done did not fire after Stop-before-handshake")
 }
 
 // TestSession_Done_FiresExactlyOnce: double-Stop must not panic (which
@@ -686,11 +628,7 @@ func TestSession_Done_FiresExactlyOnce(t *testing.T) {
 	// Third stop, for good measure — must not panic.
 	require.NoError(t, s.Stop(), "third Stop")
 	// Done still closed and drainable without panic.
-	select {
-	case <-s.Done():
-	case <-time.After(time.Second):
-		require.FailNow(t, "Done not closed after multiple Stops")
-	}
+	waitClosed(t, s.Done(), time.Second, "Done not closed after multiple Stops")
 	// And a Stop-without-Start session: Done must still fire.
 	connC, connD := newFakeConnPair()
 	defer connD.Close()
@@ -699,9 +637,137 @@ func TestSession_Done_FiresExactlyOnce(t *testing.T) {
 		Role: iface.RoleClient, SendHWM: 1, RecvHWM: 1,
 	})
 	require.NoError(t, s2.Stop(), "Stop-without-Start")
-	select {
-	case <-s2.Done():
-	case <-time.After(time.Second):
-		require.FailNow(t, "Done not closed after Stop-without-Start")
+	waitClosed(t, s2.Done(), time.Second, "Done not closed after Stop-without-Start")
+}
+
+// --------------------------------------------------------------------------
+// MaxMessageSize: the reader must bound cross-frame (multipart)
+// accumulation — the codec only caps individual frames.
+// --------------------------------------------------------------------------
+
+// TestReader_MaxMessageSize_UnderLimit: a multipart message at/below the
+// cap passes through untouched.
+func TestReader_MaxMessageSize_UnderLimit(t *testing.T) {
+	connA, connB := newFakeConnPair()
+	sA, sB := startPair(t,
+		Config{Conn: connA, Mech: newFakeMech("NULL", false, nil), SendHWM: 4, RecvHWM: 4},
+		Config{Conn: connB, Mech: newFakeMech("NULL", true, nil), SendHWM: 4, RecvHWM: 4,
+			MaxMessageSize: 1024},
+	)
+
+	ctx := testCtx(t, 2*time.Second)
+	frame := make([]byte, 256)
+	// 4 × 256 B = exactly the cap — allowed (the limit is "exceeds").
+	require.NoError(t, sA.Pipe().Send(ctx, msg.FromFrames(frame, frame, frame, frame)), "Send")
+	got, err := sB.Pipe().Recv(ctx)
+	require.NoError(t, err, "Recv")
+	require.Equal(t, 4, got.NumFrames(), "frame count")
+	require.Equal(t, 1024, got.TotalSize(), "total size")
+}
+
+// TestReader_MaxMessageSize_OverLimit: once the accumulated multipart
+// size exceeds the cap, the receiving session tears down instead of
+// ballooning memory, and the peer observes the disconnect.
+func TestReader_MaxMessageSize_OverLimit(t *testing.T) {
+	connA, connB := newFakeConnPair()
+	sA, sB := startPair(t,
+		Config{Conn: connA, Mech: newFakeMech("NULL", false, nil), SendHWM: 8, RecvHWM: 8},
+		Config{Conn: connB, Mech: newFakeMech("NULL", true, nil), SendHWM: 8, RecvHWM: 8,
+			MaxMessageSize: 512},
+	)
+
+	ctx := testCtx(t, 2*time.Second)
+	frame := make([]byte, 256)
+	// 3 × 256 B = 768 B > 512 B: B's reader must reject mid-message. The
+	// teardown happens as soon as the third frame arrives — B never
+	// assembles the full message, so memory stays bounded at the cap.
+	require.NoError(t, sA.Pipe().Send(ctx, msg.FromFrames(frame, frame, frame)), "Send")
+
+	waitClosed(t, sB.Done(), 2*time.Second, "receiver did not tear down on oversized multipart")
+	// The rejected message must not surface on B's pipe.
+	_, err := sB.Pipe().Recv(testCtx(t, time.Second))
+	require.Error(t, err, "oversized message surfaced on the pipe")
+	// A sees the disconnect (B closed the conn during shutdown).
+	waitClosed(t, sA.Done(), 2*time.Second, "sender did not observe receiver teardown")
+}
+
+// --------------------------------------------------------------------------
+// Reader scratch-buffer tests. The reader hands ReadFrame a persistent
+// scratch dst of exactly largeFrameThreshold bytes, so every frame that
+// fits in it lands on the always-copy path; anything larger must come
+// from the frame pool and surface via the zero-copy pooled path. These
+// run against the REAL zmtp codec — fakeCodec ignores dst.
+// --------------------------------------------------------------------------
+
+// startZmtpPair is startPair with the real ZMTP framing codec on both
+// ends, so the reader's scratch-vs-pool dst handling is exercised.
+func startZmtpPair(t *testing.T, hwm int) (sA, sB iface.Session) {
+	t.Helper()
+	connA, connB := newFakeConnPair()
+	return startPair(t,
+		Config{Conn: connA, Mech: newFakeMech("NULL", false, nil),
+			Codec: zmtp.NewFrameCodec(zmtp.MaxBodyUnlimited), SendHWM: hwm, RecvHWM: hwm},
+		Config{Conn: connB, Mech: newFakeMech("NULL", true, nil),
+			Codec: zmtp.NewFrameCodec(zmtp.MaxBodyUnlimited), SendHWM: hwm, RecvHWM: hwm},
+	)
+}
+
+// TestReader_ScratchThresholdBoundary: a frame of exactly
+// largeFrameThreshold bytes fits in scratch and must take the always-copy
+// path (Msg not pooled); one byte more must overflow scratch into a pool
+// buffer and surface through the zero-copy AppendPooledFrame path.
+func TestReader_ScratchThresholdBoundary(t *testing.T) {
+	sA, sB := startZmtpPair(t, 8)
+	ctx := testCtx(t, 5*time.Second)
+
+	atThreshold := bytes.Repeat([]byte{0xA5}, largeFrameThreshold)
+	require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes(bytes.Clone(atThreshold))), "Send(at)")
+	got, err := sB.Pipe().Recv(ctx)
+	require.NoError(t, err, "Recv(at)")
+	require.Equal(t, atThreshold, got.Bytes(), "at-threshold payload")
+	require.False(t, got.IsPooled(),
+		"frame of exactly largeFrameThreshold bytes must take the always-copy path")
+
+	overThreshold := bytes.Repeat([]byte{0x5A}, largeFrameThreshold+1)
+	require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes(bytes.Clone(overThreshold))), "Send(over)")
+	got, err = sB.Pipe().Recv(ctx)
+	require.NoError(t, err, "Recv(over)")
+	require.Equal(t, overThreshold, got.Bytes(), "over-threshold payload")
+	require.True(t, got.IsPooled(),
+		"threshold+1 frame must overflow scratch into the pooled zero-copy path")
+	got.Release()
+}
+
+// TestReader_SmallFrameBurstIndependentPayloads: a burst of small frames
+// all pass through the reader's single scratch buffer; every delivered
+// message must own independent bytes (a clone bug would let a later frame
+// overwrite an earlier queued message).
+func TestReader_SmallFrameBurstIndependentPayloads(t *testing.T) {
+	const N = 64
+	sA, sB := startZmtpPair(t, N+4)
+	ctx := testCtx(t, 5*time.Second)
+
+	for i := 0; i < N; i++ {
+		m := msg.FromBytes([]byte(fmt.Sprintf("payload-%03d", i)))
+		require.NoError(t, sA.Pipe().Send(ctx, m), "Send[%d]", i)
+	}
+	// Multipart tail: several scratch-backed frames within ONE message
+	// must also be independent of each other.
+	require.NoError(t, sA.Pipe().Send(ctx,
+		msg.FromFrames([]byte("frame-a"), []byte("frame-b"), []byte("frame-c"))), "Send(multipart)")
+
+	// Drain only after everything is sent so messages queue in the pipe —
+	// scratch aliasing between queued messages would corrupt payloads.
+	for i := 0; i < N; i++ {
+		m, err := sB.Pipe().Recv(ctx)
+		require.NoError(t, err, "Recv[%d]", i)
+		require.Equal(t, fmt.Sprintf("payload-%03d", i), string(m.Bytes()), "payload[%d]", i)
+	}
+	mp, err := sB.Pipe().Recv(ctx)
+	require.NoError(t, err, "Recv(multipart)")
+	require.Equal(t, 3, mp.NumFrames(), "multipart frame count")
+	want := []string{"frame-a", "frame-b", "frame-c"}
+	for j, f := range mp.Frames() {
+		require.Equal(t, want[j], string(f), "multipart frame[%d]", j)
 	}
 }

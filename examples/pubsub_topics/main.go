@@ -52,6 +52,7 @@ func main() {
 		msg, err := sub.RecvMsg(callCtx)
 		check(err, "subscriber recv")
 		fmt.Printf("subscriber received %q\n", msg.Bytes())
+		msg.Release()
 	}
 
 	check(sub.Subscribe([]byte("metrics")), "subscribe metrics")
@@ -59,6 +60,7 @@ func main() {
 	check(pub.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("metrics:mem=41"))), "publish metrics")
 	msg, err := sub.RecvMsg(callCtx)
 	check(err, "recv metrics")
+	defer msg.Release()
 	fmt.Printf("subscriber received after Subscribe: %q\n", msg.Bytes())
 
 	check(sub.Unsubscribe([]byte("metrics")), "unsubscribe metrics")

@@ -67,6 +67,13 @@ func NewPair(aToB, bToA int, aInfo, bInfo PeerInfo) (a, b iface.Pipe) {
 	}
 	endA.peerEnd = endB
 	endB.peerEnd = endA
+	// Wire each relay (HWM-0 directions only) to the receiving end's
+	// recv-ready gate, then start it. The hooks must be in place before the
+	// relay goroutine runs so no out-enqueue can miss an arm.
+	aToBq.armOut = endB.armRecvReady
+	bToAq.armOut = endA.armRecvReady
+	aToBq.start()
+	bToAq.start()
 	return endA, endB
 }
 
@@ -85,11 +92,18 @@ func newShared() *shared {
 	}
 }
 
+// direction is one half of the pipe. HWM > 0 directions are a single
+// buffered channel (in == out, HWM == capacity). HWM-0 (unbounded)
+// directions keep an unbounded FIFO inside a relay goroutine that pumps
+// in → q → out, so engines can still select on the out channel; see the
+// CAUTION in run for the close/drain ordering.
 type direction struct {
 	in       chan *msg.Msg
 	out      chan *msg.Msg
 	stopIn   chan struct{}
 	done     chan struct{}
+	drained  chan struct{} // relay closed this after flushing q post-stopIn
+	armOut   func()        // arms the receiving end's recv-ready gate; set in NewPair
 	stopOnce sync.Once
 	doneOnce sync.Once
 }
@@ -99,16 +113,34 @@ func newDirection(hwm int) *direction {
 		ch := make(chan *msg.Msg, hwm)
 		return &direction{in: ch, out: ch}
 	}
-	d := &direction{
-		in:     make(chan *msg.Msg, 1024),
-		out:    make(chan *msg.Msg, 1),
-		stopIn: make(chan struct{}),
-		done:   make(chan struct{}),
+	return &direction{
+		in:      make(chan *msg.Msg, 1024),
+		out:     make(chan *msg.Msg, 1),
+		stopIn:  make(chan struct{}),
+		done:    make(chan struct{}),
+		drained: make(chan struct{}),
 	}
-	go d.run()
-	return d
 }
 
+// start launches the relay goroutine for HWM-0 directions. Called by
+// NewPair once armOut has been wired; a no-op for channel-backed
+// directions.
+func (d *direction) start() {
+	if d.stopIn != nil {
+		go d.run()
+	}
+}
+
+// run is the HWM-0 relay: it pumps in → q → out until the sending end
+// closes (stopIn), at which point it drains in, flushes q to out, and
+// closes drained so the receiving end's Recv can distinguish "queue
+// flushed, EOF now" from "messages still in flight". If the receiving
+// end closes (done) the relay exits immediately, dropping q.
+//
+// Leak caveat: after the sender closes, the relay parks pushing q into
+// out until the receiver consumes or closes. A receiver that neither
+// reads nor closes keeps the relay (and q) alive — the same lifetime
+// rule as any unclosed pipe end.
 func (d *direction) run() {
 	var q []*msg.Msg
 	for {
@@ -124,6 +156,7 @@ func (d *direction) run() {
 		case out <- next:
 			q[0] = nil
 			q = q[1:]
+			d.armOut()
 		case <-d.stopIn:
 			for {
 				select {
@@ -139,15 +172,35 @@ func (d *direction) run() {
 				case d.out <- q[0]:
 					q[0] = nil
 					q = q[1:]
+					d.armOut()
 				case <-d.done:
 					return
 				}
 			}
+			close(d.drained)
 			return
 		case <-d.done:
 			return
 		}
 	}
+}
+
+// closedChan is a shared pre-closed channel; drainedCh returns it for
+// channel-backed (HWM > 0) directions, where every in-flight message is
+// already visible in the out channel and there is nothing left to flush.
+var closedChan = func() chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}()
+
+// drainedCh returns a channel that is closed once every message this
+// direction will ever deliver is observable on the out channel.
+func (d *direction) drainedCh() <-chan struct{} {
+	if d.drained == nil {
+		return closedChan
+	}
+	return d.drained
 }
 
 func (d *direction) closeInput() {
@@ -183,6 +236,41 @@ type end struct {
 	peerCh   chan struct{} // cached closed channel for peer end
 	peerEnd  *end          // peer end for atomic flag check
 	isClosed atomic.Bool   // set in Close()
+
+	// recvReady, when registered via SetRecvReady, is armed (non-blocking
+	// send into a cap-1 channel) every time a message becomes available to
+	// this end's Recv, and when either end closes. Socket engines hand
+	// their Poller-facing readiness gate to the pipe so a blocking
+	// Poller.Poll wakes on data arrival without a forwarder goroutine.
+	recvReady atomic.Pointer[recvReadyGate]
+}
+
+// recvReadyGate wraps the registered gate channel so it can sit behind an
+// atomic.Pointer (SetRecvReady may race in-flight sends).
+type recvReadyGate struct{ ch chan<- struct{} }
+
+// SetRecvReady registers gate as this end's recv-ready signal (see the
+// recvReady field doc). If messages are already buffered the gate is
+// armed immediately, preserving the level-trigger property across
+// late registration.
+func (e *end) SetRecvReady(gate chan<- struct{}) {
+	e.recvReady.Store(&recvReadyGate{ch: gate})
+	if len(e.recvCh) > 0 {
+		e.armRecvReady()
+	}
+}
+
+// armRecvReady performs the non-blocking arm of the registered gate.
+// Safe to call from any goroutine; a cap-1 gate coalesces bursts.
+func (e *end) armRecvReady() {
+	g := e.recvReady.Load()
+	if g == nil {
+		return
+	}
+	select {
+	case g.ch <- struct{}{}:
+	default:
+	}
 }
 
 func (e *end) Send(ctx context.Context, m *msg.Msg) error {
@@ -194,11 +282,13 @@ func (e *end) Send(ctx context.Context, m *msg.Msg) error {
 	}
 	select {
 	case e.sendCh <- m:
+		e.peerEnd.armRecvReady()
 		return nil
 	default:
 	}
 	select {
 	case e.sendCh <- m:
+		e.peerEnd.armRecvReady()
 		return nil
 	case <-e.myCh:
 		return io.ErrClosedPipe
@@ -220,6 +310,7 @@ func (e *end) TrySend(m *msg.Msg) bool {
 	}
 	select {
 	case e.sendCh <- m:
+		e.peerEnd.armRecvReady()
 		return true
 	default:
 		return false
@@ -238,11 +329,27 @@ func (e *end) Recv(ctx context.Context) (*msg.Msg, error) {
 	case <-e.myCh:
 		return nil, io.EOF
 	case <-e.peerCh:
-		select {
-		case m := <-e.recvCh:
-			return m, nil
-		default:
-			return nil, io.EOF
+		// Peer closed. For an HWM-0 direction the relay may still be
+		// flushing its queue into recvCh, so wait for drainedCh before
+		// reporting EOF — otherwise queued messages would be silently
+		// dropped. For channel-backed directions drainedCh is pre-closed
+		// and this reduces to a single non-blocking drain.
+		for {
+			select {
+			case m := <-e.recvCh:
+				return m, nil
+			case <-e.myCh:
+				// Our own end closed too; the relay exits without
+				// flushing, so don't wait on drainedCh.
+				return nil, io.EOF
+			case <-e.recvDir.drainedCh():
+				select {
+				case m := <-e.recvCh:
+					return m, nil
+				default:
+					return nil, io.EOF
+				}
+			}
 		}
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -272,6 +379,10 @@ func (e *end) Close() error {
 		e.shared.eitherOnce.Do(func() { close(e.shared.either) })
 		e.sendDir.closeInput()
 		e.recvDir.close()
+		// Wake any Poller parked on either end's recv-ready gate so it
+		// re-checks and observes the close.
+		e.armRecvReady()
+		e.peerEnd.armRecvReady()
 	})
 	return nil
 }

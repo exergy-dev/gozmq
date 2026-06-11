@@ -68,12 +68,11 @@ func inprocName(b *testing.B, tag string) string {
 // pattern so the decoder can't take a zero-copy shortcut that skews
 // numbers vs. real traffic.
 //
-// The first byte is forced to 'A' (0x41) because the SUB engine currently
-// treats a leading 0x00 / 0x01 byte as a synthetic SUBSCRIBE/CANCEL
-// command and drops the message before returning from Recv (see
-// internal/socket/sub.go — isSubscriptionMsg). Until that
-// discrimination to look at a COMMAND flag instead of data content, any
-// pub/sub benchmark payload must avoid those two bytes in position 0.
+// The first byte is forced to 'A' (0x41) purely to keep payloads stable
+// across historical runs. A leading 0x00/0x01 is now delivered intact:
+// the SUB receive path classifies subscriptions by an out-of-band flag
+// (msg.Msg.IsSubscription) set only for genuine wire SUBSCRIBE/CANCEL
+// commands, not by sniffing the payload (see internal/socket/sub.go).
 func newPayload(n int) []byte {
 	b := make([]byte, n)
 	if n > 0 {

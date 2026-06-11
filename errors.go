@@ -18,8 +18,9 @@ var (
 	ErrContextClosed = zmqerr.ErrContextClosed
 
 	// ErrSocketClosed is returned by every Socket method (Send, Recv,
-	// Bind, Connect, Disconnect, Subscribe, Monitor, Close) once the socket has
-	// been closed. Close itself returns ErrSocketClosed on double-close.
+	// Bind, Connect, Disconnect, Subscribe, Monitor) once the socket has
+	// been closed. Close itself is idempotent and returns nil on repeated
+	// calls, matching Context.Close.
 	ErrSocketClosed = zmqerr.ErrSocketClosed
 
 	// ErrHWM is returned by Send on patterns that surface high-water-mark
@@ -68,6 +69,12 @@ var (
 	// endpoint string is syntactically invalid for the chosen transport
 	// (bad port, empty inproc name, malformed ipc path, etc.).
 	ErrEndpointInvalid = zmqerr.ErrEndpointInvalid
+
+	// ErrEndpointUnknown is returned by Disconnect when the endpoint
+	// does not match any active Connect target, and by Unbind when it
+	// does not match any active listener. Distinct from
+	// ErrEndpointInvalid, which signals a syntactically bad endpoint.
+	ErrEndpointUnknown = zmqerr.ErrEndpointUnknown
 
 	// ErrTransportUnknown is returned by Bind or Connect when the
 	// endpoint's scheme has no transport registered on the Context — for

@@ -1,6 +1,7 @@
 package socket
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"sync"
@@ -187,10 +188,17 @@ func splitRepEnvelope(m *msg.Msg) (envelope [][]byte, body *msg.Msg, ok bool) {
 	for i, f := range frames {
 		if len(f) == 0 {
 			// Envelope is frames[0:i+1] (includes the empty delimiter). It is
-			// stashed into e.envelope and outlives m, so it MUST be an
-			// independent copy that cannot alias a recyclable backing slice.
+			// stashed into e.envelope and outlives m — and the body *Msg below
+			// takes ownership of m's pooled buffers and may be recycled before
+			// the reply Send. The envelope frames must therefore be DEEP
+			// copies: cloning only the slice headers would leave the envelope
+			// bytes aliasing pool-backed storage that the body's Recycle can
+			// reclaim (identity frames are ≤255 B, but DEALER peers put
+			// arbitrary user frames in the envelope, so clone them all).
 			env := make([][]byte, i+1)
-			copy(env, frames[:i+1])
+			for j, ef := range frames[:i+1] {
+				env[j] = bytes.Clone(ef)
+			}
 			// Body is frames[i+1:]. The engine solely owns m here and disarms
 			// it via result.TransferPool below (m is dropped immediately
 			// after), so we can reslice m's frame-slice header in place

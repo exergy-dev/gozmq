@@ -1,6 +1,7 @@
 package msg
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -107,4 +108,100 @@ func TestMsgReleaseIdempotentAfterReclamation(t *testing.T) {
 	m.AppendPooledFrame(buf[:32], buf)
 	m.Reset()
 	m.Release()
+}
+
+// ---------------------------------------------------------------------------
+// Ownership machinery: FromFramesOwned, TransferPool, Recycle, IsPooled.
+// ---------------------------------------------------------------------------
+
+// TestFromFramesOwnedAdoptsSlice verifies FromFramesOwned adopts the frame
+// slice header without copying it.
+func TestFromFramesOwnedAdoptsSlice(t *testing.T) {
+	frames := [][]byte{[]byte("a"), []byte("bb")}
+	m := FromFramesOwned(frames)
+	require.Equal(t, 2, m.NumFrames())
+	require.Same(t, &frames[0], &m.Frames()[0], "frame slice header was copied")
+	require.False(t, m.IsPooled(), "locally built message must not be pooled")
+}
+
+// TestTransferPoolMovesOwnership verifies TransferPool moves the pooled
+// bookkeeping (and refcount) to the destination and disarms the source.
+func TestTransferPoolMovesOwnership(t *testing.T) {
+	buf := PoolGet(8 * 1024)
+	src := New()
+	src.AppendPooledFrame(buf[:64], buf)
+	src.Retain() // refs = 2; the transferred message must inherit it
+	require.True(t, src.IsPooled())
+
+	dst := FromFramesOwned(src.Frames()[:1])
+	dst.TransferPool(src)
+	require.True(t, dst.IsPooled(), "destination did not inherit pooled buffers")
+	require.False(t, src.IsPooled(), "source still owns pooled buffers")
+	require.Equal(t, int32(2), dst.refs.Load(), "refcount not transferred")
+
+	// Source is disarmed: recycling it must not reclaim dst's buffers.
+	Recycle(src)
+	require.True(t, dst.IsPooled())
+	Recycle(dst)
+	require.True(t, dst.IsPooled(), "first Recycle reclaimed despite refs=2")
+	Recycle(dst)
+	require.False(t, dst.IsPooled(), "buffers not reclaimed at refcount zero")
+}
+
+// TestRecycleIsRefcountAware verifies Recycle decrements the refcount and
+// only reclaims when the last reference drops (the PUB fanout contract:
+// N retained references, N concurrent post-flush Recycles, one reclaim).
+func TestRecycleIsRefcountAware(t *testing.T) {
+	buf := PoolGet(8 * 1024)
+	m := New()
+	m.AppendPooledFrame(buf[:128], buf)
+	m.Retain() // refs = 2
+	Recycle(m)
+	require.True(t, m.IsPooled(), "Recycle reclaimed while references remain")
+	require.Equal(t, int32(1), m.refs.Load())
+	Recycle(m)
+	require.False(t, m.IsPooled(), "final Recycle did not reclaim")
+}
+
+// TestRecycleDoubleReleaseSafe ensures recycling after reclamation (and on
+// nil / non-pooled messages) is a harmless no-op.
+func TestRecycleDoubleReleaseSafe(t *testing.T) {
+	Recycle(nil)
+	plain := FromBytes([]byte("x"))
+	Recycle(plain)
+	Recycle(plain)
+	require.Equal(t, 1, plain.NumFrames())
+
+	buf := PoolGet(8 * 1024)
+	m := New()
+	m.AppendPooledFrame(buf[:8], buf)
+	Recycle(m)
+	require.False(t, m.IsPooled())
+	Recycle(m) // already reclaimed: must not double-PoolPut or go negative
+	require.False(t, m.IsPooled())
+}
+
+// TestRecycleConcurrent exercises the fanout shape under the race detector:
+// N references released from N goroutines must reclaim exactly once.
+func TestRecycleConcurrent(t *testing.T) {
+	const fanout = 8
+	for iter := 0; iter < 200; iter++ {
+		buf := PoolGet(8 * 1024)
+		m := New()
+		m.AppendPooledFrame(buf[:4096], buf)
+		for i := 1; i < fanout; i++ {
+			m.Retain()
+		}
+		var wg sync.WaitGroup
+		wg.Add(fanout)
+		for i := 0; i < fanout; i++ {
+			go func() {
+				defer wg.Done()
+				Recycle(m)
+			}()
+		}
+		wg.Wait()
+		require.False(t, m.IsPooled(), "buffers not reclaimed after last concurrent Recycle")
+		require.Equal(t, int32(0), m.refs.Load(), "refcount drifted: double or missed release")
+	}
 }

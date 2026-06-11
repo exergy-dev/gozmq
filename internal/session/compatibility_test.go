@@ -133,11 +133,7 @@ func TestSession_HandshakeRejectsIncompatibleSocketTypes(t *testing.T) {
 
 func waitHandshakeFailure(t *testing.T, s iface.Session, label string) {
 	t.Helper()
-	select {
-	case <-s.Handshaked():
-	case <-time.After(2 * time.Second):
-		require.FailNow(t, "handshake did not complete within 2s", label)
-	}
+	waitClosed(t, s.Handshaked(), 2*time.Second, label+": handshake did not complete within 2s")
 	err := s.HandshakeErr()
 	require.Error(t, err, "%s: HandshakeErr = nil, want incompatibility failure", label)
 	require.True(t, strings.Contains(err.Error(), "incompatible Socket-Type pairing"),

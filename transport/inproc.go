@@ -19,10 +19,13 @@ import (
 )
 
 // DefaultInprocQueueWindow is the time a Dial waits for a matching Listen
-// to land before returning ErrEndpointInvalid. Per design §7.3 we relax
-// libzmq's strict bind-before-connect rule with this small window so that
-// race-y init code (Connect goroutine starts before Bind goroutine) does
-// not flake.
+// to land before returning ErrEndpointInvalid. This diverges from libzmq:
+// since 4.2, libzmq allows an inproc connect to precede the bind
+// indefinitely (the pipe simply stays unattached until the bind happens),
+// whereas gozmq fails the Dial after this window. The bounded window is a
+// deliberate tightening — it still absorbs race-y init code (Connect
+// goroutine starting just before the Bind goroutine) while surfacing a
+// never-bound endpoint as a prompt error instead of a silent stall.
 const DefaultInprocQueueWindow = 500 * time.Millisecond
 
 // InprocTransport implements iface.Transport for the in-process scheme.
@@ -409,6 +412,13 @@ func (l *inprocListener) dialIn(name string) (iface.Conn, error) {
 // inprocConn satisfies iface.Conn by delegating to a pipe.Pipe. Because
 // inproc bypasses ZMTP framing entirely, this adapter exists so the
 // iface.Conn contract remains uniform across all transports.
+//
+// Deadline semantics follow net.Conn: SetReadDeadline/SetWriteDeadline
+// apply to in-flight calls too, so setting a deadline (including one in
+// the past) wakes a currently parked Read/Write. That is implemented with
+// per-direction "poke" channels: a blocked call captures the current poke
+// channel, and SetXDeadline closes-and-replaces it, cancelling the parked
+// call's context so it re-evaluates the new deadline.
 type inprocConn struct {
 	p             iface.Pipe
 	local, remote string
@@ -416,86 +426,149 @@ type inprocConn struct {
 	leftover      []byte // unread bytes from the last frame
 	readDeadline  time.Time
 	writeDeadline time.Time
+	readPoke      chan struct{} // closed+replaced by SetReadDeadline
+	writePoke     chan struct{} // closed+replaced by SetWriteDeadline
 	closed        bool
 }
 
 func newInprocConn(p iface.Pipe, local, remote string) *inprocConn {
-	return &inprocConn{p: p, local: local, remote: remote}
+	return &inprocConn{
+		p:         p,
+		local:     local,
+		remote:    remote,
+		readPoke:  make(chan struct{}),
+		writePoke: make(chan struct{}),
+	}
 }
 
 func (c *inprocConn) LocalEndpoint() string  { return c.local }
 func (c *inprocConn) RemoteEndpoint() string { return c.remote }
 
-func (c *inprocConn) Read(buf []byte) (int, error) {
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return 0, io.ErrClosedPipe
-	}
-	if len(c.leftover) > 0 {
-		n := copy(buf, c.leftover)
-		c.leftover = c.leftover[n:]
-		c.mu.Unlock()
-		return n, nil
-	}
-	deadline := c.readDeadline
-	c.mu.Unlock()
+// errDeadlinePoked is an internal sentinel reported by runWithDeadline when
+// a concurrent SetXDeadline replaced the deadline while the call was parked.
+// The caller loops and re-evaluates the new deadline.
+var errDeadlinePoked = errors.New("gozmq/inproc: deadline updated")
 
+// runWithDeadline executes op under a context derived from deadline,
+// additionally cancelling it when poke fires (a concurrent SetXDeadline on
+// this direction). Returns &timeoutError{} when the deadline has expired —
+// including a deadline already in the past, per the net.Conn contract —
+// and errDeadlinePoked when the call must be retried under the new
+// deadline.
+func runWithDeadline(deadline time.Time, poke <-chan struct{}, op func(context.Context) error) error {
+	if !deadline.IsZero() && !time.Now().Before(deadline) {
+		return &timeoutError{}
+	}
 	ctx := context.Background()
 	var cancel context.CancelFunc
-	if !deadline.IsZero() {
-		ctx, cancel = context.WithDeadline(ctx, deadline)
-		defer cancel()
-	}
-	m, err := c.p.Recv(ctx)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return 0, &timeoutError{}
-		}
-		return 0, err
-	}
-	// Concatenate the frames (typically a single frame; multipart can be
-	// represented by callers writing multiple times — but we chose the
-	// "1 Write = 1 frame, 1 Read = up to 1 frame" contract above).
-	var data []byte
-	if m.NumFrames() == 1 {
-		data = m.Frames()[0]
+	if deadline.IsZero() {
+		ctx, cancel = context.WithCancel(ctx)
 	} else {
-		data = bytes.Join(m.Frames(), nil)
+		ctx, cancel = context.WithDeadline(ctx, deadline)
 	}
-	n := copy(buf, data)
-	if n < len(data) {
+	defer cancel()
+
+	// Watcher: translate a deadline poke into ctx cancellation; exits when
+	// op finishes (stop closed) so no goroutine outlives the call.
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-poke:
+			cancel()
+		case <-stop:
+		}
+	}()
+
+	err := op(ctx)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, context.DeadlineExceeded):
+		return &timeoutError{}
+	case errors.Is(err, context.Canceled):
+		// The only canceller is the poke watcher above.
+		return errDeadlinePoked
+	default:
+		return err
+	}
+}
+
+func (c *inprocConn) Read(buf []byte) (int, error) {
+	for {
 		c.mu.Lock()
-		c.leftover = append(c.leftover, data[n:]...)
+		if c.closed {
+			c.mu.Unlock()
+			return 0, io.ErrClosedPipe
+		}
+		if len(c.leftover) > 0 {
+			n := copy(buf, c.leftover)
+			c.leftover = c.leftover[n:]
+			c.mu.Unlock()
+			return n, nil
+		}
+		deadline := c.readDeadline
+		poke := c.readPoke
 		c.mu.Unlock()
+
+		var data []byte
+		err := runWithDeadline(deadline, poke, func(ctx context.Context) error {
+			m, err := c.p.Recv(ctx)
+			if err != nil {
+				return err
+			}
+			// Concatenate the frames (typically a single frame; multipart
+			// can be represented by callers writing multiple times — but we
+			// chose the "1 Write = 1 frame, 1 Read = up to 1 frame"
+			// contract above).
+			if m.NumFrames() == 1 {
+				data = m.Frames()[0]
+			} else {
+				data = bytes.Join(m.Frames(), nil)
+			}
+			return nil
+		})
+		if errors.Is(err, errDeadlinePoked) {
+			continue // deadline replaced mid-call; re-evaluate it
+		}
+		if err != nil {
+			return 0, err
+		}
+		n := copy(buf, data)
+		if n < len(data) {
+			c.mu.Lock()
+			c.leftover = append(c.leftover, data[n:]...)
+			c.mu.Unlock()
+		}
+		return n, nil
 	}
-	return n, nil
 }
 
 func (c *inprocConn) Write(buf []byte) (int, error) {
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return 0, io.ErrClosedPipe
-	}
-	deadline := c.writeDeadline
-	c.mu.Unlock()
-
-	ctx := context.Background()
-	var cancel context.CancelFunc
-	if !deadline.IsZero() {
-		ctx, cancel = context.WithDeadline(ctx, deadline)
-		defer cancel()
-	}
-	// Copy so the caller may safely reuse buf after Write returns.
+	// Copy once so the caller may safely reuse buf after Write returns,
+	// including across poke-induced retries.
 	body := bytes.Clone(buf)
-	if err := c.p.Send(ctx, msg.FromBytes(body)); err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return 0, &timeoutError{}
+	for {
+		c.mu.Lock()
+		if c.closed {
+			c.mu.Unlock()
+			return 0, io.ErrClosedPipe
 		}
-		return 0, err
+		deadline := c.writeDeadline
+		poke := c.writePoke
+		c.mu.Unlock()
+
+		err := runWithDeadline(deadline, poke, func(ctx context.Context) error {
+			return c.p.Send(ctx, msg.FromBytes(body))
+		})
+		if errors.Is(err, errDeadlinePoked) {
+			continue // deadline replaced mid-call; re-evaluate it
+		}
+		if err != nil {
+			return 0, err
+		}
+		return len(buf), nil
 	}
-	return len(buf), nil
 }
 
 func (c *inprocConn) Close() error {
@@ -513,6 +586,8 @@ func (c *inprocConn) SetDeadline(t time.Time) error {
 	c.mu.Lock()
 	c.readDeadline = t
 	c.writeDeadline = t
+	c.pokeReadLocked()
+	c.pokeWriteLocked()
 	c.mu.Unlock()
 	return nil
 }
@@ -520,6 +595,7 @@ func (c *inprocConn) SetDeadline(t time.Time) error {
 func (c *inprocConn) SetReadDeadline(t time.Time) error {
 	c.mu.Lock()
 	c.readDeadline = t
+	c.pokeReadLocked()
 	c.mu.Unlock()
 	return nil
 }
@@ -527,8 +603,22 @@ func (c *inprocConn) SetReadDeadline(t time.Time) error {
 func (c *inprocConn) SetWriteDeadline(t time.Time) error {
 	c.mu.Lock()
 	c.writeDeadline = t
+	c.pokeWriteLocked()
 	c.mu.Unlock()
 	return nil
+}
+
+// pokeReadLocked / pokeWriteLocked wake any Read/Write parked on the old
+// poke channel and install a fresh one for subsequent calls. Caller holds
+// c.mu.
+func (c *inprocConn) pokeReadLocked() {
+	close(c.readPoke)
+	c.readPoke = make(chan struct{})
+}
+
+func (c *inprocConn) pokeWriteLocked() {
+	close(c.writePoke)
+	c.writePoke = make(chan struct{})
 }
 
 // timeoutError implements net.Error so io callers (and Conn consumers

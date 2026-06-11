@@ -4,7 +4,6 @@ package iface
 import (
 	"context"
 	"io"
-	"net"
 	"time"
 
 	"github.com/rkm/gozmq/internal/msg"
@@ -145,14 +144,6 @@ type FrameCodec interface {
 	WriteFrame(w io.Writer, flags uint8, body []byte) error
 }
 
-// FrameBufferAppender is an optional fast path for codecs that can append
-// one fully-encoded frame directly into a net.Buffers batch without first
-// materializing a contiguous header+body blob. Callers must invoke the
-// returned release hook after the batch has been written (or abandoned).
-type FrameBufferAppender interface {
-	AppendFrameBuffers(dst *net.Buffers, flags uint8, body []byte) (release func(), frameBytes int, err error)
-}
-
 // FrameHeaderAppender is the allocation-free fast path used by the writer
 // batching loop. It appends the wire-format frame header (flags + length)
 // for a body of len(body) bytes onto scratch and returns the grown scratch.
@@ -161,9 +152,9 @@ type FrameBufferAppender interface {
 // array is stable, so subslices referencing scratch[off:off+hdrLen] do not
 // race with further appends.
 //
-// Unlike FrameBufferAppender, this method allocates no closures and uses
-// no internal sync.Pool: header bytes live in caller-owned scratch storage
-// that the caller recycles across batches.
+// This method allocates no closures and uses no internal sync.Pool: header
+// bytes live in caller-owned scratch storage that the caller recycles
+// across batches.
 type FrameHeaderAppender interface {
 	AppendFrameHeader(scratch []byte, flags uint8, body []byte) (newScratch []byte, headerLen int, err error)
 }
@@ -257,14 +248,6 @@ type Pipe interface {
 	// Closed returns a channel that closes when either end has been Closed.
 	Closed() <-chan struct{}
 
-	// SendHWM reports the configured outbound high-water mark (messages).
-	SendHWM() int
-	// RecvHWM reports the configured inbound high-water mark.
-	RecvHWM() int
-
-	// PeerEndpoint reports the peer's ZMQ endpoint string, if any. Empty
-	// for inproc and during pre-handshake windows.
-	PeerEndpoint() string
 	// PeerIdentity returns the ZMTP Identity advertised by the peer in its
 	// READY metadata. Empty when the peer did not set one.
 	PeerIdentity() []byte
@@ -296,13 +279,6 @@ type Session interface {
 	// Pipe returns the engine-facing end of the session's pipe. Valid only
 	// after Handshaked closes without error.
 	Pipe() Pipe
-
-	// Endpoint returns the peer's ZMQ endpoint string.
-	Endpoint() string
-
-	// Role reports whether this session was initiated by Connect (Client)
-	// or Accept (Server).
-	Role() Role
 
 	// Done returns a channel that closes when every session goroutine
 	// (reader, writer, optional heartbeat) has exited.
@@ -383,4 +359,3 @@ type SocketEngine interface {
 	// goroutine, including concurrently with Send/Recv.
 	Metrics() SocketMetrics
 }
-

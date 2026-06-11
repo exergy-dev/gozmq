@@ -31,8 +31,10 @@ func main() {
 
 	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	check(client.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("hello"))), "send")
-	_, err = server.RecvMsg(callCtx)
+	check(client.SendBytes(callCtx, []byte("hello")), "send")
+	// RecvBytes copies the payload and releases the message internally,
+	// so no (*Msg).Release bookkeeping is needed.
+	_, err = server.RecvBytes(callCtx)
 	check(err, "recv")
 
 	time.Sleep(150 * time.Millisecond)
@@ -63,6 +65,8 @@ func eventName(t gozmq.EventType) string {
 		return "ConnectDelayed"
 	case gozmq.EventConnectRetried:
 		return "ConnectRetried"
+	case gozmq.EventConnectFailed:
+		return "ConnectFailed"
 	case gozmq.EventListening:
 		return "Listening"
 	case gozmq.EventBindFailed:

@@ -2,6 +2,7 @@ package gozmq
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -21,6 +22,17 @@ func TestNewSocketRejectsInvalidOptionCombinations(t *testing.T) {
 		{name: "identity-leading-zero", typ: Dealer, opt: WithIdentity([]byte{0, 1})},
 		{name: "curve-server-short-key", typ: Router, opt: WithCurveServer([]byte("short"))},
 		{name: "max-message-size-negative", typ: Pair, opt: WithMaxMessageSize(-1)},
+
+		// STREAM bypasses ZMTP entirely, so every ZMTP-layer option must
+		// fail construction rather than be silently ignored.
+		{name: "plain-auth-on-stream", typ: Stream, opt: WithPlainAuth(func(u, p string) bool { return true })},
+		{name: "plain-client-on-stream", typ: Stream, opt: WithPlainClient("user", "pass")},
+		{name: "curve-server-on-stream", typ: Stream, opt: WithCurveServer(make([]byte, 32))},
+		{name: "curve-client-on-stream", typ: Stream, opt: WithCurveClient(make([]byte, 32), make([]byte, 32), make([]byte, 32))},
+		{name: "identity-on-stream", typ: Stream, opt: WithIdentity([]byte("id"))},
+		{name: "heartbeat-on-stream", typ: Stream, opt: WithHeartbeat(time.Second, 3*time.Second)},
+		{name: "handshake-timeout-on-stream", typ: Stream, opt: WithHandshakeTimeout(time.Second)},
+		{name: "zap-domain-on-stream", typ: Stream, opt: WithZapDomain("global")},
 	}
 
 	for _, tc := range cases {

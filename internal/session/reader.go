@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"unsafe"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
@@ -32,7 +33,31 @@ func (s *sessionImpl) runReader() {
 	defer s.wg.Done()
 	defer s.shutdown()
 
+	// scratch is a persistent dst handed to ReadFrame, sized to EXACTLY
+	// largeFrameThreshold. The size is the invariant: any frame that fits
+	// in scratch is, by definition, at or below the threshold and thus on
+	// the always-copy delivery path below, so scratch-backed bytes never
+	// outlive one loop iteration — small user frames are bytes.Clone'd
+	// into the Msg, and command bodies are fully consumed by handleCommand
+	// (PING/SUBSCRIBE/CANCEL copy whatever they keep) before the next
+	// ReadFrame overwrites scratch. Frames larger than the threshold
+	// exceed scratch's capacity, so the codec draws them from the frame
+	// pool and the zero-copy AppendPooledFrame path is unaffected.
+	//
+	// scratch itself must NEVER be returned to the frame pool (its 4 KiB
+	// capacity matches a pool tier, so PoolPut would accept it and a later
+	// PoolGet could hand it out while the reader still overwrites it on
+	// every frame): putBody identity-checks every return site.
+	scratch := make([]byte, largeFrameThreshold)
+	scratchPtr := unsafe.SliceData(scratch)
+	putBody := func(body []byte) {
+		if unsafe.SliceData(body) != scratchPtr {
+			msg.PoolPut(body)
+		}
+	}
+
 	var current *msg.Msg
+	var currentSize int64 // decoded bytes accumulated into current
 	for {
 		// Honor cancellation between frames. The blocking io.Read will
 		// be interrupted by Conn.Close (called from shutdown/Stop).
@@ -42,15 +67,15 @@ func (s *sessionImpl) runReader() {
 		default:
 		}
 
-		flags, body, err := s.cfg.Codec.ReadFrame(s.reader, nil)
+		flags, body, err := s.cfg.Codec.ReadFrame(s.reader, scratch)
 		if err != nil {
 			if !isShutdownErr(err) {
 				s.cfg.Logger.Debug("gozmq/session: reader exit", "err", err)
 			}
-			// body is either nil on the header-error paths or a
-			// partially-filled pool buffer on the body-read path; in
-			// the latter case we can return it since no one holds it.
-			msg.PoolPut(body)
+			// body is nil on the header-error paths or a partially-filled
+			// buffer on the body-read path — scratch (skipped by putBody)
+			// or a pool buffer we can return since no one holds it.
+			putBody(body)
 			return
 		}
 
@@ -61,18 +86,18 @@ func (s *sessionImpl) runReader() {
 		plainFlags, decoded, err := s.decode(flags, body)
 		if err != nil {
 			s.cfg.Logger.Warn("gozmq/session: decode frame failed", "err", err)
-			msg.PoolPut(body)
+			putBody(body)
 			return
 		}
 
 		if plainFlags&iface.FlagCommand != 0 {
 			// handleCommand is synchronous and does not retain decoded
 			// past return (SUBSCRIBE/CANCEL copy into a fresh slice
-			// before publishing), so PoolPut on body is safe whether
-			// decoded aliased body or not.
-			s.lastInboundUnix.Store(monoNow())
+			// before publishing), so releasing/reusing body is safe
+			// whether decoded aliased body (or scratch) or not.
+			s.lastInboundUnix.Store(s.cfg.Now())
 			cmdErr := s.handleCommand(decoded)
-			msg.PoolPut(body)
+			putBody(body)
 			if cmdErr != nil {
 				s.cfg.Logger.Warn("gozmq/session: command handling failed", "err", cmdErr)
 				return
@@ -102,16 +127,32 @@ func (s *sessionImpl) runReader() {
 		//     pool buffer. Attach as an ordinary heap frame and PoolPut
 		//     the ciphertext scratch.
 		if current == nil {
-			s.lastInboundUnix.Store(monoNow())
+			s.lastInboundUnix.Store(s.cfg.Now())
 			current = msg.New()
+			currentSize = 0
+		}
+		// Enforce the logical-message size cap BEFORE appending: the
+		// codec's per-frame limit does not bound a MORE chain, so without
+		// this a peer could balloon memory indefinitely (remote OOM DoS).
+		currentSize += int64(len(decoded))
+		if s.cfg.MaxMessageSize > 0 && currentSize > s.cfg.MaxMessageSize {
+			err := fmt.Errorf("%w: multipart message size %d exceeds MaxMessageSize %d",
+				zmqerr.ErrMalformedFrame, currentSize, s.cfg.MaxMessageSize)
+			s.cfg.Logger.Warn("gozmq/session: reader exit", "err", err)
+			msg.Recycle(current)
+			putBody(body)
+			return
 		}
 		switch {
-		case len(decoded) > largeFrameThreshold && s.direct != nil:
+		case len(decoded) > largeFrameThreshold && s.identityMech:
+			// body cannot alias scratch here: an identity-decoded frame
+			// larger than the threshold did not fit in scratch's exactly-
+			// threshold capacity, so the codec drew it from the pool.
 			current.AppendPooledFrame(decoded, body)
 		default:
 			frame := bytes.Clone(decoded)
 			current.AppendFrame(frame)
-			msg.PoolPut(body)
+			putBody(body)
 		}
 
 		if plainFlags&iface.FlagMore != 0 {
@@ -131,9 +172,22 @@ func (s *sessionImpl) runReader() {
 
 // publishInbound enqueues a fully-assembled message on the session-side
 // pipe, honoring backpressure (HWM) by blocking until either the engine
-// drains a slot or the session is cancelled.
+// drains a slot or the session is cancelled. While blocked it raises
+// readerParked so the heartbeat timeout doesn't mistake local engine
+// backpressure (no inbound stamps while we're parked here) for a dead
+// link, and re-stamps the inbound clock on resume so the idle window
+// restarts from the unpark, not from the last pre-park frame.
 func (s *sessionImpl) publishInbound(m *msg.Msg) error {
-	if err := s.sessionPipe.Send(s.ctx, m); err != nil {
+	// Non-blocking fast path keeps the readerParked bookkeeping (and the
+	// extra inbound stamp) off the common no-backpressure case.
+	if s.sessionPipe.TrySend(m) {
+		return nil
+	}
+	s.readerParked.Store(true)
+	err := s.sessionPipe.Send(s.ctx, m)
+	s.lastInboundUnix.Store(s.cfg.Now())
+	s.readerParked.Store(false)
+	if err != nil {
 		// Distinguish ctx-cancel/closed-pipe (normal shutdown) from
 		// genuine errors.
 		if errors.Is(err, context.Canceled) || errors.Is(err, io.ErrClosedPipe) {
@@ -163,12 +217,16 @@ func (s *sessionImpl) handleCommand(body []byte) error {
 	case "PING":
 		// Echo the PING context as a PONG. PING body layout: 2-byte
 		// big-endian TTL + opaque context. PONG echoes the context (no
-		// TTL).
+		// TTL). The reply is handed to the writer goroutine via cmdCh —
+		// writing inline here would take writeMu on the read goroutine
+		// and deadlock against a writer parked in conn.Write.
+		// enqueueCommand copies ctxBytes, which aliases the pooled body.
 		var ctxBytes []byte
 		if len(rest) >= 2 {
 			ctxBytes = rest[2:]
 		}
-		return s.sendCommand("PONG", ctxBytes)
+		s.enqueueCommand("PONG", ctxBytes)
+		return nil
 	case "PONG":
 		// The lastInbound stamp already records this; nothing else to do.
 		return nil
@@ -188,6 +246,11 @@ func (s *sessionImpl) handleCommand(body []byte) error {
 		copy(body[1:], rest)
 		synth := msg.New()
 		synth.AppendFrame(body)
+		// Flag this as a genuine subscription command so a SUB/XSUB
+		// receiver distinguishes it from ordinary data that merely
+		// begins with 0x01/0x00. PUB/XPUB still classify by content
+		// (legacy peers send subscriptions as plain data frames).
+		synth.MarkSubscription()
 		if err := s.publishInbound(synth); err != nil {
 			if !isShutdownErr(err) {
 				return fmt.Errorf("gozmq/session: publish subscription: %w", err)
@@ -215,25 +278,6 @@ func (s *sessionImpl) handleCommand(body []byte) error {
 		s.cfg.Logger.Debug("gozmq/session: ignoring unknown command", "name", name)
 		return nil
 	}
-}
-
-// sendCommand writes a COMMAND-flagged frame for one of the
-// session-issued ZMTP commands (PONG, PING). It serialises the standard
-// 1-byte-name-length + name + body envelope and pushes through the
-// codec/mechanism path identically to user data.
-func (s *sessionImpl) sendCommand(name string, body []byte) error {
-	if len(name) > 255 {
-		return fmt.Errorf("gozmq/session: command name %q too long", name)
-	}
-	buf := make([]byte, 0, 1+len(name)+len(body))
-	buf = append(buf, byte(len(name)))
-	buf = append(buf, name...)
-	buf = append(buf, body...)
-
-	if err := s.writeFrame(iface.FlagCommand, buf); err != nil {
-		return fmt.Errorf("gozmq/session: write command %s: %w", name, err)
-	}
-	return nil
 }
 
 // isShutdownErr returns true for errors we expect to see during a normal

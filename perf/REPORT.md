@@ -1,6 +1,6 @@
 # Performance Report
 
-Date: 2026-04-20
+Date: 2026-04-20 (updated 2026-06-10 — see Round 6)
 
 This report summarizes the measured performance work completed after the
 initial `gozmq` performance plan. It focuses on the small-message PUSH->PULL
@@ -295,18 +295,21 @@ retain-safe default ownership model.
 
 ## Conclusion
 
-The original performance target for small native messages was met and exceeded:
+The original performance target for small native messages was met and far
+exceeded:
 
 - target: `>= 2.0M msg/s` for native `gozmq <- gozmq` at `64B`
-- latest (Round 2): `2.261M msg/s`
+- latest (2026-06-10 update): `5.70M msg/s` at 32B; ahead of native libzmq at
+  256B–8KB (1.06–1.10x)
 
-The biggest remaining gain in the original plan came from reducing fixed
-send-path overhead. The reactor rewrite remains deferred. Round 3 simplified
-the `Msg` ownership story to always-copy at the cost of large-frame
-throughput; Round 4 restored that throughput on the identity-mechanism path
-via finalizer-backed pool recycling above a 4 KiB threshold, producing a
-~4% net improvement over the pre-Round-3 baseline while keeping the
-simplified always-copy public API.
+The reactor rewrite remains deferred and now looks unnecessary for
+throughput parity: the remaining small-message gap versus libzmq is Go
+scheduler wake latency, not architecture. Rounds 3–4 settled the `Msg`
+ownership model (always-copy small frames, refcounted pool-backed large
+frames); the 2026-06-10 update removed the last avoidable per-message
+allocations on the
+writer, reader, PUB fanout, CURVE encode, and Poller paths (see the
+final update section).
 
 ## Benchmark surface expansion (Round 5)
 
@@ -497,3 +500,150 @@ and within ~0.85x at 64KB — versus the original baseline where gozmq was
 ~6x slower at 64B. The remaining 32B gap is the Go channel handoff +
 goroutine scheduling cost per message vs libzmq's hand-tuned C lock-free
 pipe; it shrinks to noise as payload (memory bandwidth) dominates.
+
+## Update (2026-05-31): architecture/correctness round — performance-neutral
+
+This round was an architecture + correctness pass (pooled-message safety, the
+LINGER teardown sleep removal, and a set of behavior-preserving refactors:
+`gozmq.go`/`engine.go` splits, the shared `pipeRing`, `applySubLocked`, the
+inline PAIR engine, and an injectable session clock). The goal was zero
+performance impact, verified by A/B against the immediate pre-change baseline.
+
+### Canonical PushPull TCP (`-benchmem -benchtime=1s -count=6`)
+
+`go test -run '^$' -bench 'BenchmarkPushPullThroughput_TCP/(32B|64B|1KB)$' -benchmem -benchtime=1s ./perf/`
+
+| size | ns/op | B/op | allocs/op |
+|------|------:|-----:|----------:|
+| 32B  | ~191  | 291  | 5 |
+| 64B  | ~203  | 323  | 5 |
+| 1KB  | ~540  | 1302 | 5 |
+
+Note: these are not directly comparable to the older "After Round 1/2" tables
+above — the in-repo harness (`perf/benchmark_test.go`) was reworked since, so
+absolute `B/op` differs (the 1KB payload is now allocated per iteration).
+
+### A/B of the writer pooled-recycle fix (the only hot-path-relevant change)
+
+Reverting just `internal/session/writer.go` (eager recycle) vs. the fix
+(deferred recycle, gated on `(*Msg).IsPooled`):
+
+| size | baseline (eager) | fix (deferred, gated) | Δ |
+|------|-----------------:|----------------------:|---|
+| 32B  | ~191 ns / 5 allocs | ~192 ns / 5 allocs | flat (noise) |
+| 64B  | ~201 ns / 5 allocs | ~203 ns / 5 allocs | flat (noise) |
+| 1KB  | ~534 ns / 5 allocs | ~540 ns / 5 allocs | within noise |
+
+An initial implementation that tracked *every* batched message for deferred
+recycle cost ~2% at 1KB (no extra allocations — just per-message bookkeeping).
+Gating the tracking on `IsPooled` (sub-4 KiB frames are never pooled, and
+`Recycle` is a no-op on them) recovered that to noise while preserving the
+use-after-free fix — confirmed by the `-race` proxy regression test.
+
+### Fair native-vs-libzmq, all cross-process transports (`perf/libzmq_thr/compare_all.sh`, libzmq 4.3.4, WSL2)
+
+Both sides two processes, NO CGO. Transports that bridge two processes are
+**tcp** and **ipc**; `inproc://` is single-process (no two-binary comparison
+possible) and `tls+tcp://` is a gozmq-only scheme libzmq does not speak — both
+out of scope here (use the in-repo Go benchmarks for inproc).
+
+**TCP loopback** — the trustworthy cross-implementation comparison:
+
+| size | gozmq        | libzmq (C)   | gozmq/libzmq |
+|------|--------------|--------------|--------------|
+| 32B  | 4.65 Mmsg/s  | 8.90 Mmsg/s  | 0.52x        |
+| 256B | 4.34 Mmsg/s  | 4.19 Mmsg/s  | 1.04x        |
+| 1KB  | 2.40 Mmsg/s  | 2.51 Mmsg/s  | 0.95x        |
+| 8KB  | 0.55 Mmsg/s  | 0.55 Mmsg/s  | 1.00x        |
+| 64KB | 0.09 Mmsg/s  | 0.10 Mmsg/s  | 0.83x        |
+
+Parity from 256B–8KB, ~2x behind only at 32B (per-message goroutine/channel
+scheduling vs libzmq's lock-free C pipe), slightly behind at 64KB. Consistent
+with the 2026-05-30 TCP figures.
+
+**IPC (Unix domain sockets)** — gozmq absolute throughput is solid and
+reproducible; the libzmq column is reproducible too but reflects *stock* libzmq
+perf-tool settings, so the ratio is **not apples-to-apples** (see caveat below):
+
+| size | gozmq        | libzmq (C, stock) | note |
+|------|--------------|-------------------|------|
+| 32B  | 5.43 Mmsg/s  | 9.14 Mmsg/s       | libzmq ahead (as on TCP) |
+| 256B | ~4.40 Mmsg/s | 3.40 Mmsg/s       | gozmq 256B verified in isolation (harness cell was a spurious FAIL) |
+| 1KB  | 2.53 Mmsg/s  | 0.79 Mmsg/s       | libzmq IPC bandwidth-bound (~6 Gb/s) here |
+| 8KB  | 0.54 Mmsg/s  | 0.084 Mmsg/s      | "" |
+| 64KB | 0.08 Mmsg/s  | 0.06 Mmsg/s       | low counts, noisy |
+
+Caveat: the C `remote_thr` uses libzmq's default `SNDHWM` (1000) and does a
+per-message `zmq_msg_init_size` + `memset`, whereas gozmq's `remote_thr` uses a
+1M HWM and reuses one pre-allocated payload. Over TCP these aren't the
+bottleneck (libzmq still wins at 32B), but over IPC they inflate gozmq's
+relative numbers — so do not read the IPC column as "gozmq is 3x faster than a
+tuned libzmq." What is fair to say: gozmq's IPC path (batched `writev` over the
+Unix socket) sustains 20–43 Gb/s and is at least competitive with libzmq IPC on
+this host. inproc is not in scope for cross-process comparison.
+
+Conclusion: the architecture/correctness work is allocation- and
+throughput-neutral; on the trustworthy TCP comparison gozmq holds parity with
+native libzmq from 256B–8KB, trailing only at the 32B and 64KB extremes.
+
+## Update (2026-06-10): correctness wave + writer/reader/fanout/CURVE/Poller optimizations
+
+This round landed alongside a large correctness wave (pooled-frame ownership
+fixes, Poller data-path wakeups, PUB fanout refcounting), so the numbers
+below supersede everything above — several hot paths were restructured for
+correctness and then re-optimized.
+
+Optimizations:
+
+- Writer: fixed `net.Buffers` capacity erosion — `WriteTo`/`WriteBuffers`
+  consume the slice header they are handed, so the batch was re-growing its
+  buffers slice from zero capacity on every flush. Flushing a copy of the
+  header preserves the backing array (TCP 32B: 291 → 194 B/op; this single
+  fix was ~33% of all bytes allocated on the TCP throughput path).
+- Reader: persistent per-reader scratch buffer (sized exactly at the 4 KiB
+  pool threshold) passed as the `ReadFrame` dst, eliminating a
+  PoolGet/PoolPut round trip per small frame.
+- PUB/XPUB: copy-on-write peer snapshot; `Send` no longer takes the engine
+  mutex or allocates a targets slice (fanout 32B ×3 subs: 393 → 214 ns/op,
+  2 → 1 allocs; XPub/XSub latency: 156 → 85 ns/op).
+- CURVE: `box.Precompute` at handshake completion (per-frame ECDH
+  eliminated) and `EncodeFrame` now seals directly into the pre-sized wire
+  buffer with a per-direction scratch (3 → 1 allocs, one full-payload copy
+  removed; encode +12–22% across 64B–16KiB).
+- Poller: registration snapshot and `reflect.SelectCase` slice cached across
+  `Poll` calls keyed on a registration generation (steady-state Poll over 8
+  sockets: ~113 ns/op, 1 alloc — the caller-owned result slice).
+- Cleanup: the legacy `FrameBufferAppender` slow lane described in the
+  "Frame-buffer pre-allocation" section above was removed entirely —
+  heartbeat-rate command writes now use the plain codec write path, and the
+  header `sync.Pool`s went with it.
+
+### In-repo results (14900KF, WSL2, `-benchtime=1s -count=3`, medians)
+
+| Benchmark                  | prior | now | B/op | allocs/op |
+|:---------------------------|------------:|--------:|-----:|----------:|
+| PushPull TCP 32B           |   ~393 ns   | 160 ns  | 194  | 5 |
+| PushPull TCP 1KB           |   ~713 ns   | 507 ns  | 1200 | 5 |
+| PushPull TCP 64KB          |  ~8900 ns   | 8780 ns | 226  | 5 |
+| PushPull inproc 32–64KB    |     —       | 73–77 ns| 80   | 1 |
+| PubSub fanout inproc 32B   |     —       | 214 ns  | 80   | 1 |
+| XPub/XSub latency 32B      |     —       | 85 ns   | 80   | 1 |
+| Router/Dealer RTT 32B      |     —       | 968 ns  | 440  | 7 |
+
+### Native two-process comparison (`perf/libzmq_thr/compare.sh`, libzmq 4.3.4)
+
+| size | gozmq | libzmq | ratio |
+|:-----|------:|-------:|------:|
+| 32B  | 5.70M msg/s | 9.96M msg/s | 0.57x |
+| 256B | 4.43M msg/s | 4.03M msg/s | **1.10x** |
+| 1KB  | 2.26M msg/s | 2.06M msg/s | **1.10x** |
+| 8KB  | 0.51M msg/s | 0.48M msg/s | **1.06x** |
+| 64KB | 43.2 Gb/s   | 48.4 Gb/s   | 0.89x |
+
+gozmq is now ahead of native libzmq from 256B through 8KB and within
+0.6–0.9x at the extremes. The remaining 32B gap is futex/scheduler-bound
+(goroutine wakeups), not allocation-bound; profiling shows runtime
+lock/wake machinery at ~36% of CPU there. Measured non-starters this
+round: raising the 32-message batch cap (syscall count is not the
+limiter), a Msg sync.Pool (cross-goroutine hit rate ~0%), and bufio/TCP
+buffer tuning (already saturated).

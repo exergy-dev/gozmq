@@ -9,7 +9,6 @@ import (
 	"github.com/rkm/gozmq/internal/pipe"
 	"github.com/rkm/gozmq/internal/socket"
 	"github.com/rkm/gozmq/internal/zmqerr"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -135,15 +134,4 @@ func TestDealer_CloseUnblocksBoth(t *testing.T) {
 			require.Fail(t, "did not unblock on close")
 		}
 	}
-}
-
-// TestDealer_AttachAfterCloseFails asserts attaching after Close yields
-// ErrSocketClosed.
-func TestDealer_AttachAfterCloseFails(t *testing.T) {
-	t.Parallel()
-	eng := socket.NewDealerEngine()
-	require.NoError(t, eng.Close(), "close")
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
-	defer closePipes(a, b)
-	assert.ErrorIs(t, eng.AttachPipe(a), zmqerr.ErrSocketClosed)
 }

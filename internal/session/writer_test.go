@@ -2,9 +2,8 @@ package session
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
-	"io"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/msg"
+	"github.com/rkm/gozmq/internal/pipe"
 )
 
 // --------------------------------------------------------------------------
@@ -30,33 +30,13 @@ type countingConn struct {
 	writeCalls int32
 	writeSizes []int
 	accum      []byte
-
-	// gateCh, when non-nil, blocks Write until a receive on gateCh
-	// unblocks it. Stored via atomic.Pointer so test control goroutines
-	// can install/remove the gate without racing with the writer
-	// goroutine. Used by the backpressure and batch-visibility tests
-	// to stall the wire.
-	gate atomic.Pointer[chan struct{}]
 }
 
 func newCountingConn(fc *fakeConn) *countingConn {
 	return &countingConn{fakeConn: fc}
 }
 
-// setGate installs g as the blocking gate for future Write calls, or
-// clears the gate when g is nil.
-func (c *countingConn) setGate(g chan struct{}) {
-	if g == nil {
-		c.gate.Store(nil)
-		return
-	}
-	c.gate.Store(&g)
-}
-
 func (c *countingConn) Write(p []byte) (int, error) {
-	if gp := c.gate.Load(); gp != nil {
-		<-*gp
-	}
 	atomic.AddInt32(&c.writeCalls, 1)
 	c.mu.Lock()
 	c.writeSizes = append(c.writeSizes, len(p))
@@ -78,6 +58,57 @@ func (c *countingConn) Sizes() []int {
 }
 
 // --------------------------------------------------------------------------
+// writevConn extends countingConn with WriteBuffers — the bufferWriter
+// fast path flushBatch prefers — emulating writev(2): every buffer in a
+// batch lands in ONE Write call on the underlying countingConn, making
+// batch coalescing observable on a fake conn (net.Buffers.WriteTo only
+// uses writev on real TCP/Unix conns).
+//
+// The optional gate stalls WriteBuffers. Because only traffic-phase
+// flushes go through WriteBuffers (greeting/handshake writes use plain
+// Write), the gate exerts wire backpressure without wedging the
+// handshake — the phase distinction the old Write-level gate lacked.
+// --------------------------------------------------------------------------
+
+type writevConn struct {
+	*countingConn
+
+	gate atomic.Pointer[chan struct{}]
+	// gateWaiting counts WriteBuffers calls currently parked on the
+	// gate, so tests can wait until the writer is provably stalled.
+	gateWaiting atomic.Int32
+}
+
+func newWritevConn(fc *fakeConn) *writevConn {
+	return &writevConn{countingConn: newCountingConn(fc)}
+}
+
+// setGate installs g as the blocking gate for future WriteBuffers calls,
+// or clears the gate when g is nil.
+func (c *writevConn) setGate(g chan struct{}) {
+	if g == nil {
+		c.gate.Store(nil)
+		return
+	}
+	c.gate.Store(&g)
+}
+
+func (c *writevConn) WriteBuffers(bufs *net.Buffers) (int64, error) {
+	if gp := c.gate.Load(); gp != nil {
+		c.gateWaiting.Add(1)
+		<-*gp
+		c.gateWaiting.Add(-1)
+	}
+	var all []byte
+	for _, b := range *bufs {
+		all = append(all, b...)
+	}
+	*bufs = (*bufs)[:0] // consumed, mirroring net.Buffers.WriteTo
+	n, err := c.Write(all)
+	return int64(n), err
+}
+
+// --------------------------------------------------------------------------
 // newWriterTestPair builds two sessions A→B over a countingConn on the
 // A side and plain fakeConn on the B side, runs both handshakes, and
 // returns (sA, sB, countingConn). B drains via a goroutine that just
@@ -88,30 +119,24 @@ func newWriterTestPair(t *testing.T, sendHWM, recvHWM int) (sA, sB iface.Session
 	t.Helper()
 	connA, connB := newFakeConnPair()
 	ccA = newCountingConn(connA)
-
-	sA = New(Config{
-		Conn:    ccA,
-		Mech:    newFakeMech("NULL", false, map[string]string{"Identity": "A"}),
-		Codec:   fakeCodec{},
-		Role:    iface.RoleClient,
-		SendHWM: sendHWM,
-		RecvHWM: recvHWM,
-	})
-	sB = New(Config{
-		Conn:    connB,
-		Mech:    newFakeMech("NULL", true, map[string]string{"Identity": "B"}),
-		Codec:   fakeCodec{},
-		Role:    iface.RoleServer,
-		SendHWM: sendHWM,
-		RecvHWM: recvHWM,
-	})
-
-	sA.Start()
-	sB.Start()
-
-	waitHandshake(t, sA, "A")
-	waitHandshake(t, sB, "B")
+	sA, sB = startPair(t,
+		Config{Conn: ccA, Mech: newFakeMech("NULL", false, map[string]string{"Identity": "A"}), SendHWM: sendHWM, RecvHWM: recvHWM},
+		Config{Conn: connB, Mech: newFakeMech("NULL", true, map[string]string{"Identity": "B"}), SendHWM: sendHWM, RecvHWM: recvHWM},
+	)
 	return sA, sB, ccA
+}
+
+// newWritevTestPair is newWriterTestPair with a writev-emulating conn on
+// the A side, for tests that observe batch coalescing or gate the wire.
+func newWritevTestPair(t *testing.T, sendHWM, recvHWM int) (sA, sB iface.Session, wcA *writevConn) {
+	t.Helper()
+	connA, connB := newFakeConnPair()
+	wcA = newWritevConn(connA)
+	sA, sB = startPair(t,
+		Config{Conn: wcA, Mech: newFakeMech("NULL", false, map[string]string{"Identity": "A"}), SendHWM: sendHWM, RecvHWM: recvHWM},
+		Config{Conn: connB, Mech: newFakeMech("NULL", true, map[string]string{"Identity": "B"}), SendHWM: sendHWM, RecvHWM: recvHWM},
+	)
+	return sA, sB, wcA
 }
 
 // resetWriteCounters clears the counting state AFTER the handshake has
@@ -125,86 +150,102 @@ func (c *countingConn) resetWriteCounters() {
 }
 
 // --------------------------------------------------------------------------
+// TestWriter_BatchRetainsBufferCapacityAcrossFlushes: net.Buffers.WriteTo
+// and the tcpConn WriteBuffers fast path CONSUME the slice header they
+// are handed (*v = (*v)[i:]), so flushBatch must be given a COPY of the
+// batch's buffers header. Regression check: the batch's backing array
+// must survive flushes — before the fix, release() truncated the
+// consumed (empty) tail and every batch re-grew from zero capacity.
+// --------------------------------------------------------------------------
+
+// consumeWritevConn emulates the consume semantics of net.Buffers.WriteTo
+// faithfully: the passed slice header is advanced past everything written.
+type consumeWritevConn struct{ *fakeConn }
+
+func (c *consumeWritevConn) WriteBuffers(bufs *net.Buffers) (int64, error) {
+	var n int64
+	for _, b := range *bufs {
+		n += int64(len(b))
+	}
+	*bufs = (*bufs)[len(*bufs):]
+	return n, nil
+}
+
+func TestWriter_BatchRetainsBufferCapacityAcrossFlushes(t *testing.T) {
+	connA, _ := newFakeConnPair()
+	s := New(Config{
+		Conn:  &consumeWritevConn{fakeConn: connA},
+		Mech:  newFakeMech("NULL", false, nil),
+		Codec: fakeCodec{},
+		Role:  iface.RoleClient,
+	}).(*sessionImpl)
+	t.Cleanup(func() { _ = s.Stop() })
+	sp, ep := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	s.sessionPipe = asSessionChanPipe(sp)
+	_ = ep
+
+	var batch writerBatch
+	require.NoError(t, s.writeBatchFrom(&batch, msg.FromBytes([]byte("first"))), "flush[0]")
+	capAfterFirst := cap(batch.buffers)
+	require.Greater(t, capAfterFirst, 0,
+		"batch.buffers lost its backing array after a flush (consumed slice header leaked into the batch)")
+	for i := 1; i <= 4; i++ {
+		require.NoError(t, s.writeBatchFrom(&batch, msg.FromBytes([]byte("again"))), "flush[%d]", i)
+		require.GreaterOrEqual(t, cap(batch.buffers), capAfterFirst,
+			"batch.buffers capacity eroded on flush %d", i)
+	}
+}
+
+// --------------------------------------------------------------------------
 // TestWriter_BatchCoalescesMultipleMessages: enqueue many messages
-// rapidly; verify the writer coalesces them into fewer Write calls than
+// rapidly; verify the writer coalesces them into fewer writev calls than
 // messages via net.Buffers.
 //
-// Timing-deterministic via a gated Conn.Write: queue all N messages
-// into the sessionPipe while the writer is parked on its FIRST Write
-// (from the handshake or an initial priming frame); unblock the gate
-// and observe that the single subsequent writer-loop iteration
-// coalesces the queued N messages into one writev.
+// Timing-deterministic via the gated writev conn: stall the writer's
+// first traffic-phase flush, queue all N messages into the sessionPipe
+// while it is parked, then unblock the gate — at most one more
+// writer-loop iteration coalesces everything still queued.
 // --------------------------------------------------------------------------
 
 func TestWriter_BatchCoalescesMultipleMessages(t *testing.T) {
-	// net.Buffers.WriteTo only uses writev on real *net.TCPConn / UnixConn;
-	// on a non-TCP io.Writer it falls back to one Write per buffer. The
-	// fakeConn used here is a plain io.Writer, so Write-count coalescing
-	// is not observable. This test will become meaningful once a
-	// writev-emulating fakeConn exists.
-	t.Skip("batching coalescing is not observable on non-TCP fake conn")
 	const HWM = 64
-	connA, connB := newFakeConnPair()
-	ccA := newCountingConn(connA)
+	sA, sB, wcA := newWritevTestPair(t, HWM, HWM)
 
-	sA := New(Config{
-		Conn: ccA, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{},
-		Role: iface.RoleClient, SendHWM: HWM, RecvHWM: HWM,
-	})
-	sB := New(Config{
-		Conn: connB, Mech: newFakeMech("NULL", true, nil), Codec: fakeCodec{},
-		Role: iface.RoleServer, SendHWM: HWM, RecvHWM: HWM,
-	})
-	sA.Start()
-	sB.Start()
-	defer func() { _ = sA.Stop(); _ = sB.Stop() }()
-
-	waitHandshake(t, sA, "A")
-	waitHandshake(t, sB, "B")
-
-	// Prime the writer with one message so it's parked in the write
-	// path, then install the gate so subsequent writes block. Now
-	// enqueue N messages into the pipe — the writer's next iteration
-	// will coalesce them.
-	//
-	// Simpler deterministic strategy: gate BEFORE any user traffic,
-	// queue N, unblock. The writer's first blocking Recv pulls one,
-	// then non-blocking peeks coalesce the rest.
 	gate := make(chan struct{})
-	ccA.setGate(gate)
-	ccA.resetWriteCounters()
+	wcA.setGate(gate)
+	wcA.resetWriteCounters()
 
 	const N = 5
 	ctx := testCtx(t, 2*time.Second)
-	for i := 0; i < N; i++ {
+	// First send: the writer pulls it and parks in the gated writev.
+	require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("msg-0"))), "Send[0]")
+	require.Eventually(t, func() bool { return wcA.gateWaiting.Load() == 1 },
+		2*time.Second, time.Millisecond, "writer did not park in the gated writev")
+	// Queue the rest while the wire is stalled.
+	for i := 1; i < N; i++ {
 		m := msg.FromBytes([]byte(fmt.Sprintf("msg-%d", i)))
 		require.NoError(t, sA.Pipe().Send(ctx, m), "Send[%d]", i)
 	}
 
-	// Release the gate: writer's pending flushBatch proceeds.
-	ccA.setGate(nil)
+	// Release the gate: the pending flush proceeds, and the next loop
+	// iteration coalesces all still-queued messages into one writev.
+	wcA.setGate(nil)
 	close(gate)
 
-	// Drain on B.
-	got := make([]string, 0, N)
+	// Drain on B, asserting order survived the batching.
 	for i := 0; i < N; i++ {
 		m, err := sB.Pipe().Recv(ctx)
 		require.NoError(t, err, "Recv[%d]", i)
-		got = append(got, string(m.Bytes()))
-	}
-	for i, s := range got {
-		want := fmt.Sprintf("msg-%d", i)
-		assert.Equal(t, want, s, "got[%d]", i)
+		assert.Equal(t, fmt.Sprintf("msg-%d", i), string(m.Bytes()), "got[%d]", i)
 	}
 
-	// Coalescing: with N=5 messages queued before any Write proceeds,
-	// the writer's first batch should contain all 5 — one Write call
-	// for 5 messages.
-	writes := ccA.WriteCount()
-	assert.Less(t, writes, N, "writer issued %d Writes for %d msgs; expected coalescing (<N)", writes, N)
-	assert.GreaterOrEqual(t, writes, 1, "writer issued 0 Writes; expected ≥1")
-	assert.LessOrEqual(t, writes, 2, "writer issued %d Writes; expected ≤2 for 5 queued msgs", writes)
-	t.Logf("batched %d messages into %d Write calls (sizes=%v)", N, writes, ccA.Sizes())
+	// Coalescing: 1 writev for the parked message + 1 for the batched
+	// remainder. Anything < N proves coalescing; ≤ 2 proves the batch
+	// picked up everything queued during the stall.
+	writes := wcA.WriteCount()
+	assert.GreaterOrEqual(t, writes, 1, "writer issued 0 writev calls; expected ≥1")
+	assert.LessOrEqual(t, writes, 2, "writer issued %d writev calls for %d msgs; expected ≤2", writes, N)
+	t.Logf("batched %d messages into %d writev calls (sizes=%v)", N, writes, wcA.Sizes())
 }
 
 // --------------------------------------------------------------------------
@@ -274,58 +315,36 @@ func TestWriter_OrderPreservation(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestWriter_Backpressure(t *testing.T) {
-	// Depends on gating Writes to exert backpressure at the wire boundary,
-	// but the current countingConn gate also blocks the greeting/handshake
-	// writes (no phase distinction). Reworking this to gate only
-	// traffic-phase writes is still pending.
-	t.Skip("gate blocks handshake writes")
 	const HWM = 4
-	connA, connB := newFakeConnPair()
-	ccA := newCountingConn(connA)
+	sA, sB, wcA := newWritevTestPair(t, HWM, HWM)
+	_ = sB
 
-	// Install the gate BEFORE Start — the very first traffic-phase
-	// Write parks on gateCh, including any batch the writer coalesces
+	// Install the gate AFTER the handshake (only traffic-phase flushes
+	// go through WriteBuffers anyway) — the very first traffic-phase
+	// writev parks on the gate, including any batch the writer coalesces
 	// from the first blocking Recv + peeks.
 	gate := make(chan struct{})
-	ccA.setGate(gate)
+	wcA.setGate(gate)
 
-	sA := New(Config{
-		Conn: ccA, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{},
-		Role: iface.RoleClient, SendHWM: HWM, RecvHWM: HWM,
-	})
-	sB := New(Config{
-		Conn: connB, Mech: newFakeMech("NULL", true, nil), Codec: fakeCodec{},
-		Role: iface.RoleServer, SendHWM: HWM, RecvHWM: HWM,
-	})
-	sA.Start()
-	sB.Start()
-	// Stop ordering: unblock gate first so writer/reader can complete
-	// in-flight Write, then Stop. Without this Stop would hang.
+	// Stop ordering: unblock gate first so the writer can complete its
+	// in-flight writev, then the startPair cleanup Stops both sessions.
 	defer func() {
-		select {
-		case <-gate:
-		default:
-			close(gate)
-		}
-		ccA.setGate(nil)
-		_ = sA.Stop()
-		_ = sB.Stop()
+		wcA.setGate(nil)
+		close(gate)
 	}()
 
-	waitHandshake(t, sA, "A")
-	waitHandshake(t, sB, "B")
+	// Park the writer first: one priming message reaches the gated
+	// writev (otherwise the writer's coalescing TryRecv loop can keep
+	// pace with the pusher and swallow everything into one large batch
+	// before flushing, hiding the HWM).
+	primeCtx := testCtx(t, 2*time.Second)
+	require.NoError(t, sA.Pipe().Send(primeCtx, msg.FromBytes([]byte("bp-prime"))), "Send(prime)")
+	require.Eventually(t, func() bool { return wcA.gateWaiting.Load() == 1 },
+		2*time.Second, time.Millisecond, "writer did not park in the gated writev")
 
-	// Now push messages as fast as possible. The writer will pull one,
-	// coalesce up to maxBatchMessages/maxBatchBytes of additional
-	// queued ones (but here capped by HWM), then park in flushBatch.
-	// Once the writer parks, further Sends accumulate in the channel
-	// until its capacity (HWM) is reached, after which Send blocks.
-	//
-	// Worst case: writer coalesces up to HWM messages and parks. That
-	// leaves HWM slots in the pipe for additional queued items. So the
-	// total number of messages we can push before Send blocks is
-	// bounded by (writer-batched) + HWM ≤ HWM + HWM = 2*HWM. Any push
-	// beyond that MUST block — demonstrating backpressure.
+	// With the writer parked, further Sends accumulate in the pipe until
+	// its capacity (HWM) is reached, after which Send MUST block —
+	// batching must not drain the pipe to empty ahead of the wire.
 	pushCtx := testCtx(t, 200*time.Millisecond)
 
 	var pushed int
@@ -426,11 +445,7 @@ func TestWriter_BatchLingerDrain(t *testing.T) {
 		}
 		cw.CancelWriter()
 		// Expect WriterFlushed to fire after drain completes.
-		select {
-		case <-sA.WriterFlushed():
-		case <-time.After(2 * time.Second):
-			require.FailNow(t, "WriterFlushed did not close after CancelWriter")
-		}
+		waitClosed(t, sA.WriterFlushed(), 2*time.Second, "WriterFlushed did not close after CancelWriter")
 		// The linger messages should have been delivered to B.
 		for i := 0; i < 3; i++ {
 			recvCtx, rc := context.WithTimeout(context.Background(), time.Second)
@@ -500,11 +515,47 @@ func TestWriter_MultipartBatched(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
-// Compile-time guard on types used above (prevents unused-import lint
-// regressions when tests shrink).
+// TestReader_HandlesPingWhileWriterBlocked: regression for the
+// reader-writes-PONG-inline deadlock. With the writer goroutine wedged
+// in a conn write (peer not draining) and holding writeMu, an incoming
+// PING must NOT stall the reader — the PONG is routed to the writer via
+// the command channel and the reader keeps reading.
 // --------------------------------------------------------------------------
 
-var (
-	_ io.Writer        = (*countingConn)(nil)
-	_ binary.ByteOrder = binary.BigEndian
-)
+func TestReader_HandlesPingWhileWriterBlocked(t *testing.T) {
+	connA, connB := newFakeConnPair()
+	wcA := newWritevConn(connA)
+	sA := New(Config{
+		Conn: wcA, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{},
+		Role: iface.RoleClient, SendHWM: 8, RecvHWM: 8,
+	})
+	sA.Start()
+	t.Cleanup(func() { _ = sA.Stop() })
+	peer := newManualPeer(t, connB, nil)
+	waitHandshake(t, sA, "A")
+	frames := peer.startReadLoop()
+
+	// Wedge the writer: gate traffic-phase writevs, then send a user
+	// message so the writer parks inside WriteBuffers holding writeMu.
+	gate := make(chan struct{})
+	wcA.setGate(gate)
+	ctx := testCtx(t, 2*time.Second)
+	require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("stall"))), "Send(stall)")
+	require.Eventually(t, func() bool { return wcA.gateWaiting.Load() == 1 },
+		2*time.Second, time.Millisecond, "writer did not park in the gated writev")
+
+	// A PING arriving now must not block the reader (pre-fix, the inline
+	// PONG write would deadlock on writeMu) ...
+	peer.sendPing(0, []byte("ctx1"))
+	// ... proven by data sent AFTER the PING still flowing to the engine.
+	peer.sendData([]byte("after-ping"))
+	got, err := sA.Pipe().Recv(testCtx(t, 2*time.Second))
+	require.NoError(t, err, "reader blocked behind the wedged writer")
+	require.Equal(t, "after-ping", string(got.Bytes()))
+
+	// Release the writer: the stalled flush and the queued PONG drain.
+	wcA.setGate(nil)
+	close(gate)
+	require.Equal(t, []byte("ctx1"), waitCommand(t, frames, "PONG", 2*time.Second),
+		"PONG must echo the PING context")
+}

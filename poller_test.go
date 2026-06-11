@@ -10,28 +10,22 @@ import (
 	"github.com/rkm/gozmq"
 )
 
-// waitPoll spins Poll with a short timeout until at least one event
-// arrives or the test budget expires. This buys us deterministic
-// behaviour against the brief race between SendMsg landing on the
-// peer's session pipe and the FairQueue forwarder enqueuing it into
-// inbound — both are async, and Poll's level signal can only fire
-// once the forwarder side completes.
+// waitPoll issues a single blocking Poll bounded by budget and returns
+// the ready events. A blocking Poll must wake on its own once readiness
+// arrives — including on single-peer sockets (regression coverage for
+// the fixed wakeup bug that previously required spinning short Polls).
 func waitPoll(t *testing.T, p *gozmq.Poller, budget time.Duration) []gozmq.PollEvent {
 	t.Helper()
-	deadline := time.Now().Add(budget)
-	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-		ev, err := p.Poll(ctx)
-		cancel()
-		if err == nil && len(ev) > 0 {
-			return ev
-		}
-		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("poll: %v", err)
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	ev, err := p.Poll(ctx)
+	if err != nil {
+		t.Fatalf("poll: %v", err)
 	}
-	t.Fatalf("poll budget exhausted without ready events")
-	return nil
+	if len(ev) == 0 {
+		t.Fatalf("poll returned no events and no error")
+	}
+	return ev
 }
 
 // TestPoller_PullReadsAfterPush registers a PULL socket, pushes a
@@ -197,23 +191,24 @@ func TestPoller_StreamPollInOut(t *testing.T) {
 		t.Fatalf("write stream peer: %v", err)
 	}
 
-	p := gozmq.NewPoller()
-	p.Add(stream, gozmq.PollIn|gozmq.PollOut)
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		pollCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-		events, err := p.Poll(pollCtx)
-		cancel()
-		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("poll stream: %v", err)
-		}
-		for _, ev := range events {
-			if ev.Socket == stream && ev.Events&gozmq.PollIn != 0 {
-				return
-			}
-		}
+	// Block on PollIn alone first: a PollIn|PollOut registration would
+	// return immediately once the peer attaches (PollOut ready) and turn
+	// the wait into a spin loop.
+	pIn := gozmq.NewPoller()
+	pIn.Add(stream, gozmq.PollIn)
+	events := waitPoll(t, pIn, 2*time.Second)
+	if len(events) != 1 || events[0].Socket != stream || events[0].Events&gozmq.PollIn == 0 {
+		t.Fatalf("unexpected PollIn events: %+v", events)
 	}
-	t.Fatalf("stream PollIn did not become ready")
+
+	// With data still queued and the peer attached, a combined
+	// registration must report both directions ready.
+	pBoth := gozmq.NewPoller()
+	pBoth.Add(stream, gozmq.PollIn|gozmq.PollOut)
+	events = waitPoll(t, pBoth, 2*time.Second)
+	if len(events) != 1 || events[0].Events != gozmq.PollIn|gozmq.PollOut {
+		t.Fatalf("combined poll events = %+v, want PollIn|PollOut", events)
+	}
 }
 
 // TestPoller_RemoveStopsReporting registers a PULL, then removes it,
@@ -354,9 +349,8 @@ func TestPoller_DealerRouterPollOut(t *testing.T) {
 	p.Add(dealer, gozmq.PollOut)
 
 	// DEALER does not become PollOut-ready until its session pipe is
-	// attached post-handshake. waitPoll polls repeatedly within the
-	// budget; once the handshake completes the LoadBalancer signals
-	// readyWrite.
+	// attached post-handshake; the blocking Poll parks until the
+	// LoadBalancer signals readyWrite.
 	events := waitPoll(t, p, 2*time.Second)
 	if len(events) != 1 {
 		t.Fatalf("want 1 event, got %d: %+v", len(events), events)
@@ -367,4 +361,55 @@ func TestPoller_DealerRouterPollOut(t *testing.T) {
 	if events[0].Events&gozmq.PollOut == 0 {
 		t.Fatalf("expected PollOut, got %#x", events[0].Events)
 	}
+}
+
+// BenchmarkPoller_PollReady measures steady-state Poll over a populated
+// registration set with one always-ready socket: the cached-snapshot
+// fast path (no reflect.Select rebuild per call).
+func BenchmarkPoller_PollReady(b *testing.B) {
+	zctx := gozmq.NewContext()
+	defer zctx.Close()
+
+	p := gozmq.NewPoller()
+	// Seven idle PULL sockets plus one PAIR pair with a buffered message.
+	for i := 0; i < 7; i++ {
+		s, err := zctx.NewSocket(gozmq.Pull)
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer s.Close()
+		p.Add(s, gozmq.PollIn)
+	}
+	a, err := zctx.NewSocket(gozmq.Pair)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer a.Close()
+	if err := a.Bind("inproc://bench-poller"); err != nil {
+		b.Fatal(err)
+	}
+	z, err := zctx.NewSocket(gozmq.Pair)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer z.Close()
+	if err := z.Connect("inproc://bench-poller"); err != nil {
+		b.Fatal(err)
+	}
+	if err := z.SendBytes(context.Background(), []byte("x")); err != nil {
+		b.Fatal(err)
+	}
+	p.Add(a, gozmq.PollIn)
+
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := p.Poll(ctx); err != nil {
+			b.Fatal(err)
+		}
+	}
+	// Exclude the deferred socket/context teardown (linger drain) from
+	// the per-op accounting.
+	b.StopTimer()
 }

@@ -106,11 +106,6 @@ func TestGreetingRejects(t *testing.T) {
 			wantErr: zmqerr.ErrProtocolVersion,
 		},
 		{
-			name:    "bad-minor",
-			mutate:  func(b []byte) { b[11] = 0xFF },
-			wantErr: zmqerr.ErrProtocolVersion,
-		},
-		{
 			name:    "bad-as-server",
 			mutate:  func(b []byte) { b[32] = 0x05 },
 			wantErr: zmqerr.ErrMalformedFrame,
@@ -136,6 +131,18 @@ func TestGreetingRejects(t *testing.T) {
 			require.ErrorIs(t, err, tc.wantErr)
 		})
 	}
+
+	// Forward compatibility: any 3.x minor is accepted; minor >= 1 implies
+	// heartbeat capability (treated as 3.1).
+	t.Run("future-minor-accepted", func(t *testing.T) {
+		t.Parallel()
+		b := good()
+		b[11] = 0x07
+		g, err := ReadGreeting(bytes.NewReader(b))
+		require.NoError(t, err)
+		require.Equal(t, [2]byte{0x03, 0x07}, g.Version)
+		require.True(t, g.HeartbeatCapable)
+	})
 }
 
 func TestGreetingTruncated(t *testing.T) {

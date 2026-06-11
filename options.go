@@ -8,9 +8,12 @@ import (
 )
 
 // Option configures a Socket at construction time. The option type is opaque;
-// construct values via the With* helpers. Applying an option that is
-// inapplicable to the socket type returns an error at Socket construction
-// rather than silently ignoring it.
+// construct values via the With* helpers. Options that are inapplicable to
+// the socket type are rejected with an error at Socket construction rather
+// than silently ignored: pattern-specific options (WithRouterMandatory,
+// WithXPubVerbose, WithSubscribe) on the wrong pattern, and ZMTP-layer
+// options (security, heartbeat, identity, handshake timeout, ZAP domain)
+// on STREAM sockets, which bypass ZMTP entirely.
 type Option interface {
 	apply(*socketConfig) error
 }
@@ -32,6 +35,12 @@ type socketConfig struct {
 	subscriptions        [][]byte
 	handshakeTimeout     time.Duration
 	zapDomain            string
+
+	// Set-flags for options whose zero/default values are
+	// indistinguishable from "not configured" — needed so
+	// validateSocketConfig can reject explicit use on STREAM sockets.
+	heartbeatSet        bool
+	handshakeTimeoutSet bool
 
 	plainAuth       func(user, pass string) bool
 	plainClientUser string
@@ -59,7 +68,7 @@ func newSocketConfig() *socketConfig {
 		recvHWM:              1000,
 		linger:               time.Second,
 		reconnectInterval:    100 * time.Millisecond,
-		reconnectIntervalMax: 0,
+		reconnectIntervalMax: 30 * time.Second,
 		heartbeatInterval:    30 * time.Second,
 		heartbeatTimeout:     90 * time.Second,
 		maxMessageSize:       64 << 20,
@@ -129,10 +138,11 @@ func WithReconnectInterval(d time.Duration) Option {
 	return newOption(func(c *socketConfig) error { c.reconnectInterval = d; return nil })
 }
 
-// WithReconnectIntervalMax caps the reconnection backoff. Default is 0,
-// meaning no cap (backoff grows without bound). Setting this to e.g.
-// 30 * time.Second bounds the longest wait while preserving fast recovery
-// on transient failures.
+// WithReconnectIntervalMax caps the reconnection backoff. Default is 30
+// seconds. Zero removes the cap: backoff doubles without bound, so after
+// a long outage a socket may wait arbitrarily long between attempts.
+// NOTE this diverges from libzmq, where ZMQ_RECONNECT_IVL_MAX=0 (its
+// default) means "no exponential backoff, constant interval".
 func WithReconnectIntervalMax(d time.Duration) Option {
 	return newOption(func(c *socketConfig) error { c.reconnectIntervalMax = d; return nil })
 }
@@ -150,19 +160,27 @@ func WithHeartbeat(interval, timeout time.Duration) Option {
 	return newOption(func(c *socketConfig) error {
 		c.heartbeatInterval = interval
 		c.heartbeatTimeout = timeout
+		c.heartbeatSet = true
 		return nil
 	})
 }
 
 // WithMaxMessageSize sets the per-message byte limit. Default is 64 MiB.
-// A peer that sends a frame exceeding this limit has its session torn
-// down with [ErrMalformedFrame]; the violation surfaces via a monitor
-// EventDisconnected (with Reason carrying the error) rather than as a
-// synchronous Send/Recv error, because the read loop detects it
-// asynchronously of the application's call path. Pass 0 to disable the
-// limit — opt-in to unlimited size, NOT recommended for untrusted peers
-// because a hostile frame header can force an arbitrarily large
-// allocation.
+// It is enforced on both directions, with different surfacing:
+//
+//   - Send side: SendMsg/SendBytes measure every frame up front and
+//     return a synchronous error wrapping [ErrMalformedFrame] on
+//     overflow; the session is NOT torn down.
+//   - Recv side: a peer whose frame — or whose accumulated multipart
+//     message — exceeds the limit has its session torn down with
+//     [ErrMalformedFrame]. The violation surfaces via a monitor
+//     EventDisconnected rather than a synchronous Recv error, because
+//     the read loop detects it asynchronously of the application's
+//     call path.
+//
+// Pass 0 to disable the limit — opt-in to unlimited size, NOT
+// recommended for untrusted peers because a hostile sender can force
+// unbounded allocation.
 func WithMaxMessageSize(n int64) Option {
 	return newOption(func(c *socketConfig) error { c.maxMessageSize = n; return nil })
 }
@@ -277,7 +295,11 @@ func WithCurveClient(serverKey, publicKey, secretKey []byte) Option {
 // and, on a client socket, the reconnector retries with the configured
 // backoff.
 func WithHandshakeTimeout(d time.Duration) Option {
-	return newOption(func(c *socketConfig) error { c.handshakeTimeout = d; return nil })
+	return newOption(func(c *socketConfig) error {
+		c.handshakeTimeout = d
+		c.handshakeTimeoutSet = true
+		return nil
+	})
 }
 
 // WithMonitor registers a channel to receive lifecycle [Event]s whose
@@ -342,6 +364,26 @@ func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 	}
 	if len(cfg.subscriptions) > 0 && t != Sub && t != XSub {
 		return fmt.Errorf("gozmq: WithSubscribe only valid on SUB/XSUB sockets")
+	}
+	if t == Stream {
+		// STREAM bypasses ZMTP entirely: no handshake, no security, no
+		// heartbeats, no identity exchange. Silently ignoring these
+		// options would be a security hazard (e.g. WithPlainAuth on a
+		// raw-TCP listener that authenticates nobody).
+		switch {
+		case cfg.plainAuth != nil || cfg.plainClient:
+			return fmt.Errorf("gozmq: PLAIN security options are not applicable to STREAM sockets (no ZMTP handshake)")
+		case len(cfg.curveSecretKey) > 0 || len(cfg.curvePublicKey) > 0 || len(cfg.curveServerKey) > 0:
+			return fmt.Errorf("gozmq: CURVE security options are not applicable to STREAM sockets (no ZMTP handshake)")
+		case len(cfg.identity) > 0:
+			return fmt.Errorf("gozmq: WithIdentity is not applicable to STREAM sockets (no ZMTP handshake)")
+		case cfg.heartbeatSet:
+			return fmt.Errorf("gozmq: WithHeartbeat is not applicable to STREAM sockets (no ZMTP heartbeats)")
+		case cfg.handshakeTimeoutSet:
+			return fmt.Errorf("gozmq: WithHandshakeTimeout is not applicable to STREAM sockets (no ZMTP handshake)")
+		case cfg.zapDomain != "":
+			return fmt.Errorf("gozmq: WithZapDomain is not applicable to STREAM sockets (no ZMTP handshake)")
+		}
 	}
 	if err := validateCurveKey("secret", cfg.curveSecretKey); err != nil {
 		return err

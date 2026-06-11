@@ -382,3 +382,99 @@ func TestFairQueue_AttachAfterClose(t *testing.T) {
 	defer closePipes(a, b)
 	assert.ErrorIs(t, fq.Attach(a), zmqerr.ErrSocketClosed)
 }
+
+// TestLoadBalancer_TwoParkedSendersWakeOnAttach is the lost-wakeup
+// regression for the old cap-1 notify token: with two goroutines parked
+// in Send (no peers), a single Attach must wake BOTH (the notify channel
+// is closed — broadcast — not a token one sender can swallow).
+func TestLoadBalancer_TwoParkedSendersWakeOnAttach(t *testing.T) {
+	t.Parallel()
+	lb := socket.NewLoadBalancer()
+	defer lb.Close()
+
+	ctx := testCtx(t)
+	done := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		i := i
+		go func() { done <- lb.Send(ctx, msg.FromBytes([]byte{byte(i)})) }()
+	}
+	time.Sleep(50 * time.Millisecond) // both park on the no-peer wait
+
+	a, b := pipe.NewPair(2, 2, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(a, b)
+	require.NoError(t, lb.Attach(a), "attach")
+
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-done:
+			require.NoError(t, err, "parked send %d", i)
+		case <-time.After(time.Second):
+			require.Fail(t, "a parked sender never woke after Attach", "sender %d", i)
+		}
+	}
+}
+
+// TestLoadBalancer_RotatesPastFullPeer pins libzmq lb_t parity: a peer at
+// HWM is skipped, not head-of-line blocked on — the send proceeds to the
+// next free peer immediately.
+func TestLoadBalancer_RotatesPastFullPeer(t *testing.T) {
+	t.Parallel()
+	lb := socket.NewLoadBalancer()
+	defer lb.Close()
+
+	full, fullPeer := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	free, freePeer := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(full, fullPeer, free, freePeer)
+	require.NoError(t, lb.Attach(full), "attach full")
+	require.NoError(t, lb.Attach(free), "attach free")
+
+	ctx := testCtx(t)
+	// Saturate the first peer (the cursor starts there).
+	require.NoError(t, full.Send(ctx, msg.FromBytes([]byte("fill"))), "fill")
+
+	start := time.Now()
+	require.NoError(t, lb.Send(ctx, msg.FromBytes([]byte("x"))), "send")
+	require.Less(t, time.Since(start), 500*time.Millisecond, "send head-of-line blocked on the full peer")
+
+	got, err := freePeer.Recv(ctx)
+	require.NoError(t, err, "free peer recv")
+	require.Equal(t, "x", string(got.Bytes()), "message must have rotated to the free peer")
+}
+
+// TestFairQueue_PromotionPreservesPerPeerFIFO stresses the 1→2 promotion
+// window: messages from the original (direct-mode) pipe must stay in
+// order even while a second pipe attaches mid-stream and the first is
+// handed from the direct path to a forwarder.
+func TestFairQueue_PromotionPreservesPerPeerFIFO(t *testing.T) {
+	t.Parallel()
+	fq := socket.NewFairQueue()
+	defer fq.Close()
+
+	a, aPeer := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	c, cPeer := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(a, aPeer, c, cPeer)
+	require.NoError(t, fq.Attach(a), "attach a (direct)")
+
+	ctx := testCtx(t)
+	const n = 500
+	go func() {
+		for i := 0; i < n; i++ {
+			if err := aPeer.Send(ctx, msg.FromBytes([]byte{byte(i >> 8), byte(i)})); err != nil {
+				return
+			}
+		}
+	}()
+	go func() {
+		time.Sleep(time.Millisecond) // land mid-stream
+		_ = fq.Attach(c)             // 1→2 promotion while recvs are in flight
+	}()
+
+	next := 0
+	for next < n {
+		m, err := fq.Recv(ctx)
+		require.NoError(t, err, "recv %d", next)
+		got := int(m.Bytes()[0])<<8 | int(m.Bytes()[1])
+		require.Equal(t, next, got, "per-peer FIFO inverted across promotion")
+		next++
+	}
+}

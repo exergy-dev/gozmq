@@ -198,3 +198,81 @@ func TestXPub_DedupLastCancel(t *testing.T) {
 	require.Equal(t, socket.UnsubscribeByte, body[0])
 	require.Equal(t, "news", string(body[1:]))
 }
+
+// TestXPub_DetachEmitsCancel: when a peer detaches, XPUB synthesizes a
+// CANCEL for every prefix whose aggregate subscriber count hit zero —
+// matching libzmq, so an upstream proxy stage can unsubscribe dead
+// topics. Runs in both dedup and verbose mode.
+func TestXPub_DetachEmitsCancel(t *testing.T) {
+	t.Parallel()
+	for _, verbose := range []bool{false, true} {
+		name := map[bool]string{false: "dedup", true: "verbose"}[verbose]
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			eng := socket.NewXPubEngineV(verbose)
+			defer eng.Close()
+
+			a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+			defer closePipes(a, b)
+			mustAttach(t, eng, a)
+			ctx := testCtx(t)
+
+			// Peer subscribes; the app observes it (which also seeds the
+			// aggregate refcount bookkeeping).
+			require.NoError(t, b.Send(ctx, subscribeMsg(true, []byte("topic"))), "peer subscribe")
+			m, err := eng.Recv(ctx)
+			require.NoError(t, err, "recv subscribe")
+			require.Equal(t, socket.SubscribeByte, m.Frames()[0][0])
+
+			// Peer goes away: the engine must synthesize the CANCEL.
+			require.NoError(t, eng.DetachPipe(a), "detach")
+			m, err = eng.Recv(ctx)
+			require.NoError(t, err, "recv synthesized cancel")
+			body := m.Frames()[0]
+			require.Equal(t, socket.UnsubscribeByte, body[0], "expected CANCEL")
+			require.Equal(t, "topic", string(body[1:]), "cancel prefix")
+		})
+	}
+}
+
+// TestXPub_DetachEmitsNoCancelWhileOtherSubscribersRemain: the synthesized
+// CANCEL only fires when the aggregate count hits zero — a second peer
+// still subscribed suppresses it.
+func TestXPub_DetachEmitsNoCancelWhileOtherSubscribersRemain(t *testing.T) {
+	t.Parallel()
+	eng := socket.NewXPubEngineV(false)
+	defer eng.Close()
+
+	a1, b1 := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a2, b2 := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(a1, b1, a2, b2)
+	mustAttach(t, eng, a1, a2)
+	ctx := testCtx(t)
+
+	require.NoError(t, b1.Send(ctx, subscribeMsg(true, []byte("topic"))), "peer1 subscribe")
+	m, err := eng.Recv(ctx)
+	require.NoError(t, err, "recv first subscribe")
+	require.Equal(t, socket.SubscribeByte, m.Frames()[0][0])
+
+	// Second subscriber for the same prefix: dedup-suppressed, but we
+	// must wait for the engine to process it before detaching. Poll the
+	// engine's metrics-free path via a short Recv timeout.
+	require.NoError(t, b2.Send(ctx, subscribeMsg(true, []byte("topic"))), "peer2 subscribe")
+	rc, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	_, err = eng.Recv(rc)
+	cancel()
+	require.ErrorIs(t, err, context.DeadlineExceeded, "duplicate subscribe must be dedup-suppressed")
+
+	// Detach peer1: peer2 still holds the prefix → no CANCEL.
+	require.NoError(t, eng.DetachPipe(a1), "detach peer1")
+	rc, cancel = context.WithTimeout(ctx, 100*time.Millisecond)
+	_, err = eng.Recv(rc)
+	cancel()
+	require.ErrorIs(t, err, context.DeadlineExceeded, "CANCEL emitted while a subscriber remains")
+
+	// Detach peer2: now the aggregate hits zero → CANCEL.
+	require.NoError(t, eng.DetachPipe(a2), "detach peer2")
+	m, err = eng.Recv(ctx)
+	require.NoError(t, err, "recv cancel")
+	require.Equal(t, socket.UnsubscribeByte, m.Frames()[0][0])
+}

@@ -39,8 +39,10 @@ type ReconnectConfig struct {
 	Dial func(ctx context.Context) (iface.Conn, error)
 
 	// NewSession constructs a session around the given Conn. The
-	// Reconnector calls Start on the returned session.
-	NewSession func(conn iface.Conn) iface.Session
+	// Reconnector calls Start on the returned session. An error closes
+	// the conn and is treated like a dial failure: the loop backs off
+	// and retries.
+	NewSession func(conn iface.Conn) (iface.Session, error)
 
 	// InitialBackoff is the base delay between reconnect attempts. Also
 	// the value the schedule resets to after a successful handshake.
@@ -59,8 +61,9 @@ type ReconnectConfig struct {
 	OnAttach func(iface.Pipe)
 
 	// OnDetach fires once per session end, with the pipe that was
-	// previously attached. nil pipes are passed if the session never
-	// reached the attach point (handshake failed); callers should guard.
+	// previously attached. It is NOT called for sessions that never
+	// reached the attach point (handshake failed) — the loop just backs
+	// off and redials.
 	OnDetach func(iface.Pipe)
 
 	// OnRetry fires once per backoff cycle, immediately before the
@@ -267,8 +270,11 @@ func (r *Reconnector) loop() {
 	attempt := 0 // consecutive failures since last handshake success
 
 	for {
-		// Cancellation check before each attempt.
-		if r.ctx.Err() != nil {
+		// Cancellation/quiesce check before each attempt. The quiesce
+		// check matters on the dial-failure continue path too: Quiesce
+		// during a backoff sleep must not let the next iteration attach
+		// a brand-new session to a closing socket.
+		if r.ctx.Err() != nil || r.isQuiesced() {
 			return
 		}
 
@@ -281,7 +287,15 @@ func (r *Reconnector) loop() {
 			continue
 		}
 
-		sess := r.cfg.NewSession(conn)
+		sess, err := r.cfg.NewSession(conn)
+		if err != nil {
+			_ = conn.Close()
+			r.cfg.Logger.Debug("gozmq/reconnect: session construction failed", "err", err, "backoff", backoff)
+			if !r.retryAfterBackoff(&attempt, &backoff) {
+				return
+			}
+			continue
+		}
 		r.sessMu.Lock()
 		if r.ctx.Err() != nil {
 			// Stopped while we were dialing. Drop everything and exit.

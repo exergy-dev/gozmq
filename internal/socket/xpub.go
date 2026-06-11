@@ -58,18 +58,42 @@ func (e *xpubEngine) AttachPipe(p iface.Pipe) error { return e.pub.AttachPipe(p)
 // DetachPipe removes a peer and decrements the aggregate prefRefs for
 // every prefix that peer was subscribed to, preventing a leak where
 // departed peers leave stale refcounts that suppress future surface events.
+//
+// For each prefix whose aggregate refcount hits zero, a synthetic CANCEL
+// (unsubscribe) message is pushed onto the subscription-event queue —
+// matching libzmq, where a terminating pipe generates unsubscribe events
+// so upstream proxy stages (XSUB side) can drop dead topics. The
+// synthesized events bypass the Recv dedup filter (their refcounts were
+// already settled here) and are delivered in both verbose and dedup mode.
 func (e *xpubEngine) DetachPipe(p iface.Pipe) error {
 	e.mu.Lock()
+	var cancels []string
 	if subs, ok := e.peerSubs[p]; ok {
 		for prefix, count := range subs {
 			e.prefRefs[prefix] -= count
 			if e.prefRefs[prefix] <= 0 {
 				delete(e.prefRefs, prefix)
+				cancels = append(cancels, prefix)
 			}
 		}
 		delete(e.peerSubs, p)
 	}
 	e.mu.Unlock()
+
+	for _, prefix := range cancels {
+		cm := msg.FromBytes(subscriptionFrame(false, []byte(prefix)))
+		cm.MarkSubscription()
+		// Non-blocking: a detach driven by the session layer must not
+		// stall behind an application that is slow to drain Recv. On
+		// overflow (or close) the event is dropped, mirroring the peer
+		// reader's overflow policy.
+		select {
+		case e.pub.subInbound <- subInboundItem{m: cm}: // pipe == nil ⇒ synthesized
+			e.pub.recvGate.arm()
+		case <-e.pub.closeCh:
+		default:
+		}
+	}
 	return e.pub.DetachPipe(p)
 }
 
@@ -116,7 +140,17 @@ func (e *xpubEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
+		if item.pipe == nil {
+			// Synthesized by DetachPipe: refcounts are already settled,
+			// so bypass the dedup filter and surface directly.
+			e.pub.recv.Add(1)
+			return item.m, nil
+		}
 		if e.verbose {
+			// Surface everything, but still maintain the aggregate and
+			// per-peer refcounts so DetachPipe can synthesize CANCELs for
+			// the prefixes a departing peer leaves orphaned.
+			e.shouldSurface(item.m, item.pipe)
 			e.pub.recv.Add(1)
 			return item.m, nil
 		}

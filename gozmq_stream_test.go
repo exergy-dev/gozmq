@@ -38,8 +38,7 @@ func TestSocketStream_TCP_HTTPEcho(t *testing.T) {
 	}
 	defer cli.Close()
 
-	ctx, cancel := testCtx(t)
-	defer cancel()
+	ctx := testCtx(t)
 
 	const request = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
 	if _, err := cli.Write([]byte(request)); err != nil {
@@ -131,8 +130,7 @@ func TestSocketStream_TCP_Connect(t *testing.T) {
 	}
 	defer a.c.Close()
 
-	ctx, cancel := testCtx(t)
-	defer cancel()
+	ctx := testCtx(t)
 
 	// Send via gozmq; read raw on the other side.
 	//

@@ -220,3 +220,104 @@ func TestReq_Send_WaitsForPeer(t *testing.T) {
 	_, err := b.Recv(ctx)
 	require.NoError(t, err, "drain")
 }
+
+// TestReq_RecvCtxErrorKeepsAwaitingReply pins the libzmq EAGAIN semantic:
+// a Recv that fails with a context error must NOT flip the FSM or drop
+// the sticky pipe — a retried Recv still gets the in-flight reply.
+func TestReq_RecvCtxErrorKeepsAwaitingReply(t *testing.T) {
+	t.Parallel()
+	eng := socket.NewReqEngine()
+	defer eng.Close()
+
+	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(a, b)
+	mustAttach(t, eng, a)
+
+	ctx := testCtx(t)
+	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))), "send")
+	_, err := b.Recv(ctx)
+	require.NoError(t, err, "drain request")
+
+	// Recv times out before the reply exists.
+	shortCtx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	_, err = eng.Recv(shortCtx)
+	cancel()
+	require.ErrorIs(t, err, context.DeadlineExceeded, "first recv")
+
+	// The reply lands late; a retried Recv must deliver it (previously
+	// the failed Recv reset the FSM to canSend and this returned
+	// ErrFSMViolation / lost the reply).
+	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("late-but-mine"))), "peer reply")
+	got, err := eng.Recv(ctx)
+	require.NoError(t, err, "retried recv")
+	require.Equal(t, "late-but-mine", string(got.Bytes()))
+}
+
+// TestReq_StaleReplyDiscardedOnNextSend: a reply buffered on a pipe from
+// an exchange the FSM already abandoned must not be delivered as the
+// answer to a later request — Send drains the chosen pipe first.
+func TestReq_StaleReplyDiscardedOnNextSend(t *testing.T) {
+	t.Parallel()
+	eng := socket.NewReqEngine()
+	defer eng.Close()
+
+	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(a, b)
+	mustAttach(t, eng, a)
+
+	ctx := testCtx(t)
+	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q1"))), "send q1")
+	_, err := b.Recv(ctx)
+	require.NoError(t, err, "drain q1")
+
+	// Malformed reply (no empty delimiter) aborts the exchange and flips
+	// the FSM back to canSend.
+	require.NoError(t, b.Send(ctx, msg.FromBytes([]byte("garbage"))), "malformed reply")
+	_, err = eng.Recv(ctx)
+	require.ErrorIs(t, err, zmqerr.ErrMalformedFrame, "recv malformed")
+
+	// The "real" reply to q1 arrives after the abort: it is now stale.
+	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("stale"))), "stale reply")
+
+	// Next request must discard the stale reply at Send time...
+	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q2"))), "send q2")
+	got, err := b.Recv(ctx)
+	require.NoError(t, err, "drain q2")
+	require.Equal(t, "q2", string(got.Frames()[1]))
+	// ...so the reply Recv returns q2's answer, not the stale one.
+	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("fresh"))), "fresh reply")
+	reply, err := eng.Recv(ctx)
+	require.NoError(t, err, "recv fresh")
+	require.Equal(t, "fresh", string(reply.Bytes()), "stale reply delivered for a later request")
+}
+
+// TestReq_CloseUnblocksSendAtHWM: a Send blocked on a full sticky-candidate
+// pipe must honor the Close contract and unblock with ErrSocketClosed
+// (the old code parked in a bare Pipe.Send with no closeCh arm).
+func TestReq_CloseUnblocksSendAtHWM(t *testing.T) {
+	t.Parallel()
+	eng := socket.NewReqEngine()
+
+	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(a, b)
+	mustAttach(t, eng, a)
+
+	// Fill the single HWM slot from the engine side so eng.Send blocks.
+	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("fill"))), "fill")
+
+	sendDone := make(chan error, 1)
+	go func() { sendDone <- eng.Send(context.Background(), msg.FromBytes([]byte("q"))) }()
+	select {
+	case err := <-sendDone:
+		require.Fail(t, "send returned before close", "%v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	require.NoError(t, eng.Close(), "close")
+	select {
+	case err := <-sendDone:
+		require.ErrorIs(t, err, zmqerr.ErrSocketClosed, "blocked send")
+	case <-time.After(time.Second):
+		require.Fail(t, "send at HWM did not unblock on close")
+	}
+}

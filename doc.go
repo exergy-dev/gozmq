@@ -37,7 +37,14 @@
 //
 //	_ = client.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("ping")))
 //	msg, _ := server.RecvMsg(callCtx)
+//	defer msg.Release()
 //	fmt.Printf("%s\n", msg.Bytes()) // "ping"
+//
+// Always call (*Msg).Release on received messages when done — it is a
+// no-op unless the message carries pooled frame buffers, so calling it
+// unconditionally is safe. For single-frame payloads where even that
+// bookkeeping is unwelcome, [Socket.RecvBytes] returns an independent
+// copy of the payload and releases the internal buffers itself.
 //
 // # Security
 //
@@ -56,10 +63,19 @@
 //
 // For untrusted networks prefer CURVE, or layer PLAIN under tls+tcp://.
 //
+// Note that inproc connections between NULL-mechanism sockets in the same
+// Context use a direct-pipe bypass that skips the session layer entirely —
+// including the ZAP authorization hook. This matches libzmq, which also
+// performs no ZAP check on inproc, but it means a Context-level ZAP
+// handler does not see inproc peers.
+//
 // # Defaults
 //
 // Sockets constructed via [Context.NewSocket] start with these defaults. Each
-// is overridable via a With* option; see options.go for full documentation.
+// is overridable via the corresponding With* option ([WithSendHWM],
+// [WithRecvHWM], [WithLinger], [WithHeartbeat], [WithHandshakeTimeout],
+// [WithMaxMessageSize], [WithReconnectInterval], [WithReconnectIntervalMax]);
+// see each option's documentation for the full semantics.
 //
 //	sendHWM              1000         (outbound high-water mark, messages)
 //	recvHWM              1000         (inbound  high-water mark, messages)
@@ -69,6 +85,7 @@
 //	handshakeTimeout     30s          (greeting + security handshake cap)
 //	maxMessageSize       64 MiB       (per-message ceiling; oversize tears session)
 //	reconnectInterval    100ms        (base backoff; exponential with 20% jitter)
+//	reconnectIntervalMax 30s          (backoff cap; 0 = no cap, diverges from libzmq)
 //
 // These differ from libzmq where libzmq's defaults are hostile: notably,
 // linger defaults to 1s (not infinite) so a forgotten Close cannot hang the
@@ -91,7 +108,18 @@
 //     identity as the leading frame to address a specific peer (an empty
 //     payload closes that connection);
 //   - has no subscription, topic, or pub/sub semantics — WithSubscribe and
-//     XPUB verbose-mode options do not apply.
+//     XPUB verbose-mode options do not apply;
+//   - dials exactly once on Connect and never reconnects: a dial failure
+//     is returned synchronously (plus [EventConnectFailed] on the monitor
+//     channel) and a later peer disconnect is final. Reconnect supervision
+//     for raw STREAM peers is the application's responsibility;
+//   - diverges from libzmq in NOT delivering synthetic [identity, empty]
+//     connect/disconnect notification messages (libzmq's ZMQ_STREAM_NOTIFY
+//     behavior). Use a monitor channel to observe STREAM peer lifecycle.
+//
+// Options that configure ZMTP-layer behavior (security, heartbeat,
+// identity, handshake timeout, ZAP domain) are rejected by NewSocket on
+// STREAM sockets rather than silently ignored.
 //
 // # Concurrency model
 //
@@ -101,13 +129,29 @@
 // Sharing a socket across many concurrent senders works but buys you nothing
 // over a dedicated fan-in goroutine and makes flow-control reasoning harder.
 //
+// # Polling
+//
+// [Poller] multiplexes blocking readiness across many sockets, in the
+// spirit of zmq_poll: register sockets with [PollIn] / [PollOut] interest
+// masks, then call [Poller.Poll] to block until at least one is ready.
+// Readiness is non-consuming — the caller still invokes RecvMsg/SendMsg
+// on the returned sockets. One divergence from libzmq: [PollOut] reports
+// only that at least one peer is attached to dispatch to; it does NOT
+// account for high-water-mark pressure, so a SendMsg after a PollOut
+// wakeup may still block if every peer pipe is full. Event loops ported
+// from zmq_poll should pair PollOut sends with a deadline or context.
+//
 // # Close semantics
 //
 // Socket.Close blocks for up to the configured linger duration while the
 // session writers flush any queued outbound messages to the wire. linger == 0
 // discards queued messages immediately; a negative linger waits indefinitely
-// (matching libzmq) — this can deadlock Close if a peer never drains and
-// should only be used with a parallel shutdown watchdog.
+// (matching libzmq) — this can deadlock Close if a peer never drains, so
+// pair infinite linger with [Socket.CloseCtx], which honors its context's
+// cancellation as an escape hatch: when the context fires mid-drain, the
+// drain is abandoned but teardown completes and the socket is fully
+// closed on return. Close and CloseCtx are idempotent — repeated calls
+// return nil.
 //
 // # Monitor events
 //
@@ -117,12 +161,24 @@
 // dropped rather than blocking the socket's hot path. Monitor channels
 // must be buffered; 64-256 is a reasonable default for most applications.
 //
+// # Metrics and logging
+//
+// [Socket.Metrics] returns a point-in-time [SocketMetrics] snapshot
+// (Sent/Recv/Dropped counters plus a QueueDepth gauge); poll it and publish
+// to whatever sink you use. [WithLogger] injects a [*slog.Logger] for internal
+// diagnostics (handshake failures, reconnect attempts, heartbeat loss). gozmq
+// does not register expvar vars or emit OpenTelemetry spans itself.
+//
 // # Live Reconfiguration
 //
 // Most With* options are construction-time only because they shape the
 // engine, session, or transport wiring created by [Context.NewSocket].
 // Use the dedicated live APIs for mutable behavior: [Socket.Monitor],
-// [Socket.Subscribe], [Socket.Unsubscribe], and [Socket.Disconnect].
+// [Socket.Subscribe], [Socket.Unsubscribe], [Socket.Disconnect], and
+// [Socket.Unbind]. Disconnect tears down the connections to one Connect
+// target and stops its reconnect loop; Unbind stops one listener (matched
+// against the resolved endpoint Bind produced) while leaving already-
+// accepted connections alive, matching libzmq's zmq_unbind.
 //
 // # Subscription refcount
 //

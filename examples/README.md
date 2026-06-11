@@ -17,7 +17,7 @@ go run ./examples/security_plain
 go run ./examples/security_curve
 go run ./examples/stream_echo
 go run ./examples/typed_pubsub
-go run ./examples/typed_router
+go run ./examples/typed_topicmux
 ```
 
 ## Demos
@@ -32,8 +32,14 @@ go run ./examples/typed_router
 - `security_curve`: CurveZMQ key generation and encrypted message exchange.
 - `stream_echo`: STREAM socket talking to a plain TCP client.
 - `typed_pubsub`: generic typed PUB/SUB helpers with the JSON codec subpackage.
-- `typed_router`: heterogeneous typed topic dispatch with longest-prefix matching.
+- `typed_topicmux`: heterogeneous typed topic dispatch with `typed.TopicMux`
+  and longest-prefix matching.
 
 Most examples bind to `tcp://127.0.0.1:0` by default and use
 `Socket.LastEndpoint()` to discover the selected port. `pair_ping` can also run
 over `inproc://`.
+
+Messages returned by `Socket.RecvMsg` are released with `(*Msg).Release` once
+consumed — always safe to call, and required best practice for pooled
+large-frame buffers. `Socket.RecvBytes` (see `monitor_events`) copies and
+releases internally for callers who want no bookkeeping.

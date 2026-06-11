@@ -16,9 +16,10 @@ import (
 // ipcScheme is the URL scheme this transport claims. Matches libzmq.
 const ipcScheme = "ipc"
 
-// ipcAcceptPollInterval mirrors the TCP accept poll so ctx cancellation /
-// Close unblock Accept within bounded latency.
-const ipcAcceptPollInterval = 50 * time.Millisecond
+// ipcAcceptPollInterval mirrors the TCP accept poll (tcpAcceptPollInterval)
+// so ctx cancellation / Close unblock Accept within the same bounded latency
+// on every net-based transport.
+const ipcAcceptPollInterval = 5 * time.Millisecond
 
 // IPCTransport implements iface.Transport over Unix domain sockets,
 // matching libzmq's "ipc" scheme (design §7.2). Endpoint syntax:

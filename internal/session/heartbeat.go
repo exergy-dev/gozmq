@@ -28,12 +28,18 @@ func (s *sessionImpl) runHeartbeat() {
 	defer ticker.Stop()
 
 	// Build a fixed PING body once. ZMTP 3.1 §3.6: 2-byte big-endian
-	// TTL (in deciseconds; 0 = no expiry) + opaque context. We pass an
-	// empty context — peers echo whatever we send, but we don't
-	// correlate, so an empty value is fine.
-	ttlDeciseconds := uint16(0)
+	// TTL (in deciseconds; 0 = no expiry) + opaque context. Per the
+	// spec's SHOULD we advertise our own timeout as the TTL, telling the
+	// peer how long to wait before declaring us dead. (We currently
+	// ignore the peer's TTL and rely on our configured timeout.) The
+	// context is empty — peers echo whatever we send, but we don't
+	// correlate.
+	ttlDeciseconds := timeout / (100 * time.Millisecond)
+	if ttlDeciseconds > 0xFFFF {
+		ttlDeciseconds = 0xFFFF
+	}
 	pingBody := make([]byte, 2)
-	binary.BigEndian.PutUint16(pingBody, ttlDeciseconds)
+	binary.BigEndian.PutUint16(pingBody, uint16(ttlDeciseconds))
 
 	for {
 		select {
@@ -44,10 +50,13 @@ func (s *sessionImpl) runHeartbeat() {
 		case <-ticker.C:
 			// Liveness check first — if we haven't heard from the peer
 			// within the timeout, tear down. We log the reason via
-			// slog rather than minting a new package error.
+			// slog rather than minting a new package error. Skip the
+			// check while the reader is parked publishing inbound on
+			// local engine backpressure: no inbound stamps can happen
+			// then, but the link itself is healthy.
 			lastNs := s.lastInboundUnix.Load()
-			if lastNs > 0 {
-				idle := time.Duration(monoNow() - lastNs)
+			if lastNs > 0 && !s.readerParked.Load() {
+				idle := time.Duration(s.cfg.Now() - lastNs)
 				if idle >= timeout {
 					s.cfg.Logger.Warn(
 						"gozmq/session: heartbeat timeout — tearing down",
@@ -58,16 +67,12 @@ func (s *sessionImpl) runHeartbeat() {
 					return
 				}
 			}
-			// Fire a PING. If sendCommand fails the writer/reader
-			// shutdown path may never fire (for example, if the peer
-			// vanished in a way that only surfaces on write), so treat
-			// a heartbeat write failure as terminal and tear the session
-			// down here.
-			if err := s.sendCommand("PING", pingBody); err != nil {
-				s.cfg.Logger.Debug("gozmq/session: heartbeat send failed", "err", err)
-				s.shutdown()
-				return
-			}
+			// Fire a PING via the writer's command channel — only the
+			// writer goroutine touches the wire in traffic phase. A
+			// write failure surfaces in the writer, which tears the
+			// session down; a full channel drops the PING and the next
+			// tick retries.
+			s.enqueueCommand("PING", pingBody)
 		}
 	}
 }

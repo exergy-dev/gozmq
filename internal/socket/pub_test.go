@@ -2,6 +2,7 @@ package socket_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -275,4 +276,126 @@ func TestPub_DetachReleasesPeerReader(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		require.Fail(t, "Detach did not return within 2s")
 	}
+}
+
+// TestPub_SlowSubscriberDoesNotDelayOthers: a peer at HWM is dropped
+// immediately (libzmq PUB semantics) — it must not add a serial grace
+// period that delays delivery to free subscribers.
+func TestPub_SlowSubscriberDoesNotDelayOthers(t *testing.T) {
+	t.Parallel()
+	eng := socket.NewPubEngine()
+	defer eng.Close()
+
+	slow, slowPeer := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	fast, fastPeer := pipe.NewPair(64, 64, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(slow, slowPeer, fast, fastPeer)
+	mustAttach(t, eng, slow, fast)
+
+	ctx := testCtx(t)
+	require.NoError(t, slowPeer.Send(ctx, subscribeMsg(true, []byte{})), "slow subscribe all")
+	require.NoError(t, fastPeer.Send(ctx, subscribeMsg(true, []byte{})), "fast subscribe all")
+	time.Sleep(50 * time.Millisecond) // let the peer readers apply the subs
+
+	// Saturate the slow peer, then publish a burst: with immediate
+	// drop-on-HWM the whole burst is non-blocking. The old 10ms-per-peer
+	// fallback would stall ~10ms × messages here.
+	const burst = 20
+	start := time.Now()
+	for i := 0; i < burst; i++ {
+		require.NoError(t, eng.Send(ctx, msg.FromFrames([]byte("t"), []byte{byte(i)})), "send %d", i)
+	}
+	require.Less(t, time.Since(start), 100*time.Millisecond, "slow subscriber stalled the publisher")
+
+	// The fast peer must have received the full burst.
+	for i := 0; i < burst; i++ {
+		got, err := fastPeer.Recv(ctx)
+		require.NoError(t, err, "fast recv %d", i)
+		require.Equal(t, byte(i), got.Frames()[1][0], "fast recv %d", i)
+	}
+}
+
+// TestPub_FanoutPooledMessageRecycledOnce is the double-recycle regression
+// (XSUB→XPUB proxy shape): one pooled >4KiB *Msg fanned out to two pipes
+// whose consumers Recycle concurrently must reclaim its buffers exactly
+// once — Send reserves a reference per extra target and Recycle is
+// refcount-aware, so -race stays quiet and IsPooled flips only after the
+// last consumer is done.
+func TestPub_FanoutPooledMessageRecycledOnce(t *testing.T) {
+	t.Parallel()
+	eng := socket.NewPubEngine()
+	defer eng.Close()
+
+	a1, b1 := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a2, b2 := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(a1, b1, a2, b2)
+	mustAttach(t, eng, a1, a2)
+
+	ctx := testCtx(t)
+	require.NoError(t, b1.Send(ctx, subscribeMsg(true, []byte{})), "peer1 subscribe")
+	require.NoError(t, b2.Send(ctx, subscribeMsg(true, []byte{})), "peer2 subscribe")
+	time.Sleep(50 * time.Millisecond) // let the peer readers apply the subs
+
+	// Build a pooled message the way the session reader does for >4KiB
+	// frames.
+	buf := msg.PoolGet(8 * 1024)
+	m := msg.New()
+	m.AppendFrame([]byte("t")) // topic
+	m.AppendPooledFrame(buf, buf)
+	require.True(t, m.IsPooled())
+
+	require.NoError(t, eng.Send(ctx, m), "fanout send")
+
+	// Both peers must observe the SAME *Msg value (single-copy fanout).
+	got1, err := b1.Recv(ctx)
+	require.NoError(t, err, "peer1 recv")
+	got2, err := b2.Recv(ctx)
+	require.NoError(t, err, "peer2 recv")
+	require.Same(t, m, got1, "peer1 must receive the fanned-out message")
+	require.Same(t, m, got2, "peer2 must receive the fanned-out message")
+
+	// Concurrent post-flush Recycle from both consumers (what the two
+	// session writers do in production).
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			msg.Recycle(m)
+		}()
+	}
+	wg.Wait()
+	require.False(t, m.IsPooled(), "pooled buffers must be reclaimed after the last Recycle")
+}
+
+// TestPub_DropOnHWMReleasesReservedReference: when fanout drops a pooled
+// message for a saturated peer, the reference reserved for that peer is
+// released — the surviving consumer's Recycle still reclaims, with no
+// leaked refcount.
+func TestPub_DropOnHWMReleasesReservedReference(t *testing.T) {
+	t.Parallel()
+	eng := socket.NewPubEngine()
+	defer eng.Close()
+
+	full, fullPeer := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	free, freePeer := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(full, fullPeer, free, freePeer)
+	mustAttach(t, eng, full, free)
+
+	ctx := testCtx(t)
+	require.NoError(t, fullPeer.Send(ctx, subscribeMsg(true, []byte{})), "full subscribe")
+	require.NoError(t, freePeer.Send(ctx, subscribeMsg(true, []byte{})), "free subscribe")
+	time.Sleep(50 * time.Millisecond)
+	require.NoError(t, full.Send(ctx, msg.FromBytes([]byte("plug"))), "saturate full peer")
+
+	buf := msg.PoolGet(8 * 1024)
+	m := msg.New()
+	m.AppendFrame([]byte("t"))
+	m.AppendPooledFrame(buf, buf)
+
+	require.NoError(t, eng.Send(ctx, m), "fanout send")
+	got, err := freePeer.Recv(ctx)
+	require.NoError(t, err, "free peer recv")
+	require.Same(t, m, got)
+	msg.Recycle(got)
+	require.False(t, m.IsPooled(), "drop path leaked its reserved reference")
 }

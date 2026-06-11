@@ -164,7 +164,7 @@ func (s *Subscriber[T]) Recv(ctx context.Context) (Message[T], error) {
 	return Message[T]{Topic: string(frames[0]), Value: v}, nil
 }
 
-// Option configures a Handle invocation or Router.Run invocation.
+// Option configures a Handle invocation or TopicMux.Run invocation.
 type Option func(*options)
 
 type options struct {

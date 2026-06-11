@@ -9,8 +9,8 @@ import "github.com/rkm/gozmq/internal/iface"
 // primitives:
 //
 //   - Send load-balances outbound messages round-robin across attached
-//     peer pipes (reusing LoadBalancer; strict cursor — blocks on an
-//     HWM-full peer rather than rotating past it).
+//     peer pipes (reusing LoadBalancer; an HWM-full peer is rotated
+//     past, blocking only when every peer is full).
 //   - Recv fair-queues inbound messages across attached peer pipes
 //     (reusing FairQueue).
 //

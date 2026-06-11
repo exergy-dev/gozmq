@@ -122,7 +122,7 @@ func (e *SubEngine) AttachPipe(p iface.Pipe) error {
 	// (subscription forwarding is best-effort; the application is
 	// expected to resubscribe on reconnect via the socket option).
 	for _, prefix := range snapshot {
-		e.forwardSubscription(p, true, prefix)
+		e.forwardSubscription(context.Background(), p, true, prefix)
 	}
 	return nil
 }
@@ -144,13 +144,7 @@ func (e *SubEngine) Subscribe(prefix []byte) error {
 		e.mu.Unlock()
 		return fmt.Errorf("sub subscribe: %w", zmqerr.ErrSocketClosed)
 	}
-	key := string(prefix)
-	e.subs[key]++
-	e.tree.Add(prefix)
-	shouldForward := e.subs[key] == 1
-	if shouldForward {
-		e.subList = append(e.subList, bytes.Clone(prefix))
-	}
+	shouldForward := e.applySubLocked(prefix, true)
 	peers := make([]iface.Pipe, 0, len(e.peers))
 	for p := range e.peers {
 		peers = append(peers, p)
@@ -160,7 +154,7 @@ func (e *SubEngine) Subscribe(prefix []byte) error {
 	// unique prefix. Refcount duplicates stay local.
 	if shouldForward {
 		for _, p := range peers {
-			e.forwardSubscription(p, true, prefix)
+			e.forwardSubscription(context.Background(), p, true, prefix)
 		}
 	}
 	return nil
@@ -174,18 +168,7 @@ func (e *SubEngine) Unsubscribe(prefix []byte) error {
 		e.mu.Unlock()
 		return fmt.Errorf("sub unsubscribe: %w", zmqerr.ErrSocketClosed)
 	}
-	key := string(prefix)
-	if e.subs[key] == 0 {
-		e.mu.Unlock()
-		return nil
-	}
-	e.subs[key]--
-	e.tree.Remove(prefix)
-	shouldForward := e.subs[key] == 0
-	if shouldForward {
-		delete(e.subs, key)
-		e.removeSubFromList(key)
-	}
+	shouldForward := e.applySubLocked(prefix, false)
 	peers := make([]iface.Pipe, 0, len(e.peers))
 	for p := range e.peers {
 		peers = append(peers, p)
@@ -193,10 +176,44 @@ func (e *SubEngine) Unsubscribe(prefix []byte) error {
 	e.mu.Unlock()
 	if shouldForward {
 		for _, p := range peers {
-			e.forwardSubscription(p, false, prefix)
+			e.forwardSubscription(context.Background(), p, false, prefix)
 		}
 	}
 	return nil
+}
+
+// applySubLocked updates the local subscription state — the refcount map,
+// the match tree, and the replay list — for a single subscribe/unsubscribe
+// of prefix. It returns shouldForward: true exactly when this was the first
+// add or the last remove of prefix, i.e. when a SUBSCRIBE/CANCEL must be
+// forwarded upstream so peers see one command per unique prefix. An
+// unsubscribe of an absent prefix is a no-op and returns false. The caller
+// must hold e.mu.
+//
+// This is the single source of truth for the refcount/tree/subList
+// invariant shared by Subscribe, Unsubscribe, and xsubSend (XSUB).
+func (e *SubEngine) applySubLocked(prefix []byte, subscribe bool) (shouldForward bool) {
+	key := string(prefix)
+	if subscribe {
+		e.subs[key]++
+		e.tree.Add(prefix)
+		if e.subs[key] == 1 {
+			e.subList = append(e.subList, bytes.Clone(prefix))
+			return true
+		}
+		return false
+	}
+	if e.subs[key] == 0 {
+		return false
+	}
+	e.subs[key]--
+	e.tree.Remove(prefix)
+	if e.subs[key] == 0 {
+		delete(e.subs, key)
+		e.removeSubFromList(key)
+		return true
+	}
+	return false
 }
 
 // removeSubFromList drops the first subList entry equal to key. The caller
@@ -214,17 +231,14 @@ func (e *SubEngine) removeSubFromList(key string) {
 // deadline (rather than a pre-cancelled ctx) avoids Go's select
 // randomly preferring ctx.Done() over a ready send channel, which would
 // drop subscriptions even when the pipe has capacity.
-func (e *SubEngine) forwardSubscription(p iface.Pipe, subscribe bool, prefix []byte) {
-	buf := make([]byte, 1+len(prefix))
-	if subscribe {
-		buf[0] = SubscribeByte
-	} else {
-		buf[0] = UnsubscribeByte
-	}
-	copy(buf[1:], prefix)
-	ctx, cancel := context.WithTimeout(context.Background(), subForwardTimeout)
+//
+// The deadline is layered onto the caller's ctx, so the effective
+// deadline is min(ctx deadline, subForwardTimeout) and an
+// already-cancelled caller does not wait out the internal budget.
+func (e *SubEngine) forwardSubscription(ctx context.Context, p iface.Pipe, subscribe bool, prefix []byte) {
+	sendCtx, cancel := context.WithTimeout(ctx, subForwardTimeout)
 	defer cancel()
-	_ = p.Send(ctx, msg.FromBytes(buf))
+	_ = p.Send(sendCtx, msg.FromBytes(subscriptionFrame(subscribe, prefix)))
 }
 
 // subForwardTimeout bounds how long Subscribe/Unsubscribe will wait on
@@ -246,7 +260,6 @@ func (e *SubEngine) Send(ctx context.Context, m *msg.Msg) error {
 // subscribe/unsubscribe message, which we both update our local filter
 // with and forward to every peer.
 func (e *SubEngine) xsubSend(ctx context.Context, m *msg.Msg) error {
-	_ = ctx // XSUB forwarding uses the same bounded best-effort semantics as Subscribe.
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
@@ -258,21 +271,11 @@ func (e *SubEngine) xsubSend(ctx context.Context, m *msg.Msg) error {
 		// XSUB accepts only subscription commands from the app.
 		return fmt.Errorf("xsub send: %w: not a subscription message", zmqerr.ErrFSMViolation)
 	}
-	key := string(prefix)
-	if subscribe {
-		e.subs[key]++
-		e.tree.Add(prefix)
-		if e.subs[key] == 1 {
-			e.subList = append(e.subList, bytes.Clone(prefix))
-		}
-	} else if e.subs[key] > 0 {
-		e.subs[key]--
-		e.tree.Remove(prefix)
-		if e.subs[key] == 0 {
-			delete(e.subs, key)
-			e.removeSubFromList(key)
-		}
-	}
+	// Update local filter state. XSUB forwards every app-issued command
+	// upstream regardless of refcount (the app is explicitly driving the
+	// subscription), so the shouldForward result is intentionally ignored
+	// here — unlike Subscribe/Unsubscribe which dedup forwarding.
+	e.applySubLocked(prefix, subscribe)
 	peers := make([]iface.Pipe, 0, len(e.peers))
 	for p := range e.peers {
 		peers = append(peers, p)
@@ -280,7 +283,7 @@ func (e *SubEngine) xsubSend(ctx context.Context, m *msg.Msg) error {
 	e.mu.Unlock()
 
 	for _, p := range peers {
-		e.forwardSubscription(p, subscribe, prefix)
+		e.forwardSubscription(ctx, p, subscribe, prefix)
 	}
 	e.sent.Add(1)
 	return nil
@@ -300,20 +303,29 @@ func (e *SubEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		if err != nil {
 			return nil, err
 		}
-		if isSub, _, _ := isSubscriptionMsg(m); isSub {
-			// SUB: drop. XSUB: surface as-is (matches libzmq XSUB
-			// behavior — the app sees SUBSCRIBE events coming from
-			// its peers).
+		if m.IsSubscription() {
+			// A genuine SUBSCRIBE/CANCEL command surfaced by the session
+			// reader from a peer (flagged out-of-band, NOT sniffed from
+			// the payload — so ordinary data beginning with 0x00/0x01 is
+			// never misclassified). SUB: drop. XSUB: surface as-is
+			// (matches libzmq XSUB behavior — the app sees SUBSCRIBE
+			// events coming from its peers).
 			if e.surface {
 				e.recv.Add(1)
 				return m, nil
 			}
+			msg.Recycle(m)
 			continue
 		}
 		if m.NumFrames() == 0 {
+			msg.Recycle(m)
 			continue
 		}
 		if !e.matches(m.Frames()[0]) {
+			// Filter miss: the engine is the message's last owner, so
+			// recycle eagerly instead of leaving pooled buffers to the
+			// finalizer.
+			msg.Recycle(m)
 			continue
 		}
 		e.recv.Add(1)

@@ -20,10 +20,7 @@
 package security
 
 import (
-	"bytes"
 	"fmt"
-	"maps"
-	"strings"
 
 	"github.com/rkm/gozmq/internal/iface"
 	"github.com/rkm/gozmq/internal/zmqerr"
@@ -71,17 +68,11 @@ const (
 // A single value is not safe for concurrent use; the session layer drives
 // NextHandshake single-threaded.
 type plainMech struct {
-	role      iface.Role
-	state     plainState
-	username  string
-	password  string
-	authFn    func(user, pass string) bool
-	localMeta map[string]string
-	peerMeta  map[string]string
-	zapAuth   iface.ZAPAuthorizer
-	zapDomain string
-	zapAddr   string
-	zapMeta   map[string]string
+	MechBase
+	state    plainState
+	username string
+	password string
+	authFn   func(user, pass string) bool
 }
 
 // NewPlainClient returns a PLAIN mechanism configured as the initiator. It
@@ -90,11 +81,10 @@ type plainMech struct {
 // localMeta may be nil.
 func NewPlainClient(username, password string, localMeta map[string]string) iface.SecurityMech {
 	return &plainMech{
-		role:      iface.RoleClient,
-		state:     plainClientSendHello,
-		username:  username,
-		password:  password,
-		localMeta: maps.Clone(localMeta),
+		MechBase: NewMechBase(iface.RoleClient, localMeta),
+		state:    plainClientSendHello,
+		username: username,
+		password: password,
 	}
 }
 
@@ -104,20 +94,22 @@ func NewPlainClient(username, password string, localMeta map[string]string) ifac
 // zmqerr.ErrAuthFailed from the next NextHandshake call so the session layer
 // tears the connection down. A nil authenticate callback is equivalent to one
 // that always returns false.
+//
+// Implementations of authenticate should compare the supplied password using
+// crypto/subtle.ConstantTimeCompare (or compare salted hashes) rather than
+// ==, so a network peer cannot use response timing to probe the password
+// byte-by-byte. The credentials are not retained by the mechanism after the
+// authentication decision is made.
 func NewPlainServer(authenticate func(user, pass string) bool, localMeta map[string]string) iface.SecurityMech {
 	return &plainMech{
-		role:      iface.RoleServer,
-		state:     plainServerSeed,
-		authFn:    authenticate,
-		localMeta: maps.Clone(localMeta),
+		MechBase: NewMechBase(iface.RoleServer, localMeta),
+		state:    plainServerSeed,
+		authFn:   authenticate,
 	}
 }
 
 // Name reports the greeting mechanism token, unpadded.
 func (*plainMech) Name() string { return plainMechName }
-
-// AsServer reports the value of the greeting as-server byte.
-func (m *plainMech) AsServer() bool { return m.role == iface.RoleServer }
 
 // EncodeFrame is the identity codec for PLAIN — no per-frame rewriting.
 func (*plainMech) EncodeFrame(flags uint8, plain []byte) (uint8, []byte, error) {
@@ -127,44 +119,6 @@ func (*plainMech) EncodeFrame(flags uint8, plain []byte) (uint8, []byte, error) 
 // DecodeFrame is the identity codec for PLAIN — no per-frame rewriting.
 func (*plainMech) DecodeFrame(flags uint8, wire []byte) (uint8, []byte, error) {
 	return flags, wire, nil
-}
-
-// Metadata returns a copy of the local metadata properties sent in the
-// metadata-bearing handshake command: INITIATE on the client, READY on the
-// server.
-func (m *plainMech) Metadata() map[string]string { return maps.Clone(m.localMeta) }
-
-// SetPeerMetadata stores the peer's parsed metadata-bearing command
-// properties. PLAIN performs no additional validation; Socket-Type
-// compatibility lives in the engine.
-func (m *plainMech) SetPeerMetadata(props map[string]string) error {
-	if props == nil {
-		m.peerMeta = nil
-		return nil
-	}
-	m.peerMeta = maps.Clone(props)
-	return nil
-}
-
-// PeerMetadata returns the parsed peer metadata-bearing command properties,
-// or nil before the handshake completes. Exposed (like NULL's version) for
-// testability; not part of iface.SecurityMech.
-func (m *plainMech) PeerMetadata() map[string]string {
-	if m.peerMeta == nil {
-		return nil
-	}
-	return maps.Clone(m.peerMeta)
-}
-
-// ConfigureZAP wires a server-side RFC 27 authorizer into the mechanism.
-// Client-side PLAIN ignores the hook.
-func (m *plainMech) ConfigureZAP(authorizer iface.ZAPAuthorizer, domain, address string) {
-	if m.role != iface.RoleServer {
-		return
-	}
-	m.zapAuth = authorizer
-	m.zapDomain = domain
-	m.zapAddr = address
 }
 
 // NextHandshake drives the PLAIN handshake state machine. See the package
@@ -187,7 +141,7 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		if in == nil {
 			return nil, false, fmt.Errorf("gozmq/security/plain: nil peer input awaiting WELCOME: %w", zmqerr.ErrMalformedFrame)
 		}
-		name, payload, err := parseServerCommand(in)
+		name, payload, err := parseCommand(in)
 		if err != nil {
 			return nil, false, fmt.Errorf("gozmq/security/plain: parse WELCOME/ERROR body %x: %w", in, err)
 		}
@@ -218,7 +172,7 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		if in == nil {
 			return nil, false, fmt.Errorf("gozmq/security/plain: nil peer input awaiting READY: %w", zmqerr.ErrMalformedFrame)
 		}
-		name, payload, err := parseServerCommand(in)
+		name, payload, err := parseCommand(in)
 		if err != nil {
 			return nil, false, fmt.Errorf("gozmq/security/plain: parse READY body %x: %w", in, err)
 		}
@@ -234,7 +188,7 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 			if err != nil {
 				return nil, false, err
 			}
-			m.peerMeta = props
+			m.MergePeerMetadata(props)
 			m.state = plainDone
 			return nil, true, nil
 		default:
@@ -265,17 +219,16 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		if err != nil {
 			return nil, false, err
 		}
+		// Record the username for diagnostics; the password stays in locals
+		// only and is dropped as soon as the auth decision below is made.
 		m.username = user
-		m.password = pass
 		switch {
 		case m.zapAuth != nil:
-			_, meta, err := m.zapAuth(m.zapDomain, m.zapAddr, plainMechName, [][]byte{[]byte(user), []byte(pass)})
-			if err != nil {
+			if err := m.AuthorizeZAP(plainMechName, [][]byte{[]byte(user), []byte(pass)}); err != nil {
 				out := encodeCommand(plainCmdError, encodeErrorReason("Invalid username or password"))
 				m.state = plainDone
 				return out, false, fmt.Errorf("gozmq/security/plain: ZAP rejected user %q: %w", user, err)
 			}
-			m.zapMeta = maps.Clone(meta)
 		case m.authFn == nil || !m.authFn(user, pass):
 			// Emit ERROR and tear down. The reason text is short and
 			// opaque per RFC 24's guidance not to leak authentication
@@ -304,7 +257,7 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		if err != nil {
 			return nil, false, err
 		}
-		m.peerMeta = zmtp.MergeMeta(props, m.zapMeta)
+		m.MergePeerMetadata(props)
 		m.state = plainServerSendReady
 		return m.NextHandshake(nil)
 
@@ -329,7 +282,9 @@ func encodeCommand(name string, payload []byte) []byte {
 	return zmtp.EncodeCommand(zmtp.Command{Name: name, Body: payload})
 }
 
-// parseCommand splits a command body into (name, payload).
+// parseCommand splits a command body into (name, payload). Command names in
+// ZMTP are exact (case-sensitive) ASCII tokens, so no normalization is
+// applied.
 func parseCommand(body []byte) (string, []byte, error) {
 	if len(body) < 1 {
 		return "", nil, fmt.Errorf("gozmq/security/plain: empty command body: %w", zmqerr.ErrMalformedFrame)
@@ -338,76 +293,62 @@ func parseCommand(body []byte) (string, []byte, error) {
 	if 1+nameLen > len(body) {
 		return "", nil, fmt.Errorf("gozmq/security/plain: command name truncated (declared %d, have %d): %w", nameLen, len(body)-1, zmqerr.ErrMalformedFrame)
 	}
-	// Command names in ZMTP are case-sensitive ASCII tokens, but libzmq
-	// emits them uppercase; accept either to be robust.
-	name := strings.ToUpper(string(body[1 : 1+nameLen]))
-	return name, body[1+nameLen:], nil
+	return string(body[1 : 1+nameLen]), body[1+nameLen:], nil
 }
 
-// parseServerCommand accepts the canonical length-prefixed PLAIN command
-// bodies and two auth-failure forms observed in libzmq interop:
-//   - a bare "ERROR" command body without the leading name-length byte
-//   - a malformed "?RROR" variant carrying the same short-string payload
-//
-// The malformed variant is only tolerated for ERROR because it is specific to
-// negative-path interop; all other commands must use the canonical encoding.
-func parseServerCommand(body []byte) (string, []byte, error) {
-	name, payload, err := parseCommand(body)
-	if err == nil {
-		return name, payload, nil
+// putShortString appends the RFC 24 short-string form — [1 byte length][bytes]
+// — of s to dst. Strings are capped at 255 bytes by the single-byte prefix.
+func putShortString(dst []byte, s, what string) ([]byte, error) {
+	if len(s) > 255 {
+		return nil, fmt.Errorf("gozmq/security/plain: %s length %d exceeds 255", what, len(s))
 	}
-	if bytes.HasPrefix(body, []byte(plainCmdError)) {
-		return plainCmdError, body[len(plainCmdError):], nil
+	dst = append(dst, byte(len(s)))
+	return append(dst, s...), nil
+}
+
+// getShortString parses one [1 byte length][bytes] short string from the
+// front of b, returning the string and the remaining bytes.
+func getShortString(b []byte, what string) (string, []byte, error) {
+	if len(b) < 1 {
+		return "", nil, fmt.Errorf("gozmq/security/plain: missing %s length: %w", what, zmqerr.ErrMalformedFrame)
 	}
-	if len(body) >= len(plainCmdError) && bytes.Equal(body[1:len(plainCmdError)], []byte(plainCmdError[1:])) {
-		return plainCmdError, body[len(plainCmdError):], nil
+	n := int(b[0])
+	if 1+n > len(b) {
+		return "", nil, fmt.Errorf("gozmq/security/plain: %s truncated (declared %d, have %d): %w", what, n, len(b)-1, zmqerr.ErrMalformedFrame)
 	}
-	return "", nil, err
+	return string(b[1 : 1+n]), b[1+n:], nil
 }
 
 // encodeHello builds the HELLO payload per RFC 24 §4:
 //
 //	[1 byte username-length][username][1 byte password-length][password]
-//
-// Usernames and passwords are capped at 255 bytes by the single-byte prefix.
 func encodeHello(user, pass string) ([]byte, error) {
-	if len(user) > 255 {
-		return nil, fmt.Errorf("gozmq/security/plain: username length %d exceeds 255", len(user))
-	}
-	if len(pass) > 255 {
-		return nil, fmt.Errorf("gozmq/security/plain: password length %d exceeds 255", len(pass))
-	}
 	payload := make([]byte, 0, 1+len(user)+1+len(pass))
-	payload = append(payload, byte(len(user)))
-	payload = append(payload, user...)
-	payload = append(payload, byte(len(pass)))
-	payload = append(payload, pass...)
+	payload, err := putShortString(payload, user, "username")
+	if err != nil {
+		return nil, err
+	}
+	payload, err = putShortString(payload, pass, "password")
+	if err != nil {
+		return nil, err
+	}
 	return encodeCommand(plainCmdHello, payload), nil
 }
 
 // parseHello parses the HELLO payload (NOT the full command body — the
 // command-name prefix must already have been stripped by parseCommand).
 func parseHello(payload []byte) (string, string, error) {
-	if len(payload) < 1 {
-		return "", "", fmt.Errorf("gozmq/security/plain: HELLO payload missing username length: %w", zmqerr.ErrMalformedFrame)
+	user, rest, err := getShortString(payload, "HELLO username")
+	if err != nil {
+		return "", "", err
 	}
-	userLen := int(payload[0])
-	if 1+userLen > len(payload) {
-		return "", "", fmt.Errorf("gozmq/security/plain: HELLO username truncated (declared %d, have %d): %w", userLen, len(payload)-1, zmqerr.ErrMalformedFrame)
+	pass, rest, err := getShortString(rest, "HELLO password")
+	if err != nil {
+		return "", "", err
 	}
-	user := string(payload[1 : 1+userLen])
-	rest := payload[1+userLen:]
-	if len(rest) < 1 {
-		return "", "", fmt.Errorf("gozmq/security/plain: HELLO payload missing password length: %w", zmqerr.ErrMalformedFrame)
-	}
-	passLen := int(rest[0])
-	if 1+passLen > len(rest) {
-		return "", "", fmt.Errorf("gozmq/security/plain: HELLO password truncated (declared %d, have %d): %w", passLen, len(rest)-1, zmqerr.ErrMalformedFrame)
-	}
-	pass := string(rest[1 : 1+passLen])
 	// Trailing bytes after the declared password are malformed.
-	if 1+passLen != len(rest) {
-		return "", "", fmt.Errorf("gozmq/security/plain: HELLO has %d trailing bytes: %w", len(rest)-(1+passLen), zmqerr.ErrMalformedFrame)
+	if len(rest) != 0 {
+		return "", "", fmt.Errorf("gozmq/security/plain: HELLO has %d trailing bytes: %w", len(rest), zmqerr.ErrMalformedFrame)
 	}
 	return user, pass, nil
 }
@@ -417,20 +358,12 @@ func encodeErrorReason(reason string) []byte {
 	if len(reason) > 255 {
 		reason = reason[:255]
 	}
-	out := make([]byte, 0, 1+len(reason))
-	out = append(out, byte(len(reason)))
-	out = append(out, reason...)
+	out, _ := putShortString(make([]byte, 0, 1+len(reason)), reason, "reason") // length pre-clamped; cannot fail
 	return out
 }
 
 // parseErrorReason parses an ERROR payload: [1 byte length][reason].
 func parseErrorReason(payload []byte) (string, error) {
-	if len(payload) < 1 {
-		return "", fmt.Errorf("gozmq/security/plain: ERROR payload missing reason length: %w", zmqerr.ErrMalformedFrame)
-	}
-	reasonLen := int(payload[0])
-	if 1+reasonLen > len(payload) {
-		return "", fmt.Errorf("gozmq/security/plain: ERROR reason truncated (declared %d, have %d): %w", reasonLen, len(payload)-1, zmqerr.ErrMalformedFrame)
-	}
-	return string(payload[1 : 1+reasonLen]), nil
+	reason, _, err := getShortString(payload, "ERROR reason")
+	return reason, err
 }

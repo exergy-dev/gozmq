@@ -1,0 +1,80 @@
+package gozmq
+
+import (
+	"fmt"
+
+	"github.com/rkm/gozmq/internal/iface"
+	"github.com/rkm/gozmq/internal/session"
+	"github.com/rkm/gozmq/internal/zmtp"
+	"github.com/rkm/gozmq/security"
+	"github.com/rkm/gozmq/security/curve"
+)
+
+// buildSession is the factory the Reconnector (and the acceptLoop) call
+// to wrap a Conn in a Session with the mechanism and codec configured for
+// this Socket. An error means the security mechanism could not be
+// constructed (e.g. ephemeral CURVE keygen failure); the connection must
+// be torn down rather than proceeding with a weaker mechanism.
+func (s *Socket) buildSession(conn iface.Conn, role iface.Role) (iface.Session, error) {
+	mech, err := s.newMechanism(role)
+	if err != nil {
+		return nil, err
+	}
+	if role == iface.RoleServer {
+		if cfg, ok := mech.(iface.ZapConfigurable); ok && s.ctx.zapAuth != nil {
+			cfg.ConfigureZAP(s.ctx.zapAuth, s.cfg.zapDomain, conn.RemoteEndpoint())
+		}
+	}
+	codec := zmtp.NewFrameCodec(s.cfg.maxMessageSize)
+	return session.New(session.Config{
+		Conn:              conn,
+		Mech:              mech,
+		Codec:             codec,
+		Role:              role,
+		HeartbeatInterval: s.cfg.heartbeatInterval,
+		HeartbeatTimeout:  s.cfg.heartbeatTimeout,
+		HandshakeTimeout:  s.cfg.handshakeTimeout,
+		SendHWM:           s.cfg.sendHWM,
+		RecvHWM:           s.cfg.recvHWM,
+		MaxMessageSize:    s.cfg.maxMessageSize,
+		Logger:            s.cfg.logger,
+	}), nil
+}
+
+func toKey(b []byte) curve.Key {
+	var k curve.Key
+	copy(k[:], b)
+	return k
+}
+
+// newMechanism picks the security mechanism for a new session based on
+// the socket's configured options. Precedence: CURVE > PLAIN > NULL.
+// A configured mechanism that cannot be constructed is an error — never
+// a silent downgrade to a weaker mechanism.
+func (s *Socket) newMechanism(role iface.Role) (iface.SecurityMech, error) {
+	meta := map[string]string{
+		"Socket-Type": socketTypeName(s.socketType),
+	}
+	if len(s.cfg.identity) > 0 {
+		meta["Identity"] = string(s.cfg.identity)
+	}
+	switch {
+	case len(s.cfg.curveSecretKey) == 32 && s.cfg.curveServer:
+		m, err := curve.NewCurveServer(toKey(s.cfg.curveSecretKey), meta)
+		if err != nil {
+			return nil, fmt.Errorf("gozmq: CURVE server mechanism: %w", err)
+		}
+		return m, nil
+	case len(s.cfg.curveSecretKey) == 32 && !s.cfg.curveServer && len(s.cfg.curveServerKey) == 32 && len(s.cfg.curvePublicKey) == 32:
+		m, err := curve.NewCurveClient(toKey(s.cfg.curveServerKey), toKey(s.cfg.curvePublicKey), toKey(s.cfg.curveSecretKey), meta)
+		if err != nil {
+			return nil, fmt.Errorf("gozmq: CURVE client mechanism: %w", err)
+		}
+		return m, nil
+	case s.cfg.plainAuth != nil && role == iface.RoleServer:
+		return security.NewPlainServer(s.cfg.plainAuth, meta), nil
+	case s.cfg.plainClient && role == iface.RoleClient:
+		return security.NewPlainClient(s.cfg.plainClientUser, s.cfg.plainClientPass, meta), nil
+	}
+	return security.NewNull(role, meta), nil
+}

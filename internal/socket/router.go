@@ -25,18 +25,9 @@ import (
 //
 // Recv is race-safe against concurrent Detach: a message enqueued by a pipe's
 // forwarder before Detach ran still resolves to that pipe's original identity
-// via the post-detach side cache (detachedIdOf), keyed by the iface.Pipe
-// pointer so a newer peer with a colliding PeerIdentity is never confused for
-// the departed original.
-
-// routerDetachCacheCap bounds the side cache of identities for recently
-// detached pipes. A small FIFO cap suffices: the FairQueue inbound channel has
-// capacity 1 and a detached pipe's forwarder exits shortly after Detach, so the
-// window in which it can still produce messages is short. Under extreme churn a
-// handful of in-flight messages predating eviction fall back to the pipe's
-// advertised PeerIdentity (never cross-wired to a newer peer, since the key is
-// the pipe pointer).
-const routerDetachCacheCap = 1024
+// via the post-detach side cache (identityRouter.detachedIdOf, enabled here at
+// construction), keyed by the iface.Pipe pointer so a newer peer with a
+// colliding PeerIdentity is never confused for the departed original.
 
 type routerEngine struct {
 	identityRouter
@@ -44,61 +35,17 @@ type routerEngine struct {
 	mandatory bool
 	// dropped (promoted from identityRouter.counters) counts non-mandatory
 	// routes with an unknown identity.
-
-	// detachedIdOf retains, post-Detach, the identity in use for a pipe at
-	// Detach time, so Recv can still stamp in-flight messages correctly.
-	// Bounded to routerDetachCacheCap, FIFO eviction via detachedOrder.
-	detachedIdOf  map[iface.Pipe][]byte
-	detachedOrder []iface.Pipe
 }
 
 // NewRouterEngine returns a new ROUTER socket engine. If mandatory is true,
 // Send returns zmqerr.ErrRouteUnknown when the leading identity frame does not
 // match an attached peer; otherwise such sends are silently dropped.
 func NewRouterEngine(mandatory bool) iface.SocketEngine {
-	e := &routerEngine{
-		identityRouter: newIdentityRouter("router"),
+	return &routerEngine{
+		// detachCache=true: ROUTER keeps the post-detach identity cache so
+		// Recv can stamp messages from just-detached peers (see doc above).
+		identityRouter: newIdentityRouter("router", true),
 		mandatory:      mandatory,
-		detachedIdOf:   make(map[iface.Pipe][]byte),
-	}
-	// Wire the base hooks to ROUTER's post-detach identity cache.
-	e.postAttachLocked = e.removeDetachedLocked
-	e.postDetachLocked = e.rememberDetachedLocked
-	e.extraIDLocked = func(src iface.Pipe) []byte { return e.detachedIdOf[src] }
-	e.postCloseLocked = func() { e.detachedIdOf = nil; e.detachedOrder = nil }
-	return e
-}
-
-// rememberDetachedLocked stores (pipe -> identity) in the post-detach side
-// cache, evicting the oldest entry if full. Caller must hold e.mu.
-func (e *routerEngine) rememberDetachedLocked(p iface.Pipe, id []byte) {
-	if e.detachedIdOf == nil {
-		return
-	}
-	if _, exists := e.detachedIdOf[p]; exists {
-		// Unreachable in practice (Detach runs once per pipe); guard drift.
-		e.detachedIdOf[p] = id
-		return
-	}
-	if len(e.detachedOrder) >= routerDetachCacheCap {
-		evict := e.detachedOrder[0]
-		e.detachedOrder = e.detachedOrder[1:]
-		delete(e.detachedIdOf, evict)
-	}
-	e.detachedIdOf[p] = id
-	e.detachedOrder = append(e.detachedOrder, p)
-}
-
-// removeDetachedLocked drops any cached detach entry for p, called from Attach
-// so re-attaching a reused pipe value doesn't leave a stale entry. Caller must
-// hold e.mu.
-func (e *routerEngine) removeDetachedLocked(p iface.Pipe) {
-	if _, ok := e.detachedIdOf[p]; !ok {
-		return
-	}
-	delete(e.detachedIdOf, p)
-	if i := slices.Index(e.detachedOrder, p); i >= 0 {
-		e.detachedOrder = slices.Delete(e.detachedOrder, i, i+1)
 	}
 }
 
@@ -129,10 +76,12 @@ func (e *routerEngine) Send(ctx context.Context, m *msg.Msg) error {
 	}
 
 	// Route everything after the identity frame. Clone the frame-slice header
-	// so we don't share backing storage with the caller's message, then hand
-	// the locally-built slice off directly (FromFramesOwned avoids the second
-	// copy FromFrames would make).
+	// (the frame BYTES still alias m's), hand the locally-built slice off via
+	// FromFramesOwned, and transfer pooled-buffer ownership so the session
+	// writer's post-flush Recycle reclaims via routed instead of leaving m's
+	// pooled frames live under the in-flight write (use-after-free).
 	routed := msg.FromFramesOwned(slices.Clone(rest))
+	routed.TransferPool(m)
 	if err := p.Send(ctx, routed); err != nil {
 		return err
 	}

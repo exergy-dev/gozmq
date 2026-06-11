@@ -205,9 +205,7 @@ func EncodeZapRequest(req *ZapRequest) [][]byte {
 		req.Identity,
 		[]byte(req.Mechanism),
 	)
-	for _, cred := range req.Credentials {
-		frames = append(frames, cred)
-	}
+	frames = append(frames, req.Credentials...)
 	return frames
 }
 

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/rkm/gozmq/internal/iface"
+	"github.com/rkm/gozmq/internal/msg"
 	"github.com/rkm/gozmq/internal/zmqerr"
 )
 
@@ -119,10 +120,11 @@ func (s *sessionImpl) exchangeGreeting() error {
 	// layer's NextHandshake will fail naturally if the peer chose a
 	// different mechanism. We only assert that the peer also speaks
 	// ZMTP 3.x (decode would have rejected anything else) and record
-	// the heartbeat capability. design §5.4: skip PING/PONG if peer is
+	// the heartbeat capability: any minor >= 1 is treated as 3.1
+	// (heartbeats available). design §5.4: skip PING/PONG if peer is
 	// 3.0.
 	if peerMinor >= 0x01 {
-		s.peerHeartbeats.Store(true)
+		s.peerHeartbeats = true
 	}
 	// Mechanism mismatch is informational; the actual negotiation rule
 	// is decided by NextHandshake. We log if there's a mismatch so it's
@@ -155,7 +157,19 @@ func (s *sessionImpl) runSecurityHandshake() error {
 	var in []byte
 	for {
 		out, done, err := s.cfg.Mech.NextHandshake(in)
+		// `in` is a codec pool buffer from the previous iteration's
+		// ReadFrame. NextHandshake copies anything it retains (metadata
+		// maps, keys), so the scratch can go back to the pool now.
+		msg.PoolPut(in)
+		in = nil
 		if err != nil {
+			// Mechanisms may return an encoded ERROR command alongside the
+			// failure (e.g. ZAP rejection) so the peer learns the reason
+			// instead of seeing an abrupt close. Best-effort: the session
+			// is being torn down either way.
+			if len(out) > 0 {
+				_ = s.cfg.Codec.WriteFrame(s.cfg.Conn, iface.FlagCommand, out)
+			}
 			return fmt.Errorf("gozmq/session: security handshake: %w", err)
 		}
 
@@ -184,15 +198,20 @@ func (s *sessionImpl) runSecurityHandshake() error {
 
 		// Read the peer's next handshake message.
 		flags, body, rerr := s.cfg.Codec.ReadFrame(s.reader, nil)
-		// Always reap the writer before propagating either error.
+		// Always reap the writer before propagating either error. On the
+		// error paths body is nil or an unreferenced pool buffer — return
+		// it rather than leaking it from the pool.
 		werr := <-writeErrCh
 		if werr != nil {
+			msg.PoolPut(body)
 			return fmt.Errorf("gozmq/session: write handshake frame: %w", werr)
 		}
 		if rerr != nil {
+			msg.PoolPut(body)
 			return fmt.Errorf("gozmq/session: read handshake frame: %w", rerr)
 		}
 		if flags&iface.FlagCommand == 0 {
+			msg.PoolPut(body)
 			return fmt.Errorf("%w: expected COMMAND frame in handshake, flags=0x%02x", zmqerr.ErrMalformedFrame, flags)
 		}
 		// Do NOT route through Mech.DecodeFrame here: that method is the
@@ -338,9 +357,9 @@ func decodeGreeting(buf []byte) (mech string, minor byte, err error) {
 	if major != greetingVersionMaj {
 		return "", 0, fmt.Errorf("%w: unsupported major 0x%02x", zmqerr.ErrProtocolVersion, major)
 	}
-	if minor != 0x00 && minor != 0x01 {
-		return "", 0, fmt.Errorf("%w: unsupported minor 0x%02x", zmqerr.ErrProtocolVersion, minor)
-	}
+	// Any 3.x minor is acceptable: ZMTP guarantees backwards-compatible
+	// minors, so we treat minor >= 1 as 3.1 (heartbeats) and never
+	// reject a future 3.x peer.
 	asServer := buf[greetingAsServerOff]
 	if asServer != 0 && asServer != 1 {
 		return "", 0, fmt.Errorf("%w: bad as-server byte 0x%02x", zmqerr.ErrMalformedFrame, asServer)

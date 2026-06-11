@@ -30,10 +30,13 @@ func TestRoundTrip_Basic(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "hello", string(got.Bytes()))
 
-	require.Equal(t, 2, a.SendHWM(), "SendHWM")
-	require.Equal(t, 2, a.RecvHWM(), "RecvHWM")
-	require.Equal(t, "b-side", a.PeerEndpoint())
-	require.Equal(t, "a-side", b.PeerEndpoint())
+	// SendHWM/RecvHWM/PeerEndpoint are concrete *end accessors, no
+	// longer part of iface.Pipe.
+	ae, be := a.(*end), b.(*end)
+	require.Equal(t, 2, ae.SendHWM(), "SendHWM")
+	require.Equal(t, 2, ae.RecvHWM(), "RecvHWM")
+	require.Equal(t, "b-side", ae.PeerEndpoint())
+	require.Equal(t, "a-side", be.PeerEndpoint())
 }
 
 // TestHWM_Blocks_Send_On_Full asserts that Send blocks once HWM buffered
@@ -310,4 +313,91 @@ func TestProperty_Bounded_Unblock(t *testing.T) {
 			rt.Fatalf("Send unblock gap = %v (want ≤100ms)", gap)
 		}
 	})
+}
+
+// TestHWMZero_CloseDrainsThenEOF is the HWM-0 counterpart of
+// TestClose_Drains_Then_EOF: messages parked inside the unbounded relay's
+// queue (not yet visible on the out channel) must still be delivered after
+// the sender closes, with EOF only after the relay's flush completes.
+func TestHWMZero_CloseDrainsThenEOF(t *testing.T) {
+	a, b := NewPair(0, 0, PeerInfo{}, PeerInfo{})
+	defer b.Close()
+
+	ctx := context.Background()
+	const n = 200
+	for i := 0; i < n; i++ {
+		require.NoError(t, a.Send(ctx, msg.FromBytes([]byte{byte(i)})), "a.Send[%d]", i)
+	}
+	require.NoError(t, a.Close())
+
+	for i := 0; i < n; i++ {
+		m, err := b.Recv(ctx)
+		require.NoError(t, err, "Recv[%d]", i)
+		require.Equal(t, byte(i), m.Bytes()[0], "Recv[%d]", i)
+	}
+	_, err := b.Recv(ctx)
+	require.ErrorIs(t, err, io.EOF, "expected io.EOF after relay drain")
+}
+
+// TestSetRecvReady_ArmsOnSendAndClose verifies the recv-ready gate is
+// armed from the data path (every enqueue) and on close, including for
+// HWM-0 relay-backed directions — the level-trigger contract the Poller
+// readiness fix relies on.
+func TestSetRecvReady_ArmsOnSendAndClose(t *testing.T) {
+	for _, hwm := range []int{4, 0} {
+		t.Run(map[int]string{4: "hwm4", 0: "hwm0"}[hwm], func(t *testing.T) {
+			a, b := NewPair(hwm, hwm, PeerInfo{}, PeerInfo{})
+			defer a.Close()
+			defer b.Close()
+
+			gate := make(chan struct{}, 1)
+			b.(*end).SetRecvReady(gate)
+			select {
+			case <-gate:
+				require.Fail(t, "gate armed with no data")
+			case <-time.After(20 * time.Millisecond):
+			}
+
+			require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("x"))))
+			select {
+			case <-gate:
+			case <-time.After(time.Second):
+				require.Fail(t, "gate not armed by enqueue")
+			}
+
+			// Drain the message, then close: the gate must arm again so a
+			// parked poller wakes and observes the close.
+			_, err := b.Recv(context.Background())
+			require.NoError(t, err)
+			select {
+			case <-gate:
+				// A relay-backed direction may have re-armed during its
+				// in→out hop; drain and continue to the close check.
+			default:
+			}
+			require.NoError(t, a.Close())
+			select {
+			case <-gate:
+			case <-time.After(time.Second):
+				require.Fail(t, "gate not armed by close")
+			}
+		})
+	}
+}
+
+// TestSetRecvReady_LateRegistrationArmsIfPending verifies a gate registered
+// after data already arrived is armed immediately (level trigger).
+func TestSetRecvReady_LateRegistrationArmsIfPending(t *testing.T) {
+	a, b := NewPair(4, 4, PeerInfo{}, PeerInfo{})
+	defer a.Close()
+	defer b.Close()
+
+	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("x"))))
+	gate := make(chan struct{}, 1)
+	b.(*end).SetRecvReady(gate)
+	select {
+	case <-gate:
+	case <-time.After(time.Second):
+		require.Fail(t, "late-registered gate not armed despite buffered data")
+	}
 }

@@ -32,7 +32,7 @@ func newPubSubPair(t *testing.T, endpoint string) (*gozmq.Context, *gozmq.Socket
 	return zctx, pubSock, subSock
 }
 
-func TestRouter_DispatchesHeterogeneousTypes(t *testing.T) {
+func TestTopicMux_DispatchesHeterogeneousTypes(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	zctx, pubSock, subSock := newPubSubPair(t, "inproc://typed-router-hetero")
@@ -40,7 +40,7 @@ func TestRouter_DispatchesHeterogeneousTypes(t *testing.T) {
 	defer pubSock.Close()
 	defer subSock.Close()
 
-	router := typed.NewRouter(subSock, jsonCodec{})
+	router := typed.NewTopicMux(subSock, jsonCodec{})
 	var (
 		mu       sync.Mutex
 		orders   []order
@@ -108,7 +108,7 @@ func TestRouter_DispatchesHeterogeneousTypes(t *testing.T) {
 	require.Equal(t, "warn", alerts[0].Severity)
 }
 
-func TestRouter_LongestPrefixWins(t *testing.T) {
+func TestTopicMux_LongestPrefixWins(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	zctx, pubSock, subSock := newPubSubPair(t, "inproc://typed-router-longest")
@@ -116,7 +116,7 @@ func TestRouter_LongestPrefixWins(t *testing.T) {
 	defer pubSock.Close()
 	defer subSock.Close()
 
-	router := typed.NewRouter(subSock, jsonCodec{})
+	router := typed.NewTopicMux(subSock, jsonCodec{})
 
 	var (
 		mu     sync.Mutex
@@ -165,7 +165,7 @@ func TestRouter_LongestPrefixWins(t *testing.T) {
 	require.Equal(t, "orders.priority.", winner)
 }
 
-func TestRouter_RegisterAfterRunReturnsError(t *testing.T) {
+func TestTopicMux_RegisterAfterRunReturnsError(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	zctx, pubSock, subSock := newPubSubPair(t, "inproc://typed-router-after-run")
@@ -173,7 +173,7 @@ func TestRouter_RegisterAfterRunReturnsError(t *testing.T) {
 	defer pubSock.Close()
 	defer subSock.Close()
 
-	router := typed.NewRouter(subSock, jsonCodec{})
+	router := typed.NewTopicMux(subSock, jsonCodec{})
 	require.NoError(t, subSock.Connect("inproc://typed-router-after-run"))
 
 	runCtx, runCancel := context.WithCancel(context.Background())
@@ -185,14 +185,19 @@ func TestRouter_RegisterAfterRunReturnsError(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	err := typed.Register[order](router, "orders.", func(context.Context, typed.Message[order]) error { return nil })
-	require.ErrorIs(t, err, typed.ErrRouterRunning, "Register after Run")
-	require.ErrorIs(t, router.Unregister("orders."), typed.ErrRouterRunning, "Unregister after Run")
+	require.ErrorIs(t, err, typed.ErrTopicMuxRunning, "Register after Run")
+	require.ErrorIs(t, router.Unregister("orders."), typed.ErrTopicMuxRunning, "Unregister after Run")
 
 	runCancel()
 	<-runErr
+
+	// Once Run returns the latch resets: registration is allowed again.
+	require.NoError(t, typed.Register[order](router, "more.",
+		func(context.Context, typed.Message[order]) error { return nil }),
+		"Register after Run returned")
 }
 
-func TestRouter_DuplicateTopicRejected(t *testing.T) {
+func TestTopicMux_DuplicateTopicRejected(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	zctx, pubSock, subSock := newPubSubPair(t, "inproc://typed-router-dup")
@@ -200,13 +205,13 @@ func TestRouter_DuplicateTopicRejected(t *testing.T) {
 	defer pubSock.Close()
 	defer subSock.Close()
 
-	router := typed.NewRouter(subSock, jsonCodec{})
+	router := typed.NewTopicMux(subSock, jsonCodec{})
 	require.NoError(t, typed.Register[order](router, "orders.", func(context.Context, typed.Message[order]) error { return nil }))
 	err := typed.Register[order](router, "orders.", func(context.Context, typed.Message[order]) error { return nil })
 	require.ErrorIs(t, err, typed.ErrTopicAlreadyRegistered)
 }
 
-func TestRouter_UnmatchedTopicSurfacesErrNoRouterMatch(t *testing.T) {
+func TestTopicMux_UnmatchedTopicSurfacesErrNoTopicMatch(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	zctx, pubSock, subSock := newPubSubPair(t, "inproc://typed-router-nomatch")
@@ -214,7 +219,7 @@ func TestRouter_UnmatchedTopicSurfacesErrNoRouterMatch(t *testing.T) {
 	defer pubSock.Close()
 	defer subSock.Close()
 
-	router := typed.NewRouter(subSock, jsonCodec{})
+	router := typed.NewTopicMux(subSock, jsonCodec{})
 	// Subscribe via the router to "orders.", but then also subscribe the raw
 	// socket to "metrics." so the SUB filter will pass a topic the router
 	// has no handler for.
@@ -229,10 +234,10 @@ func TestRouter_UnmatchedTopicSurfacesErrNoRouterMatch(t *testing.T) {
 	require.NoError(t, metricsPub.Send(callCtx, "metrics.cpu", order{ID: 99}))
 
 	err := router.Run(callCtx, typed.WithErrorHandler(func(e error) error {
-		if errors.Is(e, typed.ErrNoRouterMatch) {
+		if errors.Is(e, typed.ErrNoTopicMatch) {
 			return e // stop
 		}
 		return nil
 	}))
-	require.ErrorIs(t, err, typed.ErrNoRouterMatch)
+	require.ErrorIs(t, err, typed.ErrNoTopicMatch)
 }

@@ -2,9 +2,9 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
-    branches: [main]
+    branches: [main, master]
 
 jobs:
   test:
@@ -39,7 +39,7 @@ jobs:
       - name: Test with race detector
         env:
           CGO_ENABLED: '1'
-        run: go test -race -count=1 . ./internal/session ./internal/socket ./transport ./internal/zmtp ./security ./security/curve
+        run: go test -race -count=1 . ./internal/session ./internal/socket ./internal/pipe ./internal/msg ./internal/stream ./transport ./internal/zmtp ./security ./security/curve ./typed ./typed/codecjson
 
   cross-build:
     name: cross-build (pure Go)
@@ -76,8 +76,6 @@ jobs:
           go-version: '1.22.x'
       - name: Fuzz smoke
         # Discover every Fuzz* target via go test -list and run each for 10s.
-        # Until Wave 1 A1 lands the ZMTP fuzz targets this is effectively a
-        # no-op that still catches any accidentally-added but broken target.
         run: |
           set -euo pipefail
           pkgs=$(go list ./...)
@@ -98,9 +96,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22.x'
-      - name: Install libzmq (for CGO interop harness — Wave 1 A7+)
+      - name: Install libzmq (for the CGO interop harness)
         run: sudo apt-get update && sudo apt-get install -y libzmq3-dev
-      - name: Run interop tests (no-op until Wave 1 A7)
+      - name: Run interop tests
         env:
           CGO_ENABLED: '1'
         run: |

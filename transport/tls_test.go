@@ -2,12 +2,12 @@ package transport
 
 import (
 	"context"
-	"errors"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"io"
 	"math/big"
 	"net"
@@ -405,6 +405,139 @@ func TestTLS_ConfigCloneIsolatesFromCaller(t *testing.T) {
 	_, err = io.ReadFull(r.c, got)
 	require.NoError(t, err, "ReadFull")
 	require.Equal(t, want, got)
+}
+
+// TestTLS_MinVersionFloor asserts the constructor's TLS-version policy:
+// a zero MinVersion is upgraded to TLS 1.2 on the stored clone, and any
+// explicit MinVersion below 1.2 is rejected outright.
+func TestTLS_MinVersionFloor(t *testing.T) {
+	t.Run("zero-defaults-to-1.2", func(t *testing.T) {
+		cfg := serverTLSConfig()
+		cfg.MinVersion = 0
+		tr := mustNewTLS(t, cfg)
+		require.Equal(t, uint16(tls.VersionTLS12), tr.Config.MinVersion)
+	})
+	t.Run("below-1.2-rejected", func(t *testing.T) {
+		for _, v := range []uint16{tls.VersionTLS10, tls.VersionTLS11} {
+			cfg := serverTLSConfig()
+			cfg.MinVersion = v
+			tr, err := NewTLSTransport(cfg)
+			require.Error(t, err, "MinVersion %#04x accepted", v)
+			assert.Nil(t, tr)
+		}
+	})
+	t.Run("1.3-preserved", func(t *testing.T) {
+		cfg := serverTLSConfig()
+		cfg.MinVersion = tls.VersionTLS13
+		tr := mustNewTLS(t, cfg)
+		require.Equal(t, uint16(tls.VersionTLS13), tr.Config.MinVersion)
+	})
+}
+
+// TestTLS_CtxCanceledAcceptLeavesListenerUsable asserts that a ctx-cancelled
+// Accept does NOT poison the listener: a subsequent Accept with a fresh ctx
+// must still hand out connections. (An earlier implementation closed the
+// underlying listener on ctx cancel, permanently bricking the endpoint
+// after one timed-out Accept.)
+func TestTLS_CtxCanceledAcceptLeavesListenerUsable(t *testing.T) {
+	srvTr, l := listenTLSLoopback(t, serverTLSConfig())
+	_ = srvTr
+	defer l.Close()
+
+	// First Accept: cancelled with no peer in sight.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	_, err := l.Accept(ctx)
+	cancel()
+	require.ErrorIs(t, err, context.DeadlineExceeded, "first Accept")
+
+	// Let the cancelled Accept's poll goroutine drain (it lingers up to one
+	// tcpAcceptPollInterval and would otherwise accept-and-discard a conn
+	// that lands in that window).
+	time.Sleep(50 * time.Millisecond)
+
+	// Second Accept on the same listener must still work end-to-end.
+	_, portStr, _ := net.SplitHostPort(strings.TrimPrefix(l.Endpoint(), "tls+tcp://"))
+	acceptCtx := testCtx(t, 5*time.Second)
+	type acceptResult struct {
+		c   net.Conn
+		err error
+	}
+	acceptedCh := make(chan acceptResult, 1)
+	go func() {
+		c, err := l.Accept(acceptCtx)
+		if err != nil {
+			acceptedCh <- acceptResult{nil, err}
+			return
+		}
+		acceptedCh <- acceptResult{c.(net.Conn), nil}
+	}()
+
+	cliTr := mustNewTLS(t, clientTLSConfig())
+	dial, err := cliTr.Dial(acceptCtx, "tls+tcp://localhost:"+portStr)
+	require.NoError(t, err, "Dial after cancelled Accept")
+	defer dial.Close()
+
+	r := <-acceptedCh
+	require.NoError(t, r.err, "Accept after cancelled Accept")
+	require.NoError(t, r.c.Close())
+}
+
+// TestTLS_SilentClientDoesNotBlockAccept asserts that a peer which connects
+// at the TCP level but never starts the TLS handshake cannot wedge the
+// listener: the handshake deadline trips, that Accept returns an error, and
+// the next Accept picks up a legitimate client.
+func TestTLS_SilentClientDoesNotBlockAccept(t *testing.T) {
+	cfg := serverTLSConfig()
+	tr := mustNewTLS(t, cfg)
+	tr.HandshakeTimeout = 250 * time.Millisecond
+	lIface, err := tr.Listen(context.Background(), "tls+tcp://127.0.0.1:0")
+	require.NoError(t, err, "Listen")
+	l := lIface.(*tlsListener)
+	defer l.Close()
+
+	_, portStr, _ := net.SplitHostPort(strings.TrimPrefix(l.Endpoint(), "tls+tcp://"))
+
+	// Silent client: raw TCP connect, no TLS bytes ever.
+	silent, err := net.Dial("tcp", "127.0.0.1:"+portStr)
+	require.NoError(t, err, "silent raw dial")
+	defer silent.Close()
+
+	// Give the silent connection time to land in the accept queue first.
+	time.Sleep(50 * time.Millisecond)
+
+	// Legitimate client dials concurrently; its handshake completes once
+	// the accept loop reaches it.
+	dialErrCh := make(chan error, 1)
+	var dialConn net.Conn
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cliTr := mustNewTLS(t, clientTLSConfig())
+		c, err := cliTr.Dial(ctx, "tls+tcp://localhost:"+portStr)
+		if err == nil {
+			dialConn = c.(net.Conn)
+		}
+		dialErrCh <- err
+	}()
+
+	// Accept until the legitimate client lands. The silent conn costs one
+	// Accept call a handshake-timeout error; it must not cost more.
+	var got net.Conn
+	deadline := time.Now().Add(5 * time.Second)
+	for got == nil && time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		c, err := l.Accept(ctx)
+		cancel()
+		if err == nil {
+			got = c.(net.Conn)
+		}
+	}
+	require.NotNil(t, got, "no legitimate Accept within 5s — silent client blocked the listener")
+	defer got.Close()
+	require.NoError(t, <-dialErrCh, "legitimate Dial")
+	if dialConn != nil {
+		defer dialConn.Close()
+	}
 }
 
 // TestTLS_AcceptGoroutineExitsOnCtxCancel asserts that canceling the

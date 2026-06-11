@@ -1,12 +1,12 @@
 # gozmq: A Pure Go ZeroMQ Library — Design Document
 
-**Status:** Draft
+**Status:** Current
 **Author:** TBD
-**Last updated:** 2026-04-17
+**Last updated:** 2026-06-10
 
 ## 1. Overview
 
-`gozmq` is a pure-Go implementation of the ZeroMQ messaging patterns, wire protocol (ZMTP 3.1), and transports. Unlike `pebbe/zmq4` (CGO wrapper over libzmq) and `goczmq` (CGO wrapper over CZMQ), `gozmq` has no C dependencies. Unlike the existing pure-Go `go-zeromq/zmq4`, it targets full ZMTP 3.1 compliance, all standard and draft socket types, all practical transports, all three security mechanisms (including a correct CURVE implementation), and production-grade operational characteristics (backpressure, reconnection, monitoring, observability).
+`gozmq` is a pure-Go implementation of the ZeroMQ messaging patterns, wire protocol (ZMTP 3.1), and transports. Unlike `pebbe/zmq4` (CGO wrapper over libzmq) and `goczmq` (CGO wrapper over CZMQ), `gozmq` has no C dependencies. Unlike the existing pure-Go `go-zeromq/zmq4`, it targets full ZMTP 3.1 compliance, all standard socket types (draft socket types are out of scope; see §2.1), all practical transports, all three practical security mechanisms (including a correct CURVE implementation), and production-grade operational characteristics (backpressure, reconnection, monitoring, observability).
 
 The target consumer is a Go application author who wants ZeroMQ semantics without linking libzmq, without CGO-related build/deployment complexity, and without the feature gaps that currently make pure-Go options unsuitable for production interop with heterogeneous ZMQ deployments.
 
@@ -26,7 +26,14 @@ The target consumer is a Go application author who wants ZeroMQ semantics withou
 
 ### 2.2 Non-Goals
 
-- **PGM/EPGM multicast transports.** These require OpenPGM or an equivalent reliable multicast stack, which has no mature pure-Go equivalent. Deferred until demand justifies the work.
+- **Transport and mechanism gaps (deliberate, for now).** Relative to the full libzmq surface, the following are intentional non-goals at present:
+  - `ws://` / `wss://` (WebSocket transport, ZMTP-over-WS);
+  - `udp://` (and the draft `RADIO`/`DISH` pattern it serves);
+  - `pgm://` / `epgm://` reliable multicast (requires an OpenPGM-equivalent stack with no mature pure-Go counterpart);
+  - `vmci://` (VMware sockets) and `tipc://`;
+  - the `GSSAPI` security mechanism (Kerberos).
+
+  None of these are architecturally precluded — the internal `Transport` and `SecurityMech` interfaces can absorb them later (§7.5) — but they are deferred until demand justifies the work.
 - **libzmq API parity at the C level.** We mirror semantics, not C identifiers or option numeric codes.
 - **Being a drop-in replacement for `pebbe/zmq4`.** Migration will require code changes; see §6.1 for the API philosophy.
 - **Supporting ZMTP 2.0 and older.** We negotiate down to ZMTP 3.0 if the peer advertises it, but ZMTP 1.0/2.0 framing is out of scope.
@@ -87,14 +94,14 @@ Each layer has a narrow interface and a dedicated test suite. Layers never reach
 - **Pipe**: a bidirectional bounded queue between a socket engine and a session. Each direction has an independent HWM. Pipes are where backpressure is expressed.
 - **Session**: owns one peer connection end-to-end. Runs the ZMTP state machine, owns the security codec, translates between framed bytes on the wire and `Msg` structs on the pipe.
 - **Transport**: turns an endpoint string (`tcp://host:port`, `ipc:///run/foo.sock`, `inproc://name`) into something connection-like. Hides listener vs. dialer.
-- **Context**: a top-level object owning shared resources (the inproc registry, the I/O poller, global defaults). Multiple Contexts can coexist; they share nothing.
+- **Context**: a top-level object owning shared resources (the transport registry, including the inproc name table) and the defaults sockets inherit. Multiple Contexts can coexist; they share nothing. (The multi-socket `Poller` is a separate, caller-constructed type — not owned by the Context.)
 
 ### 4.3 Concurrency model
 
 Go's runtime makes the classic libzmq "one I/O thread, one reactor" architecture unnecessary. Instead:
 
-- Each **session** owns two goroutines: a reader (wire → pipe in-bound) and a writer (pipe out-bound → wire). They communicate via channels and a shared session state guarded by a mutex for metadata that both touch (e.g., last heartbeat time).
-- Each **socket engine** runs one goroutine that selects over all inbound pipes (fair queueing) and one goroutine that dispatches outbound messages across pipes (pattern-specific policy). For REQ/REP, one goroutine suffices because traffic is lock-step.
+- Each **session** owns two goroutines: a reader (wire → pipe in-bound) and a writer (pipe out-bound → wire), plus an optional heartbeat scheduler when both peers are ZMTP 3.1. Shared state both touch (last-inbound timestamp, handshake error) uses `sync/atomic` rather than a coarse mutex; a small `writeMu` serialises the writer, PONG, and PING writes to the conn.
+- **Socket engines** are goroutine-frugal. Inbound fair-queueing (`FairQueue`, used by PULL/DEALER/REP/ROUTER/SUB/XSUB) spawns one lightweight forwarder goroutine per attached peer, and **zero** when exactly one peer is attached (a lock-free direct path). Outbound load-balancing (`LoadBalancer`, used by PUSH/DEALER) runs **no** steady-state goroutines — it inlines the send onto the peer's channel. REQ reads its sticky reply pipe inline (no per-request goroutine); PUB runs one reader goroutine per subscriber to absorb SUBSCRIBE/CANCEL.
 - **Public API calls** (`Send`, `Recv`) are thread-safe but serialize per socket. Concurrent senders on the same socket are supported but not encouraged — prefer one goroutine per socket, as with libzmq.
 
 This gives us the Go idiom (goroutines + channels + `context.Context`) while preserving the ZeroMQ guarantee that a socket is conceptually single-threaded from the user's point of view.
@@ -139,13 +146,13 @@ After the greeting:
 
 ### 5.4 Heartbeats
 
-When both peers are ZMTP 3.1, each session can send `PING` every `HeartbeatInterval` (default 30s) with a TTL. If no frame (data or `PONG`) is received within `HeartbeatTimeout` (default 2× interval), the session is torn down and reconnection (if applicable) begins.
+When both peers are ZMTP 3.1, each session can send `PING` every `HeartbeatInterval` (default 30s) with a TTL. If no frame (data or `PONG`) is received within `HeartbeatTimeout` (default 90s — 3× the interval), the session is torn down and reconnection (if applicable) begins. A session parked on local backpressure (its inbound pipe at HWM) is not treated as peer-dead.
 
 Heartbeat frames and user frames share the same read loop; the decoder distinguishes them via the `COMMAND` flag.
 
 ### 5.5 Traffic phase
 
-Inbound frames are accumulated into a `Msg` (a slice of `[]byte` frames) until a frame without `MORE` arrives, then the complete `Msg` is pushed onto the inbound pipe. Outbound pipes accept a full `Msg` and the writer emits frames with `MORE` set on all but the last.
+Inbound frames are accumulated into a `Msg` (a slice of `[]byte` frames) until a frame without `MORE` arrives, then the complete `Msg` is pushed onto the inbound pipe. Accumulation is bounded by `MaxMessageSize` across the whole multipart message (not just per frame); a peer exceeding the cap has its session torn down, preventing unbounded-allocation DoS. Outbound pipes accept a full `Msg` and the writer emits frames with `MORE` set on all but the last.
 
 ## 6. Public API
 
@@ -163,21 +170,36 @@ We do not mimic the libzmq C API. We design for Go. That means:
 
 ```
 github.com/.../gozmq
-├── gozmq.go               // Context, Socket, Msg, top-level API
+├── gozmq.go               // SocketType, Msg aliases, emit/logger helpers
+├── context.go             // Context lifecycle: NewContext, Close, RegisterTransport, ZAP
+├── socket.go              // Socket: Bind/Connect/SendMsg/RecvMsg/Subscribe/Metrics
+├── wiring.go              // per-socket session + security mechanism construction
+├── directpipe.go          // inproc direct-pipe bypass + STREAM adapter wiring
+├── close.go               // LINGER teardown (Close / CloseCtx)
+├── peerlink.go            // unified peer-teardown contract (session/pipe/stream)
 ├── options.go             // typed option structs, defaults
-├── errors.go              // sentinel errors
+├── errors.go              // sentinel errors (aliases of internal/zmqerr)
 ├── events.go              // monitoring events
-├── transport/
-│   ├── tcp.go  ipc.go  inproc.go  tls.go
-├── security/
-│   ├── zap.go
-│   └── curve/             // CurveZMQ public key helpers
+├── poller.go              // multi-socket readiness Poller
+├── transport/             // tcp, tcp6, ipc, inproc, tls (per-Context registry)
+├── security/              // NULL, PLAIN mechanisms + RFC 27 ZAP codec
+│   └── curve/             // CurveZMQ mechanism + Z85 public-key helpers
+├── typed/                 // generics convenience wrappers (Sender/Receiver/…)
 └── internal/
-    ├── socket/            // socket engines
+    ├── iface/             // cross-layer contracts (the dependency sink)
+    ├── socket/            // socket engines + shared LoadBalancer / FairQueue / SubTree
     ├── zmtp/              // greeting, framing, commands, metadata
-    ├── security/          // NULL and PLAIN mechanisms
-    └── session/           // handshake, reader/writer, heartbeat
+    ├── session/           // handshake, reader/writer, heartbeat, reconnect
+    ├── pipe/              // bounded bidirectional queues (HWM)
+    ├── msg/               // Msg type + size-tiered frame-buffer pool
+    ├── stream/            // raw-bytes adapter for STREAM sockets
+    └── zmqerr/            // sentinel error definitions
 ```
+
+NULL and PLAIN live in the public `security/` package (alongside ZAP), not
+under `internal/` — the security mechanisms and transports are an intentional
+first-party closed set (see §7.5), but their entry points are public so callers
+can reference the option helpers and ZAP types.
 
 ### 6.3 Sketch
 
@@ -217,18 +239,30 @@ Defaults match libzmq defaults unless libzmq's default is hostile (e.g., infinit
 ```go
 type Msg struct {
     frames [][]byte
-    // internally: a pooled buffer + offsets, to avoid per-frame allocation.
+    // internally: pooled-buffer bookkeeping + an atomic refcount
+    // (see internal/msg).
 }
 
 func (m *Msg) Frames() [][]byte
 func (m *Msg) NumFrames() int
-func (m *Msg) Bytes() []byte              // single-frame shortcut
+func (m *Msg) Bytes() []byte              // single-frame shortcut (panics on multipart)
+func (m *Msg) SingleFrame() ([]byte, bool)
+func (m *Msg) TotalSize() int
 func (m *Msg) AppendFrame(b []byte)
+func (m *Msg) Retain()
+func (m *Msg) Release()
+func NewMsg() *Msg
 func NewMsgFromBytes(b []byte) *Msg
 func NewMsgFromFrames(fs ...[]byte) *Msg
 ```
 
-`Msg` values obtained from `RecvMsg` reference pooled buffers and are valid until the next call on the same socket; a `Clone()` method produces an independently-owned copy for retention across calls.
+**Ownership model (as shipped).** Frames delivered by `RecvMsg` are caller-owned: they remain valid indefinitely and may be retained, stashed, or passed between goroutines — there is no "valid until the next call" window and no `Clone()` requirement. Reclamation is refcount-driven:
+
+- Most `*Msg` values carry ordinary heap-allocated frames and need no explicit reclamation; `Release` on them is a no-op.
+- The session reader backs *large* inbound frames with buffers from a size-tiered pool (`internal/msg.PoolGet`/`PoolPut`). The first pooled frame installs a refcount of 1; the consumer calls `Release` when done, and when the count reaches zero the pooled buffers return to the pool. `Retain` adds a reference for cross-goroutine shares.
+- Calling `Release` unconditionally on every received `*Msg` is always safe and is the documented best practice. A runtime-finalizer safety net reclaims pooled buffers for callers that forget, but it is not the primary path.
+- Fan-out is refcount-aware: when an engine (PUB/XPUB) dispatches one `*Msg` to N pipes it takes N references, and the N session writers recycle concurrently post-flush — exactly one (the last) reclaims. `TransferPool` moves pooled-buffer ownership when engines rewrite envelopes (REQ/REP/ROUTER strip/prepend), preventing use-after-free across the rewrite.
+- Single-frame convenience: `Socket.RecvBytes` copies the payload and releases internally, so callers who want zero bookkeeping have a misuse-proof path.
 
 ## 7. Transports
 
@@ -252,7 +286,7 @@ Not in ZMTP proper, but essential for modern deployments and currently requires 
 
 ### 7.5 Deferred
 
-PGM/EPGM, VMCI, NORM. Design leaves a `Transport` interface that can accept these later without API churn.
+PGM/EPGM, VMCI, NORM. The internal `Transport` interface can accept these later without API churn — but transports are an intentionally **closed, first-party set**: `iface.Transport` lives under `internal/`, so adding a transport is an in-module change, not a third-party plugin point. `Context.RegisterTransport` exists to inject configuration into the built-in transports (chiefly TLS's `*tls.Config`), not to register arbitrary external transports. The same applies to security mechanisms (`iface.SecurityMech`): ZMTP defines exactly NULL/PLAIN/CURVE and all three are first-party; the supported extension point for authorization is the ZAP handler, not a custom mechanism.
 
 ## 8. Security
 
@@ -291,9 +325,9 @@ The ZeroMQ Authentication Protocol ([rfc.zeromq.org/spec/27](https://rfc.zeromq.
 Each socket type gets a dedicated engine. Representative behaviors:
 
 - **REQ / REP**: strict lock-step. REQ auto-prepends an empty delimiter frame. REP records the peer identity stack on receive and replays it on send. State machine enforces alternation; out-of-order `Send`/`Recv` returns `ErrFSMViolation`.
-- **DEALER / ROUTER**: DEALER load-balances outbound across connected peers round-robin, fair-queues inbound. ROUTER prepends the peer identity to inbound messages and routes outbound by the leading identity frame. `WithRouterMandatory` makes unroutable sends return an error instead of silently dropping.
+- **DEALER / ROUTER**: DEALER load-balances outbound across connected peers round-robin, fair-queues inbound. The load balancer rotates past peers whose pipe is at HWM rather than head-of-line blocking on the cursor peer (matching libzmq's `lb_t`); only when *every* peer is full does Send block. ROUTER prepends the peer identity to inbound messages and routes outbound by the leading identity frame. `WithRouterMandatory` makes unroutable sends return an error instead of silently dropping.
 - **PUB / SUB**: PUB fans out to all subscribed peers, filtering by subscription prefix maintained per-peer. SUB maintains its subscription list and forwards `SUBSCRIBE`/`CANCEL` commands to every connected PUB.
-- **XPUB / XSUB**: identical wire behavior but with subscriptions surfaced as normal messages to the application. `WithXPubVerbose` disables the default dedup.
+- **XPUB / XSUB**: identical wire behavior but with subscriptions surfaced as normal messages to the application. `WithXPubVerbose` disables the default dedup. XPUB synthesizes `CANCEL` messages when a departing peer's subscriptions drop to refcount zero (libzmq parity).
 - **PUSH / PULL**: PUSH load-balances, PULL fair-queues. No identity.
 - **PAIR**: exclusive 1:1.
 - **STREAM**: raw TCP bytes, no ZMTP on the wire. Each inbound frame is prefixed with a peer identity so a single STREAM socket can multiplex many clients. Useful for speaking non-ZMQ protocols (HTTP, SMTP) from a ZMQ pipeline.
@@ -312,7 +346,13 @@ The most important test suite. For every standard socket type, every transport, 
 - `gozmq` client ↔ libzmq server (via a small CGO test harness, isolated behind a build tag so the main module stays CGO-free).
 - libzmq client ↔ `gozmq` server.
 
-The CGO harness lives under `interop/` and is only built when `-tags interop` is set. CI runs it on Linux with libzmq installed from the distro package.
+The CGO harness lives under `interop/` and is only built when `-tags interop` is set. CI (`.github/workflows/ci.yml`) runs five jobs:
+
+- **test** — `go mod tidy` verification, `go vet ./...`, a `CGO_ENABLED=0` build (the whole point of the project), and `go test ./...`;
+- **race** — `go test -race` over the full core package list (root, `internal/session`, `internal/socket`, `internal/pipe`, `internal/msg`, `internal/stream`, `transport`, `internal/zmtp`, `security`, `security/curve`, `typed`, `typed/codecjson`);
+- **cross-build** — pure-Go (`CGO_ENABLED=0`) builds for linux/386, darwin/amd64, and windows/amd64;
+- **fuzz-smoke** — discovers every `Fuzz*` target and runs each for 10s;
+- **interop** — installs `libzmq3-dev` and runs `go test -tags interop -race ./interop/...`.
 
 ### 10.3 CURVE test vectors
 
@@ -324,7 +364,7 @@ Go's native fuzzing (`go test -fuzz`) targets: the greeting parser, the frame pa
 
 ### 10.5 Race and leak detection
 
-All tests run with `-race`. Goroutine leak detection via `go.uber.org/goleak` in every test's `TestMain` ensures sockets shut down cleanly.
+CI runs the core package list under `-race` in a dedicated job (see §10.2); the plain test job covers every package without the race detector. Goroutine leak detection via `go.uber.org/goleak` in test `TestMain`s ensures sockets shut down cleanly.
 
 ### 10.6 Benchmarks
 
@@ -336,7 +376,7 @@ Benchmark suite mirroring libzmq's `perf/` directory: `local_lat`, `remote_lat`,
 - **Batched writes**: the session writer coalesces up to *N* frames from the outbound pipe into a single `writev`-style call (`net.Buffers` does this natively on TCP and IPC).
 - **Zero-copy inproc**: inproc pipes pass `*Msg` directly, no framing, no copy. The only cost is channel synchronization.
 - **HWM as a channel capacity**: bounded Go channels are the native expression of HWM, not something we bolt on.
-- **Goroutine count**: 2 per session + 1–2 per socket + 1 per listener. For a ROUTER serving 10 000 peers this is ~20 000 goroutines — acceptable in Go but documented as the scaling cost. A future optimization pools sessions onto shared I/O goroutines for the 100k+ peer case.
+- **Goroutine count**: 2 per session (reader + writer, plus an optional heartbeat) + roughly one inbound forwarder per attached peer for fair-queued patterns + 1 per listener. Outbound load-balancing and the single-peer inbound fast path add none. For a ROUTER serving 10 000 peers this is ~30 000 goroutines — acceptable in Go but documented as the scaling cost. A future optimization pools sessions onto shared I/O goroutines for the 100k+ peer case.
 
 We target ≥ 1M msg/s on inproc, ≥ 500k msg/s on TCP loopback with small frames, and < 10 µs median round-trip REQ/REP on inproc. These are aspirational numbers to be validated against prototype benchmarks.
 
@@ -349,13 +389,18 @@ events := make(chan gozmq.Event, 64)
 sock.Monitor(events, gozmq.EventAll)
 ```
 
-Events cover: `Connected`, `ConnectDelayed`, `ConnectRetried`, `Listening`, `BindFailed`, `Accepted`, `AcceptFailed`, `Closed`, `CloseFailed`, `Disconnected`, `HandshakeSucceeded`, `HandshakeFailedProtocol`, `HandshakeFailedAuth`. Each event carries the endpoint, a timestamp, and a machine-readable reason code.
+Events cover: `Connected`, `ConnectDelayed`, `ConnectRetried`, `ConnectFailed`, `Listening`, `BindFailed`, `Accepted`, `AcceptFailed`, `Closed`, `Disconnected`, `HandshakeSucceeded`, `HandshakeFailedProtocol`, `HandshakeFailedAuth`. Each event carries the endpoint, a timestamp, and a free-text `Reason` string (the underlying error string for failures; the pending backoff duration for `ConnectDelayed`/`ConnectRetried`; empty for unambiguous successes). `ConnectFailed` marks terminal connect failures with no reconnect loop behind them — an unknown transport scheme, or a STREAM dial failure (STREAM dials exactly once). There is no `CloseFailed` event.
 
-Integration points for standard observability stacks:
+Implemented observability surface:
 
-- `expvar` counters per socket (messages sent, bytes sent, HWM hits, handshakes failed).
-- Optional `log/slog` handler injection so all internal warnings (malformed frames, auth failures) are emitted with structured context.
-- Optional OpenTelemetry spans around socket lifecycle events (behind a build tag to avoid forcing the dependency).
+- **Monitor events** (above) via `Socket.Monitor` / `WithMonitor` — the primary lifecycle signal.
+- **Counter/gauge snapshots** via `Socket.Metrics()`, returning `SocketMetrics{Sent, Recv, Dropped, QueueDepth}` (atomic counters + a sampled queue-depth gauge). Drop semantics are documented on `SocketMetrics`.
+- **Structured logging** via `WithLogger(*slog.Logger)` — internal diagnostics (handshake failures, reconnect attempts, heartbeat loss, teardown anomalies) are emitted with structured context; defaults to `slog.Default`.
+
+Not implemented (possible future work, deliberately out of scope for now):
+
+- `expvar` registration of the `Metrics()` counters. Today callers poll `Metrics()` and publish to whatever sink they use; gozmq does not register an `expvar` var itself.
+- OpenTelemetry spans around socket lifecycle. Deferred to avoid forcing the dependency; callers can derive spans from monitor events.
 
 ## 13. Error Model
 
@@ -375,7 +420,7 @@ Blocking calls that accept a `context.Context` return `ctx.Err()` on cancellatio
 1. **M1 — Scaffolding (2 weeks)**: Context, Socket skeleton, transport interface, TCP + inproc, NULL mechanism, PAIR socket, framing encode/decode with fuzz corpus. Deliverable: two PAIR sockets can round-trip a multipart message over TCP and inproc, with `-race` clean.
 2. **M2 — Core patterns (4 weeks)**: REQ/REP, PUSH/PULL, PUB/SUB, DEALER/ROUTER, XPUB/XSUB. HWM, LINGER, reconnection with backoff. Interop tests against libzmq for each.
 3. **M3 — Security (3 weeks)**: PLAIN, CURVE with test vectors, ZAP, handshake timeouts.
-4. **M4 — Operational polish (3 weeks)**: monitoring events, `expvar`, `slog`, TLS transport, IPC transport, STREAM socket.
+4. **M4 — Operational polish (3 weeks)**: monitoring events, `Metrics()` snapshots, `slog`, TLS transport, IPC transport, STREAM socket. (`expvar`/OTel integration deferred — see §12.)
 5. **M5 — Perf (3 weeks)**: benchmark suite; performance tuning against numbers in §11.
 6. **M6 — v1.0 release (2 weeks)**: API review, doc pass, migration guide from `pebbe/zmq4` and `go-zeromq/zmq4`, tagged release.
 
@@ -386,7 +431,7 @@ Total: ~17 weeks of focused work for a single engineer, less with parallelism (s
 - **Async DNS**: libzmq resolves names lazily at connect time. Should we expose `WithResolver(*net.Resolver)` or defer?
 - **Epoll-level I/O**: Go's netpoller is fine for tens of thousands of peers. For hundreds of thousands, is there value in a shared-goroutine I/O model, or do we declare that out of scope?
 - **Auth plugins**: should `WithPlainAuth` accept a full `Authenticator` interface that covers PLAIN, CURVE key lookup, and ZAP uniformly? Probably yes — to be designed in M3.
-- **Message ownership**: returning pooled frames from `RecvMsg` is fast but invites use-after-free bugs. Options: (a) always copy, (b) pooled with `Clone()` for retention (current plan), (c) pooled with an explicit `Release()` call. Lean toward (b) but revisit after M2 benchmarks.
+- ~~**Message ownership**: returning pooled frames from `RecvMsg` is fast but invites use-after-free bugs. Options: (a) always copy, (b) pooled with `Clone()` for retention (current plan), (c) pooled with an explicit `Release()` call.~~ **Resolved — option (c) shipped**: refcounted `Retain`/`Release` with caller-owned frames, a finalizer safety net, and `RecvBytes` as the copy-always convenience. See §6.5.
 
 ## 17. References
 

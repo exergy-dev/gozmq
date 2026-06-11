@@ -1,8 +1,8 @@
-// Command typed_router demonstrates the typed.Router: one SUB socket
+// Command typed_topicmux demonstrates the typed.TopicMux: one SUB socket
 // receives two different struct types on different topic prefixes,
-// and the router dispatches each message to a typed handler.
+// and the mux dispatches each message to a typed handler.
 //
-//	go run ./examples/typed_router
+//	go run ./examples/typed_topicmux
 package main
 
 import (
@@ -42,17 +42,17 @@ func main() {
 	defer subSock.Close()
 
 	codec := codecjson.Codec{}
-	router := typed.NewRouter(subSock, codec)
+	mux := typed.NewTopicMux(subSock, codec)
 
 	var wg sync.WaitGroup
 	wg.Add(3) // expect 2 orders + 1 alert
 
-	check(typed.Register[Order](router, "orders.", func(_ context.Context, m typed.Message[Order]) error {
+	check(typed.Register[Order](mux, "orders.", func(_ context.Context, m typed.Message[Order]) error {
 		fmt.Printf("order  (%s): %+v\n", m.Topic, m.Value)
 		wg.Done()
 		return nil
 	}), "register orders.")
-	check(typed.Register[Alert](router, "alerts.", func(_ context.Context, m typed.Message[Alert]) error {
+	check(typed.Register[Alert](mux, "alerts.", func(_ context.Context, m typed.Message[Alert]) error {
 		fmt.Printf("alert  (%s): %+v\n", m.Topic, m.Value)
 		wg.Done()
 		return nil
@@ -66,7 +66,7 @@ func main() {
 
 	runCtx, runCancel := context.WithCancel(callCtx)
 	runErr := make(chan error, 1)
-	go func() { runErr <- router.Run(runCtx) }()
+	go func() { runErr <- mux.Run(runCtx) }()
 
 	orderPub := typed.NewPublisher[Order](pubSock, codec)
 	alertPub := typed.NewPublisher[Alert](pubSock, codec)
@@ -77,7 +77,7 @@ func main() {
 	waitWithTimeout(&wg, 3*time.Second)
 	runCancel()
 	if err := <-runErr; err != nil && !errors.Is(err, context.Canceled) {
-		log.Fatalf("router.Run: %v", err)
+		log.Fatalf("mux.Run: %v", err)
 	}
 }
 

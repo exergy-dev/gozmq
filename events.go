@@ -26,6 +26,12 @@ const (
 	// backoff duration.
 	EventConnectRetried
 
+	// EventConnectFailed fires when Connect fails terminally with no
+	// reconnect loop to fall back on: an unknown transport scheme, or a
+	// STREAM dial failure (STREAM dials exactly once). Event.Endpoint is
+	// the requested target; Event.Reason is the underlying error string.
+	EventConnectFailed
+
 	// EventListening fires after a successful Bind with wildcards and
 	// ephemeral ports resolved. Event.Endpoint is the resolved endpoint
 	// (same value as Socket.LastEndpoint).

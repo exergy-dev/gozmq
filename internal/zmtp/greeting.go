@@ -107,12 +107,9 @@ func ReadGreeting(r io.Reader) (Greeting, error) {
 	if major != GreetingVersionMaj {
 		return Greeting{}, fmt.Errorf("gozmq/zmtp: unsupported major version 0x%02x: %w", major, zmqerr.ErrProtocolVersion)
 	}
-	switch minor {
-	case 0x00, 0x01:
-		// accepted
-	default:
-		return Greeting{}, fmt.Errorf("gozmq/zmtp: unsupported minor version 0x%02x: %w", minor, zmqerr.ErrProtocolVersion)
-	}
+	// Accept any 3.x minor for forward compatibility (ZMTP revisions are
+	// backward compatible within a major); minor >= 1 is treated as 3.1.
+	// Matches the session-layer greeting decode and libzmq.
 
 	mech, err := decodeMechanism(buf[12 : 12+greetingMechLen])
 	if err != nil {

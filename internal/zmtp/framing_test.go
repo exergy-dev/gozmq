@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
-	"net"
 	"strings"
 	"testing"
 
@@ -76,11 +75,11 @@ func TestFrameWireFormat(t *testing.T) {
 	})
 }
 
-func TestFrameAppendBuffersMatchesWriteFrame(t *testing.T) {
+func TestFrameAppendHeaderMatchesWriteFrame(t *testing.T) {
 	t.Parallel()
 	codec := NewFrameCodec(MaxBodyUnlimited)
-	appender, ok := codec.(iface.FrameBufferAppender)
-	require.True(t, ok, "codec does not implement FrameBufferAppender")
+	appender, ok := codec.(iface.FrameHeaderAppender)
+	require.True(t, ok, "codec does not implement FrameHeaderAppender")
 
 	cases := []struct {
 		name  string
@@ -98,19 +97,12 @@ func TestFrameAppendBuffersMatchesWriteFrame(t *testing.T) {
 			var want bytes.Buffer
 			require.NoError(t, codec.WriteFrame(&want, tc.flags, tc.body), "WriteFrame")
 
-			var buffers net.Buffers
-			release, _, err := appender.AppendFrameBuffers(&buffers, tc.flags, tc.body)
-			require.NoError(t, err, "AppendFrameBuffers")
-			t.Cleanup(func() {
-				if release != nil {
-					release()
-				}
-			})
+			scratch, hdrLen, err := appender.AppendFrameHeader(nil, tc.flags, tc.body)
+			require.NoError(t, err, "AppendFrameHeader")
+			require.Len(t, scratch, hdrLen, "returned scratch length vs header length")
 
-			var got bytes.Buffer
-			_, err = buffers.WriteTo(&got)
-			require.NoError(t, err, "WriteTo")
-			require.Equal(t, want.Bytes(), got.Bytes(), "wire mismatch")
+			got := append(append([]byte(nil), scratch...), tc.body...)
+			require.Equal(t, want.Bytes(), got, "wire mismatch")
 		})
 	}
 }

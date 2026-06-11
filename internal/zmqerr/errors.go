@@ -23,6 +23,7 @@ var (
 	ErrProtocolVersion  = errors.New("gozmq: unsupported ZMTP version")
 	ErrRouteUnknown     = errors.New("gozmq: no route to peer")
 	ErrEndpointInvalid  = errors.New("gozmq: invalid endpoint")
+	ErrEndpointUnknown  = errors.New("gozmq: endpoint not connected or bound")
 	ErrTransportUnknown = errors.New("gozmq: unknown transport scheme")
 
 	// ErrNonceExhausted is returned by a CURVE mechanism when a per-direction

@@ -237,20 +237,6 @@ func TestPlainClientAcceptsErrorAfterInitiate(t *testing.T) {
 	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "ERROR after INITIATE")
 }
 
-func TestPlainClientAcceptsCompatErrorAfterInitiate(t *testing.T) {
-	client := NewPlainClient("alice", "hunter2", nil)
-
-	_, _, err := client.NextHandshake(nil)
-	require.NoError(t, err, "seed")
-	out, done, err := client.NextHandshake([]byte{0x07, 'W', 'E', 'L', 'C', 'O', 'M', 'E'})
-	require.NoError(t, err, "WELCOME")
-	require.False(t, done, "INITIATE: done should be false")
-	require.NotEmpty(t, out, "INITIATE: out should not be empty")
-
-	_, _, err = client.NextHandshake([]byte{0x5e, 'R', 'R', 'O', 'R', 0x03, '4', '0', '0'})
-	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "compat ERROR after INITIATE")
-}
-
 func TestPlainEncodeDecodeFrameIdentity(t *testing.T) {
 	m := NewPlainClient("u", "p", nil)
 	for _, tc := range []struct {

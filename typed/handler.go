@@ -16,7 +16,7 @@ import (
 var ErrDecode = errors.New("typed: decode failed")
 
 // ErrHandler wraps non-nil errors returned by the user callback passed
-// to Handle or registered with a Router. Use errors.Is against
+// to Handle or registered with a TopicMux. Use errors.Is against
 // ErrHandler to distinguish these from decode errors.
 var ErrHandler = errors.New("typed: handler returned error")
 

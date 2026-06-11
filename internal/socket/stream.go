@@ -33,6 +33,15 @@ import (
 // STREAM cannot ride the normal internal/session layer (that layer applies ZMTP
 // framing); it attaches raw Pipes sourced from internal/stream.Adapter, which
 // pumps conn.Read bytes into the pipe and drains outbound Msgs to conn.Write.
+//
+// DIVERGENCE from libzmq: ZMQ_STREAM_NOTIFY (default-on in libzmq) makes a
+// libzmq STREAM socket deliver a synthetic [identity, empty] message pair on
+// every peer connect AND disconnect, so applications can track peer lifetime
+// from the recv stream alone. This engine does NOT emit those notifications —
+// Recv only ever yields real wire bytes. Implementing them would change recv
+// semantics that existing root-level tests (and users) depend on; doing it
+// compatibly needs a root-level socket option to opt in, which is out of this
+// package's hands. Track peer lifetime via socket monitor events instead.
 type streamEngine struct {
 	identityRouter
 }
@@ -46,7 +55,8 @@ type streamEngine struct {
 //     verbatim. An empty body means "close the conn" (STREAM half-close).
 //   - The pipe's PeerIdentity may be empty; the engine synthesizes one.
 func NewStreamEngine() iface.SocketEngine {
-	return &streamEngine{identityRouter: newIdentityRouter("stream")}
+	// detachCache=false: STREAM has no post-detach identity grace cache.
+	return &streamEngine{identityRouter: newIdentityRouter("stream", false)}
 }
 
 // Send routes by the leading identity frame and writes the concatenation of the

@@ -1,6 +1,7 @@
 package gozmq_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -13,69 +14,48 @@ import (
 
 func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }
 
-// TestPairRoundTrip_TCP proves that two PAIR sockets can round-trip a
-// multipart Msg over TCP with -race clean and no goroutine leaks.
-func TestPairRoundTrip_TCP(t *testing.T) {
-	_, server, client := newSocketPair(t, gozmq.Pair, "tcp://127.0.0.1:0")
+// TestPairRoundTrip proves that two PAIR sockets can round-trip a multipart
+// and a single-frame Msg, -race clean and with no goroutine leaks, over both
+// the TCP session path and the inproc direct-pipe path.
+func TestPairRoundTrip(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+	}{
+		{"tcp", "tcp://127.0.0.1:0"},
+		{"inproc", "inproc://pair-roundtrip"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, server, client := newSocketPair(t, gozmq.Pair, tc.endpoint)
+			callCtx := testCtx(t)
 
-	callCtx, cancel := testCtx(t)
-	defer cancel()
+			// Client → server, multipart.
+			req := gozmq.NewMsgFromFrames([]byte("hello"), []byte("world"))
+			if err := client.SendMsg(callCtx, req); err != nil {
+				t.Fatalf("client send: %v", err)
+			}
+			got, err := server.RecvMsg(callCtx)
+			if err != nil {
+				t.Fatalf("server recv: %v", err)
+			}
+			if got.NumFrames() != 2 || string(got.Frames()[0]) != "hello" || string(got.Frames()[1]) != "world" {
+				t.Fatalf("server got %v frames=%v", got.NumFrames(), got.Frames())
+			}
+			got.Release()
 
-	// Client → server, multipart.
-	req := gozmq.NewMsgFromFrames([]byte("hello"), []byte("world"))
-	if err := client.SendMsg(callCtx, req); err != nil {
-		t.Fatalf("client send: %v", err)
-	}
-	got, err := server.RecvMsg(callCtx)
-	if err != nil {
-		t.Fatalf("server recv: %v", err)
-	}
-	if got.NumFrames() != 2 || string(got.Frames()[0]) != "hello" || string(got.Frames()[1]) != "world" {
-		t.Fatalf("server got %v frames=%v", got.NumFrames(), got.Frames())
-	}
-
-	// Server → client, single frame.
-	if err := server.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("ack"))); err != nil {
-		t.Fatalf("server send: %v", err)
-	}
-	ack, err := client.RecvMsg(callCtx)
-	if err != nil {
-		t.Fatalf("client recv: %v", err)
-	}
-	if string(ack.Bytes()) != "ack" {
-		t.Fatalf("client got %q want ack", ack.Bytes())
-	}
-}
-
-// TestPairRoundTrip_Inproc is the same convergence test over inproc —
-// exercises the inproc transport registry and pipe-backed Conn.
-func TestPairRoundTrip_Inproc(t *testing.T) {
-	_, server, client := newSocketPair(t, gozmq.Pair, "inproc://pair-ping-test")
-
-	callCtx, cancel := testCtx(t)
-	defer cancel()
-
-	req := gozmq.NewMsgFromFrames([]byte("ping"), []byte("payload-bytes"))
-	if err := client.SendMsg(callCtx, req); err != nil {
-		t.Fatalf("client send: %v", err)
-	}
-	got, err := server.RecvMsg(callCtx)
-	if err != nil {
-		t.Fatalf("server recv: %v", err)
-	}
-	if got.NumFrames() != 2 || string(got.Frames()[0]) != "ping" || string(got.Frames()[1]) != "payload-bytes" {
-		t.Fatalf("server frames: %v", got.Frames())
-	}
-
-	if err := server.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("pong"))); err != nil {
-		t.Fatalf("server send: %v", err)
-	}
-	reply, err := client.RecvMsg(callCtx)
-	if err != nil {
-		t.Fatalf("client recv: %v", err)
-	}
-	if string(reply.Bytes()) != "pong" {
-		t.Fatalf("client reply %q want pong", reply.Bytes())
+			// Server → client, single frame.
+			if err := server.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("ack"))); err != nil {
+				t.Fatalf("server send: %v", err)
+			}
+			ack, err := client.RecvMsg(callCtx)
+			if err != nil {
+				t.Fatalf("client recv: %v", err)
+			}
+			if string(ack.Bytes()) != "ack" {
+				t.Fatalf("client got %q want ack", ack.Bytes())
+			}
+			ack.Release()
+		})
 	}
 }
 
@@ -84,8 +64,7 @@ func TestPairRoundTrip_Inproc(t *testing.T) {
 func TestPushPull_TCP(t *testing.T) {
 	_, puller, pusher := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "tcp://127.0.0.1:0", nil, nil)
 
-	callCtx, cancel := testCtx(t)
-	defer cancel()
+	callCtx := testCtx(t)
 
 	for i := 0; i < 5; i++ {
 		if err := pusher.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte{byte(i)})); err != nil {
@@ -100,6 +79,7 @@ func TestPushPull_TCP(t *testing.T) {
 		if m.Bytes()[0] != byte(i) {
 			t.Fatalf("pull[%d] = %d (order violated)", i, m.Bytes()[0])
 		}
+		m.Release()
 	}
 }
 
@@ -107,16 +87,9 @@ func TestPushPull_TCP(t *testing.T) {
 // smoke-test that the typed sentinels propagate correctly through the
 // public API.
 func TestPushSendRejected(t *testing.T) {
-	ctxZmq := gozmq.NewContext()
-	defer ctxZmq.Close()
+	_, s := newTestSocket(t, gozmq.Push)
 
-	s, err := ctxZmq.NewSocket(gozmq.Push)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-
-	_, err = s.RecvMsg(context.Background())
+	_, err := s.RecvMsg(context.Background())
 	if !errors.Is(err, gozmq.ErrFSMViolation) {
 		t.Fatalf("expected ErrFSMViolation, got %v", err)
 	}
@@ -127,8 +100,7 @@ func TestPushSendRejected(t *testing.T) {
 func TestReqRep_TCP(t *testing.T) {
 	_, rep, req := newSocketPairTypes(t, gozmq.Rep, gozmq.Req, "tcp://127.0.0.1:0", nil, nil)
 
-	callCtx, cancel := testCtx(t)
-	defer cancel()
+	callCtx := testCtx(t)
 
 	for i := 0; i < 3; i++ {
 		if err := req.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte{byte(i)})); err != nil {
@@ -141,6 +113,7 @@ func TestReqRep_TCP(t *testing.T) {
 		if got.Bytes()[0] != byte(i) {
 			t.Fatalf("rep got %d want %d", got.Bytes()[0], i)
 		}
+		got.Release()
 		reply := []byte{byte(i) * 10}
 		if err := rep.SendMsg(callCtx, gozmq.NewMsgFromBytes(reply)); err != nil {
 			t.Fatalf("rep send[%d]: %v", i, err)
@@ -152,41 +125,15 @@ func TestReqRep_TCP(t *testing.T) {
 		if back.Bytes()[0] != reply[0] {
 			t.Fatalf("req got %d want %d", back.Bytes()[0], reply[0])
 		}
+		back.Release()
 	}
 }
 
 // TestPubSub_Inproc exercises PUB/SUB with topic filtering over inproc.
 func TestPubSub_Inproc(t *testing.T) {
-	ctxZmq := gozmq.NewContext()
-	defer ctxZmq.Close()
+	_, pub, sub := newPubSubPair(t, "inproc://pubsub-test", [][]byte{[]byte("alpha")}, nil, nil)
 
-	pub, err := ctxZmq.NewSocket(gozmq.Pub)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pub.Close()
-	if err := pub.Bind("inproc://pubsub-test"); err != nil {
-		t.Fatal(err)
-	}
-
-	sub, err := ctxZmq.NewSocket(gozmq.Sub)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sub.Close()
-	if err := sub.Subscribe([]byte("alpha")); err != nil {
-		t.Fatal(err)
-	}
-	if err := sub.Connect("inproc://pubsub-test"); err != nil {
-		t.Fatal(err)
-	}
-
-	// Give handshake + subscription forwarding a window to settle before
-	// publishing (libzmq-style slow-joiner pattern).
-	time.Sleep(100 * time.Millisecond)
-
-	callCtx, cancel := testCtx(t)
-	defer cancel()
+	callCtx := testCtx(t)
 
 	// Send one matching and one non-matching message. The filter must
 	// drop "beta" before it reaches RecvMsg.
@@ -208,6 +155,42 @@ func TestPubSub_Inproc(t *testing.T) {
 		if string(got.Bytes()) != want {
 			t.Fatalf("sub got %q want %q", got.Bytes(), want)
 		}
+		got.Release()
+	}
+}
+
+// TestPubSub_BinaryPayloadLeadingSubByte is a regression test for a SUB
+// receive-path bug: single-frame data whose first byte was 0x00 or 0x01
+// (the SUBSCRIBE/CANCEL marker bytes) was silently dropped because Recv
+// classified subscriptions by sniffing the payload. A SUB's peer is a PUB
+// that only ever sends data, so such payloads must be delivered intact.
+func TestPubSub_BinaryPayloadLeadingSubByte(t *testing.T) {
+	// Match-all subscription: every published message should be delivered.
+	_, pub, sub := newPubSubPair(t, "inproc://pubsub-binary", [][]byte{{}}, nil, nil)
+
+	callCtx := testCtx(t)
+
+	// Payloads beginning with the subscription marker bytes (0x00/0x01)
+	// plus a control case. Before the fix the first two were dropped.
+	want := [][]byte{
+		{0x00, 0x42, 0x43},
+		{0x01, 0x42, 0x43},
+		{'A', 0x00, 0x01},
+	}
+	for _, p := range want {
+		if err := pub.SendMsg(callCtx, gozmq.NewMsgFromBytes(p)); err != nil {
+			t.Fatalf("pub send %x: %v", p, err)
+		}
+	}
+	for i, w := range want {
+		got, err := sub.RecvMsg(callCtx)
+		if err != nil {
+			t.Fatalf("sub recv %d: %v", i, err)
+		}
+		if !bytes.Equal(got.Bytes(), w) {
+			t.Fatalf("payload %d: got %x want %x", i, got.Bytes(), w)
+		}
+		got.Release()
 	}
 }
 
@@ -218,8 +201,7 @@ func TestRouterDealer_TCP(t *testing.T) {
 		nil, []gozmq.Option{gozmq.WithIdentity([]byte("worker-1"))},
 	)
 
-	callCtx, cancel := testCtx(t)
-	defer cancel()
+	callCtx := testCtx(t)
 
 	// Dealer → Router (Router sees identity frame prepended).
 	if err := dealer.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("req-payload"))); err != nil {
@@ -238,6 +220,7 @@ func TestRouterDealer_TCP(t *testing.T) {
 	if string(got.Frames()[1]) != "req-payload" {
 		t.Fatalf("router body %q", got.Frames()[1])
 	}
+	got.Release()
 
 	// Router → Dealer (use same identity in leading frame).
 	if err := router.SendMsg(callCtx, gozmq.NewMsgFromFrames(
@@ -252,36 +235,20 @@ func TestRouterDealer_TCP(t *testing.T) {
 	if string(reply.Bytes()) != "reply-payload" {
 		t.Fatalf("dealer got %q", reply.Bytes())
 	}
+	reply.Release()
 }
 
 // TestPlainAuth_Success: a PLAIN client with correct credentials handshakes
 // with a PLAIN server and then round-trips.
 func TestPlainAuth_Success(t *testing.T) {
-	ctxZmq := gozmq.NewContext()
-	defer ctxZmq.Close()
+	_, server, client := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair, "tcp://127.0.0.1:0",
+		[]gozmq.Option{gozmq.WithPlainAuth(func(u, p string) bool {
+			return u == "alice" && p == "hunter2"
+		})},
+		[]gozmq.Option{gozmq.WithPlainClient("alice", "hunter2")},
+	)
 
-	server, err := ctxZmq.NewSocket(gozmq.Pair, gozmq.WithPlainAuth(func(u, p string) bool {
-		return u == "alice" && p == "hunter2"
-	}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer server.Close()
-	if err := server.Bind("tcp://127.0.0.1:0"); err != nil {
-		t.Fatal(err)
-	}
-
-	client, err := ctxZmq.NewSocket(gozmq.Pair, gozmq.WithPlainClient("alice", "hunter2"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.Close()
-	if err := client.Connect(server.LastEndpoint()); err != nil {
-		t.Fatal(err)
-	}
-
-	callCtx, cancel := testCtx(t)
-	defer cancel()
+	callCtx := testCtx(t)
 	if err := client.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("secret"))); err != nil {
 		t.Fatal(err)
 	}
@@ -292,14 +259,12 @@ func TestPlainAuth_Success(t *testing.T) {
 	if string(got.Bytes()) != "secret" {
 		t.Fatalf("got %q", got.Bytes())
 	}
+	got.Release()
 }
 
 // TestCurveAuth_Success verifies that a CURVE client with the correct
 // server key completes the handshake and round-trips.
 func TestCurveAuth_Success(t *testing.T) {
-	ctxZmq := gozmq.NewContext()
-	defer ctxZmq.Close()
-
 	serverPub, serverSec, err := curve.GenerateKeyPair()
 	if err != nil {
 		t.Fatal(err)
@@ -309,26 +274,12 @@ func TestCurveAuth_Success(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	server, err := ctxZmq.NewSocket(gozmq.Pair, gozmq.WithCurveServer(serverSec[:]))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer server.Close()
-	if err := server.Bind("tcp://127.0.0.1:0"); err != nil {
-		t.Fatal(err)
-	}
+	_, server, client := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair, "tcp://127.0.0.1:0",
+		[]gozmq.Option{gozmq.WithCurveServer(serverSec[:])},
+		[]gozmq.Option{gozmq.WithCurveClient(serverPub[:], clientPub[:], clientSec[:])},
+	)
 
-	client, err := ctxZmq.NewSocket(gozmq.Pair, gozmq.WithCurveClient(serverPub[:], clientPub[:], clientSec[:]))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.Close()
-	if err := client.Connect(server.LastEndpoint()); err != nil {
-		t.Fatal(err)
-	}
-
-	callCtx, cancel := testCtx(t)
-	defer cancel()
+	callCtx := testCtx(t)
 	if err := client.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("curve-secret"))); err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -339,6 +290,7 @@ func TestCurveAuth_Success(t *testing.T) {
 	if string(got.Bytes()) != "curve-secret" {
 		t.Fatalf("got %q", got.Bytes())
 	}
+	got.Release()
 }
 
 // TestContextClosed_BlocksNewSocket is a smoke test on teardown ordering.
@@ -352,130 +304,67 @@ func TestContextClosed_BlocksNewSocket(t *testing.T) {
 	}
 }
 
-// TestMaxMessageSize_AtLimit verifies that a message of exactly
-// MaxMessageSize bytes round-trips successfully through a PUSH/PULL pair.
-// Uses a small custom limit so the test doesn't allocate the 64 MiB default.
-func TestMaxMessageSize_AtLimit(t *testing.T) {
-	const limit = 1024
-	opts := []gozmq.Option{gozmq.WithMaxMessageSize(limit)}
-	_, puller, pusher := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "inproc://maxmsg-at-limit", opts, opts)
-
-	callCtx, cancel := testCtx(t)
-	defer cancel()
-
-	payload := make([]byte, limit)
-	for i := range payload {
-		payload[i] = byte(i & 0xff)
-	}
-	if err := pusher.SendMsg(callCtx, gozmq.NewMsgFromBytes(payload)); err != nil {
-		t.Fatalf("send at limit: %v", err)
-	}
-	got, err := puller.RecvMsg(callCtx)
-	if err != nil {
-		t.Fatalf("recv at limit: %v", err)
-	}
-	if len(got.Bytes()) != limit {
-		t.Fatalf("recv size = %d want %d", len(got.Bytes()), limit)
-	}
-}
-
-// TestMaxMessageSize_OverLimit verifies that a message of MaxMessageSize+1
-// bytes is rejected synchronously by SendMsg with an error wrapping
-// ErrMalformedFrame, and that the failed send does not tear down the
-// session — a subsequent in-limit SendMsg succeeds on the same socket.
+// TestMaxMessageSize_SendBoundary covers the synchronous send-side
+// MaxMessageSize contract across patterns and boundary positions:
 //
-// Oversize messages are rejected synchronously by SendMsg with
-// ErrMalformedFrame so callers don't need a monitor to observe the error.
-func TestMaxMessageSize_OverLimit(t *testing.T) {
+//   - At exactly the limit the message round-trips.
+//   - One byte over, SendMsg rejects synchronously with an error wrapping
+//     ErrMalformedFrame (one case also asserts the return is prompt — no
+//     monitor channel or session round-trip is involved), the session is
+//     NOT torn down, and a subsequent at-limit send still round-trips.
+func TestMaxMessageSize_SendBoundary(t *testing.T) {
 	const limit = 1024
 	opts := []gozmq.Option{gozmq.WithMaxMessageSize(limit)}
-	_, puller, pusher := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "inproc://maxmsg-over-limit", opts, opts)
 
-	callCtx, cancel := testCtx(t)
-	defer cancel()
+	cases := []struct {
+		name         string
+		server       gozmq.SocketType
+		client       gozmq.SocketType
+		endpoint     string
+		overLimit    bool
+		assertPrompt bool // assert the oversize rejection returns synchronously
+	}{
+		{"push-pull/at-limit", gozmq.Pull, gozmq.Push, "inproc://maxmsg-pushpull-at", false, false},
+		{"push-pull/over-limit", gozmq.Pull, gozmq.Push, "inproc://maxmsg-pushpull-over", true, false},
+		{"pair/at-limit", gozmq.Pair, gozmq.Pair, "inproc://maxmsg-pair-at", false, false},
+		{"pair/over-limit", gozmq.Pair, gozmq.Pair, "inproc://maxmsg-pair-over", true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, server, client := newSocketPairTypes(t, tc.server, tc.client, tc.endpoint, opts, opts)
+			callCtx := testCtx(t)
 
-	// Oversize send: synchronous ErrMalformedFrame, no session teardown.
-	big := make([]byte, limit+1)
-	if err := pusher.SendMsg(callCtx, gozmq.NewMsgFromBytes(big)); !errors.Is(err, gozmq.ErrMalformedFrame) {
-		t.Fatalf("oversize SendMsg err = %v, want ErrMalformedFrame", err)
-	}
+			if tc.overLimit {
+				big := make([]byte, limit+1)
+				start := time.Now()
+				err := client.SendMsg(callCtx, gozmq.NewMsgFromBytes(big))
+				elapsed := time.Since(start)
+				if !errors.Is(err, gozmq.ErrMalformedFrame) {
+					t.Fatalf("oversize SendMsg err = %v, want ErrMalformedFrame", err)
+				}
+				if tc.assertPrompt && elapsed > 500*time.Millisecond {
+					t.Fatalf("oversize SendMsg took %v — expected synchronous return", elapsed)
+				}
+			}
 
-	// Session still healthy: an in-limit send round-trips.
-	ok := make([]byte, limit)
-	for i := range ok {
-		ok[i] = byte(i & 0xff)
-	}
-	if err := pusher.SendMsg(callCtx, gozmq.NewMsgFromBytes(ok)); err != nil {
-		t.Fatalf("in-limit SendMsg after oversize: %v", err)
-	}
-	got, err := puller.RecvMsg(callCtx)
-	if err != nil {
-		t.Fatalf("recv after oversize: %v", err)
-	}
-	if len(got.Bytes()) != limit {
-		t.Fatalf("recv size = %d want %d", len(got.Bytes()), limit)
-	}
-}
-
-// TestSendMsg_OversizeSynchronousError verifies the synchronous size
-// check: SendMsg with a payload exceeding MaxMessageSize returns
-// immediately with an error wrapping ErrMalformedFrame, without needing
-// a monitor channel and without tearing down the session. A subsequent
-// in-limit SendMsg must succeed on the same socket.
-func TestSendMsg_OversizeSynchronousError(t *testing.T) {
-	const limit = 1024
-	_, srv, cli := newSocketPair(t, gozmq.Pair, "inproc://sendmsg-oversize-sync", gozmq.WithMaxMessageSize(limit))
-
-	callCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	// Fast path: synchronous rejection. The call should return well
-	// under the ctx deadline (in practice, immediately).
-	start := time.Now()
-	big := make([]byte, limit+1)
-	err := cli.SendMsg(callCtx, gozmq.NewMsgFromBytes(big))
-	if !errors.Is(err, gozmq.ErrMalformedFrame) {
-		t.Fatalf("oversize SendMsg err = %v, want ErrMalformedFrame", err)
-	}
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
-		t.Fatalf("oversize SendMsg took %v — expected synchronous return", elapsed)
-	}
-
-	// Session still healthy: in-limit send round-trips.
-	payload := []byte("still-alive")
-	if err := cli.SendMsg(callCtx, gozmq.NewMsgFromBytes(payload)); err != nil {
-		t.Fatalf("post-oversize in-limit SendMsg: %v", err)
-	}
-	got, err := srv.RecvMsg(callCtx)
-	if err != nil {
-		t.Fatalf("recv after oversize: %v", err)
-	}
-	if string(got.Bytes()) != string(payload) {
-		t.Fatalf("recv payload = %q, want %q", got.Bytes(), payload)
-	}
-}
-
-// TestSendMsg_AtLimitBoundary confirms the synchronous check does not
-// reject payloads of exactly MaxMessageSize bytes.
-func TestSendMsg_AtLimitBoundary(t *testing.T) {
-	const limit = 1024
-	_, srv, cli := newSocketPair(t, gozmq.Pair, "inproc://sendmsg-at-limit-boundary", gozmq.WithMaxMessageSize(limit))
-
-	callCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	payload := make([]byte, limit)
-	for i := range payload {
-		payload[i] = byte(i)
-	}
-	if err := cli.SendMsg(callCtx, gozmq.NewMsgFromBytes(payload)); err != nil {
-		t.Fatalf("at-limit SendMsg: %v", err)
-	}
-	got, err := srv.RecvMsg(callCtx)
-	if err != nil {
-		t.Fatalf("recv at limit: %v", err)
-	}
-	if len(got.Bytes()) != limit {
-		t.Fatalf("recv size = %d want %d", len(got.Bytes()), limit)
+			// At-limit payload round-trips — and, in the over-limit cases,
+			// proves the rejected send did not tear down the session.
+			payload := make([]byte, limit)
+			for i := range payload {
+				payload[i] = byte(i & 0xff)
+			}
+			if err := client.SendMsg(callCtx, gozmq.NewMsgFromBytes(payload)); err != nil {
+				t.Fatalf("at-limit SendMsg: %v", err)
+			}
+			got, err := server.RecvMsg(callCtx)
+			if err != nil {
+				t.Fatalf("recv at limit: %v", err)
+			}
+			if !bytes.Equal(got.Bytes(), payload) {
+				t.Fatalf("recv size = %d want %d (payload mismatch)", len(got.Bytes()), limit)
+			}
+			got.Release()
+		})
 	}
 }
 
@@ -489,8 +378,7 @@ func TestSendMsg_CollectsMultipartSizeCorrectly(t *testing.T) {
 	const limit = 1024
 	_, srv, cli := newSocketPair(t, gozmq.Pair, "inproc://sendmsg-multipart", gozmq.WithMaxMessageSize(limit))
 
-	callCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	callCtx := testCtx(t)
 
 	// Case A: two <=limit frames (sum > limit) — accepted.
 	// Each frame is limit bytes, total 2*limit, but the codec/SendMsg
@@ -507,6 +395,7 @@ func TestSendMsg_CollectsMultipartSizeCorrectly(t *testing.T) {
 	if got.NumFrames() != 2 || len(got.Frames()[0]) != limit || len(got.Frames()[1]) != limit {
 		t.Fatalf("recv frames = %v, want 2x%d", got.Frames(), limit)
 	}
+	got.Release()
 
 	// Case B: one frame > limit — rejected with ErrMalformedFrame.
 	small := []byte("ok")
@@ -518,60 +407,42 @@ func TestSendMsg_CollectsMultipartSizeCorrectly(t *testing.T) {
 }
 
 // TestCloseCtx_CancellationBreaksLingerDrain verifies that under
-// WithLinger(time.Hour) (effectively infinite for a test),
-// a stalled outbound queue would previously block Close for an hour; the
-// new CloseCtx honors ctx cancellation and returns ctx.Err() after the
-// linger wait is interrupted, while still completing the rest of
-// teardown.
+// WithLinger(-1) (infinite) a stalled outbound queue would previously
+// block Close forever; CloseCtx honors ctx cancellation and returns
+// ctx.Err() after the linger wait is interrupted, while still completing
+// the rest of teardown.
 //
-// To force a genuinely-stalled drain we use a PUSH socket connected to
-// nothing: PUSH blocks at the engine's Send until a peer attaches, so
-// SendMsg calls would deadlock. Instead we rely on the fact that with
-// WithLinger(time.Hour) and zero active sessions, waitWritersFlushed
-// returns nil immediately — which does not exercise the bug. The
-// reliable reproduction is: a PAIR with a peer whose recv side is
-// saturated AND WithLinger(infinite). We configure recv+send HWMs to
-// 1 and pre-fill past the transport-level pipe buffer (HWM 64 for
-// inproc), so the writer's drain path blocks on conn.Write.
+// The reliable reproduction is a PAIR with a peer whose recv side is
+// saturated AND WithLinger(infinite). We configure recv+send HWMs to 1
+// and pre-fill past the transport-level pipe buffer, so the drain path
+// blocks until the deadline interrupts it.
 func TestCloseCtx_CancellationBreaksLingerDrain(t *testing.T) {
-	ctxZmq := gozmq.NewContext()
-	defer ctxZmq.Close()
-
-	// A receiver that accepts the handshake but never RecvMsgs. With
-	// a tiny recvHWM, its engine-side pipe fills after 1 buffered
-	// message and blocks further writes on the transport pipe.
-	receiver, err := ctxZmq.NewSocket(gozmq.Pair, gozmq.WithRecvHWM(1))
-	if err != nil {
-		t.Fatalf("new receiver: %v", err)
-	}
-	defer receiver.Close()
-	endpoint := "inproc://closectx-cancel-linger"
-	if err := receiver.Bind(endpoint); err != nil {
-		t.Fatalf("bind: %v", err)
-	}
-
-	sender, err := ctxZmq.NewSocket(
-		gozmq.Pair,
-		gozmq.WithLinger(-1), // infinite
-		gozmq.WithSendHWM(1),
+	// receiver accepts the wiring but never RecvMsgs payload. With a tiny
+	// recvHWM its inbound pipe fills quickly and blocks further writes.
+	_, receiver, sender := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair,
+		"inproc://closectx-cancel-linger",
+		[]gozmq.Option{gozmq.WithRecvHWM(1)},
+		[]gozmq.Option{gozmq.WithLinger(-1) /* infinite */, gozmq.WithSendHWM(1)},
 	)
-	if err != nil {
-		t.Fatalf("new sender: %v", err)
+
+	// Settle: a reverse round-trip (receiver → sender) proves both ends
+	// are attached without a fixed sleep.
+	callCtx := testCtx(t)
+	if err := receiver.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("sync"))); err != nil {
+		t.Fatalf("settle send: %v", err)
 	}
-	if err := sender.Connect(endpoint); err != nil {
-		t.Fatalf("connect: %v", err)
+	if m, err := sender.RecvMsg(callCtx); err != nil {
+		t.Fatalf("settle recv: %v", err)
+	} else {
+		m.Release()
 	}
 
-	// Give the handshake time to complete so the session is attached.
-	time.Sleep(100 * time.Millisecond)
-
-	// Pre-fill: enqueue enough messages that the transport pipe (HWM 64)
-	// + receiver engine pipe (HWM 1) + session/writer buffers all
-	// saturate. Once saturated, a further SendMsg will block at the
-	// engine level; we use a short per-call deadline so we don't block
-	// the test on the pre-fill step. The exact count that queues vs.
-	// blocks is implementation-dependent — we just need SOMETHING
-	// pending when Close runs.
+	// Pre-fill: enqueue enough messages that the transport pipe +
+	// receiver pipe (HWM 1) + buffers all saturate. Once saturated, a
+	// further SendMsg blocks; we use a short per-call deadline so the
+	// pre-fill step itself never blocks the test. The exact count that
+	// queues vs. blocks is implementation-dependent — we just need
+	// SOMETHING pending when Close runs.
 	for i := 0; i < 256; i++ {
 		sCtx, sCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 		err := sender.SendMsg(sCtx, gozmq.NewMsgFromBytes([]byte{byte(i)}))
@@ -588,7 +459,7 @@ func TestCloseCtx_CancellationBreaksLingerDrain(t *testing.T) {
 	defer closeCancel()
 
 	start := time.Now()
-	err = sender.CloseCtx(closeCtx)
+	err := sender.CloseCtx(closeCtx)
 	elapsed := time.Since(start)
 
 	if !errors.Is(err, context.DeadlineExceeded) {
@@ -600,126 +471,63 @@ func TestCloseCtx_CancellationBreaksLingerDrain(t *testing.T) {
 		t.Fatalf("CloseCtx took %v after ctx cancel — did not honor ctx.Done", elapsed)
 	}
 
-	// Idempotent: second CloseCtx returns ErrSocketClosed.
-	if err2 := sender.CloseCtx(context.Background()); !errors.Is(err2, gozmq.ErrSocketClosed) {
-		t.Fatalf("second CloseCtx err = %v, want ErrSocketClosed", err2)
+	// Idempotent: second CloseCtx returns nil.
+	if err2 := sender.CloseCtx(context.Background()); err2 != nil {
+		t.Fatalf("second CloseCtx err = %v, want nil", err2)
 	}
 }
 
 // TestCloseCtx_NormalDrainStillWorks confirms that CloseCtx with a
-// bounded linger and a responsive peer returns nil (no ctx error) and
-// that queued messages arrive at the peer before the drain completes.
+// bounded linger and a responsive peer returns nil (no ctx error): once
+// the peer has drained every queued message, the close path has nothing
+// left to linger on.
 func TestCloseCtx_NormalDrainStillWorks(t *testing.T) {
-	ctxZmq := gozmq.NewContext()
-	defer ctxZmq.Close()
+	_, receiver, sender := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair,
+		"inproc://closectx-normal-drain",
+		nil,
+		[]gozmq.Option{gozmq.WithLinger(2 * time.Second)},
+	)
 
-	receiver, err := ctxZmq.NewSocket(gozmq.Pair)
-	if err != nil {
-		t.Fatalf("new receiver: %v", err)
-	}
-	defer receiver.Close()
-	endpoint := "inproc://closectx-normal-drain"
-	if err := receiver.Bind(endpoint); err != nil {
-		t.Fatalf("bind: %v", err)
-	}
-
-	sender, err := ctxZmq.NewSocket(gozmq.Pair, gozmq.WithLinger(2*time.Second))
-	if err != nil {
-		t.Fatalf("new sender: %v", err)
-	}
-	if err := sender.Connect(endpoint); err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-
-	// Start receiver FIRST and actively drain so sender's writer never
-	// backs up — the drain path is exercised by the writerCtx cancel
-	// seeing no residual queue (WriterFlushed fires promptly) while
-	// the writer is still fully functional.
+	callCtx := testCtx(t)
 	const N = 4
-	recvDone := make(chan struct{})
-	recvErr := make(chan error, 1)
-	gotCount := make(chan int, 1)
-	go func() {
-		defer close(recvDone)
-		recvCtx, recvCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer recvCancel()
-		seen := 0
-		for seen < N {
-			m, err := receiver.RecvMsg(recvCtx)
-			if err != nil {
-				recvErr <- err
-				break
-			}
-			if len(m.Bytes()) != 1 || m.Bytes()[0] != byte(seen) {
-				recvErr <- errors.New("unexpected payload")
-				break
-			}
-			seen++
-		}
-		gotCount <- seen
-	}()
-
-	// Give the handshake time to complete.
-	time.Sleep(100 * time.Millisecond)
-
-	sendCtx, sendCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer sendCancel()
 	for i := 0; i < N; i++ {
-		if err := sender.SendMsg(sendCtx, gozmq.NewMsgFromBytes([]byte{byte(i)})); err != nil {
+		if err := sender.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte{byte(i)})); err != nil {
 			t.Fatalf("send %d: %v", i, err)
 		}
 	}
-
-	// Give messages time to flow through before closing — this is the
-	// "responsive peer" scenario, not the "drain at Close" scenario.
-	// CloseCtx(Background()) should return nil, not leak, and not surface
-	// a context error. This does not mandate that queued messages always
-	// arrive; that is the separate WithLinger contract.
-	time.Sleep(200 * time.Millisecond)
+	// Drain everything BEFORE closing — this is the "responsive peer"
+	// scenario, not the "drain at Close" scenario, and waiting for the
+	// last receive replaces any settle sleep.
+	for i := 0; i < N; i++ {
+		m, err := receiver.RecvMsg(callCtx)
+		if err != nil {
+			t.Fatalf("recv %d: %v", i, err)
+		}
+		if len(m.Bytes()) != 1 || m.Bytes()[0] != byte(i) {
+			t.Fatalf("recv %d: unexpected payload %x", i, m.Bytes())
+		}
+		m.Release()
+	}
 
 	if err := sender.CloseCtx(context.Background()); err != nil {
 		t.Fatalf("CloseCtx err = %v, want nil", err)
-	}
-
-	<-recvDone
-	select {
-	case err := <-recvErr:
-		t.Fatalf("receiver: %v", err)
-	default:
-	}
-	if got := <-gotCount; got != N {
-		t.Fatalf("receiver got %d/%d messages", got, N)
 	}
 }
 
 // TestClose_DelegatesToCloseCtx confirms that Close uses the same teardown
 // path as CloseCtx with a background context.
 func TestClose_DelegatesToCloseCtx(t *testing.T) {
-	ctxZmq := gozmq.NewContext()
-	defer ctxZmq.Close()
-
-	receiver, err := ctxZmq.NewSocket(gozmq.Pair)
-	if err != nil {
-		t.Fatalf("new receiver: %v", err)
-	}
-	defer receiver.Close()
-	endpoint := "inproc://close-delegates"
-	if err := receiver.Bind(endpoint); err != nil {
-		t.Fatalf("bind: %v", err)
-	}
-	sender, err := ctxZmq.NewSocket(gozmq.Pair, gozmq.WithLinger(200*time.Millisecond))
-	if err != nil {
-		t.Fatalf("new sender: %v", err)
-	}
-	if err := sender.Connect(endpoint); err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	_, _, sender := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair,
+		"inproc://close-delegates",
+		nil,
+		[]gozmq.Option{gozmq.WithLinger(200 * time.Millisecond)},
+	)
 
 	if err := sender.Close(); err != nil {
 		t.Fatalf("Close() err = %v, want nil", err)
 	}
-	// Idempotent contract preserved.
-	if err := sender.Close(); !errors.Is(err, gozmq.ErrSocketClosed) {
-		t.Fatalf("second Close() err = %v, want ErrSocketClosed", err)
+	// Idempotent contract: repeated Close returns nil, like Context.Close.
+	if err := sender.Close(); err != nil {
+		t.Fatalf("second Close() err = %v, want nil", err)
 	}
 }

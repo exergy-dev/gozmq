@@ -14,8 +14,7 @@ import (
 func TestSocketMetrics_PushPullCounters(t *testing.T) {
 	_, puller, pusher := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "inproc://metrics-pushpull", nil, nil)
 
-	callCtx, cancel := testCtx(t)
-	defer cancel()
+	callCtx := testCtx(t)
 
 	const n = 8
 	for i := 0; i < n; i++ {
@@ -24,9 +23,11 @@ func TestSocketMetrics_PushPullCounters(t *testing.T) {
 		}
 	}
 	for i := 0; i < n; i++ {
-		if _, err := puller.RecvMsg(callCtx); err != nil {
+		m, err := puller.RecvMsg(callCtx)
+		if err != nil {
 			t.Fatalf("recv %d: %v", i, err)
 		}
+		m.Release()
 	}
 
 	if got := pusher.Metrics().Sent; got != n {
@@ -45,39 +46,20 @@ func TestSocketMetrics_PushPullCounters(t *testing.T) {
 // is full. Verifies the per-(message, peer) drop accounting at the PUB
 // fanout site.
 func TestSocketMetrics_PubDropsOnSlowSubscriber(t *testing.T) {
-	ctxZmq := gozmq.NewContext()
-	defer ctxZmq.Close()
-
 	// Small HWMs so a handful of sends are enough to overflow the
-	// peer's inbound buffer.
-	pub, err := ctxZmq.NewSocket(gozmq.Pub, gozmq.WithSendHWM(2))
-	if err != nil {
-		t.Fatalf("new pub: %v", err)
-	}
-	defer pub.Close()
-	if err := pub.Bind("inproc://metrics-pubdrop"); err != nil {
-		t.Fatalf("bind: %v", err)
-	}
+	// peer's inbound buffer. newPubSubPair waits for the SUBSCRIBE to
+	// reach the PUB engine before returning; otherwise the early sends
+	// would be filtered out (a different path that doesn't increment
+	// Dropped).
+	_, pub, _ := newPubSubPair(t, "inproc://metrics-pubdrop", [][]byte{nil}, // match everything
+		[]gozmq.Option{gozmq.WithSendHWM(2)},
+		[]gozmq.Option{gozmq.WithRecvHWM(2)},
+	)
 
-	sub, err := ctxZmq.NewSocket(gozmq.Sub, gozmq.WithRecvHWM(2))
-	if err != nil {
-		t.Fatalf("new sub: %v", err)
-	}
-	defer sub.Close()
-	if err := sub.Subscribe(nil); err != nil { // match everything
-		t.Fatalf("subscribe: %v", err)
-	}
-	if err := sub.Connect("inproc://metrics-pubdrop"); err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	// The subscription sync probes count toward Sent — measure the delta.
+	base := pub.Metrics().Sent
 
-	// Let the SUBSCRIBE propagate to the PUB engine before we publish;
-	// otherwise the early sends are filtered out (which is a different
-	// path that doesn't increment Dropped).
-	time.Sleep(150 * time.Millisecond)
-
-	callCtx, cancel := testCtx(t)
-	defer cancel()
+	callCtx := testCtx(t)
 	const n = 200
 	for i := 0; i < n; i++ {
 		// Never drain on the SUB side. Once HWM is full the per-peer
@@ -89,8 +71,8 @@ func TestSocketMetrics_PubDropsOnSlowSubscriber(t *testing.T) {
 	}
 
 	m := pub.Metrics()
-	if m.Sent != n {
-		t.Fatalf("pub Sent = %d, want %d", m.Sent, n)
+	if m.Sent != base+n {
+		t.Fatalf("pub Sent = %d, want %d", m.Sent, base+n)
 	}
 	if m.Dropped == 0 {
 		t.Fatalf("pub Dropped = 0, want > 0 (slow subscriber should overflow HWM=%d)", 2)
@@ -104,26 +86,7 @@ func TestSocketMetrics_PubDropsOnSlowSubscriber(t *testing.T) {
 // forwarder-backed mode (the single-pipe direct path bypasses the
 // inbound channel entirely, making QueueDepth always 0).
 func TestSocketMetrics_QueueDepthGauge(t *testing.T) {
-	ctxZmq := gozmq.NewContext()
-	defer ctxZmq.Close()
-
-	puller, err := ctxZmq.NewSocket(gozmq.Pull)
-	if err != nil {
-		t.Fatalf("new pull: %v", err)
-	}
-	defer puller.Close()
-	if err := puller.Bind("inproc://metrics-depth"); err != nil {
-		t.Fatalf("bind: %v", err)
-	}
-
-	pusher, err := ctxZmq.NewSocket(gozmq.Push)
-	if err != nil {
-		t.Fatalf("new push: %v", err)
-	}
-	defer pusher.Close()
-	if err := pusher.Connect("inproc://metrics-depth"); err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	ctxZmq, puller, pusher := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "inproc://metrics-depth", nil, nil)
 
 	// Attach a second pusher to force forwarder-backed mode.
 	pusher2, err := ctxZmq.NewSocket(gozmq.Push)
@@ -131,12 +94,11 @@ func TestSocketMetrics_QueueDepthGauge(t *testing.T) {
 		t.Fatalf("new push2: %v", err)
 	}
 	defer pusher2.Close()
-	if err := pusher2.Connect("inproc://metrics-depth"); err != nil {
+	if err := pusher2.Connect(puller.LastEndpoint()); err != nil {
 		t.Fatalf("connect2: %v", err)
 	}
 
-	callCtx, cancel := testCtx(t)
-	defer cancel()
+	callCtx := testCtx(t)
 	if err := pusher.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("x"))); err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -154,8 +116,10 @@ func TestSocketMetrics_QueueDepthGauge(t *testing.T) {
 		t.Fatalf("QueueDepth before drain = %d, want 1", got)
 	}
 
-	if _, err := puller.RecvMsg(callCtx); err != nil {
+	if m, err := puller.RecvMsg(callCtx); err != nil {
 		t.Fatalf("recv: %v", err)
+	} else {
+		m.Release()
 	}
 	if got := puller.Metrics().QueueDepth; got != 0 {
 		t.Fatalf("QueueDepth after drain = %d, want 0", got)
@@ -165,13 +129,7 @@ func TestSocketMetrics_QueueDepthGauge(t *testing.T) {
 // TestSocketMetrics_ClosedReturnsZero asserts that Metrics on a closed
 // Socket returns the zero value rather than panicking.
 func TestSocketMetrics_ClosedReturnsZero(t *testing.T) {
-	ctxZmq := gozmq.NewContext()
-	defer ctxZmq.Close()
-
-	s, err := ctxZmq.NewSocket(gozmq.Push)
-	if err != nil {
-		t.Fatalf("new: %v", err)
-	}
+	_, s := newTestSocket(t, gozmq.Push)
 	if err := s.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}

@@ -9,20 +9,27 @@ import (
 	"github.com/rkm/gozmq"
 )
 
-func TestHWMZeroDirectInprocDoesNotBlockWithoutReceiver(t *testing.T) {
-	_, server, client := newSocketPair(t, gozmq.Pair, "inproc://hwm-zero-direct",
-		gozmq.WithSendHWM(0), gozmq.WithRecvHWM(0))
+// TestHWMZeroDoesNotBlockWithoutReceiver verifies that WithSendHWM(0) /
+// WithRecvHWM(0) (unbounded) lets a PAIR sender enqueue freely with no
+// active receiver, on both the inproc direct-pipe path and the TCP
+// session path.
+func TestHWMZeroDoesNotBlockWithoutReceiver(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+		count    int
+	}{
+		{"direct-inproc", "inproc://hwm-zero-direct", 1000},
+		{"session-tcp", "tcp://127.0.0.1:0", 200},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, server, client := newSocketPair(t, gozmq.Pair, tc.endpoint,
+				gozmq.WithSendHWM(0), gozmq.WithRecvHWM(0))
 
-	sendManyWithoutReceiver(t, client, 1000)
-	recvMany(t, server, 1000)
-}
-
-func TestHWMZeroSessionPathDoesNotBlockWithoutReceiver(t *testing.T) {
-	_, server, client := newSocketPair(t, gozmq.Pair, "tcp://127.0.0.1:0",
-		gozmq.WithSendHWM(0), gozmq.WithRecvHWM(0))
-
-	sendManyWithoutReceiver(t, client, 200)
-	recvMany(t, server, 200)
+			sendManyWithoutReceiver(t, client, tc.count)
+			recvMany(t, server, tc.count)
+		})
+	}
 }
 
 func sendManyWithoutReceiver(t *testing.T, sock *gozmq.Socket, n int) {

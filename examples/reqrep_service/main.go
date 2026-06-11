@@ -42,6 +42,7 @@ func main() {
 				return
 			}
 			body := string(msg.Bytes())
+			msg.Release()
 			fmt.Printf("service received %q\n", body)
 			reply := fmt.Sprintf("reply(%s)", body)
 			if err := rep.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte(reply))); err != nil {
@@ -60,6 +61,7 @@ func main() {
 		reply, err := req.RecvMsg(callCtx)
 		check(err, "client recv")
 		fmt.Printf("client got %q\n", reply.Bytes())
+		reply.Release()
 	}
 
 	check(<-done, "service loop")
