@@ -74,14 +74,20 @@ jobs:
         with:
           go-version: stable
       - name: Test with coverage
-        run: go test -count=1 -coverprofile=cover.out -covermode=atomic ./...
-      - name: Enforce minimum total coverage
+        # Library packages only. examples/ and perf/ are demonstration and
+        # measurement `main` programs with no tests by design; including
+        # them would report ~72% and say nothing about the library.
+        run: |
+          set -euo pipefail
+          pkgs=$(go list ./... | grep -v -e '/examples/' -e '/perf/' -e '/soak$')
+          go test -count=1 -coverprofile=cover.out -covermode=atomic $pkgs
+      - name: Enforce minimum coverage
         env:
           MIN_COVERAGE: '80'
         run: |
           set -euo pipefail
           total=$(go tool cover -func=cover.out | awk '/^total:/ {gsub(/%/,"",$3); print $3}')
-          echo "total coverage: ${total}% (minimum ${MIN_COVERAGE}%)"
+          echo "library coverage: ${total}% (minimum ${MIN_COVERAGE}%)"
           awk -v t="$total" -v m="$MIN_COVERAGE" 'BEGIN { exit (t+0 >= m+0) ? 0 : 1 }' \
             || { echo "::error::coverage ${total}% is below the ${MIN_COVERAGE}% minimum"; exit 1; }
       - uses: actions/upload-artifact@v4

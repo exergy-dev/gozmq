@@ -1,0 +1,63 @@
+name: Bug report
+description: Something behaves differently from what the docs say
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security vulnerabilities do **not** belong here — see
+        [SECURITY.md](../blob/main/SECURITY.md) for private reporting.
+
+        Before filing, check [docs/COMPATIBILITY.md](../blob/main/docs/COMPATIBILITY.md):
+        several differences from libzmq are intentional and documented there.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproducer
+      description: >
+        A self-contained Go program or test is by far the most useful thing
+        you can provide. If it involves a real libzmq peer, include that side too.
+      render: go
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: gozmq version
+      placeholder: v1.0.0, or a commit SHA
+    validations:
+      required: true
+  - type: input
+    id: goversion
+    attributes:
+      label: Go version and platform
+      placeholder: "go version go1.24.0 linux/amd64"
+    validations:
+      required: true
+  - type: input
+    id: setup
+    attributes:
+      label: Socket pattern, transport, and security mechanism
+      placeholder: "ROUTER/DEALER over tcp:// with CURVE"
+    validations:
+      required: true
+  - type: input
+    id: libzmq
+    attributes:
+      label: libzmq version (if a libzmq peer is involved)
+      placeholder: "4.3.4, or n/a"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs, monitor events, or race output
+      description: >
+        Output from a WithLogger slog handler, events from a monitor channel,
+        or a `go test -race` report if you have one.
+      render: shell

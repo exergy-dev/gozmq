@@ -1,0 +1,37 @@
+name: Feature request
+description: Propose new functionality
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If you are asking for a libzmq feature gozmq does not have, please
+        check [docs/COMPATIBILITY.md](../blob/main/docs/COMPATIBILITY.md)
+        first — the gaps are catalogued there with the reasoning, and the
+        post-1.0 candidate list is at the bottom.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve
+      description: >
+        Describe the situation you are actually in, not just the API you want.
+        The best design often differs from the one first imagined.
+    validations:
+      required: true
+  - type: input
+    id: libzmq
+    attributes:
+      label: Corresponding libzmq feature, if any
+      placeholder: "ZMQ_CONFLATE"
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What you are doing today instead
+    validations:
+      required: true
+  - type: textarea
+    id: sketch
+    attributes:
+      label: Proposed API sketch
+      description: Optional, but it moves the discussion along.
+      render: go
