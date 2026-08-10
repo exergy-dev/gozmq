@@ -1,4 +1,4 @@
-// Package pipe provides the reference implementation of iface.Pipe — a
+// Package pipe provides the reference implementation of pipeiface.Pipe — a
 // bidirectional in-memory message queue between a socket engine and a
 // session. Positive HWM directions are channel-backed with HWM expressed as
 // channel capacity; HWM 0 directions use an unbounded FIFO queue.
@@ -11,7 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/pipeiface"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -31,7 +31,7 @@ type PeerInfo struct {
 //
 // aInfo describes the peer visible to the A end (i.e. B's endpoint/identity);
 // bInfo describes what A looks like from B's side.
-func NewPair(aToB, bToA int, aInfo, bInfo PeerInfo) (a, b iface.Pipe) {
+func NewPair(aToB, bToA int, aInfo, bInfo PeerInfo) (a, b pipeiface.Pipe) {
 	if aToB < 0 || bToA < 0 {
 		panic("gozmq/pipe: negative HWM")
 	}
@@ -347,7 +347,7 @@ func (e *end) Recv(ctx context.Context) (*msg.Msg, error) {
 }
 
 // TryRecv returns one buffered message if available without blocking.
-// It is intentionally not part of iface.Pipe; the session writer uses
+// It is intentionally not part of pipeiface.Pipe; the session writer uses
 // it opportunistically via a local type assertion during linger drains
 // to avoid racing a pre-cancelled context against a ready receive.
 func (e *end) TryRecv() (*msg.Msg, bool) {
@@ -393,4 +393,4 @@ func (e *end) RecvCh() <-chan *msg.Msg { return e.recvCh }
 func (e *end) SendCh() chan<- *msg.Msg { return e.sendCh }
 
 // Compile-time check.
-var _ iface.Pipe = (*end)(nil)
+var _ pipeiface.Pipe = (*end)(nil)

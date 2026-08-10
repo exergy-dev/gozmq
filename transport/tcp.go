@@ -4,8 +4,6 @@ import (
 	"context"
 	"net"
 	"time"
-
-	"github.com/exergy-dev/gozmq/internal/iface"
 )
 
 // Defaults that match design §7.1 and the socketConfig defaults in
@@ -21,7 +19,7 @@ const (
 	defaultTCPWriteBuffer   = 8 << 20
 )
 
-// TCPTransport implements iface.Transport over the standard library's
+// TCPTransport implements Transport over the standard library's
 // net.Dial / net.Listen. The exported fields are configuration knobs the
 // higher layers may flip before installing the transport into a Registry;
 // they take effect for every subsequent Dial / Accept on this transport.
@@ -74,7 +72,7 @@ func NewTCP6Transport() *TCPTransport { return newTCP("tcp6") }
 func (t *TCPTransport) Scheme() string { return t.scheme }
 
 // Dial honors ctx via net.Dialer.DialContext.
-func (t *TCPTransport) Dial(ctx context.Context, endpoint string) (iface.Conn, error) {
+func (t *TCPTransport) Dial(ctx context.Context, endpoint string) (Conn, error) {
 	addr, err := t.parseAddress(endpoint)
 	if err != nil {
 		return nil, err
@@ -96,7 +94,7 @@ func (t *TCPTransport) Dial(ctx context.Context, endpoint string) (iface.Conn, e
 // Listen binds endpoint. For "tcp://*:port" the wildcard expands to
 // 0.0.0.0 (or :: for tcp6). Endpoint() on the returned Listener reports the
 // resolved address — important for ephemeral-port (port 0) bindings.
-func (t *TCPTransport) Listen(_ context.Context, endpoint string) (iface.Listener, error) {
+func (t *TCPTransport) Listen(_ context.Context, endpoint string) (Listener, error) {
 	addr, err := t.parseListenAddress(endpoint)
 	if err != nil {
 		return nil, err
@@ -157,7 +155,7 @@ func (t *TCPTransport) parseListenAddress(endpoint string) (string, error) {
 }
 
 // --------------------------------------------------------------------------
-// tcpConn — iface.Conn adapter over net.Conn.
+// tcpConn — Conn adapter over net.Conn.
 // --------------------------------------------------------------------------
 
 // tcpConn wraps a *net.TCPConn (or any net.Conn) and exposes ZMQ-style
@@ -202,11 +200,11 @@ func formatTCPEndpoint(scheme string, a net.Addr) string {
 }
 
 // --------------------------------------------------------------------------
-// tcpListener — iface.Listener adapter over net.Listener with ctx-aware
+// tcpListener — Listener adapter over net.Listener with ctx-aware
 // Accept and Close-wakes-Accept semantics.
 // --------------------------------------------------------------------------
 
-// tcpListener implements iface.Listener over a net.Listener. Accept honors
+// tcpListener implements Listener over a net.Listener. Accept honors
 // ctx via a poll-with-deadline pattern: we set a short read deadline on the
 // underlying listener (when supported) so that a concurrent Close or a ctx
 // cancellation trips Accept within bounded latency. On Close, in-flight
@@ -230,7 +228,7 @@ func newTCPListener(l net.Listener, t *TCPTransport) *tcpListener {
 
 func (l *tcpListener) Endpoint() string { return l.endpoint }
 
-func (l *tcpListener) Accept(ctx context.Context) (iface.Conn, error) {
+func (l *tcpListener) Accept(ctx context.Context) (Conn, error) {
 	c, err := acceptWithDeadline(
 		ctx,
 		l.l,

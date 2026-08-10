@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
@@ -21,7 +20,7 @@ const ipcScheme = "ipc"
 // on every net-based transport.
 const ipcAcceptPollInterval = 5 * time.Millisecond
 
-// IPCTransport implements iface.Transport over Unix domain sockets,
+// IPCTransport implements Transport over Unix domain sockets,
 // matching libzmq's "ipc" scheme (design §7.2). Endpoint syntax:
 //
 //	ipc:///path/to/file.sock   — filesystem-namespace socket
@@ -54,7 +53,7 @@ func (t *IPCTransport) Scheme() string { return ipcScheme }
 
 // Dial connects to endpoint. Respects ctx via net.Dialer.DialContext; the
 // dialer resolves the abstract-namespace sigil before handing to the OS.
-func (t *IPCTransport) Dial(ctx context.Context, endpoint string) (iface.Conn, error) {
+func (t *IPCTransport) Dial(ctx context.Context, endpoint string) (Conn, error) {
 	addr, displayAddr, abstract, err := parseIPCAddress(endpoint)
 	if err != nil {
 		return nil, err
@@ -73,7 +72,7 @@ func (t *IPCTransport) Dial(ctx context.Context, endpoint string) (iface.Conn, e
 // Listen binds endpoint. For filesystem paths we create the socket inode
 // and (if FilePerm is set) chmod it. For abstract namespaces we skip the
 // chmod path entirely.
-func (t *IPCTransport) Listen(_ context.Context, endpoint string) (iface.Listener, error) {
+func (t *IPCTransport) Listen(_ context.Context, endpoint string) (Listener, error) {
 	addr, displayAddr, abstract, err := parseIPCAddress(endpoint)
 	if err != nil {
 		return nil, err
@@ -124,7 +123,7 @@ func parseIPCAddress(endpoint string) (addr, displayAddr string, abstract bool, 
 }
 
 // --------------------------------------------------------------------------
-// ipcListener — iface.Listener with ctx-aware Accept and socket-file
+// ipcListener — Listener with ctx-aware Accept and socket-file
 // cleanup on Close.
 // --------------------------------------------------------------------------
 
@@ -152,7 +151,7 @@ func newIPCListener(l net.Listener, path, display string, abstract bool) *ipcLis
 
 func (l *ipcListener) Endpoint() string { return l.endpoint }
 
-func (l *ipcListener) Accept(ctx context.Context) (iface.Conn, error) {
+func (l *ipcListener) Accept(ctx context.Context) (Conn, error) {
 	c, err := acceptWithDeadline(
 		ctx,
 		l.l,
@@ -198,7 +197,7 @@ func (l *ipcListener) Close() error {
 }
 
 // --------------------------------------------------------------------------
-// ipcConn — iface.Conn over a net.Conn (Unix socket).
+// ipcConn — Conn over a net.Conn (Unix socket).
 // --------------------------------------------------------------------------
 
 // ipcConn wraps a net.Conn and reports ipc:// endpoints. Unlike inproc
@@ -222,7 +221,7 @@ func (c *ipcConn) WriteBuffers(buffers *net.Buffers) (int64, error) {
 
 // Compile-time interface checks.
 var (
-	_ iface.Transport = (*IPCTransport)(nil)
-	_ iface.Listener  = (*ipcListener)(nil)
-	_ iface.Conn      = (*ipcConn)(nil)
+	_ Transport = (*IPCTransport)(nil)
+	_ Listener  = (*ipcListener)(nil)
+	_ Conn      = (*ipcConn)(nil)
 )

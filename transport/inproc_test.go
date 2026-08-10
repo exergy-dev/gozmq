@@ -68,7 +68,7 @@ func TestInproc_RoundTrip(t *testing.T) {
 	require.Equal(t, want2, got2, "client read data")
 }
 
-// inprocConnish is the minimal subset we need from iface.Conn in tests.
+// inprocConnish is the minimal subset we need from Conn in tests.
 type inprocConnish interface {
 	io.Reader
 	io.Writer

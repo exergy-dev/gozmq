@@ -190,7 +190,7 @@ func TestTCP_BadEndpoint(t *testing.T) {
 }
 
 // TestTCP_Conn_Endpoints checks LocalEndpoint / RemoteEndpoint round-trip
-// through the iface.Conn adapter.
+// through the Conn adapter.
 func TestTCP_Conn_Endpoints(t *testing.T) {
 	tr, l := listenLoopback(t)
 	defer l.Close()

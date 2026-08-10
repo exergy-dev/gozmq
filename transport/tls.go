@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"net"
 	"time"
-
-	"github.com/exergy-dev/gozmq/internal/iface"
 )
 
 // defaultTLSHandshakeTimeout bounds the server-side TLS handshake performed
@@ -108,7 +106,7 @@ func (t *TLSTransport) Scheme() string { return tlsScheme }
 // Dial connects to endpoint over TCP and runs the TLS client handshake.
 // Honors ctx via net.Dialer.DialContext for the TCP handshake and
 // tls.Conn.HandshakeContext for the TLS handshake.
-func (t *TLSTransport) Dial(ctx context.Context, endpoint string) (iface.Conn, error) {
+func (t *TLSTransport) Dial(ctx context.Context, endpoint string) (Conn, error) {
 	addr, err := t.parseDialAddress(endpoint)
 	if err != nil {
 		return nil, err
@@ -150,7 +148,7 @@ func (t *TLSTransport) Dial(ctx context.Context, endpoint string) (iface.Conn, e
 // the server-side handshake eagerly (Go's tls.Conn would otherwise run it
 // lazily on first I/O), so Accept never hands back an unhandshaken
 // connection.
-func (t *TLSTransport) Listen(_ context.Context, endpoint string) (iface.Listener, error) {
+func (t *TLSTransport) Listen(_ context.Context, endpoint string) (Listener, error) {
 	addr, err := t.parseListenAddress(endpoint)
 	if err != nil {
 		return nil, err
@@ -172,7 +170,7 @@ func (t *TLSTransport) parseListenAddress(endpoint string) (string, error) {
 }
 
 // --------------------------------------------------------------------------
-// tlsConn — iface.Conn over a *tls.Conn.
+// tlsConn — Conn over a *tls.Conn.
 // --------------------------------------------------------------------------
 
 // tlsConn reports its endpoints as tls+tcp://… rather than the raw tcp
@@ -197,7 +195,7 @@ func (c *tlsConn) WriteBuffers(buffers *net.Buffers) (int64, error) {
 }
 
 // --------------------------------------------------------------------------
-// tlsListener — iface.Listener that performs the TLS handshake inside
+// tlsListener — Listener that performs the TLS handshake inside
 // Accept, honoring ctx/deadline and Close-wakes-Accept semantics.
 // --------------------------------------------------------------------------
 
@@ -228,7 +226,7 @@ func newTLSListener(l net.Listener, t *TLSTransport) *tlsListener {
 
 func (l *tlsListener) Endpoint() string { return l.endpoint }
 
-func (l *tlsListener) Accept(ctx context.Context) (iface.Conn, error) {
+func (l *tlsListener) Accept(ctx context.Context) (Conn, error) {
 	c, err := acceptWithDeadline(
 		ctx,
 		l.l,
@@ -279,7 +277,7 @@ func (l *tlsListener) Close() error {
 
 // Compile-time interface checks.
 var (
-	_ iface.Transport = (*TLSTransport)(nil)
-	_ iface.Listener  = (*tlsListener)(nil)
-	_ iface.Conn      = (*tlsConn)(nil)
+	_ Transport = (*TLSTransport)(nil)
+	_ Listener  = (*tlsListener)(nil)
+	_ Conn      = (*tlsConn)(nil)
 )

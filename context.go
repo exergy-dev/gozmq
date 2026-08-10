@@ -95,26 +95,40 @@ func (c *Context) Ctx() context.Context { return c.ctx }
 // registering a transport for an already-registered scheme overwrites the
 // prior entry.
 //
-// This is the supported extension point for transports whose defaults
-// cannot be baked into transport.New() — most notably TLS, which needs a
-// caller-supplied *tls.Config. Typical usage:
+// A Context starts with tcp, tcp6, ipc, and inproc already registered, so
+// this is needed in two cases.
 //
+// The first is a built-in transport that needs caller-supplied
+// configuration. TLS is the main one — there is no reasonable default
+// *tls.Config, so tls+tcp is not preregistered:
+//
+//	tr, err := transport.NewTLSTransport(tlsCfg)
+//	if err != nil {
+//		return err
+//	}
 //	ctx := gozmq.NewContext()
-//	ctx.RegisterTransport(transport.NewTLSTransport(tlsCfg))
+//	ctx.RegisterTransport(tr)
 //	sock, _ := ctx.NewSocket(gozmq.Router)
 //	_ = sock.Bind("tls+tcp://0.0.0.0:5555")
+//
+// It also re-registers a built-in whose exported knobs you want to change —
+// for example TCP keepalive or socket buffer sizes:
+//
+//	tcp := transport.NewTCPTransport()
+//	tcp.KeepAlivePeriod = 10 * time.Second
+//	ctx.RegisterTransport(tcp) // replaces the default tcp:// entry
+//
+// The second is a scheme gozmq does not ship. [transport.Transport] is a
+// public interface naming only standard-library types, so an out-of-tree
+// carrier (QUIC, WebSocket, a fault-injecting test harness) can be plugged
+// in without forking. Everything above the transport — sessions, ZMTP
+// framing, security mechanisms, socket patterns — is unaffected.
 //
 // Safe to call concurrently with NewSocket; existing sockets consult the
 // registry at Bind / Connect time, so a socket constructed before
 // RegisterTransport sees the updated scheme set as long as its Bind /
 // Connect call races after Register.
-//
-// The parameter type iface.Transport is internal by design: transports are
-// an intentional first-party closed set (see package transport). This method
-// exists to inject configuration into the built-in transports — chiefly TLS,
-// which needs a caller-supplied *tls.Config — not as a plugin boundary for
-// arbitrary third-party transports.
-func (c *Context) RegisterTransport(t iface.Transport) {
+func (c *Context) RegisterTransport(t transport.Transport) {
 	c.registry.Register(t)
 }
 

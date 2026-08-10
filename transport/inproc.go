@@ -12,8 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/internal/pipeiface"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -28,15 +28,15 @@ import (
 // never-bound endpoint as a prompt error instead of a silent stall.
 const DefaultInprocQueueWindow = 500 * time.Millisecond
 
-// InprocTransport implements iface.Transport for the in-process scheme.
+// inprocTransport implements Transport for the in-process scheme.
 //
 // Important scope note: the registry of bound names is kept on the
-// InprocTransport instance itself. The public Context wires one
-// InprocTransport into each registry, so two Contexts have independent
+// inprocTransport instance itself. The public Context wires one
+// inprocTransport into each registry, so two Contexts have independent
 // inproc namespaces.
 //
-// Concurrency: all exported methods are safe for concurrent use.
-type InprocTransport struct {
+// Concurrency: all methods are safe for concurrent use.
+type inprocTransport struct {
 	queueWindow time.Duration
 
 	mu        sync.Mutex
@@ -65,14 +65,18 @@ func newInprocWaiter() *inprocWaiter {
 	return &inprocWaiter{resultCh: make(chan *inprocListener, 1)}
 }
 
-// NewInprocTransport returns an InprocTransport. queueWindow controls how
+// NewInprocTransport returns the inproc Transport. queueWindow controls how
 // long a Dial waits for a matching Listen before erroring; pass 0 to use
 // DefaultInprocQueueWindow.
-func NewInprocTransport(queueWindow time.Duration) *InprocTransport {
+//
+// The concrete type is unexported: its only method beyond the Transport
+// contract is the direct-pipe handoff the socket layer probes for
+// internally, which is not part of the public API.
+func NewInprocTransport(queueWindow time.Duration) Transport {
 	if queueWindow <= 0 {
 		queueWindow = DefaultInprocQueueWindow
 	}
-	return &InprocTransport{
+	return &inprocTransport{
 		queueWindow: queueWindow,
 		listeners:   make(map[string]*inprocListener),
 		pending:     make(map[string][]*inprocWaiter),
@@ -80,12 +84,12 @@ func NewInprocTransport(queueWindow time.Duration) *InprocTransport {
 }
 
 // Scheme reports "inproc".
-func (it *InprocTransport) Scheme() string { return "inproc" }
+func (it *inprocTransport) Scheme() string { return "inproc" }
 
 // Dial connects to the named endpoint. If no Listen has happened yet, the
 // call queues for up to queueWindow (or until ctx cancels) and resolves
 // when a matching Listen arrives.
-func (it *InprocTransport) Dial(ctx context.Context, endpoint string) (iface.Conn, error) {
+func (it *inprocTransport) Dial(ctx context.Context, endpoint string) (Conn, error) {
 	name, err := parseInprocName(endpoint)
 	if err != nil {
 		return nil, err
@@ -126,7 +130,7 @@ func (it *InprocTransport) Dial(ctx context.Context, endpoint string) (iface.Con
 
 // Listen binds the named endpoint. Returns ErrEndpointInvalid if the name
 // is already bound (libzmq same-Context behavior).
-func (it *InprocTransport) Listen(_ context.Context, endpoint string) (iface.Listener, error) {
+func (it *inprocTransport) Listen(_ context.Context, endpoint string) (Listener, error) {
 	name, err := parseInprocName(endpoint)
 	if err != nil {
 		return nil, err
@@ -161,7 +165,7 @@ func (it *InprocTransport) Listen(_ context.Context, endpoint string) (iface.Lis
 // LookupDirectAcceptor returns the DirectPipeAcceptor for a bound inproc
 // endpoint, or nil if no listener exists. Used by Socket.Connect to bypass
 // the session layer for inproc connections.
-func (it *InprocTransport) LookupDirectAcceptor(endpoint string) iface.DirectPipeAcceptor {
+func (it *inprocTransport) LookupDirectAcceptor(endpoint string) pipeiface.DirectPipeAcceptor {
 	name, err := parseInprocName(endpoint)
 	if err != nil {
 		return nil
@@ -176,7 +180,7 @@ func (it *InprocTransport) LookupDirectAcceptor(endpoint string) iface.DirectPip
 }
 
 // removeListener is called by inprocListener.Close.
-func (it *InprocTransport) removeListener(name string, l *inprocListener) {
+func (it *inprocTransport) removeListener(name string, l *inprocListener) {
 	it.mu.Lock()
 	if cur, ok := it.listeners[name]; ok && cur == l {
 		delete(it.listeners, name)
@@ -196,7 +200,7 @@ func (it *InprocTransport) removeListener(name string, l *inprocListener) {
 // This is the crux of the fix: the `done` CAS is the single arbiter — only
 // one side can win, so no notification is ever lost and no waiter is ever
 // both "cancelled" and "notified" ambiguously.
-func (it *InprocTransport) cancelWaiter(name string, w *inprocWaiter) *inprocListener {
+func (it *inprocTransport) cancelWaiter(name string, w *inprocWaiter) *inprocListener {
 	if !w.done.CompareAndSwap(false, true) {
 		// Listen won the CAS first: there is a listener in resultCh.
 		// Receive it so the caller can complete the Dial.
@@ -232,7 +236,7 @@ func parseInprocName(endpoint string) (string, error) {
 }
 
 // --------------------------------------------------------------------------
-// inprocListener — iface.Listener over an in-memory accept channel.
+// inprocListener — Listener over an in-memory accept channel.
 // --------------------------------------------------------------------------
 
 // inprocListener accepts in-process Dial pairings. Dial pushes the
@@ -240,12 +244,12 @@ func parseInprocName(endpoint string) (string, error) {
 // keep a small buffer so a few concurrent Dials don't immediately block on
 // the Accept goroutine.
 type inprocListener struct {
-	t        *InprocTransport
+	t        *inprocTransport
 	name     string
 	endpoint string
 
 	acceptCh     chan *inprocConn
-	directPipeCh chan *iface.DirectPipeOffer
+	directPipeCh chan *pipeiface.DirectPipeOffer
 
 	mu        sync.Mutex
 	closed    bool
@@ -253,7 +257,7 @@ type inprocListener struct {
 	closeOnce sync.Once
 }
 
-func newInprocListener(t *InprocTransport, name string) *inprocListener {
+func newInprocListener(t *inprocTransport, name string) *inprocListener {
 	return &inprocListener{
 		t:        t,
 		name:     name,
@@ -262,14 +266,14 @@ func newInprocListener(t *InprocTransport, name string) *inprocListener {
 		// side is slow to Accept, additional Dials block (correct behavior
 		// for backpressure).
 		acceptCh:     make(chan *inprocConn, 16),
-		directPipeCh: make(chan *iface.DirectPipeOffer, 16),
+		directPipeCh: make(chan *pipeiface.DirectPipeOffer, 16),
 		closeCh:      make(chan struct{}),
 	}
 }
 
 func (l *inprocListener) Endpoint() string { return l.endpoint }
 
-func (l *inprocListener) Accept(ctx context.Context) (iface.Conn, error) {
+func (l *inprocListener) Accept(ctx context.Context) (Conn, error) {
 	select {
 	case c := <-l.acceptCh:
 		return c, nil
@@ -281,7 +285,7 @@ func (l *inprocListener) Accept(ctx context.Context) (iface.Conn, error) {
 }
 
 // AcceptDirectPipe blocks until a direct-pipe offer arrives or ctx cancels.
-func (l *inprocListener) AcceptDirectPipe(ctx context.Context) (*iface.DirectPipeOffer, error) {
+func (l *inprocListener) AcceptDirectPipe(ctx context.Context) (*pipeiface.DirectPipeOffer, error) {
 	select {
 	case offer := <-l.directPipeCh:
 		return offer, nil
@@ -293,7 +297,7 @@ func (l *inprocListener) AcceptDirectPipe(ctx context.Context) (*iface.DirectPip
 }
 
 // OfferDirectPipe pushes a direct-pipe offer to the bind side.
-func (l *inprocListener) OfferDirectPipe(offer *iface.DirectPipeOffer) error {
+func (l *inprocListener) OfferDirectPipe(offer *pipeiface.DirectPipeOffer) error {
 	select {
 	case l.directPipeCh <- offer:
 		return nil
@@ -314,7 +318,7 @@ func (l *inprocListener) Close() error {
 		drainChan(l.acceptCh, func(c *inprocConn) {
 			_ = c.Close()
 		})
-		drainChan(l.directPipeCh, func(offer *iface.DirectPipeOffer) {
+		drainChan(l.directPipeCh, func(offer *pipeiface.DirectPipeOffer) {
 			_ = offer.BindPipe.Close()
 		})
 	})
@@ -338,7 +342,7 @@ func drainChan[T any](ch <-chan T, fn func(T)) {
 // dialIn is the Dial-side hand-off into an established Listener. We forge
 // a fresh pipe pair — one end becomes the dialer's Conn, the other is
 // queued onto the listener's acceptCh.
-func (l *inprocListener) dialIn(name string) (iface.Conn, error) {
+func (l *inprocListener) dialIn(name string) (Conn, error) {
 	l.mu.Lock()
 	if l.closed {
 		l.mu.Unlock()
@@ -372,7 +376,7 @@ func (l *inprocListener) dialIn(name string) (iface.Conn, error) {
 }
 
 // --------------------------------------------------------------------------
-// inprocConn — iface.Conn over a Pipe pair.
+// inprocConn — Conn over a Pipe pair.
 //
 // The Conn contract is io.Reader + io.Writer. Inproc bypasses ZMTP framing
 // so there is nothing to "frame" at the transport level — but the iface
@@ -390,9 +394,9 @@ func (l *inprocListener) dialIn(name string) (iface.Conn, error) {
 // unambiguous reference.
 // --------------------------------------------------------------------------
 
-// inprocConn satisfies iface.Conn by delegating to a pipe.Pipe. Because
+// inprocConn satisfies Conn by delegating to a pipe.Pipe. Because
 // inproc bypasses ZMTP framing entirely, this adapter exists so the
-// iface.Conn contract remains uniform across all transports.
+// Conn contract remains uniform across all transports.
 //
 // Deadline semantics follow net.Conn: SetReadDeadline/SetWriteDeadline
 // apply to in-flight calls too, so setting a deadline (including one in
@@ -401,7 +405,7 @@ func (l *inprocListener) dialIn(name string) (iface.Conn, error) {
 // channel, and SetXDeadline closes-and-replaces it, cancelling the parked
 // call's context so it re-evaluates the new deadline.
 type inprocConn struct {
-	p             iface.Pipe
+	p             pipeiface.Pipe
 	local, remote string
 	mu            sync.Mutex
 	leftover      []byte // unread bytes from the last frame
@@ -412,7 +416,7 @@ type inprocConn struct {
 	closed        bool
 }
 
-func newInprocConn(p iface.Pipe, local, remote string) *inprocConn {
+func newInprocConn(p pipeiface.Pipe, local, remote string) *inprocConn {
 	return &inprocConn{
 		p:         p,
 		local:     local,
@@ -613,10 +617,10 @@ func (e *timeoutError) Temporary() bool { return true }
 
 // Compile-time interface checks.
 var (
-	_ iface.Transport          = (*InprocTransport)(nil)
-	_ iface.DirectPipeDialer   = (*InprocTransport)(nil)
-	_ iface.Listener           = (*inprocListener)(nil)
-	_ iface.DirectPipeAcceptor = (*inprocListener)(nil)
-	_ iface.Conn               = (*inprocConn)(nil)
-	_ net.Error                = (*timeoutError)(nil)
+	_ Transport                    = (*inprocTransport)(nil)
+	_ pipeiface.DirectPipeDialer   = (*inprocTransport)(nil)
+	_ Listener                     = (*inprocListener)(nil)
+	_ pipeiface.DirectPipeAcceptor = (*inprocListener)(nil)
+	_ Conn                         = (*inprocConn)(nil)
+	_ net.Error                    = (*timeoutError)(nil)
 )

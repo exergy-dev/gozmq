@@ -1,20 +1,26 @@
-// Package transport provides concrete iface.Transport implementations for
-// the schemes the gozmq library understands: tcp, tcp6, inproc, and
-// (opt-in) tls+tcp.
+// Package transport defines the transport-layer contracts — [Transport],
+// [Conn], and [Listener] — and provides the concrete implementations for
+// the schemes gozmq ships: tcp, tcp6, ipc, inproc, and (opt-in) tls+tcp.
 //
 // Each transport turns an endpoint string into Dial / Listen operations and
 // adapts the underlying primitive (a net.Conn for TCP, an in-memory pipe for
-// inproc) to the iface.Conn / iface.Listener contracts.
+// inproc) to the Conn / Listener contracts.
 //
-// Closed set: the transport implementations are an intentional, first-party
-// set. iface.Transport (the interface RegisterTransport accepts) lives under
-// internal/, so it cannot be implemented by code outside this module; the
-// supported schemes are exactly those constructed here. RegisterTransport is
-// an injection point for transports that need caller-supplied configuration
-// (most notably TLS, via NewTLSTransport), NOT a plugin boundary for
-// arbitrary third-party transports. Adding a new transport (e.g. a future
-// PGM/EPGM) is an in-module change. This keeps the wire/handshake surface
-// auditable and matches the closed mechanism set in package security.
+// The built-in set is registered automatically by [New], which every
+// gozmq.Context uses. Two cases call for registering one yourself via
+// (*gozmq.Context).RegisterTransport:
+//
+//   - A built-in that needs caller-supplied configuration. TLS is the only
+//     one: there is no reasonable default *tls.Config, so tls+tcp is not
+//     preregistered — install it with [NewTLSTransport]. The TCP and IPC
+//     transports expose their knobs (keepalive, socket buffer sizes, socket
+//     file permissions) as struct fields for the same reason.
+//   - A scheme gozmq does not ship. Implementing [Transport] out of tree is
+//     supported: the interfaces here name only standard-library types, so a
+//     QUIC or WebSocket carrier, or a fault-injecting test harness, plugs in
+//     without forking. Everything above the transport — sessions, ZMTP
+//     framing, security mechanisms, socket patterns — is unaffected by which
+//     scheme carries the bytes.
 package transport
 
 import (
@@ -23,7 +29,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
@@ -31,13 +36,13 @@ import (
 // NOT usable; construct via New or NewRegistry.
 type Registry struct {
 	mu sync.RWMutex
-	m  map[string]iface.Transport
+	m  map[string]Transport
 }
 
 // NewRegistry returns an empty registry. Callers must Register transports
 // before Lookup will succeed.
 func NewRegistry() *Registry {
-	return &Registry{m: make(map[string]iface.Transport)}
+	return &Registry{m: make(map[string]Transport)}
 }
 
 // New returns a registry preloaded with the standard transports: tcp,
@@ -58,13 +63,13 @@ func New() *Registry {
 	return r
 }
 
-func (r *Registry) Register(t iface.Transport) {
+func (r *Registry) Register(t Transport) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.m[t.Scheme()] = t
 }
 
-func (r *Registry) Lookup(endpoint string) (iface.Transport, error) {
+func (r *Registry) Lookup(endpoint string) (Transport, error) {
 	scheme, _, err := splitEndpoint(endpoint)
 	if err != nil {
 		return nil, err

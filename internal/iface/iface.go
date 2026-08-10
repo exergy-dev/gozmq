@@ -4,9 +4,10 @@ package iface
 import (
 	"context"
 	"io"
-	"time"
 
+	"github.com/exergy-dev/gozmq/internal/pipeiface"
 	"github.com/exergy-dev/gozmq/msg"
+	"github.com/exergy-dev/gozmq/transport"
 )
 
 // Role distinguishes the initiator (client, from Connect) from the acceptor
@@ -23,95 +24,35 @@ const (
 // Transport layer
 // --------------------------------------------------------------------------
 
-// Transport turns an endpoint string into dial/listen operations for a
-// single scheme (tcp, ipc, inproc, tls+tcp).
-type Transport interface {
-	// Scheme reports the URL scheme this transport handles, without the "://"
-	// suffix (e.g. "tcp", "inproc").
-	Scheme() string
-
-	// Dial connects to endpoint and returns a Conn ready for ZMTP framing.
-	// Respects ctx cancellation and deadline.
-	Dial(ctx context.Context, endpoint string) (Conn, error)
-
-	// Listen binds to endpoint and returns a Listener. For wildcard
-	// endpoints (e.g. "tcp://*:0") the returned Listener's Endpoint()
-	// reports the resolved address.
-	Listen(ctx context.Context, endpoint string) (Listener, error)
-}
-
-// Conn is a single ZMTP connection underneath the session layer. Read and
-// Write deliver raw bytes; the session layer applies framing and security
-// codecs on top.
-type Conn interface {
-	io.Reader
-	io.Writer
-	io.Closer
-
-	// LocalEndpoint returns the local side in ZMQ string form (e.g.
-	// "tcp://127.0.0.1:5555"). May be empty for inproc.
-	LocalEndpoint() string
-	// RemoteEndpoint returns the peer in ZMQ string form.
-	RemoteEndpoint() string
-
-	// SetDeadline matches net.Conn's semantic. The session layer uses it
-	// to bound the handshake; per-direction deadlines are not part of the
-	// contract.
-	SetDeadline(t time.Time) error
-}
-
-// Listener accepts incoming ZMTP connections on a bound endpoint.
-type Listener interface {
-	// Accept blocks until an incoming connection arrives or ctx cancels.
-	Accept(ctx context.Context) (Conn, error)
-	// Endpoint returns the actual bound endpoint (wildcards resolved).
-	Endpoint() string
-	// Close stops accepting and unblocks in-flight Accept calls.
-	Close() error
-}
+// The transport-layer contracts are defined in the public transport package
+// so that pkg.go.dev documents them and out-of-tree transports can implement
+// them (see (*gozmq.Context).RegisterTransport). They are aliased here so the
+// internal layers keep referring to them as iface.Transport / iface.Conn /
+// iface.Listener.
+type (
+	// Transport is an alias for [transport.Transport].
+	Transport = transport.Transport
+	// Conn is an alias for [transport.Conn].
+	Conn = transport.Conn
+	// Listener is an alias for [transport.Listener].
+	Listener = transport.Listener
+)
 
 // --------------------------------------------------------------------------
 // Direct-pipe (inproc bypass) layer
 // --------------------------------------------------------------------------
 
-// DirectPipeOffer represents a pre-created pipe pair offered to the bind-side
-// socket when the dialer detects that session-layer bypass is possible (e.g.
-// inproc transport within the same Context). The bind side calls Accept on its
-// DirectPipeAcceptor interface to receive these offers instead of raw Conns.
-type DirectPipeOffer struct {
-	// BindPipe is the pipe end for the bind-side (server) engine.
-	BindPipe Pipe
-	// DialerSocketType is the ZMTP Socket-Type name of the dialing socket
-	// (e.g. "PUSH", "SUB") for compatibility checking.
-	DialerSocketType string
-	// Endpoint is the resolved endpoint string (e.g. "inproc://foo").
-	Endpoint string
-}
-
-// DirectPipeAcceptor is an optional interface implemented by Listeners that
-// support session-layer bypass. When detected by Socket.Connect, the dialer
-// pushes a DirectPipeOffer through the acceptor instead of going through the
-// normal Dial->Conn->Session path. Socket.acceptLoop detects offers arriving
-// via AcceptDirectPipe and calls engine.AttachPipe directly, skipping ZMTP
-// greeting, handshake, and codec.
-type DirectPipeAcceptor interface {
-	// AcceptDirectPipe blocks until a direct-pipe offer arrives or ctx cancels.
-	AcceptDirectPipe(ctx context.Context) (*DirectPipeOffer, error)
-	// OfferDirectPipe pushes an offer to the bind side. Blocks if the accept
-	// buffer is full.
-	OfferDirectPipe(offer *DirectPipeOffer) error
-}
-
-// DirectPipeDialer is an optional interface implemented by transports that
-// support direct-pipe bypass (session-layer skip). The Socket layer probes
-// for this interface at Connect time; when present and the listener is
-// already bound, it uses the direct path instead of Dial+Session.
-type DirectPipeDialer interface {
-	// LookupDirectAcceptor returns the DirectPipeAcceptor for endpoint, or
-	// nil when the endpoint is not yet bound (in which case the caller falls
-	// back to the normal Dial path).
-	LookupDirectAcceptor(endpoint string) DirectPipeAcceptor
-}
+// The direct-pipe contracts live in internal/pipeiface, a leaf package the
+// transport package can import without a cycle. Aliased here so the internal
+// layers keep referring to them as iface.DirectPipe*.
+type (
+	// DirectPipeOffer is an alias for [pipeiface.DirectPipeOffer].
+	DirectPipeOffer = pipeiface.DirectPipeOffer
+	// DirectPipeAcceptor is an alias for [pipeiface.DirectPipeAcceptor].
+	DirectPipeAcceptor = pipeiface.DirectPipeAcceptor
+	// DirectPipeDialer is an alias for [pipeiface.DirectPipeDialer].
+	DirectPipeDialer = pipeiface.DirectPipeDialer
+)
 
 // --------------------------------------------------------------------------
 // Framing layer
@@ -225,31 +166,10 @@ type SecurityMech interface {
 // Pipe layer
 // --------------------------------------------------------------------------
 
-// Pipe is one end of a bidirectional bounded message queue. A Session and
-// a SocketEngine sit on opposite ends; a Send on one end surfaces as a
-// Recv on the other. Each direction has its own high-water mark.
-type Pipe interface {
-	// Send enqueues m for the other end. Blocks until space is available or
-	// ctx cancels. Returns ErrHWM is NOT used by Pipe directly — HWM
-	// behavior is expressed as a blocking Send; non-blocking behavior is
-	// achieved by passing a ctx with zero deadline.
-	Send(ctx context.Context, m *msg.Msg) error
-
-	// Recv dequeues a message posted by the other end. Blocks until one is
-	// available or ctx cancels.
-	Recv(ctx context.Context) (*msg.Msg, error)
-
-	// Close terminates this end of the pipe. Messages already in flight may
-	// still be delivered; the other end sees io.EOF on subsequent Recv.
-	Close() error
-
-	// Closed returns a channel that closes when either end has been Closed.
-	Closed() <-chan struct{}
-
-	// PeerIdentity returns the ZMTP Identity advertised by the peer in its
-	// READY metadata. Empty when the peer did not set one.
-	PeerIdentity() []byte
-}
+// Pipe is an alias for [pipeiface.Pipe] — one end of a bidirectional
+// bounded message queue. A Session and a SocketEngine sit on opposite ends;
+// a Send on one end surfaces as a Recv on the other.
+type Pipe = pipeiface.Pipe
 
 // --------------------------------------------------------------------------
 // Session layer
