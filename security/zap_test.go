@@ -19,15 +19,11 @@ type mockPolicy struct {
 
 	// observed is populated on each Authenticate call so tests can assert
 	// on what the handler passed through.
-	lastDomain    string
-	lastAddress   string
 	lastMechanism string
 	lastCreds     [][]byte
 }
 
-func (p *mockPolicy) Authenticate(domain, address, mech string, creds [][]byte) (string, map[string]string, error) {
-	p.lastDomain = domain
-	p.lastAddress = address
+func (p *mockPolicy) Authenticate(_, _, mech string, creds [][]byte) (string, map[string]string, error) {
 	p.lastMechanism = mech
 	p.lastCreds = creds
 	return p.userID, p.metadata, p.err

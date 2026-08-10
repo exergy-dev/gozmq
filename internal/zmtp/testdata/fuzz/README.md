@@ -5,7 +5,6 @@ live in subdirectories named after the fuzz target:
 
 - `FuzzFrameDecode/` — flags + length + body triples that the frame decoder
   must accept or reject cleanly (no panic, no runaway allocation).
-- `FuzzGreeting/` — full 64-byte greeting blobs.
 - `FuzzCommand/` — ZMTP command bodies (`READY`, `SUBSCRIBE`, `PING`, …).
 - `FuzzMetadata/` — property-list payloads.
 - `FuzzCurveEnvelope/` — CurveZMQ `MESSAGE` envelope bytes.

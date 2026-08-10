@@ -12,14 +12,13 @@ import "sync"
 //     hits zero; return whether the prefix was fully removed.
 //   - Match(topic)     — report whether any stored prefix is a prefix of
 //     topic.
-//   - Size()           — number of distinct prefixes currently stored.
 //
 // libzmq semantics:
 //   - Add and Remove are reference counted: two Add("foo") calls require
 //     two Remove("foo") calls before the prefix disappears from the tree.
 //   - Match returns true if ANY prefix in the tree is a prefix of the
 //     candidate topic. The empty prefix ([]byte{}) matches every topic.
-//   - Add/Remove/Match/Size are all goroutine-safe.
+//   - Add/Remove/Match are all goroutine-safe.
 //
 // Implementation: a node-per-byte trie with per-node child maps so memory
 // stays proportional to stored subscriptions (subscription trees are
@@ -118,6 +117,9 @@ func (t *SubTree) Remove(prefix []byte) bool {
 // Match reports whether any subscription prefix in the tree is a prefix
 // of topic. The empty prefix ([]byte{}) is considered a prefix of every
 // topic, so a tree containing only "" matches everything.
+//
+// The Size accessor (number of distinct prefixes) is test-only and lives
+// in subtree_test.go; production code never reads the size field.
 func (t *SubTree) Match(topic []byte) bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -139,13 +141,4 @@ func (t *SubTree) Match(topic []byte) bool {
 		n = child
 	}
 	return false
-}
-
-// Size reports the number of distinct prefixes currently in the tree
-// (duplicates increment refcount, not size). Returns 0 for an empty
-// tree.
-func (t *SubTree) Size() int {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return t.size
 }

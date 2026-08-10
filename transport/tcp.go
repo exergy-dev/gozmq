@@ -13,13 +13,12 @@ import (
 // constructing TCPTransport directly and toggling the exported fields
 // before installing into a Registry.
 const (
-	defaultTCPKeepAlive       = true
-	defaultTCPKeepAliveIdle   = 30 * time.Second
-	defaultTCPNoDelay         = true
-	tcpAcceptPollInterval     = 5 * time.Millisecond
-	tcpDialContextDefaultWait = 0 // unlimited; ctx supplies the deadline
-	defaultTCPReadBuffer      = 8 << 20
-	defaultTCPWriteBuffer     = 8 << 20
+	defaultTCPKeepAlive     = true
+	defaultTCPKeepAliveIdle = 30 * time.Second
+	defaultTCPNoDelay       = true
+	tcpAcceptPollInterval   = 5 * time.Millisecond
+	defaultTCPReadBuffer    = 8 << 20
+	defaultTCPWriteBuffer   = 8 << 20
 )
 
 // TCPTransport implements iface.Transport over the standard library's

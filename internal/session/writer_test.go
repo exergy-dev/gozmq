@@ -177,7 +177,6 @@ func TestWriter_BatchRetainsBufferCapacityAcrossFlushes(t *testing.T) {
 		Conn:  &consumeWritevConn{fakeConn: connA},
 		Mech:  newFakeMech("NULL", false, nil),
 		Codec: fakeCodec{},
-		Role:  iface.RoleClient,
 	}).(*sessionImpl)
 	t.Cleanup(func() { _ = s.Stop() })
 	sp, ep := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
@@ -527,7 +526,7 @@ func TestReader_HandlesPingWhileWriterBlocked(t *testing.T) {
 	wcA := newWritevConn(connA)
 	sA := New(Config{
 		Conn: wcA, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{},
-		Role: iface.RoleClient, SendHWM: 8, RecvHWM: 8,
+		SendHWM: 8, RecvHWM: 8,
 	})
 	sA.Start()
 	t.Cleanup(func() { _ = sA.Stop() })

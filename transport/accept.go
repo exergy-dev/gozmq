@@ -62,9 +62,7 @@ func acceptWithDeadline(
 	resCh := make(chan acceptResult, 1)
 	go func() {
 		for {
-			if setDeadline != nil {
-				_ = setDeadline(time.Now().Add(pollInterval))
-			}
+			_ = setDeadline(time.Now().Add(pollInterval))
 			c, err := l.Accept()
 			if err != nil {
 				if closed() {
@@ -86,9 +84,7 @@ func acceptWithDeadline(
 				resCh <- acceptResult{err: err}
 				return
 			}
-			if setDeadline != nil {
-				_ = setDeadline(time.Time{})
-			}
+			_ = setDeadline(time.Time{})
 			if onAccept != nil {
 				wrapped, err := onAccept(c)
 				if err != nil {

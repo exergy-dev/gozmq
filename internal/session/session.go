@@ -25,7 +25,7 @@ import (
 	"github.com/rkm/gozmq/internal/pipe"
 )
 
-// Config bundles the inputs to New. Conn, Mech, Codec, and Role are
+// Config bundles the inputs to New. Conn, Mech, and Codec are
 // required. The timeout/heartbeat values are used exactly as given:
 // zero disables the corresponding behavior (no handshake deadline, no
 // heartbeats, no inbound size cap). New applies no defaults to them —
@@ -34,7 +34,6 @@ type Config struct {
 	Conn              iface.Conn
 	Mech              iface.SecurityMech
 	Codec             iface.FrameCodec
-	Role              iface.Role
 	HeartbeatInterval time.Duration
 	HeartbeatTimeout  time.Duration
 	HandshakeTimeout  time.Duration
@@ -240,9 +239,6 @@ type frameDecoder func(flags uint8, body []byte) (uint8, []byte, error)
 // sessionFramePaths picks the per-frame encode/decode functions and
 // reports whether the mechanism is an identity transform (NULL/PLAIN).
 func sessionFramePaths(mech iface.SecurityMech) (frameEncoder, frameDecoder, bool) {
-	if mech == nil {
-		return nil, nil, false
-	}
 	switch mech.Name() {
 	case "NULL", "PLAIN":
 		return identityEncodeFrame, identityDecodeFrame, true
@@ -294,9 +290,6 @@ func identityDecodeFrame(flags uint8, body []byte) (uint8, []byte, error) {
 // prefixes here couples the session to endpoint syntax. Behavior is
 // kept as-is for now.
 func sessionReader(conn iface.Conn) io.Reader {
-	if conn == nil {
-		return nil
-	}
 	ep := conn.RemoteEndpoint()
 	if ep == "" {
 		ep = conn.LocalEndpoint()
@@ -437,7 +430,6 @@ func (s *sessionImpl) run() {
 	// reader (Send) and writer (Recv); the engine-side end is published
 	// via Pipe().
 	peerInfo := pipe.PeerInfo{
-		Endpoint: s.cfg.Conn.RemoteEndpoint(),
 		Identity: identityFromMetadata(s.cfg.Mech),
 	}
 	sp, ep := pipe.NewPair(s.cfg.RecvHWM, s.cfg.SendHWM, pipe.PeerInfo{}, peerInfo)

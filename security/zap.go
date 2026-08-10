@@ -132,9 +132,6 @@ func NewZapHandler(policy ZapPolicy) *ZapHandler {
 	return &ZapHandler{policy: policy}
 }
 
-// Policy returns the installed ZapPolicy. Exposed for tests and diagnostics.
-func (h *ZapHandler) Policy() ZapPolicy { return h.policy }
-
 // ServeRequest executes one request/response cycle. It parses the raw frames,
 // invokes the policy, and serializes the reply. Malformed input produces a
 // 500 response per RFC 27 §3.2 so the peer mechanism sees a terminating

@@ -275,8 +275,13 @@ func (*curveMech) Name() string { return mechName }
 
 // PeerLongTermPublic returns the peer's long-term public key. On the client
 // side this is the server public key passed to NewCurveClient. On the
-// server side this is the client public key discovered during the INITIATE
-// step; it is the zero Key until then.
+// server side this is the client public key discovered (and vouch-verified)
+// during the INITIATE step; it is the zero Key until then.
+//
+// This is deliberate public surface: it is the only way a server can learn
+// the authenticated identity of a connected client — e.g. to key
+// post-handshake authorization decisions on the client's pinned public key
+// when not using a ZAP handler.
 func (m *curveMech) PeerLongTermPublic() Key { return m.peerPublic }
 
 // NextHandshake drives the CURVE handshake one step per call. The state
@@ -378,10 +383,7 @@ func (m *curveMech) nextServer(in []byte) ([]byte, bool, error) {
 		if err != nil {
 			return errOut, false, err
 		}
-		body, err := m.buildReady()
-		if err != nil {
-			return nil, false, err
-		}
+		body := m.buildReady()
 		m.finishHandshake()
 		return body, true, nil
 
@@ -776,7 +778,7 @@ func (m *curveMech) parseInitiate(body []byte) ([]byte, error) {
 
 // buildReady constructs the READY command body. Layout:
 // [5]"READY" + short-nonce(8) + ready-box(metadata ciphertext).
-func (m *curveMech) buildReady() ([]byte, error) {
+func (m *curveMech) buildReady() []byte {
 	meta := zmtp.MetadataCodec.Encode(m.Metadata())
 	counter := m.ourShortNonce
 	m.ourShortNonce++
@@ -787,7 +789,7 @@ func (m *curveMech) buildReady() ([]byte, error) {
 	body = append(body, cmdReady...)
 	body = binary.BigEndian.AppendUint64(body, counter)
 	body = append(body, readyBox...)
-	return body, nil
+	return body
 }
 
 // parseReady decodes the READY body on the client side and stores the

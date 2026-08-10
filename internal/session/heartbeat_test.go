@@ -171,7 +171,6 @@ func newHeartbeatSession(t *testing.T, clk *fakeClock, interval, timeout time.Du
 		Conn:              connA,
 		Mech:              newFakeMech("NULL", false, nil),
 		Codec:             fakeCodec{},
-		Role:              iface.RoleClient,
 		SendHWM:           8,
 		RecvHWM:           recvHWM,
 		HeartbeatInterval: interval,

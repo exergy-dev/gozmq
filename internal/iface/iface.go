@@ -54,10 +54,10 @@ type Conn interface {
 	// RemoteEndpoint returns the peer in ZMQ string form.
 	RemoteEndpoint() string
 
-	// SetDeadline matches net.Conn's semantic.
+	// SetDeadline matches net.Conn's semantic. The session layer uses it
+	// to bound the handshake; per-direction deadlines are not part of the
+	// contract.
 	SetDeadline(t time.Time) error
-	SetReadDeadline(t time.Time) error
-	SetWriteDeadline(t time.Time) error
 }
 
 // Listener accepts incoming ZMTP connections on a bound endpoint.
@@ -100,8 +100,6 @@ type DirectPipeAcceptor interface {
 	// OfferDirectPipe pushes an offer to the bind side. Blocks if the accept
 	// buffer is full.
 	OfferDirectPipe(offer *DirectPipeOffer) error
-	// CloseCh returns a channel that closes when the listener is closed.
-	CloseCh() <-chan struct{}
 }
 
 // DirectPipeDialer is an optional interface implemented by transports that

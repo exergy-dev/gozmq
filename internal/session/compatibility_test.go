@@ -95,7 +95,6 @@ func TestSession_HandshakeRejectsIncompatibleSocketTypes(t *testing.T) {
 			"Identity":    "client-A",
 		}),
 		Codec:   fakeCodec{},
-		Role:    iface.RoleClient,
 		SendHWM: 1,
 		RecvHWM: 1,
 	})
@@ -106,7 +105,6 @@ func TestSession_HandshakeRejectsIncompatibleSocketTypes(t *testing.T) {
 			"Identity":    "server-B",
 		}),
 		Codec:   fakeCodec{},
-		Role:    iface.RoleServer,
 		SendHWM: 1,
 		RecvHWM: 1,
 	})

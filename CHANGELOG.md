@@ -32,6 +32,7 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
 - Session: the reader no longer writes PONG replies inline under the writer mutex (deadlock under full-duplex saturation — PONGs now route through the writer); `writerExited` closes on every exit path (fixes a `Close` hang with `linger < 0`); heartbeat timeout no longer tears down sessions parked on local engine backpressure; the greeting decode accepts any ZMTP 3.x minor version (minor ≥ 1 is treated as 3.1, so future 3.x peers are not rejected); PING commands now carry the TTL; and handshake-failure `ERROR` commands (including the new NULL/CURVE ZAP-rejection ERRORs) are actually written to the wire before teardown.
 - TLS transport: a ctx-canceled `Accept` no longer closes the shared listener; handshakes no longer serialize the accept loop (each runs concurrently under its deadline).
 - inproc: `SetReadDeadline` / `SetWriteDeadline` now interrupt in-flight blocked `Read` / `Write` calls, per the `net.Conn` contract.
+- inproc: a PLAIN/CURVE-configured binder now actively rejects (closes) direct-pipe bypass offers from no-security dialers. Previously the offer sat undrained: the dialer emitted `EventConnected` and hung silently on a pipe wired to nothing; it now observes a prompt `EventDisconnected`, matching the visibility of a failed handshake.
 
 ### Added
 
@@ -65,6 +66,7 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
 - `internal/socket`: ROUTER's identity-cache behavior is now plain methods on `identityRouter` (gated by a constructor flag) instead of four function-pointer hooks; synthetic subscription frames are built by one shared helper; deleted dead `pipeRing.contains`.
 - `typed`: `TopicMux.Run` is now built on the shared `handleLoop` dispatch skeleton instead of duplicating it (error classification and messages unchanged).
 - `security/curve`: deleted the unused `newWithRand` constructor; added Encode/Decode/round-trip benchmarks for the traffic path.
+- Dead-code sweep (~650 SLOC): deleted `internal/zmtp`'s unused greeting and PING/PONG codecs (the session layer deliberately implements both inline) plus their tests and fuzz corpus; removed write-only fields (`session.Config.Role`, `pipe.PeerInfo.Endpoint` and the `stream.Config.Endpoint` chain that fed it, pipe HWM accessors); narrowed `iface.Conn` (dropped per-direction deadline setters) and `iface.DirectPipeAcceptor` (dropped `CloseCh`); removed structurally impossible nil-guards in session construction and the inproc transport; `ErrHWM` documented as reserved (no built-in pattern currently returns it) and `WithSendHWM` docs corrected to describe actual blocking/drop behavior.
 
 ### Pooled-message safety & teardown (correctness)
 

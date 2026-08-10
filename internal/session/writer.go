@@ -350,19 +350,15 @@ func (s *sessionImpl) flushBatch(buffers *net.Buffers) error {
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	var (
-		n   int64
-		err error
-	)
+	var err error
 	if bw, ok := s.cfg.Conn.(bufferWriter); ok {
-		n, err = bw.WriteBuffers(buffers)
+		_, err = bw.WriteBuffers(buffers)
 	} else {
-		n, err = buffers.WriteTo(s.cfg.Conn)
+		_, err = buffers.WriteTo(s.cfg.Conn)
 	}
 	if err != nil {
 		return fmt.Errorf("gozmq/session: writev: %w", err)
 	}
-	_ = n
 	return nil
 }
 

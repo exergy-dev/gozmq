@@ -15,9 +15,8 @@ import (
 func (s *Socket) startStreamAdapter(conn iface.Conn) {
 	remote := conn.RemoteEndpoint()
 	ad := stream.NewAdapter(s.runCtx, conn, stream.Config{
-		Endpoint: remote,
-		SendHWM:  s.cfg.sendHWM,
-		RecvHWM:  s.cfg.recvHWM,
+		SendHWM: s.cfg.sendHWM,
+		RecvHWM: s.cfg.recvHWM,
 	})
 
 	if !s.addLink(streamLink{ad}) {
@@ -68,8 +67,8 @@ func (s *Socket) hasSecurityMech() bool {
 func (s *Socket) connectDirectPipe(acceptor iface.DirectPipeAcceptor, endpoint string) error {
 	dialerPipe, binderPipe := pipe.NewPair(
 		s.cfg.sendHWM, s.cfg.recvHWM,
-		pipe.PeerInfo{Endpoint: endpoint},
-		pipe.PeerInfo{Endpoint: endpoint, Identity: s.cfg.identity},
+		pipe.PeerInfo{},
+		pipe.PeerInfo{Identity: s.cfg.identity},
 	)
 	offer := &iface.DirectPipeOffer{
 		BindPipe:         binderPipe,
@@ -115,6 +114,15 @@ func (s *Socket) acceptDirectPipeLoop(acceptor iface.DirectPipeAcceptor) {
 		offer, err := acceptor.AcceptDirectPipe(s.runCtx)
 		if err != nil {
 			return
+		}
+
+		// A security-configured binder must not accept the unauthenticated
+		// bypass. Close the offer so the dialer observes a prompt
+		// disconnect instead of a silently dead pipe (it cannot see our
+		// security config and would otherwise hang).
+		if s.hasSecurityMech() {
+			_ = offer.BindPipe.Close()
+			continue
 		}
 
 		// Socket-type compatibility check.

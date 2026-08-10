@@ -18,7 +18,7 @@ import (
 // TestRoundTrip_Basic is the smoke test — a Send on A surfaces on B.Recv
 // and vice versa.
 func TestRoundTrip_Basic(t *testing.T) {
-	a, b := NewPair(2, 2, PeerInfo{Endpoint: "b-side"}, PeerInfo{Endpoint: "a-side"})
+	a, b := NewPair(2, 2, PeerInfo{Identity: []byte("b-id")}, PeerInfo{Identity: []byte("a-id")})
 	defer a.Close()
 	defer b.Close()
 
@@ -30,13 +30,8 @@ func TestRoundTrip_Basic(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "hello", string(got.Bytes()))
 
-	// SendHWM/RecvHWM/PeerEndpoint are concrete *end accessors, no
-	// longer part of iface.Pipe.
-	ae, be := a.(*end), b.(*end)
-	require.Equal(t, 2, ae.SendHWM(), "SendHWM")
-	require.Equal(t, 2, ae.RecvHWM(), "RecvHWM")
-	require.Equal(t, "b-side", ae.PeerEndpoint())
-	require.Equal(t, "a-side", be.PeerEndpoint())
+	require.Equal(t, "b-id", string(a.PeerIdentity()), "A peer identity")
+	require.Equal(t, "a-id", string(b.PeerIdentity()), "B peer identity")
 }
 
 // TestHWM_Blocks_Send_On_Full asserts that Send blocks once HWM buffered

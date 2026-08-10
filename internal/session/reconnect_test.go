@@ -93,14 +93,12 @@ func (s *stubSession) CancelWriter()                  {}                // stub:
 // methods; it just passes the value to NewSession.
 type stubConn struct{}
 
-func (stubConn) Read([]byte) (int, error)         { return 0, errors.New("stub") }
-func (stubConn) Write(p []byte) (int, error)      { return len(p), nil }
-func (stubConn) Close() error                     { return nil }
-func (stubConn) LocalEndpoint() string            { return "stub://local" }
-func (stubConn) RemoteEndpoint() string           { return "stub://remote" }
-func (stubConn) SetDeadline(time.Time) error      { return nil }
-func (stubConn) SetReadDeadline(time.Time) error  { return nil }
-func (stubConn) SetWriteDeadline(time.Time) error { return nil }
+func (stubConn) Read([]byte) (int, error)    { return 0, errors.New("stub") }
+func (stubConn) Write(p []byte) (int, error) { return len(p), nil }
+func (stubConn) Close() error                { return nil }
+func (stubConn) LocalEndpoint() string       { return "stub://local" }
+func (stubConn) RemoteEndpoint() string      { return "stub://remote" }
+func (stubConn) SetDeadline(time.Time) error { return nil }
 
 // --------------------------------------------------------------------------
 // Tests

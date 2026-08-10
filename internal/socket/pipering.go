@@ -38,9 +38,8 @@ func (r *pipeRing) add(p iface.Pipe) bool {
 // remove deletes p from the ring and fixes the cursor so round-robin order
 // is preserved: if an element before the cursor was removed the cursor shifts
 // left, and it is wrapped back into range (or reset to 0 when the ring
-// empties). Returns the removed index and true if p was present, else (-1,
-// false).
-func (r *pipeRing) remove(p iface.Pipe) (int, bool) {
+// empties). Returns true if p was present.
+func (r *pipeRing) remove(p iface.Pipe) bool {
 	for i, existing := range r.pipes {
 		if existing == p {
 			r.pipes = slices.Delete(r.pipes, i, i+1)
@@ -52,10 +51,10 @@ func (r *pipeRing) remove(p iface.Pipe) (int, bool) {
 				}
 				r.cursor %= len(r.pipes)
 			}
-			return i, true
+			return true
 		}
 	}
-	return -1, false
+	return false
 }
 
 // current returns the index and pipe the cursor points at. Callers must

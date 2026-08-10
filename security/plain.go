@@ -219,9 +219,8 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		if err != nil {
 			return nil, false, err
 		}
-		// Record the username for diagnostics; the password stays in locals
-		// only and is dropped as soon as the auth decision below is made.
-		m.username = user
+		// The credentials stay in locals only and are dropped as soon as
+		// the auth decision below is made.
 		switch {
 		case m.zapAuth != nil:
 			if err := m.AuthorizeZAP(plainMechName, [][]byte{[]byte(user), []byte(pass)}); err != nil {

@@ -1,8 +1,10 @@
 // Package zmtp implements the wire-level constructs of ZeroMQ Message
-// Transport Protocol 3.1: the greeting, the framing layer (flags + length +
-// body), and the command codec (READY, ERROR, SUBSCRIBE, CANCEL, PING, PONG,
-// DISCONNECT). Higher-level packages (security, internal/session) consume
-// these via the iface contracts defined in internal/iface.
+// Transport Protocol 3.1: the framing layer (flags + length + body), the
+// command codec, and the READY metadata codec. Higher-level packages
+// (security, internal/session) consume these via the iface contracts
+// defined in internal/iface. The greeting and PING/PONG wire formats are
+// handled inline by internal/session, which deliberately does not import
+// this package.
 package zmtp
 
 import (

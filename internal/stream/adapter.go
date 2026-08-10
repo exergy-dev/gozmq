@@ -36,10 +36,6 @@ type Config struct {
 	// that case, matching libzmq's anonymous-peer convention.
 	Identity []byte
 
-	// Endpoint is the peer's ZMQ endpoint string (e.g. "tcp://host:port").
-	// Stored in the pipe's PeerInfo for monitoring/logging.
-	Endpoint string
-
 	// ReadBufSize caps each conn.Read. Defaults to 32 KiB when <= 0.
 	ReadBufSize int
 
@@ -98,7 +94,6 @@ func NewAdapter(parent context.Context, conn iface.Conn, cfg Config) *Adapter {
 	}
 
 	engInfo := pipe.PeerInfo{
-		Endpoint: cfg.Endpoint,
 		Identity: bytes.Clone(cfg.Identity),
 	}
 	// admInfo is what the adapter end sees as "the peer" — the engine

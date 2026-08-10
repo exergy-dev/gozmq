@@ -156,7 +156,7 @@ func newPubEngineBase(surface bool) *pubEngine {
 		sendGate:    newReadyGate(),
 	}
 	if surface {
-		// Capacity-1 handoff buffer. HWM-style backpressure on the
+		// Small handoff buffer. HWM-style backpressure on the
 		// application isn't expressed here — XPUB applications are
 		// expected to drain promptly. A bigger buffer doesn't help
 		// because the synthetic messages are rare relative to data
@@ -287,7 +287,9 @@ func (e *pubEngine) ReadyWrite() <-chan struct{} {
 }
 
 func (e *pubEngine) CanRecvNow() bool {
-	return e.surfaceSubs && e.subInbound != nil && len(e.subInbound) > 0
+	// surfaceSubs ⇒ subInbound non-nil (both set together at construction);
+	// len(nil chan) is 0, so no nil-check is needed.
+	return e.surfaceSubs && len(e.subInbound) > 0
 }
 
 func (e *pubEngine) CanSendNow() bool {

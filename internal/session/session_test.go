@@ -67,12 +67,10 @@ func (c *fakeConn) Close() error {
 	})
 	return nil
 }
-func (c *fakeConn) LocalEndpoint() string            { return c.local }
-func (c *fakeConn) RemoteEndpoint() string           { return c.remote }
-func (c *fakeConn) SetDeadline(time.Time) error      { return nil }
-func (c *fakeConn) SetReadDeadline(time.Time) error  { return nil }
-func (c *fakeConn) SetWriteDeadline(time.Time) error { return nil }
-func (c *fakeConn) Closed() <-chan struct{}          { return c.closed }
+func (c *fakeConn) LocalEndpoint() string       { return c.local }
+func (c *fakeConn) RemoteEndpoint() string      { return c.remote }
+func (c *fakeConn) SetDeadline(time.Time) error { return nil }
+func (c *fakeConn) Closed() <-chan struct{}     { return c.closed }
 
 // --------------------------------------------------------------------------
 // fakeCodec: trivial length-prefixed wire format.
@@ -210,8 +208,6 @@ func startPair(t *testing.T, cfgA, cfgB Config) (sA, sB iface.Session) {
 	if cfgB.Codec == nil {
 		cfgB.Codec = fakeCodec{}
 	}
-	cfgA.Role = iface.RoleClient
-	cfgB.Role = iface.RoleServer
 
 	sA = New(cfgA)
 	sB = New(cfgB)
@@ -250,11 +246,6 @@ func TestSession_Handshake_AndRoundTrip(t *testing.T) {
 
 	// Verify the engine-facing pipe surfaces the peer's identity from
 	// metadata propagated through SetPeerMetadata after the handshake.
-	// PeerEndpoint is a concrete *pipe.end accessor, not part of
-	// iface.Pipe — assert through a focused interface.
-	type peerEndpointer interface{ PeerEndpoint() string }
-	assert.Equal(t, "fake://b", sA.Pipe().(peerEndpointer).PeerEndpoint(), "A pipe peer endpoint")
-	assert.Equal(t, "fake://a", sB.Pipe().(peerEndpointer).PeerEndpoint(), "B pipe peer endpoint")
 	mechA := sA.(*sessionImpl).cfg.Mech.(*fakeMech)
 	mechB := sB.(*sessionImpl).cfg.Mech.(*fakeMech)
 	require.Equal(t, 1, mechA.setPeerCalls, "A SetPeerMetadata calls")
@@ -359,7 +350,6 @@ func TestSession_StopBeforeHandshake(t *testing.T) {
 		Conn:    connA,
 		Mech:    newFakeMech("NULL", false, nil),
 		Codec:   fakeCodec{},
-		Role:    iface.RoleClient,
 		SendHWM: 1,
 		RecvHWM: 1,
 	})
@@ -402,7 +392,6 @@ func TestSession_StopWithoutStart(t *testing.T) {
 		Conn:    connA,
 		Mech:    newFakeMech("NULL", false, nil),
 		Codec:   fakeCodec{},
-		Role:    iface.RoleClient,
 		SendHWM: 1,
 		RecvHWM: 1,
 	})
@@ -485,7 +474,6 @@ func TestSession_HandshakeErr_ProtocolViolation(t *testing.T) {
 		Conn:    connA,
 		Mech:    newFakeMech("NULL", false, nil),
 		Codec:   fakeCodec{},
-		Role:    iface.RoleClient,
 		SendHWM: 1,
 		RecvHWM: 1,
 	})
@@ -565,7 +553,7 @@ func TestSession_Done_FiresOnHandshakeFailure(t *testing.T) {
 
 	sA := New(Config{
 		Conn: connA, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{},
-		Role: iface.RoleClient, SendHWM: 1, RecvHWM: 1,
+		SendHWM: 1, RecvHWM: 1,
 	})
 	sA.Start()
 
@@ -601,7 +589,7 @@ func TestSession_Done_FiresOnStopBeforeHandshake(t *testing.T) {
 
 	s := New(Config{
 		Conn: connA, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{},
-		Role: iface.RoleClient, SendHWM: 1, RecvHWM: 1,
+		SendHWM: 1, RecvHWM: 1,
 	})
 	s.Start()
 	// Give the run goroutine a moment to reach the blocking greeting read.
@@ -619,7 +607,7 @@ func TestSession_Done_FiresExactlyOnce(t *testing.T) {
 
 	s := New(Config{
 		Conn: connA, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{},
-		Role: iface.RoleClient, SendHWM: 1, RecvHWM: 1,
+		SendHWM: 1, RecvHWM: 1,
 	})
 	s.Start()
 	time.Sleep(10 * time.Millisecond)
@@ -634,7 +622,7 @@ func TestSession_Done_FiresExactlyOnce(t *testing.T) {
 	defer connD.Close()
 	s2 := New(Config{
 		Conn: connC, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{},
-		Role: iface.RoleClient, SendHWM: 1, RecvHWM: 1,
+		SendHWM: 1, RecvHWM: 1,
 	})
 	require.NoError(t, s2.Stop(), "Stop-without-Start")
 	waitClosed(t, s2.Done(), time.Second, "Done not closed after Stop-without-Start")

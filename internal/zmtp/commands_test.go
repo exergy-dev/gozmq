@@ -1,7 +1,6 @@
 package zmtp
 
 import (
-	"bytes"
 	"strings"
 	"testing"
 
@@ -19,9 +18,9 @@ func TestCommandRoundTrip(t *testing.T) {
 		{name: "ready-empty", cmd: Command{Name: CmdReady, Body: nil}},
 		{name: "ready-body", cmd: Command{Name: CmdReady, Body: []byte("\x0bSocket-Type\x00\x00\x00\x03REQ")}},
 		{name: "error", cmd: Command{Name: CmdError, Body: []byte("auth failed")}},
-		{name: "subscribe-prefix", cmd: Command{Name: CmdSubscribe, Body: []byte("logs.")}},
-		{name: "cancel-prefix", cmd: Command{Name: CmdCancel, Body: []byte("logs.")}},
-		{name: "disconnect-empty", cmd: Command{Name: CmdDisconnect, Body: nil}},
+		{name: "subscribe-prefix", cmd: Command{Name: "SUBSCRIBE", Body: []byte("logs.")}},
+		{name: "cancel-prefix", cmd: Command{Name: "CANCEL", Body: []byte("logs.")}},
+		{name: "disconnect-empty", cmd: Command{Name: "DISCONNECT", Body: nil}},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -76,74 +75,6 @@ func TestEncodeCommandPanicsOnHugeName(t *testing.T) {
 	})
 }
 
-func TestPingPongRoundTrip(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		ttl  uint16
-		ctx  []byte
-	}{
-		{name: "no-context", ttl: 0, ctx: nil},
-		{name: "default-ttl", ttl: 3000, ctx: []byte{}},
-		{name: "with-context", ttl: 1234, ctx: []byte("hello")},
-		{name: "max-context", ttl: 0xFFFF, ctx: bytes.Repeat([]byte{0xAB}, PingPongMaxContext)},
-	}
-	for _, tc := range cases {
-		tc := tc
-		t.Run("ping-"+tc.name, func(t *testing.T) {
-			t.Parallel()
-			cmd, err := EncodePing(tc.ttl, tc.ctx)
-			require.NoError(t, err, "EncodePing")
-			require.Equal(t, CmdPing, cmd.Name, "name")
-			ttl, ctx, err := DecodePing(cmd)
-			require.NoError(t, err, "DecodePing")
-			require.Equal(t, tc.ttl, ttl, "ttl")
-			if len(ctx) != 0 || len(tc.ctx) != 0 {
-				require.Equal(t, tc.ctx, ctx, "ctx")
-			}
-		})
-		t.Run("pong-"+tc.name, func(t *testing.T) {
-			t.Parallel()
-			cmd, err := EncodePong(tc.ttl, tc.ctx)
-			require.NoError(t, err, "EncodePong")
-			require.Equal(t, CmdPong, cmd.Name, "name")
-			ttl, ctx, err := DecodePong(cmd)
-			require.NoError(t, err, "DecodePong")
-			require.Equal(t, tc.ttl, ttl, "ttl")
-			if len(ctx) != 0 || len(tc.ctx) != 0 {
-				require.Equal(t, tc.ctx, ctx, "ctx")
-			}
-		})
-	}
-}
-
-func TestPingPongRejects(t *testing.T) {
-	t.Parallel()
-	t.Run("encode-context-too-long", func(t *testing.T) {
-		_, err := EncodePing(0, bytes.Repeat([]byte{0}, PingPongMaxContext+1))
-		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
-		_, err = EncodePong(0, bytes.Repeat([]byte{0}, PingPongMaxContext+1))
-		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
-	})
-	t.Run("decode-too-short", func(t *testing.T) {
-		_, _, err := DecodePing(Command{Name: CmdPing, Body: []byte{0x00}})
-		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
-		_, _, err = DecodePong(Command{Name: CmdPong, Body: []byte{0x00}})
-		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
-	})
-	t.Run("decode-too-long", func(t *testing.T) {
-		body := append([]byte{0, 0}, bytes.Repeat([]byte{0xCC}, PingPongMaxContext+1)...)
-		_, _, err := DecodePing(Command{Name: CmdPing, Body: body})
-		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
-	})
-	t.Run("decode-wrong-name", func(t *testing.T) {
-		_, _, err := DecodePing(Command{Name: CmdPong, Body: []byte{0, 0}})
-		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
-		_, _, err = DecodePong(Command{Name: CmdPing, Body: []byte{0, 0}})
-		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
-	})
-}
-
 // FuzzCommand: arbitrary input bytes interpreted as a COMMAND-frame body must
 // either decode cleanly (and round-trip via EncodeCommand) or be rejected. No
 // panics, no infinite loops.
@@ -166,11 +97,5 @@ func FuzzCommand(f *testing.F) {
 		require.NoError(t, err2, "re-decode failed")
 		require.Equal(t, c.Name, c2.Name, "round-trip name drift")
 		require.Equal(t, c.Body, c2.Body, "round-trip body drift")
-		// If the decoded command is a PING/PONG with a body that fits the
-		// helper schema, the typed helpers must agree.
-		if c.Name == CmdPing && len(c.Body) >= pingPongTTLBytes && len(c.Body) <= pingPongTTLBytes+PingPongMaxContext {
-			_, _, err := DecodePing(c)
-			require.NoError(t, err, "DecodePing on accepted PING")
-		}
 	})
 }

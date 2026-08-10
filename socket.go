@@ -215,10 +215,20 @@ func (s *Socket) Bind(endpoint string) error {
 	go s.acceptLoop(l)
 	// If the listener supports direct-pipe bypass (inproc), start a
 	// second accept loop that handles direct-pipe offers from connecting
-	// sockets. This runs in parallel with the regular acceptLoop so
-	// that legacy-path Dial (security configured, or other edge cases)
-	// still works.
-	if acceptor, ok := l.(iface.DirectPipeAcceptor); ok && !s.hasSecurityMech() {
+	// sockets. The regular acceptLoop above is still required even for
+	// inproc — two dial paths verifiably reach it:
+	//   - a dialer with PLAIN/CURVE configured skips the direct-pipe
+	//     path in Connect and dials through transport.InprocTransport,
+	//     whose dialIn hands a conn to Listener.Accept;
+	//   - a Connect that races ahead of this Bind finds no
+	//     LookupDirectAcceptor yet and falls back to the Reconnector,
+	//     whose tr.Dial parks in the transport's pending-waiter queue
+	//     and likewise resolves through Listener.Accept.
+	// The loop runs even when this socket has security configured: a
+	// no-security dialer cannot see our config and will still offer a
+	// direct pipe, so the loop must actively REJECT (close) those offers —
+	// leaving them undrained would hang the dialer silently.
+	if acceptor, ok := l.(iface.DirectPipeAcceptor); ok {
 		s.acceptWG.Add(1)
 		go s.acceptDirectPipeLoop(acceptor)
 	}

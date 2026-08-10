@@ -1,8 +1,10 @@
 package gozmq_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -415,3 +417,125 @@ func TestSocketType_String(t *testing.T) {
 		t.Fatalf("SocketType(99).String() = %q, want SocketType(99)", got)
 	}
 }
+
+// TestInproc_SecurityBinderRejectsDirectPipeOffer: a PLAIN-configured
+// binder must actively reject the inproc direct-pipe bypass offered by a
+// no-security dialer (the dialer cannot see the binder's config). Before
+// the fix the offer sat undrained in the listener's buffer: the dialer
+// emitted EventConnected and then hung silently on a pipe wired to
+// nothing. Now the binder closes the offer, so the dialer observes a
+// prompt EventDisconnected.
+func TestInproc_SecurityBinderRejectsDirectPipeOffer(t *testing.T) {
+	zctx := gozmq.NewContext()
+	defer zctx.Close()
+
+	srv, err := zctx.NewSocket(gozmq.Rep,
+		gozmq.WithPlainAuth(func(user, pass string) bool { return true }))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	defer srv.Close()
+	const ep = "inproc://sec-binder-direct-reject"
+	if err := srv.Bind(ep); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+
+	events := make(chan gozmq.Event, 64)
+	cli, err := zctx.NewSocket(gozmq.Req, gozmq.WithMonitor(events, gozmq.EventAll))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer cli.Close()
+	if err := cli.Connect(ep); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+
+	// The binder must close the offered pipe promptly: the dialer sees a
+	// disconnect instead of hanging on a dead pipe.
+	waitForEvents(t, events, 3*time.Second, func(evts []gozmq.Event) bool {
+		for _, ev := range evts {
+			if ev.Type == gozmq.EventDisconnected {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// TestNewMsg covers the NewMsg constructor end to end: an empty message,
+// incremental frame appends, a round trip, and the always-safe Release
+// contract for caller-constructed messages.
+func TestNewMsg(t *testing.T) {
+	m := gozmq.NewMsg()
+	if m.NumFrames() != 0 {
+		t.Fatalf("NewMsg NumFrames = %d, want 0", m.NumFrames())
+	}
+	m.AppendFrame([]byte("alpha"))
+	m.AppendFrame([]byte("beta"))
+	if m.NumFrames() != 2 {
+		t.Fatalf("NumFrames = %d, want 2", m.NumFrames())
+	}
+
+	_, server, client := newSocketPair(t, gozmq.Pair, "inproc://newmsg-roundtrip")
+	callCtx := testCtx(t)
+	if err := client.SendMsg(callCtx, m); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	got, err := server.RecvMsg(callCtx)
+	if err != nil {
+		t.Fatalf("recv: %v", err)
+	}
+	defer got.Release()
+	if got.NumFrames() != 2 || string(got.Frames()[0]) != "alpha" || string(got.Frames()[1]) != "beta" {
+		t.Fatalf("got frames %q", got.Frames())
+	}
+
+	// Release on a caller-constructed message is documented as always safe.
+	empty := gozmq.NewMsg()
+	empty.Release()
+}
+
+// TestWithLogger proves the configured logger actually receives the
+// socket's internal diagnostics: a refused dial must produce the
+// reconnector's debug log line on the custom logger.
+func TestWithLogger(t *testing.T) {
+	var (
+		mu  sync.Mutex
+		buf bytes.Buffer
+	)
+	syncW := writerFunc(func(p []byte) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return buf.Write(p)
+	})
+	logger := slog.New(slog.NewTextHandler(syncW, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	zctx, sock := newTestSocket(t, gozmq.Pair,
+		gozmq.WithLogger(logger),
+		gozmq.WithReconnectInterval(10*time.Millisecond))
+	defer zctx.Close()
+	defer sock.Close()
+
+	// Port 1 on loopback is essentially guaranteed to refuse.
+	if err := sock.Connect("tcp://127.0.0.1:1"); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		logged := strings.Contains(buf.String(), "dial failed")
+		mu.Unlock()
+		if logged {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	t.Fatalf("custom logger never received the dial-failure diagnostic; got: %q", buf.String())
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }

@@ -102,10 +102,10 @@ func WithIdentity(id []byte) Option {
 // messages queued per peer pipe before backpressure engages. Default is
 // 1000. Zero disables the limit (unbounded growth; not recommended for
 // untrusted peers). When the HWM is reached, Send behavior depends on the
-// socket pattern: blocking sockets (PAIR, PUSH, DEALER, REQ, REP, ROUTER
-// without mandatory) wait for a Recv on the peer to drain queue space,
-// while drop-on-overflow patterns (PUB, and ROUTER with mandatory plus an
-// unknown route) may return [ErrHWM] or silently drop per pattern policy.
+// socket pattern: blocking sockets (PAIR, PUSH, DEALER, REQ, REP, ROUTER)
+// wait for a Recv on the peer to drain queue space, while PUB/XPUB drop
+// the message for the full peer and continue the fan-out (the drop is
+// counted in [Socket.Metrics]).
 func WithSendHWM(n int) Option {
 	return newOption(func(c *socketConfig) error { c.sendHWM = n; return nil })
 }

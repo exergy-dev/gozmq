@@ -107,10 +107,6 @@ func (it *InprocTransport) Dial(ctx context.Context, endpoint string) (iface.Con
 
 	select {
 	case l := <-w.resultCh:
-		if l == nil {
-			// closed without resolution (defensive — should not happen).
-			return nil, fmt.Errorf("%w: inproc dial cancelled before Listen", zmqerr.ErrEndpointInvalid)
-		}
 		return l.dialIn(name)
 	case <-ctx.Done():
 		if l := it.cancelWaiter(name, w); l != nil {
@@ -276,9 +272,6 @@ func (l *inprocListener) Endpoint() string { return l.endpoint }
 func (l *inprocListener) Accept(ctx context.Context) (iface.Conn, error) {
 	select {
 	case c := <-l.acceptCh:
-		if c == nil {
-			return nil, listenerClosedErr()
-		}
 		return c, nil
 	case <-l.closeCh:
 		return nil, listenerClosedErr()
@@ -291,9 +284,6 @@ func (l *inprocListener) Accept(ctx context.Context) (iface.Conn, error) {
 func (l *inprocListener) AcceptDirectPipe(ctx context.Context) (*iface.DirectPipeOffer, error) {
 	select {
 	case offer := <-l.directPipeCh:
-		if offer == nil {
-			return nil, listenerClosedErr()
-		}
 		return offer, nil
 	case <-l.closeCh:
 		return nil, listenerClosedErr()
@@ -312,11 +302,6 @@ func (l *inprocListener) OfferDirectPipe(offer *iface.DirectPipeOffer) error {
 	}
 }
 
-// CloseCh returns a channel that closes when the listener is closed.
-func (l *inprocListener) CloseCh() <-chan struct{} {
-	return l.closeCh
-}
-
 func (l *inprocListener) Close() error {
 	l.closeOnce.Do(func() {
 		l.mu.Lock()
@@ -327,14 +312,10 @@ func (l *inprocListener) Close() error {
 		// Drain & close any pending accepts and direct-pipe offers so their
 		// dialing peers fail promptly.
 		drainChan(l.acceptCh, func(c *inprocConn) {
-			if c != nil {
-				_ = c.Close()
-			}
+			_ = c.Close()
 		})
 		drainChan(l.directPipeCh, func(offer *iface.DirectPipeOffer) {
-			if offer != nil {
-				_ = offer.BindPipe.Close()
-			}
+			_ = offer.BindPipe.Close()
 		})
 	})
 	return nil
@@ -371,8 +352,8 @@ func (l *inprocListener) dialIn(name string) (iface.Conn, error) {
 	// buffer that does not deadlock on a single-frame round-trip.
 	const transportPipeHWM = 64
 	clientPipe, serverPipe := pipe.NewPair(transportPipeHWM, transportPipeHWM,
-		pipe.PeerInfo{Endpoint: endpoint}, // client sees the server endpoint
-		pipe.PeerInfo{Endpoint: endpoint}, // server sees the client endpoint (no separate value for inproc)
+		pipe.PeerInfo{},
+		pipe.PeerInfo{},
 	)
 
 	clientConn := newInprocConn(clientPipe, endpoint, endpoint)

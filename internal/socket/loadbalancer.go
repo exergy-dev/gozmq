@@ -146,7 +146,7 @@ func (lb *LoadBalancer) Attach(p iface.Pipe) error {
 func (lb *LoadBalancer) Detach(p iface.Pipe) error {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
-	if _, ok := lb.ring.remove(p); ok {
+	if lb.ring.remove(p) {
 		lb.signalLocked()
 		lb.refreshSingleLocked()
 		lb.signalReadyWriteLocked()

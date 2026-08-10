@@ -23,10 +23,12 @@ var (
 	// calls, matching Context.Close.
 	ErrSocketClosed = zmqerr.ErrSocketClosed
 
-	// ErrHWM is returned by Send on patterns that surface high-water-mark
-	// pressure as an error rather than by blocking — notably drop-or-
-	// return patterns and non-blocking send paths once the outbound pipe
-	// for the target peer is full.
+	// ErrHWM is reserved for Send paths that surface high-water-mark
+	// pressure as an error rather than by blocking. NOTE: no built-in
+	// pattern currently returns it — blocking patterns park until the
+	// peer drains, and drop-on-HWM patterns (PUB fan-out) drop silently
+	// and count the drop in Metrics. The sentinel is kept for API
+	// stability and future non-blocking send surfaces.
 	ErrHWM = zmqerr.ErrHWM
 
 	// ErrFSMViolation is returned by socket methods called in the wrong

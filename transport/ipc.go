@@ -93,7 +93,7 @@ func (t *IPCTransport) Listen(_ context.Context, endpoint string) (iface.Listene
 			return nil, fmt.Errorf("%w: chmod socket: %s", zmqerr.ErrEndpointInvalid, err.Error())
 		}
 	}
-	return newIPCListener(l, t, addr, displayAddr, abstract), nil
+	return newIPCListener(l, addr, displayAddr, abstract), nil
 }
 
 // parseIPCAddress decodes an ipc endpoint. Returns:
@@ -132,7 +132,6 @@ func parseIPCAddress(endpoint string) (addr, displayAddr string, abstract bool, 
 // socket file (filesystem namespace only) and unblocks pending Accept.
 type ipcListener struct {
 	l        net.Listener
-	t        *IPCTransport
 	path     string // the raw address we passed to net.Listen (for Remove)
 	display  string // "@name" or "/path" for endpoint-string reporting
 	abstract bool
@@ -140,10 +139,9 @@ type ipcListener struct {
 	listenerCloseState
 }
 
-func newIPCListener(l net.Listener, t *IPCTransport, path, display string, abstract bool) *ipcListener {
+func newIPCListener(l net.Listener, path, display string, abstract bool) *ipcListener {
 	return &ipcListener{
 		l:                  l,
-		t:                  t,
 		path:               path,
 		display:            display,
 		abstract:           abstract,

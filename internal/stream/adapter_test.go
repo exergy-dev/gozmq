@@ -47,7 +47,6 @@ func TestAdapter_InboundChunking(t *testing.T) {
 
 	ad := NewAdapter(context.Background(), ac, Config{
 		Identity:    []byte("peer-1"),
-		Endpoint:    "tcp://peer-1",
 		ReadBufSize: 4 * 1024,
 	})
 	defer ad.Close()
@@ -216,9 +215,9 @@ func TestAdapter_TCPRoundTrip(t *testing.T) {
 	clientSide := &testConn{Conn: clientConn, local: clientConn.LocalAddr().String(), remote: clientConn.RemoteAddr().String()}
 	serverSide := &testConn{Conn: srv.conn, local: srv.conn.LocalAddr().String(), remote: srv.conn.RemoteAddr().String()}
 
-	clientAd := NewAdapter(context.Background(), clientSide, Config{Identity: []byte("client"), Endpoint: "tcp://" + addr})
+	clientAd := NewAdapter(context.Background(), clientSide, Config{Identity: []byte("client")})
 	defer clientAd.Close()
-	serverAd := NewAdapter(context.Background(), serverSide, Config{Identity: []byte("server"), Endpoint: "tcp://" + srv.conn.RemoteAddr().String()})
+	serverAd := NewAdapter(context.Background(), serverSide, Config{Identity: []byte("server")})
 	defer serverAd.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

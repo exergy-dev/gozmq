@@ -171,3 +171,70 @@ func TestReceiver_ContextCancelled(t *testing.T) {
 	_, err = receiver.Recv(ctx)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
+
+// TestSubscriber_Unsubscribe verifies the Subscriber's filter management
+// end to end: after Unsubscribe the topic is no longer delivered. The
+// sentinel "zz." subscription is issued AFTER the unsubscribe, and both
+// control messages travel the same ordered upstream path — so once a
+// "zz." message arrives, the "orders." unsubscribe is provably in effect
+// at the publisher.
+func TestSubscriber_Unsubscribe(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	zctx := gozmq.NewContext()
+	defer zctx.Close()
+
+	pubSock, err := zctx.NewSocket(gozmq.Pub)
+	require.NoError(t, err)
+	defer pubSock.Close()
+	require.NoError(t, pubSock.Bind("inproc://typed-unsub"))
+
+	subSock, err := zctx.NewSocket(gozmq.Sub)
+	require.NoError(t, err)
+	defer subSock.Close()
+
+	pub := typed.NewPublisher[payload](pubSock, jsonCodec{})
+	sub := typed.NewSubscriber[payload](subSock, jsonCodec{})
+
+	require.NoError(t, sub.Subscribe("orders."))
+	require.NoError(t, subSock.Connect("inproc://typed-unsub"))
+
+	// Probe until the initial subscription has propagated.
+	recvProbe := func(topic string) bool {
+		for i := 0; i < 100; i++ {
+			require.NoError(t, pub.Send(context.Background(), topic, payload{N: i}))
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			_, err := sub.Recv(ctx)
+			cancel()
+			if err == nil {
+				return true
+			}
+		}
+		return false
+	}
+	require.True(t, recvProbe("orders.probe"), "initial subscription never propagated")
+
+	require.NoError(t, sub.Unsubscribe("orders."))
+	require.NoError(t, sub.Subscribe("zz."))
+	require.True(t, recvProbe("zz.probe"), "sentinel subscription never propagated")
+
+	// Drain any extra in-flight probes.
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		_, err := sub.Recv(ctx)
+		cancel()
+		if err != nil {
+			break
+		}
+	}
+
+	// "orders." is unsubscribed: only the sentinel must arrive.
+	require.NoError(t, pub.Send(context.Background(), "orders.gone", payload{N: 1}))
+	require.NoError(t, pub.Send(context.Background(), "zz.fin", payload{N: 2}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := sub.Recv(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "zz.fin", got.Topic, "unsubscribed topic leaked through the filter")
+}

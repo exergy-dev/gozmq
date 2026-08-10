@@ -21,7 +21,6 @@ var ErrNilMessage = errors.New("gozmq/pipe: nil message")
 // PeerInfo carries the metadata a session advertises to its engine. Zero
 // value = unknown; fields are set at pipe construction and may not change.
 type PeerInfo struct {
-	Endpoint string
 	Identity []byte
 }
 
@@ -41,26 +40,20 @@ func NewPair(aToB, bToA int, aInfo, bInfo PeerInfo) (a, b iface.Pipe) {
 	bToAq := newDirection(bToA)
 	endA := &end{
 		shared:  s,
-		isA:     true,
 		sendCh:  aToBq.in,  // A writes → B reads
 		recvCh:  bToAq.out, // A reads ← B writes
 		sendDir: aToBq,
 		recvDir: bToAq,
-		sendHWM: aToB,
-		recvHWM: bToA,
 		peer:    aInfo,
 		myCh:    s.aClosed,
 		peerCh:  s.bClosed,
 	}
 	endB := &end{
 		shared:  s,
-		isA:     false,
 		sendCh:  bToAq.in,
 		recvCh:  aToBq.out,
 		sendDir: bToAq,
 		recvDir: aToBq,
-		sendHWM: bToA,
-		recvHWM: aToB,
 		peer:    bInfo,
 		myCh:    s.bClosed,
 		peerCh:  s.aClosed,
@@ -219,16 +212,13 @@ func (d *direction) close() {
 
 type end struct {
 	shared *shared
-	isA    bool
 
 	sendCh  chan *msg.Msg
 	recvCh  chan *msg.Msg
 	sendDir *direction
 	recvDir *direction
 
-	sendHWM int
-	recvHWM int
-	peer    PeerInfo
+	peer PeerInfo
 
 	closeOnce sync.Once
 
@@ -389,10 +379,6 @@ func (e *end) Close() error {
 
 func (e *end) Closed() <-chan struct{} { return e.shared.either }
 
-func (e *end) SendHWM() int { return e.sendHWM }
-func (e *end) RecvHWM() int { return e.recvHWM }
-
-func (e *end) PeerEndpoint() string { return e.peer.Endpoint }
 func (e *end) PeerIdentity() []byte { return e.peer.Identity }
 
 // RecvCh exposes the internal receive channel for direct use in select

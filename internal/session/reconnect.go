@@ -17,8 +17,7 @@ package session
 // fires on all teardown paths — post-handshake peer disconnect,
 // heartbeat timeout, explicit Stop, or pre-pipe handshake failure — it
 // is a single, unambiguous signal that also catches sessions that never
-// reach the traffic phase. (Earlier revisions polled Pipe().Closed() as
-// a workaround when Done() did not exist; that path is gone.)
+// reach the traffic phase.
 
 import (
 	"context"
