@@ -180,6 +180,18 @@
 // against the resolved endpoint Bind produced) while leaving already-
 // accepted connections alive, matching libzmq's zmq_unbind.
 //
+// # ROUTER identity handover
+//
+// When a peer attaches to a ROUTER claiming an identity that is already in
+// use, gozmq hands the identity over: the new pipe takes it and the stale
+// one is displaced. This is libzmq's ZMQ_ROUTER_HANDOVER=1 behaviour rather
+// than its default, which rejects the new peer and keeps the old pipe
+// bound. Handover is the better default in practice — a client reconnecting
+// before the server's TCP stack has noticed the old connection died would
+// otherwise be stranded until the stale pipe times out — but it does mean
+// two clients that pick the same [WithIdentity] value will silently evict
+// each other rather than one failing loudly. Identities must be unique.
+//
 // # Subscription refcount
 //
 // SUB and XSUB maintain per-prefix refcounts. Calling Subscribe with the same

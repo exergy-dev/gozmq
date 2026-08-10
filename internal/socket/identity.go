@@ -32,8 +32,16 @@ type identityRouter struct {
 	// PeerIdentity, or a synthesized 5-byte identity for anonymous peers).
 	idOf map[iface.Pipe][]byte
 	// pipeOf maps a routing identity (string key) back to the pipe.
-	// Last-writer-wins on collision (a reconnecting peer displaces the
-	// stale entry), matching libzmq.
+	// Last-writer-wins on collision: a peer claiming an identity that is
+	// already attached displaces the stale entry.
+	//
+	// This is libzmq's ZMQ_ROUTER_HANDOVER=1 behaviour, NOT its default.
+	// libzmq defaults to handover=0, where the *new* peer is rejected and
+	// the stale pipe keeps the identity — which strands a client that
+	// reconnects before the server has noticed the old connection died,
+	// the common case behind a NAT or load balancer. gozmq always hands
+	// over; there is no option to get the rejecting behaviour. See
+	// docs/COMPATIBILITY.md.
 	pipeOf map[string]iface.Pipe
 	// sendGate is the Poller-facing PollOut signal, level-armed while at
 	// least one peer is attached.
