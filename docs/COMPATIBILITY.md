@@ -209,6 +209,23 @@ down cleanly with `ErrNonceExhausted`. Reaching this requires ~2^64 frames on
 one session, so it is a defensive check rather than an operational limit —
 but if you see it in logs, rotate keys and reconnect.
 
+### libzmq's malformed PLAIN ERROR command
+
+libzmq's `plain_server_t::produce_error` writes the C literal `"\x5ERROR"`
+where `"\5ERROR"` was intended. C hex escapes consume every following hex
+digit, so `\x5E` swallows the `E`: the command that reaches the wire
+declares a 94-byte name and supplies four bytes of it. Confirmed against
+libzmq 4.3.4.
+
+A strict ZMTP 3.1 §5.1 reading rejects that frame, which would make every
+bad-password handshake against a real libzmq server surface as a malformed
+frame rather than an authentication failure. gozmq therefore accepts this
+one byte sequence — matched in full, only after the strict parse has already
+failed — and reports `ErrAuthFailed` as it should. No other malformed
+command name is accepted.
+
+gozmq itself always emits well-formed ERROR commands.
+
 ### Message ownership
 
 `RecvMsg` may return a `*Msg` backed by pooled buffers. Call `Release` when

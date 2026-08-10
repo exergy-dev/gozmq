@@ -316,3 +316,61 @@ func TestPlainServerInitialSeedIsPassive(t *testing.T) {
 	_, _, err = server.NextHandshake(nil)
 	require.Error(t, err, "second NextHandshake with nil input should error")
 }
+
+// TestParseCommandAcceptsLibzmqBrokenError pins the compatibility shim to
+// the exact bytes libzmq 4.3.4 puts on the wire when a PLAIN server rejects
+// credentials. Captured from a real libzmq server via the interop harness:
+//
+//	04 09 5e 52 52 4f 52 03 34 30 30
+//	   ^flags/len   ^ the malformed name    ^len "400"
+//
+// libzmq's produce_error writes "\x5ERROR" where "\5ERROR" was meant; the C
+// hex escape swallows the 'E'. See parseLibzmqBrokenError.
+func TestParseCommandAcceptsLibzmqBrokenError(t *testing.T) {
+	body := []byte{0x5E, 'R', 'R', 'O', 'R', 0x03, '4', '0', '0'}
+
+	name, payload, err := parseCommand(body)
+	require.NoError(t, err)
+	require.Equal(t, plainCmdError, name)
+
+	reason, err := parseErrorReason(payload)
+	require.NoError(t, err)
+	require.Equal(t, "400", reason)
+}
+
+// The shim must be exactly that narrow: anything else with a bogus
+// name-length byte still has to fail, or it becomes a hole through which
+// corrupt frames are silently reinterpreted.
+func TestParseCommandStillRejectsOtherMalformedNames(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body []byte
+	}{
+		{"overlong declared name", []byte{0x5E, 'X', 'X', 'X', 'X', 0x03, '4', '0', '0'}},
+		{"truncated welcome", []byte{0x07, 'W', 'E', 'L'}},
+		{"almost the shim, one byte short", []byte{0x5E, 'R', 'R', 'O'}},
+		{"shim prefix but declared length honoured", []byte{0x04, 'R', 'R', 'O', 'R'}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotName, _, err := parseCommand(tc.body)
+			if err == nil {
+				require.NotEqual(t, plainCmdError, gotName,
+					"malformed body must not be reinterpreted as ERROR")
+			}
+		})
+	}
+}
+
+// A well-formed ERROR from a spec-compliant peer must keep working — the
+// shim is an addition, not a replacement.
+func TestParseCommandAcceptsWellFormedError(t *testing.T) {
+	body := append([]byte{0x05, 'E', 'R', 'R', 'O', 'R', 0x03}, "400"...)
+
+	name, payload, err := parseCommand(body)
+	require.NoError(t, err)
+	require.Equal(t, plainCmdError, name)
+
+	reason, err := parseErrorReason(payload)
+	require.NoError(t, err)
+	require.Equal(t, "400", reason)
+}

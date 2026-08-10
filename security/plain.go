@@ -20,6 +20,7 @@
 package security
 
 import (
+	"bytes"
 	"fmt"
 
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
@@ -289,9 +290,39 @@ func parseCommand(body []byte) (string, []byte, error) {
 	}
 	nameLen := int(body[0])
 	if 1+nameLen > len(body) {
+		if name, payload, ok := parseLibzmqBrokenError(body); ok {
+			return name, payload, nil
+		}
 		return "", nil, fmt.Errorf("gozmq/security/plain: command name truncated (declared %d, have %d): %w", nameLen, len(body)-1, zmqerr.ErrMalformedFrame)
 	}
 	return string(body[1 : 1+nameLen]), body[1+nameLen:], nil
+}
+
+// libzmqBrokenErrorPrefix is the exact byte sequence libzmq emits instead of
+// a well-formed ERROR command name.
+//
+// libzmq's plain_server_t::produce_error writes the literal "\x5ERROR",
+// intending a 0x05 length byte followed by "ERROR". In C, \x hex escapes
+// consume as many hex digits as follow, so \x5E swallows the 'E': the
+// literal is really the four characters 0x5E 'R' 'R' 'O' 'R'. The result is
+// a command whose declared name length is 94 with only four name bytes
+// behind it.
+//
+// Confirmed against libzmq 4.3.4. A gozmq client that rejects this — which
+// a strict reading of ZMTP 3.1 §5.1 requires — reports every bad-password
+// handshake against a real libzmq server as a malformed frame instead of an
+// authentication failure, which is both wrong and actively misleading.
+var libzmqBrokenErrorPrefix = []byte{0x5E, 'R', 'R', 'O', 'R'}
+
+// parseLibzmqBrokenError recognises that one malformed encoding and nothing
+// else. It runs only after the strict parse has already failed, and matches
+// the full five-byte prefix, so no other malformed name is accepted: a
+// genuinely corrupt frame still fails.
+func parseLibzmqBrokenError(body []byte) (name string, payload []byte, ok bool) {
+	if !bytes.HasPrefix(body, libzmqBrokenErrorPrefix) {
+		return "", nil, false
+	}
+	return plainCmdError, body[len(libzmqBrokenErrorPrefix):], true
 }
 
 // putShortString appends the RFC 24 short-string form — [1 byte length][bytes]
