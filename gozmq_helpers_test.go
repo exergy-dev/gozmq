@@ -7,8 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/exergy-dev/gozmq"
 	"github.com/stretchr/testify/require"
+
+	"github.com/exergy-dev/gozmq"
 )
 
 // newTestSocket creates a Context plus a single socket of the given type.

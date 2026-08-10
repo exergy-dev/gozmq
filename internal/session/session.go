@@ -22,6 +22,7 @@ import (
 
 	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/internal/zmtp"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -488,6 +489,13 @@ func (s *sessionImpl) closeWriterExited() {
 // keep-alives — the peer (or our next tick) simply retries — and
 // dropping is the price of never blocking the reader on the writer.
 func (s *sessionImpl) enqueueCommand(name string, body []byte) {
+	if len(name) > zmtp.MaxCommandNameLen {
+		// Same contract as zmtp.EncodeCommand, which this path
+		// deliberately open-codes to control buffer ownership: a name
+		// that does not fit the single length byte would be silently
+		// truncated into a malformed frame.
+		panic(fmt.Sprintf("gozmq/session: command name %q exceeds %d bytes", name, zmtp.MaxCommandNameLen))
+	}
 	buf := make([]byte, 0, 1+len(name)+len(body))
 	buf = append(buf, byte(len(name)))
 	buf = append(buf, name...)

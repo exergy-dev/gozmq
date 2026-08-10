@@ -9,9 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
 // listenLoopback binds tcp://127.0.0.1:0 and returns the resolved Listener.

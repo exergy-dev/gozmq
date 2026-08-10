@@ -161,7 +161,11 @@ func (s *sessionImpl) runSecurityHandshake() error {
 		// ReadFrame. NextHandshake copies anything it retains (metadata
 		// maps, keys), so the scratch can go back to the pool now.
 		bufpool.Put(in)
-		in = nil
+		// Drop the alias immediately. The store is dead today (every path
+		// below reassigns before the next read), but leaving a live
+		// reference to a buffer already back in the pool is exactly the
+		// shape of the use-after-free bugs this path has had before.
+		in = nil //nolint:ineffassign,staticcheck // defensive, see above
 		if err != nil {
 			// Mechanisms may return an encoded ERROR command alongside the
 			// failure (e.g. ZAP rejection) so the peer learns the reason

@@ -11,9 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
 // TestInproc_RoundTrip is the smoke: bind, dial, write, read in both
@@ -339,7 +340,7 @@ func TestInproc_ConcurrentDialsStress(t *testing.T) {
 	wg.Add(N)
 	start := time.Now()
 	for i := 0; i < N; i++ {
-		i, to := i, timeouts[i]
+		to := timeouts[i]
 		go func() {
 			defer wg.Done()
 			ctx, cancel := context.WithTimeout(context.Background(), to)

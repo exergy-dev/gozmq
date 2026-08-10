@@ -79,7 +79,9 @@ func Register[T any](
 			return v, nil
 		},
 		invoke: func(ctx context.Context, topic string, v any) error {
-			return handler(ctx, Message[T]{Topic: topic, Value: v.(T)})
+			// v came from the decode closure directly above, which
+			// always produces a T.
+			return handler(ctx, Message[T]{Topic: topic, Value: v.(T)}) //nolint:errcheck // invariant, see above
 		},
 	}
 

@@ -7,10 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/exergy-dev/gozmq"
-	"github.com/exergy-dev/gozmq/typed"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
+
+	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/typed"
 )
 
 // jsonCodec is a trivial Codec used only for tests. Keeping the package

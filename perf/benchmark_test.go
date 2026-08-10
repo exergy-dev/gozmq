@@ -90,7 +90,6 @@ func newPayload(n int) []byte {
 
 func BenchmarkReqRepRoundTrip_Inproc(b *testing.B) {
 	for _, sz := range sizes {
-		sz := sz
 		b.Run(sz.name, func(b *testing.B) {
 			benchReqRepRoundTrip(b, sz.n, inprocName(b, "reqrep-inproc-"+sz.name))
 		})
@@ -99,7 +98,6 @@ func BenchmarkReqRepRoundTrip_Inproc(b *testing.B) {
 
 func BenchmarkReqRepRoundTrip_TCP(b *testing.B) {
 	for _, sz := range sizes {
-		sz := sz
 		b.Run(sz.name, func(b *testing.B) {
 			benchReqRepRoundTrip(b, sz.n, freeTCPEndpoint)
 		})
@@ -198,7 +196,6 @@ func benchReqRepRoundTrip(b *testing.B, msgSize int, endpoint string) {
 
 func BenchmarkPushPullThroughput_Inproc(b *testing.B) {
 	for _, sz := range sizes {
-		sz := sz
 		b.Run(sz.name, func(b *testing.B) {
 			benchPushPullThroughput(b, sz.n, inprocName(b, "pushpull-inproc-"+sz.name))
 		})
@@ -207,7 +204,6 @@ func BenchmarkPushPullThroughput_Inproc(b *testing.B) {
 
 func BenchmarkPushPullThroughput_TCP(b *testing.B) {
 	for _, sz := range sizes {
-		sz := sz
 		b.Run(sz.name, func(b *testing.B) {
 			benchPushPullThroughput(b, sz.n, freeTCPEndpoint)
 		})
@@ -318,7 +314,6 @@ func benchPushPullThroughput(b *testing.B, msgSize int, endpoint string) {
 // the timer covers the PUB send plus the slowest SUB receive.
 func BenchmarkPubSubFanout_Inproc(b *testing.B) {
 	for _, sz := range sizes {
-		sz := sz
 		b.Run(sz.name, func(b *testing.B) {
 			benchPubSubFanout(b, sz.n, inprocName(b, "pubsub-inproc-"+sz.name), 3)
 		})
@@ -443,7 +438,6 @@ func benchPubSubFanout(b *testing.B, msgSize int, endpoint string, nSub int) {
 	var recvWG sync.WaitGroup
 	subCounts := make([]atomic.Int64, nSub)
 	for i, s := range subs {
-		i, s := i, s
 		recvWG.Add(1)
 		go func() {
 			defer recvWG.Done()
@@ -528,7 +522,6 @@ var routerDealerSizes = []struct {
 
 func BenchmarkRouterDealerLatency_Inproc(b *testing.B) {
 	for _, sz := range routerDealerSizes {
-		sz := sz
 		b.Run(sz.name, func(b *testing.B) {
 			benchRouterDealerLatency(b, sz.n, inprocName(b, "routerdealer-inproc-"+sz.name))
 		})
@@ -537,7 +530,6 @@ func BenchmarkRouterDealerLatency_Inproc(b *testing.B) {
 
 func BenchmarkRouterDealerLatency_TCP(b *testing.B) {
 	for _, sz := range routerDealerSizes {
-		sz := sz
 		b.Run(sz.name, func(b *testing.B) {
 			benchRouterDealerLatency(b, sz.n, freeTCPEndpoint)
 		})
@@ -646,7 +638,6 @@ func xsubSubscribeFrame(topic []byte) []byte {
 // recv on inproc.
 func BenchmarkXPubXSubLatency_Inproc(b *testing.B) {
 	for _, sz := range routerDealerSizes {
-		sz := sz
 		b.Run(sz.name, func(b *testing.B) {
 			benchXPubXSubLatency(b, sz.n, inprocName(b, "xpubxsub-lat-inproc-"+sz.name))
 		})
@@ -721,7 +712,6 @@ func benchXPubXSubLatency(b *testing.B, msgSize int, endpoint string) {
 // not per-iteration latency.
 func BenchmarkXPubXSubThroughput_Inproc(b *testing.B) {
 	for _, sz := range sizes {
-		sz := sz
 		b.Run(sz.name, func(b *testing.B) {
 			benchXPubXSubThroughput(b, sz.n, inprocName(b, "xpubxsub-thr-inproc-"+sz.name))
 		})
@@ -833,7 +823,6 @@ var reqRepThroughputSizes = routerDealerSizes
 
 func BenchmarkReqRepThroughput_Inproc(b *testing.B) {
 	for _, sz := range reqRepThroughputSizes {
-		sz := sz
 		b.Run(sz.name, func(b *testing.B) {
 			benchReqRepThroughput(b, sz.n, inprocName(b, "reqrep-thr-inproc-"+sz.name))
 		})
@@ -842,7 +831,6 @@ func BenchmarkReqRepThroughput_Inproc(b *testing.B) {
 
 func BenchmarkReqRepThroughput_TCP(b *testing.B) {
 	for _, sz := range reqRepThroughputSizes {
-		sz := sz
 		b.Run(sz.name, func(b *testing.B) {
 			benchReqRepThroughput(b, sz.n, freeTCPEndpoint)
 		})

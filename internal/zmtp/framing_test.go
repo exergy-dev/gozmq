@@ -30,7 +30,6 @@ func TestFrameRoundTrip(t *testing.T) {
 	}
 	codec := NewFrameCodec(MaxBodyUnlimited)
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var buf bytes.Buffer
@@ -91,7 +90,6 @@ func TestFrameAppendHeaderMatchesWriteFrame(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			var want bytes.Buffer
 			require.NoError(t, codec.WriteFrame(&want, tc.flags, tc.body), "WriteFrame")

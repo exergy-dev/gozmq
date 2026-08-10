@@ -26,7 +26,6 @@ func TestGetTierSizes(t *testing.T) {
 		{"exact-1m", 1024 * 1024, 1024 * 1024},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			b := Get(tc.size)

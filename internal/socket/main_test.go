@@ -5,9 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/testutil"
-	"github.com/stretchr/testify/require"
 )
 
 func TestMain(m *testing.M) { testutil.VerifyTestMain(m) }

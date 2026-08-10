@@ -268,7 +268,8 @@ func (l *tlsListener) Accept(ctx context.Context) (Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newTLSConn(c.(*tls.Conn)), nil
+	// listener is a tls.Listener, so Accept always yields a *tls.Conn.
+	return newTLSConn(c.(*tls.Conn)), nil //nolint:errcheck // invariant, see above
 }
 
 func (l *tlsListener) Close() error {

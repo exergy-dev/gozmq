@@ -9,10 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/exergy-dev/gozmq/msg"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"pgregory.net/rapid"
+
+	"github.com/exergy-dev/gozmq/msg"
 )
 
 // TestRoundTrip_Basic is the smoke test — a Send on A surfaces on B.Recv

@@ -4,9 +4,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/exergy-dev/gozmq/internal/socket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/exergy-dev/gozmq/internal/socket"
 )
 
 func TestSubTree_EmptyMatchesNothing(t *testing.T) {
@@ -14,7 +15,7 @@ func TestSubTree_EmptyMatchesNothing(t *testing.T) {
 	tr := socket.NewSubTree()
 	require.Equal(t, 0, tr.Size(), "fresh tree size")
 	cases := [][]byte{
-		nil, {}, []byte("x"), []byte("foo"), []byte{0x00},
+		nil, {}, []byte("x"), []byte("foo"), {0x00},
 	}
 	for _, c := range cases {
 		assert.False(t, tr.Match(c), "empty tree matched %q", c)
@@ -27,7 +28,7 @@ func TestSubTree_EmptyPrefixMatchesEverything(t *testing.T) {
 	tr.Add([]byte{})
 	require.Equal(t, 1, tr.Size(), "size after Add(empty)")
 	cases := [][]byte{
-		nil, {}, []byte("x"), []byte("foo"), []byte{0x00, 0xff},
+		nil, {}, []byte("x"), []byte("foo"), {0x00, 0xff},
 	}
 	for _, c := range cases {
 		assert.True(t, tr.Match(c), "empty-prefix tree did not match %q", c)

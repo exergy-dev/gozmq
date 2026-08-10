@@ -4,8 +4,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/exergy-dev/gozmq/internal/bufpool"
 	"github.com/stretchr/testify/require"
+
+	"github.com/exergy-dev/gozmq/internal/bufpool"
 )
 
 func TestMsgAppendFrame(t *testing.T) {

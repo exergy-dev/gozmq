@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"slices"
 	"sync"
@@ -273,8 +274,5 @@ func synthFallback(dst []byte) {
 	synthCounter++
 	c := synthCounter
 	synthMu.Unlock()
-	dst[0] = byte(c >> 24)
-	dst[1] = byte(c >> 16)
-	dst[2] = byte(c >> 8)
-	dst[3] = byte(c)
+	binary.BigEndian.PutUint32(dst[:4], c)
 }

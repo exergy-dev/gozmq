@@ -3,8 +3,9 @@ package codecjson_test
 import (
 	"testing"
 
-	"github.com/exergy-dev/gozmq/typed/codecjson"
 	"github.com/stretchr/testify/require"
+
+	"github.com/exergy-dev/gozmq/typed/codecjson"
 )
 
 type thing struct {

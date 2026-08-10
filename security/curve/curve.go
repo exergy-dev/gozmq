@@ -515,7 +515,7 @@ func (m *curveMech) buildWelcome() ([]byte, error) {
 	cookiePlain = append(cookiePlain, m.peerEphPublic[:]...)
 	cookiePlain = append(cookiePlain, m.ourEphSecret[:]...)
 	// Encrypt with server-only cookieKey via secretbox.
-	cookieCipher := secretbox.Seal(nil, cookiePlain, (*[24]byte)(&cookieNonce), (*[32]byte)(&m.cookieKey))
+	cookieCipher := secretbox.Seal(nil, cookiePlain, &cookieNonce, &m.cookieKey)
 	wipe(cookiePlain)
 	if err := assertLen(len(cookieCipher), cookieInnerSize, "cookie cipher"); err != nil {
 		return nil, err
@@ -531,7 +531,7 @@ func (m *curveMech) buildWelcome() ([]byte, error) {
 	welPlain = append(welPlain, cookie...)
 
 	// Welcome box: box(welPlain, welNonce, C', s).
-	welBox := box.Seal(nil, welPlain, (*[24]byte)(&welNonce), (*[32]byte)(&m.peerEphPublic), (*[32]byte)(&m.ourSecret))
+	welBox := box.Seal(nil, welPlain, &welNonce, (*[32]byte)(&m.peerEphPublic), (*[32]byte)(&m.ourSecret))
 	if err := assertLen(len(welBox), welcomeBoxSize, "welcome box"); err != nil {
 		return nil, err
 	}
@@ -563,7 +563,7 @@ func (m *curveMech) parseWelcome(body []byte) ([]byte, error) {
 	off += 16
 	welBox := body[off : off+welcomeBoxSize]
 	nonce := longNonce(prefixWelcome, welNonceR)
-	plain, ok := box.Open(nil, welBox, (*[24]byte)(&nonce), (*[32]byte)(&m.peerPublic), (*[32]byte)(&m.ourEphSecret))
+	plain, ok := box.Open(nil, welBox, &nonce, (*[32]byte)(&m.peerPublic), (*[32]byte)(&m.ourEphSecret))
 	if !ok {
 		return nil, fmt.Errorf("gozmq/security/curve: WELCOME box open failed: %w", zmqerr.ErrAuthFailed)
 	}
@@ -610,7 +610,7 @@ func (m *curveMech) buildInitiate(cookie []byte) ([]byte, error) {
 	vouchPlain := make([]byte, 0, 64)
 	vouchPlain = append(vouchPlain, m.ourEphPublic[:]...)
 	vouchPlain = append(vouchPlain, m.peerPublic[:]...)
-	vouchBox := box.Seal(nil, vouchPlain, (*[24]byte)(&vouchNonce), (*[32]byte)(&m.peerEphPublic), (*[32]byte)(&m.ourSecret))
+	vouchBox := box.Seal(nil, vouchPlain, &vouchNonce, (*[32]byte)(&m.peerEphPublic), (*[32]byte)(&m.ourSecret))
 	if err := assertLen(len(vouchBox), vouchBoxSize, "vouch box"); err != nil {
 		return nil, err
 	}
@@ -667,7 +667,7 @@ func (m *curveMech) parseInitiate(body []byte) ([]byte, error) {
 	cookieCipher := body[off+16 : off+cookieSize]
 	off += cookieSize
 	cookieNonce := longNonce(prefixCookie, cookieNonceR)
-	cookiePlain, ok := secretbox.Open(nil, cookieCipher, (*[24]byte)(&cookieNonce), (*[32]byte)(&m.cookieKey))
+	cookiePlain, ok := secretbox.Open(nil, cookieCipher, &cookieNonce, &m.cookieKey)
 	if !ok {
 		return nil, fmt.Errorf("gozmq/security/curve: INITIATE cookie open failed: %w", zmqerr.ErrAuthFailed)
 	}
@@ -729,7 +729,7 @@ func (m *curveMech) parseInitiate(body []byte) ([]byte, error) {
 	// Open vouch: encrypted with c (client long-term secret) -> S' (our ephemeral public).
 	// We open using our ephemeral secret s' + clientLongPub.
 	vouchNonce := longNonce(prefixVouch, vouchR)
-	vouchPlain, ok := box.Open(nil, vouchBox, (*[24]byte)(&vouchNonce), (*[32]byte)(&clientLongPub), (*[32]byte)(&m.ourEphSecret))
+	vouchPlain, ok := box.Open(nil, vouchBox, &vouchNonce, (*[32]byte)(&clientLongPub), (*[32]byte)(&m.ourEphSecret))
 	if !ok {
 		return nil, fmt.Errorf("gozmq/security/curve: INITIATE vouch open failed: %w", zmqerr.ErrAuthFailed)
 	}
@@ -878,7 +878,7 @@ func (m *curveMech) EncodeFrame(flags uint8, plain []byte) (uint8, []byte, error
 	body[0] = byte(len(cmdMessage))
 	copy(body[1:], cmdMessage)
 	binary.BigEndian.PutUint64(body[1+len(cmdMessage):], counter)
-	body = box.SealAfterPrecomputation(body, inner, (*[24]byte)(&nonce), &m.shared)
+	body = box.SealAfterPrecomputation(body, inner, &nonce, &m.shared)
 	return flags &^ zmtp.FlagMore, body, nil
 }
 
@@ -913,7 +913,7 @@ func (m *curveMech) DecodeFrame(flags uint8, wire []byte) (uint8, []byte, error)
 		return 0, nil, err
 	}
 	nonce := shortNonce(m.decPrefix, counter)
-	plain, ok := box.OpenAfterPrecomputation(nil, wire[off:], (*[24]byte)(&nonce), &m.shared)
+	plain, ok := box.OpenAfterPrecomputation(nil, wire[off:], &nonce, &m.shared)
 	if !ok {
 		return 0, nil, fmt.Errorf("gozmq/security/curve: MESSAGE box open failed: %w", zmqerr.ErrMalformedFrame)
 	}
@@ -940,13 +940,13 @@ func (m *curveMech) DecodeFrame(flags uint8, wire []byte) (uint8, []byte, error)
 // nonce.go.
 func sealShort(prefix string, counter uint64, plain []byte, peerPub, ourSec *Key) []byte {
 	nonce := shortNonce(prefix, counter)
-	return box.Seal(nil, plain, (*[24]byte)(&nonce), (*[32]byte)(peerPub), (*[32]byte)(ourSec))
+	return box.Seal(nil, plain, &nonce, (*[32]byte)(peerPub), (*[32]byte)(ourSec))
 }
 
 // openShort is the inverse of sealShort. ok is false on MAC failure.
 func openShort(prefix string, counter uint64, cipher []byte, peerPub, ourSec *Key) ([]byte, bool) {
 	nonce := shortNonce(prefix, counter)
-	return box.Open(nil, cipher, (*[24]byte)(&nonce), (*[32]byte)(peerPub), (*[32]byte)(ourSec))
+	return box.Open(nil, cipher, &nonce, (*[32]byte)(peerPub), (*[32]byte)(ourSec))
 }
 
 // assertLen is the build-time self-check used after every fixed-size seal:

@@ -31,7 +31,6 @@ func TestValidateSocketTypeCompatibility(t *testing.T) {
 		{local: "PAIR", peer: "PAIR"},
 	}
 	for _, tc := range accepted {
-		tc := tc
 		t.Run(tc.local+"_to_"+tc.peer, func(t *testing.T) {
 			t.Parallel()
 			err := validateSocketTypeCompatibility(
@@ -74,7 +73,6 @@ func TestValidateSocketTypeCompatibility(t *testing.T) {
 		},
 	}
 	for _, tc := range rejected {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			err := validateSocketTypeCompatibility(tc.local, tc.peer)

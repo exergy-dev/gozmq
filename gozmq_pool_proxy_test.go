@@ -5,8 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/exergy-dev/gozmq"
 	"github.com/stretchr/testify/require"
+
+	"github.com/exergy-dev/gozmq"
 )
 
 // TestProxy_PooledLargeFrameRoundTrip is a regression test for a writer

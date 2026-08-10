@@ -5,13 +5,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // helper: build N pipe pairs with given HWMs. Returns engine ends and
@@ -395,7 +396,6 @@ func TestLoadBalancer_TwoParkedSendersWakeOnAttach(t *testing.T) {
 	ctx := testCtx(t)
 	done := make(chan error, 2)
 	for i := 0; i < 2; i++ {
-		i := i
 		go func() { done <- lb.Send(ctx, msg.FromBytes([]byte{byte(i)})) }()
 	}
 	time.Sleep(50 * time.Millisecond) // both park on the no-peer wait

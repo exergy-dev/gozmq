@@ -5,6 +5,7 @@ package interop
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"testing"
 	"time"
@@ -214,7 +215,7 @@ func drainGozmqReceiver(t *testing.T, receiver *gozmq.Socket) int {
 		msg, err := receiver.RecvMsg(recvCtx)
 		cancel()
 		if err != nil {
-			if err == context.DeadlineExceeded || err == io.EOF {
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) {
 				return got
 			}
 			t.Fatalf("gozmq recv: %v", err)

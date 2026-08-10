@@ -88,7 +88,10 @@ func Get(size int) []byte {
 	if i < 0 {
 		return make([]byte, size)
 	}
-	bp := bufPools[i].Get().(*[]byte)
+	// The tier pools are private and their New returns only *[]byte, so
+	// the assertion cannot fail; a panic here would mean the pool was
+	// corrupted from inside this file.
+	bp := bufPools[i].Get().(*[]byte) //nolint:errcheck // invariant, see above
 	b := (*bp)[:size]
 	*bp = nil
 	slicePtrPool.Put(bp)
@@ -113,7 +116,7 @@ func Put(b []byte) {
 		return
 	}
 	b = b[:0]
-	p := slicePtrPool.Get().(*[]byte)
+	p := slicePtrPool.Get().(*[]byte) //nolint:errcheck // private pool, New returns only *[]byte
 	*p = b
 	bufPools[i].Put(p)
 }

@@ -110,7 +110,6 @@ func TestMetadataDecodeTruncatedInputs(t *testing.T) {
 		if boundaries[i] {
 			continue
 		}
-		i := i
 		t.Run(fmt.Sprintf("truncate-at-%d", i), func(t *testing.T) {
 			_, err := MetadataCodec.Decode(good[:i])
 			require.ErrorIs(t, err, zmqerr.ErrMalformedFrame, "Decode(truncated)")

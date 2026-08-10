@@ -15,6 +15,7 @@ package curve
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -82,8 +83,10 @@ func Z85Encode(b []byte) string {
 	out := make([]byte, outLen)
 	oi := 0
 	for i := 0; i < len(b); i += 4 {
-		// Big-endian uint32 over the 4-byte chunk.
-		v := uint32(b[i])<<24 | uint32(b[i+1])<<16 | uint32(b[i+2])<<8 | uint32(b[i+3])
+		// Big-endian uint32 over the 4-byte chunk. i+3 is always in
+		// range: the loop steps by 4 and len(b)%4 == 0 is enforced by the
+		// panic above.
+		v := binary.BigEndian.Uint32(b[i : i+4])
 		// Emit 5 base-85 digits most-significant first.
 		out[oi+4] = z85Alphabet[v%85]
 		v /= 85

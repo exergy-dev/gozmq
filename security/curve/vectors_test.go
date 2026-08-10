@@ -8,9 +8,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/exergy-dev/gozmq/security"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/exergy-dev/gozmq/security"
 )
 
 // deterministicReader is a non-cryptographic io.Reader derived from a

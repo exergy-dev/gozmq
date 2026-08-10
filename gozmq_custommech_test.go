@@ -7,9 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/exergy-dev/gozmq"
 	"github.com/exergy-dev/gozmq/security"
-	"github.com/stretchr/testify/require"
 )
 
 // This file is the executable form of the claim made in the docs for

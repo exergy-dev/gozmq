@@ -8,8 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/exergy-dev/gozmq"
 	"github.com/stretchr/testify/require"
+
+	"github.com/exergy-dev/gozmq"
 )
 
 // startProxy runs Proxy in the background and returns a stop function that
@@ -73,7 +74,7 @@ func TestProxyXSubXPub(t *testing.T) {
 
 	// PUB/SUB has no delivery guarantee before the subscription has
 	// propagated through both hops, so publish until one arrives.
-	got := recvWithRetry(t, ctx, sub, func() {
+	got := recvWithRetry(ctx, t, sub, func() {
 		require.NoError(t, pub.SendBytes(ctx, []byte("topic.a|payload")))
 	})
 	require.Equal(t, "topic.a|payload", string(got))
@@ -309,7 +310,7 @@ func TestProxyStopsCleanlyOnSocketClose(t *testing.T) {
 // recvWithRetry re-runs send until sub receives something or ctx expires.
 // PUB/SUB drops messages published before the subscription has propagated,
 // which through a proxy takes two hops.
-func recvWithRetry(t *testing.T, ctx context.Context, sub *gozmq.Socket, send func()) []byte {
+func recvWithRetry(ctx context.Context, t *testing.T, sub *gozmq.Socket, send func()) []byte {
 	t.Helper()
 	for {
 		if ctx.Err() != nil {

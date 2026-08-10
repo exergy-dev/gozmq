@@ -6,8 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/exergy-dev/gozmq"
 	"github.com/stretchr/testify/require"
+
+	"github.com/exergy-dev/gozmq"
 )
 
 // TestSubscribe_RefcountedBehavior verifies that SUB's Subscribe/Unsubscribe

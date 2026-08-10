@@ -11,9 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
 // tmpSock returns a unique socket path under t.TempDir. Paths must be

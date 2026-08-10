@@ -5,9 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
+
+	"github.com/exergy-dev/gozmq/internal/iface"
 )
 
 var closedWaitSessionCh = func() <-chan struct{} {

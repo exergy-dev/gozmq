@@ -23,7 +23,6 @@ func TestCommandRoundTrip(t *testing.T) {
 		{name: "disconnect-empty", cmd: Command{Name: "DISCONNECT", Body: nil}},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			raw := EncodeCommand(tc.cmd)
@@ -59,7 +58,6 @@ func TestCommandRejects(t *testing.T) {
 		{name: "non-printable-name", raw: []byte{0x03, 'R', 0x01, 'Y'}},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			_, err := DecodeCommand(tc.raw)

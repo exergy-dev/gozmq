@@ -7,9 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/goleak"
+
 	"github.com/exergy-dev/gozmq"
 	"github.com/exergy-dev/gozmq/security/curve"
-	"go.uber.org/goleak"
 )
 
 func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }

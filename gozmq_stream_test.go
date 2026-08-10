@@ -2,6 +2,7 @@ package gozmq_test
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -83,7 +84,7 @@ func TestSocketStream_TCP_HTTPEcho(t *testing.T) {
 	// Reads on the client should now return EOF (possibly after the
 	// echo flushes).
 	_, err = io.ReadAll(cli)
-	if err != nil && err != io.EOF {
+	if err != nil && !errors.Is(err, io.EOF) {
 		// net may return a "use of closed network connection" if we
 		// already closed, but io.ReadAll translates EOF to nil err.
 		t.Fatalf("client ReadAll after half-close: %v", err)

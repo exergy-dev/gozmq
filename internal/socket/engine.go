@@ -181,4 +181,4 @@ type chanPipe interface {
 // a structural invariant (*pipe.end is the sole iface.Pipe
 // implementation); failure means a new pipe type was introduced without
 // the channel accessors and is a programmer error worth the panic.
-func asChanPipe(p iface.Pipe) chanPipe { return p.(chanPipe) }
+func asChanPipe(p iface.Pipe) chanPipe { return p.(chanPipe) } //nolint:errcheck // deliberate panic, see above

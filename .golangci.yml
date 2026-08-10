@@ -1,0 +1,111 @@
+version: "2"
+
+run:
+  timeout: 5m
+  # The interop harness is the only cgo in the repo and is build-tagged;
+  # lint it too so it does not rot.
+  build-tags:
+    - interop
+    - soak
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - copyloopvar
+    - errcheck
+    - errorlint
+    - govet
+    - gosec
+    - ineffassign
+    - misspell
+    - nilerr
+    - revive
+    - staticcheck
+    - unconvert
+    - unused
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+
+    govet:
+      enable-all: true
+      disable:
+        # Struct field alignment is a micro-optimisation that fights
+        # readability; the hot-path structs are laid out deliberately.
+        - fieldalignment
+        # `if err := f(); err != nil` shadows an outer err by design and is
+        # the idiomatic form. The check cannot distinguish that from a real
+        # mistake, so it is ~50 false positives here and no true ones.
+        - shadow
+
+    gosec:
+      excludes:
+        # G404: math/rand is used only for reconnect-backoff jitter, which
+        # is not a security decision. Everything cryptographic uses
+        # crypto/rand — see security/curve.
+        - G404
+        # G115 (integer overflow on conversion): every site in this module
+        # was audited individually. All are `byte(len(x))` / `uint32(len(x))`
+        # narrowings guarded by an explicit bound immediately above them —
+        # zmtp.MaxCommandNameLen, the 255/2^32-1 metadata panics,
+        # validateWriteFrame's short/long-form choice — or widenings of a
+        # non-negative length. The audit did turn up two genuine issues
+        # (an unguarded command-name length byte in the session writer, and
+        # hand-rolled big-endian extraction); both are fixed, and the
+        # remainder are false positives at a rate that makes the check
+        # counterproductive to keep on.
+        - G115
+
+    revive:
+      rules:
+        - name: exported
+          # Every exported symbol in this module is documented; keep it
+          # that way.
+          arguments:
+            - disableStutteringCheck
+        - name: package-comments
+        - name: indent-error-flow
+        - name: errorf
+        - name: error-return
+        - name: error-naming
+        - name: increment-decrement
+        - name: var-declaration
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: context-as-argument
+        - name: context-keys-type
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - std-error-handling
+    rules:
+      # Tests deliberately ignore errors on teardown paths and construct
+      # deliberately-bad inputs.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - bodyclose
+      # The perf CLIs and examples are demonstration programs: terse
+      # error handling there is the point.
+      - path: (^perf/|^examples/)
+        linters:
+          - errcheck
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/exergy-dev/gozmq
