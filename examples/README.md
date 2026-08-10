@@ -13,6 +13,7 @@ go run ./examples/pubsub_topics
 go run ./examples/pushpull_pipeline
 go run ./examples/router_dealer_workers
 go run ./examples/monitor_events
+go run ./examples/proxy_xsub_xpub
 go run ./examples/security_plain
 go run ./examples/security_curve
 go run ./examples/stream_echo
@@ -28,6 +29,7 @@ go run ./examples/typed_topicmux
 - `pushpull_pipeline`: PUSH/PULL work distribution across multiple workers.
 - `router_dealer_workers`: ROUTER/DEALER identity routing and multipart envelopes.
 - `monitor_events`: socket lifecycle monitoring with buffered event channels.
+- `proxy_xsub_xpub`: `gozmq.Proxy` as a PUB/SUB forwarder, with an optional capture tap.
 - `security_plain`: username/password authentication with PLAIN.
 - `security_curve`: CurveZMQ key generation and encrypted message exchange.
 - `stream_echo`: STREAM socket talking to a plain TCP client.
