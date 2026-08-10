@@ -9,7 +9,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
@@ -24,10 +23,10 @@ func TestFrameRoundTrip(t *testing.T) {
 		{name: "single-byte", flags: 0, body: []byte{0xAA}},
 		{name: "max-short", flags: 0, body: bytes.Repeat([]byte{0x55}, 255)},
 		{name: "first-long", flags: 0, body: bytes.Repeat([]byte{0x33}, 256)},
-		{name: "command-flag", flags: iface.FlagCommand, body: []byte("READY")},
-		{name: "more-flag", flags: iface.FlagMore, body: []byte("part1")},
-		{name: "long-forced", flags: iface.FlagLong, body: []byte{0x01, 0x02, 0x03}},
-		{name: "all-flags", flags: iface.FlagMore | iface.FlagLong | iface.FlagCommand, body: bytes.Repeat([]byte{0xCC}, 1024)},
+		{name: "command-flag", flags: FlagCommand, body: []byte("READY")},
+		{name: "more-flag", flags: FlagMore, body: []byte("part1")},
+		{name: "long-forced", flags: FlagLong, body: []byte{0x01, 0x02, 0x03}},
+		{name: "all-flags", flags: FlagMore | FlagLong | FlagCommand, body: bytes.Repeat([]byte{0xCC}, 1024)},
 	}
 	codec := NewFrameCodec(MaxBodyUnlimited)
 	for _, tc := range cases {
@@ -41,7 +40,7 @@ func TestFrameRoundTrip(t *testing.T) {
 			// LONG may be promoted by the encoder; the other bits must round-trip.
 			wantFlags := tc.flags
 			if len(tc.body) > 255 {
-				wantFlags |= iface.FlagLong
+				wantFlags |= FlagLong
 			}
 			require.Equal(t, wantFlags, gotFlags, "flags")
 			if len(tc.body) == 0 {
@@ -59,8 +58,8 @@ func TestFrameWireFormat(t *testing.T) {
 	codec := NewFrameCodec(MaxBodyUnlimited)
 	t.Run("short", func(t *testing.T) {
 		var buf bytes.Buffer
-		require.NoError(t, codec.WriteFrame(&buf, iface.FlagCommand, []byte{1, 2, 3}), "WriteFrame")
-		want := []byte{iface.FlagCommand, 0x03, 0x01, 0x02, 0x03}
+		require.NoError(t, codec.WriteFrame(&buf, FlagCommand, []byte{1, 2, 3}), "WriteFrame")
+		want := []byte{FlagCommand, 0x03, 0x01, 0x02, 0x03}
 		require.Equal(t, want, buf.Bytes())
 	})
 	t.Run("long", func(t *testing.T) {
@@ -68,7 +67,7 @@ func TestFrameWireFormat(t *testing.T) {
 		var buf bytes.Buffer
 		require.NoError(t, codec.WriteFrame(&buf, 0, body), "WriteFrame")
 		got := buf.Bytes()
-		require.Equal(t, iface.FlagLong, got[0], "flags")
+		require.Equal(t, FlagLong, got[0], "flags")
 		ln := binary.BigEndian.Uint64(got[1:9])
 		require.Equal(t, uint64(len(body)), ln, "length")
 		require.Equal(t, body, got[9:], "body")
@@ -78,7 +77,7 @@ func TestFrameWireFormat(t *testing.T) {
 func TestFrameAppendHeaderMatchesWriteFrame(t *testing.T) {
 	t.Parallel()
 	codec := NewFrameCodec(MaxBodyUnlimited)
-	appender, ok := codec.(iface.FrameHeaderAppender)
+	appender, ok := codec.(FrameHeaderAppender)
 	require.True(t, ok, "codec does not implement FrameHeaderAppender")
 
 	cases := []struct {
@@ -86,8 +85,8 @@ func TestFrameAppendHeaderMatchesWriteFrame(t *testing.T) {
 		flags uint8
 		body  []byte
 	}{
-		{name: "short", flags: iface.FlagCommand, body: []byte("READY")},
-		{name: "long", flags: iface.FlagMore, body: bytes.Repeat([]byte{0xAB}, 300)},
+		{name: "short", flags: FlagCommand, body: []byte("READY")},
+		{name: "long", flags: FlagMore, body: bytes.Repeat([]byte{0xAB}, 300)},
 		{name: "empty", flags: 0, body: nil},
 	}
 
@@ -145,7 +144,7 @@ func TestFrameMaxBodyEnforced(t *testing.T) {
 	})
 
 	t.Run("decode-rejects-oversize-long", func(t *testing.T) {
-		raw := []byte{iface.FlagLong, 0, 0, 0, 0, 0, 0, 0, 17}
+		raw := []byte{FlagLong, 0, 0, 0, 0, 0, 0, 0, 17}
 		raw = append(raw, bytes.Repeat([]byte{0xAA}, 17)...)
 		_, _, err := codec.ReadFrame(bytes.NewReader(raw), nil)
 		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
@@ -177,7 +176,7 @@ func TestFrameTruncated(t *testing.T) {
 		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 	})
 	t.Run("missing-long-length", func(t *testing.T) {
-		_, _, err := codec.ReadFrame(bytes.NewReader([]byte{iface.FlagLong, 0, 0, 0}), nil)
+		_, _, err := codec.ReadFrame(bytes.NewReader([]byte{FlagLong, 0, 0, 0}), nil)
 		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 	})
 }
@@ -196,10 +195,10 @@ func TestFrameNewFrameCodecPanicsOnNegative(t *testing.T) {
 func FuzzFrameDecode(f *testing.F) {
 	// Seed with a couple of valid frames so the fuzzer has a starting point.
 	f.Add([]byte{0x00, 0x00})
-	f.Add([]byte{iface.FlagCommand, 0x05, 'R', 'E', 'A', 'D', 'Y'})
-	f.Add(append([]byte{iface.FlagLong, 0, 0, 0, 0, 0, 0, 0, 0x04}, []byte{1, 2, 3, 4}...))
-	f.Add([]byte{0xFF})           // reserved flag bits
-	f.Add([]byte{iface.FlagLong}) // truncated long header
+	f.Add([]byte{FlagCommand, 0x05, 'R', 'E', 'A', 'D', 'Y'})
+	f.Add(append([]byte{FlagLong, 0, 0, 0, 0, 0, 0, 0, 0x04}, []byte{1, 2, 3, 4}...))
+	f.Add([]byte{0xFF})     // reserved flag bits
+	f.Add([]byte{FlagLong}) // truncated long header
 
 	codec := NewFrameCodec(1 << 20)
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -214,7 +213,7 @@ func FuzzFrameDecode(f *testing.F) {
 		flags2, body2, err2 := codec.ReadFrame(&buf, nil)
 		require.NoError(t, err2, "re-decode failed")
 		// LONG is always set by re-encode for the round-trip when forced; mask it.
-		require.Equal(t, flags & ^iface.FlagLong, flags2 & ^iface.FlagLong, "flags drift")
+		require.Equal(t, flags & ^FlagLong, flags2 & ^FlagLong, "flags drift")
 		require.Equal(t, body, body2, "body drift")
 	})
 }

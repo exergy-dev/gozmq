@@ -22,7 +22,6 @@ package security
 import (
 	"fmt"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
 )
@@ -63,7 +62,7 @@ const (
 	plainDone
 )
 
-// plainMech implements iface.SecurityMech for the PLAIN mechanism.
+// plainMech implements Mech for the PLAIN mechanism.
 //
 // A single value is not safe for concurrent use; the session layer drives
 // NextHandshake single-threaded.
@@ -79,9 +78,9 @@ type plainMech struct {
 // advertises localMeta in its outbound INITIATE. username and password are
 // sent verbatim in HELLO, per RFC 24 §4 (length-prefixed, max 255 each).
 // localMeta may be nil.
-func NewPlainClient(username, password string, localMeta map[string]string) iface.SecurityMech {
+func NewPlainClient(username, password string, localMeta map[string]string) Mech {
 	return &plainMech{
-		MechBase: NewMechBase(iface.RoleClient, localMeta),
+		MechBase: NewMechBase(RoleClient, localMeta),
 		state:    plainClientSendHello,
 		username: username,
 		password: password,
@@ -91,7 +90,7 @@ func NewPlainClient(username, password string, localMeta map[string]string) ifac
 // NewPlainServer returns a PLAIN mechanism configured as the acceptor. The
 // authenticate callback is invoked once on receipt of HELLO; returning false
 // causes the mechanism to emit an ERROR command and return an error wrapping
-// zmqerr.ErrAuthFailed from the next NextHandshake call so the session layer
+// gozmq.ErrAuthFailed from the next NextHandshake call so the session layer
 // tears the connection down. A nil authenticate callback is equivalent to one
 // that always returns false.
 //
@@ -100,9 +99,9 @@ func NewPlainClient(username, password string, localMeta map[string]string) ifac
 // ==, so a network peer cannot use response timing to probe the password
 // byte-by-byte. The credentials are not retained by the mechanism after the
 // authentication decision is made.
-func NewPlainServer(authenticate func(user, pass string) bool, localMeta map[string]string) iface.SecurityMech {
+func NewPlainServer(authenticate func(user, pass string) bool, localMeta map[string]string) Mech {
 	return &plainMech{
-		MechBase: NewMechBase(iface.RoleServer, localMeta),
+		MechBase: NewMechBase(RoleServer, localMeta),
 		state:    plainServerSeed,
 		authFn:   authenticate,
 	}

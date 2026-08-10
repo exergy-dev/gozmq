@@ -5,8 +5,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/zmtp"
 )
 
 // TestNullHandshakeEndToEnd drives two NULL mechanisms — one server, one
@@ -23,8 +23,8 @@ func TestNullHandshakeEndToEnd(t *testing.T) {
 		"Resource":    "/api",
 	}
 
-	client := NewNull(iface.RoleClient, clientMeta)
-	server := NewNull(iface.RoleServer, serverMeta)
+	client := NewNull(RoleClient, clientMeta)
+	server := NewNull(RoleServer, serverMeta)
 
 	require.False(t, client.AsServer(), "client.AsServer should be false")
 	require.True(t, server.AsServer(), "server.AsServer should be true")
@@ -79,13 +79,13 @@ func TestNullHandshakeEndToEnd(t *testing.T) {
 // TestNullEncodeDecodeFrameIdentity verifies NULL applies no per-frame
 // transformation — plaintext and flags are preserved exactly.
 func TestNullEncodeDecodeFrameIdentity(t *testing.T) {
-	m := NewNull(iface.RoleClient, nil)
+	m := NewNull(RoleClient, nil)
 	for _, tc := range []struct {
 		flags uint8
 		input [][]byte
 	}{
 		{flags: 0, input: [][]byte{nil, {}, {0x00}, []byte("hello, zmq"), make([]byte, 4096)}},
-		{flags: iface.FlagMore | iface.FlagCommand, input: [][]byte{[]byte("flagged")}},
+		{flags: zmtp.FlagMore | zmtp.FlagCommand, input: [][]byte{[]byte("flagged")}},
 	} {
 		for _, input := range tc.input {
 			wireFlags, enc, err := m.EncodeFrame(tc.flags, input)
@@ -103,7 +103,7 @@ func TestNullEncodeDecodeFrameIdentity(t *testing.T) {
 // TestNullSetPeerMetadataStores checks SetPeerMetadata is a pure store
 // (NULL does no validation) and that nil clears the state.
 func TestNullSetPeerMetadataStores(t *testing.T) {
-	m := NewNull(iface.RoleServer, nil).(*nullMech)
+	m := NewNull(RoleServer, nil).(*nullMech)
 	props := map[string]string{"Socket-Type": "PAIR"}
 	require.NoError(t, m.SetPeerMetadata(props))
 	require.Equal(t, props, m.PeerMetadata())
@@ -121,13 +121,13 @@ func TestNullSetPeerMetadataStores(t *testing.T) {
 // on the ingest step.
 func TestNullNextHandshakeRejectsMalformed(t *testing.T) {
 	t.Run("non-nil-on-seed", func(t *testing.T) {
-		m := NewNull(iface.RoleClient, nil)
+		m := NewNull(RoleClient, nil)
 		_, _, err := m.NextHandshake([]byte{0x00})
 		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 	})
 
 	t.Run("nil-on-ingest", func(t *testing.T) {
-		m := NewNull(iface.RoleClient, nil)
+		m := NewNull(RoleClient, nil)
 		_, _, err := m.NextHandshake(nil)
 		require.NoError(t, err, "seed")
 		_, _, err = m.NextHandshake(nil)
@@ -135,7 +135,7 @@ func TestNullNextHandshakeRejectsMalformed(t *testing.T) {
 	})
 
 	t.Run("wrong-command-name", func(t *testing.T) {
-		m := NewNull(iface.RoleClient, nil)
+		m := NewNull(RoleClient, nil)
 		_, _, err := m.NextHandshake(nil)
 		require.NoError(t, err, "seed")
 		// Fabricate a command that is not READY.
@@ -145,7 +145,7 @@ func TestNullNextHandshakeRejectsMalformed(t *testing.T) {
 	})
 
 	t.Run("truncated-name", func(t *testing.T) {
-		m := NewNull(iface.RoleClient, nil)
+		m := NewNull(RoleClient, nil)
 		_, _, err := m.NextHandshake(nil)
 		require.NoError(t, err, "seed")
 		// Declares a 5-byte name but only supplies 2 bytes.
@@ -155,7 +155,7 @@ func TestNullNextHandshakeRejectsMalformed(t *testing.T) {
 	})
 
 	t.Run("empty-body", func(t *testing.T) {
-		m := NewNull(iface.RoleClient, nil)
+		m := NewNull(RoleClient, nil)
 		_, _, err := m.NextHandshake(nil)
 		require.NoError(t, err, "seed")
 		_, _, err = m.NextHandshake([]byte{})
@@ -167,7 +167,7 @@ func TestNullNextHandshakeRejectsMalformed(t *testing.T) {
 // mutation can't leak into what the mechanism sends on the wire.
 func TestNullMetadataIsolated(t *testing.T) {
 	local := map[string]string{"Socket-Type": "REQ"}
-	m := NewNull(iface.RoleClient, local)
+	m := NewNull(RoleClient, local)
 
 	// Caller mutates the map they passed in — mechanism must be unaffected.
 	local["Socket-Type"] = "REP"
@@ -184,7 +184,7 @@ func TestNullMetadataIsolated(t *testing.T) {
 // pumpNull drives a NULL client/server pair to completion, returning any
 // errors each side produced. Mirrors pumpPlain but for NULL's two-step
 // READY exchange.
-func pumpNull(t *testing.T, client, server iface.SecurityMech) (clientErr, serverErr error) {
+func pumpNull(t *testing.T, client, server Mech) (clientErr, serverErr error) {
 	t.Helper()
 	clientReady, _, err := client.NextHandshake(nil)
 	require.NoError(t, err, "client seed")
@@ -209,11 +209,11 @@ func pumpNull(t *testing.T, client, server iface.SecurityMech) (clientErr, serve
 // domain/address, and (b) the metadata from the ZAP reply is merged into
 // the peer metadata, overlaying the peer-supplied properties.
 func TestNullZAP_AcceptMergesMetadata(t *testing.T) {
-	client := NewNull(iface.RoleClient, map[string]string{
+	client := NewNull(RoleClient, map[string]string{
 		"Socket-Type": "PAIR",
 		"Identity":    "client-1",
 	})
-	server := NewNull(iface.RoleServer, map[string]string{"Socket-Type": "PAIR"})
+	server := NewNull(RoleServer, map[string]string{"Socket-Type": "PAIR"})
 
 	var gotDomain, gotAddr, gotMech string
 	server.(*nullMech).ConfigureZAP(func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
@@ -240,8 +240,8 @@ func TestNullZAP_AcceptMergesMetadata(t *testing.T) {
 // error wrapping ErrAuthFailed AND hands back an encoded ZMTP ERROR command
 // body, so the peer learns it was refused instead of seeing an abrupt close.
 func TestNullZAP_RejectEmitsError(t *testing.T) {
-	client := NewNull(iface.RoleClient, nil)
-	server := NewNull(iface.RoleServer, nil)
+	client := NewNull(RoleClient, nil)
+	server := NewNull(RoleServer, nil)
 	server.(*nullMech).ConfigureZAP(func(string, string, string, [][]byte) (string, map[string]string, error) {
 		return "", nil, zmqerr.ErrAuthFailed
 	}, "global", "127.0.0.1:1234")
@@ -264,12 +264,12 @@ func TestNullZAP_RejectEmitsError(t *testing.T) {
 
 // TestNullClientIgnoresConfigureZAP: the hook is server-only.
 func TestNullClientIgnoresConfigureZAP(t *testing.T) {
-	client := NewNull(iface.RoleClient, nil)
+	client := NewNull(RoleClient, nil)
 	client.(*nullMech).ConfigureZAP(func(string, string, string, [][]byte) (string, map[string]string, error) {
 		require.Fail(t, "client-side ZAP hook must never fire")
 		return "", nil, nil
 	}, "global", "addr")
-	server := NewNull(iface.RoleServer, nil)
+	server := NewNull(RoleServer, nil)
 	cerr, serr := pumpNull(t, client, server)
 	require.NoError(t, cerr)
 	require.NoError(t, serr)

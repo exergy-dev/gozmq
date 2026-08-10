@@ -8,10 +8,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/exergy-dev/gozmq/security"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/exergy-dev/gozmq/internal/iface"
 )
 
 // deterministicReader is a non-cryptographic io.Reader derived from a
@@ -60,9 +59,9 @@ func TestCurveHandshakeDeterministic(t *testing.T) {
 	run := func(rngSeed uint64) (hello, welcome, initiate, ready, msgCS, msgSC []byte) {
 		cRand := newDeterministicReader(rngSeed)
 		sRand := newDeterministicReader(rngSeed ^ 0xDEADBEEF)
-		client, err := newMech(iface.RoleClient, clientSec, clientPub, serverPub, nil, cRand)
+		client, err := newMech(security.RoleClient, clientSec, clientPub, serverPub, nil, cRand)
 		require.NoError(t, err, "newMech client")
-		server, err := newMech(iface.RoleServer, serverSec, Key{}, Key{}, nil, sRand)
+		server, err := newMech(security.RoleServer, serverSec, Key{}, Key{}, nil, sRand)
 		require.NoError(t, err, "newMech server")
 		var done bool
 		hello, done, err = client.NextHandshake(nil)
@@ -144,9 +143,9 @@ func TestCurveHandshakeGoldenBytes(t *testing.T) {
 	cRand := newDeterministicReader(0x0123456789ABCDEF)
 	sRand := newDeterministicReader(0xFEDCBA9876543210)
 
-	client, err := newMech(iface.RoleClient, clientSec, clientPub, serverPub, nil, cRand)
+	client, err := newMech(security.RoleClient, clientSec, clientPub, serverPub, nil, cRand)
 	require.NoError(t, err, "client")
-	server, err := newMech(iface.RoleServer, serverSec, Key{}, Key{}, nil, sRand)
+	server, err := newMech(security.RoleServer, serverSec, Key{}, Key{}, nil, sRand)
 	require.NoError(t, err, "server")
 	hello, _, err := client.NextHandshake(nil)
 	require.NoError(t, err, "HELLO")
@@ -212,9 +211,9 @@ func TestCurveHandshakeRFC26ShapeBytes(t *testing.T) {
 	serverPub, serverSec := fixedKeyPair(t, 0xA11CE00000000001)
 	clientPub, clientSec := fixedKeyPair(t, 0xB0B0000000000002)
 
-	client, err := newMech(iface.RoleClient, clientSec, clientPub, serverPub, nil, newDeterministicReader(1))
+	client, err := newMech(security.RoleClient, clientSec, clientPub, serverPub, nil, newDeterministicReader(1))
 	require.NoError(t, err, "client")
-	server, err := newMech(iface.RoleServer, serverSec, Key{}, Key{}, nil, newDeterministicReader(2))
+	server, err := newMech(security.RoleServer, serverSec, Key{}, Key{}, nil, newDeterministicReader(2))
 	require.NoError(t, err, "server")
 	hello, _, err := client.NextHandshake(nil)
 	require.NoError(t, err, "HELLO")

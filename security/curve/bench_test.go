@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/zmtp"
 )
 
 // benchSizes are the payload sizes exercised: a small control-plane-ish
@@ -40,7 +40,7 @@ func BenchmarkEncodeFrame(b *testing.B) {
 			b.SetBytes(int64(size))
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if _, _, err := client.EncodeFrame(iface.FlagMore, payload); err != nil {
+				if _, _, err := client.EncodeFrame(zmtp.FlagMore, payload); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -85,7 +85,7 @@ func BenchmarkEncodeDecodeRoundTrip(b *testing.B) {
 			b.SetBytes(int64(size))
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				_, wire, err := client.EncodeFrame(iface.FlagMore, payload)
+				_, wire, err := client.EncodeFrame(zmtp.FlagMore, payload)
 				if err != nil {
 					b.Fatal(err)
 				}

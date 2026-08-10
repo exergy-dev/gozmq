@@ -3,21 +3,12 @@ package iface
 
 import (
 	"context"
-	"io"
 
 	"github.com/exergy-dev/gozmq/internal/pipeiface"
+	"github.com/exergy-dev/gozmq/internal/zmtp"
 	"github.com/exergy-dev/gozmq/msg"
+	"github.com/exergy-dev/gozmq/security"
 	"github.com/exergy-dev/gozmq/transport"
-)
-
-// Role distinguishes the initiator (client, from Connect) from the acceptor
-// (server, from Bind) within a single session. Some security mechanisms and
-// socket patterns branch on role.
-type Role uint8
-
-const (
-	RoleClient Role = iota
-	RoleServer
 )
 
 // --------------------------------------------------------------------------
@@ -58,109 +49,48 @@ type (
 // Framing layer
 // --------------------------------------------------------------------------
 
-// ZMTP frame flag bits (ZMTP 3.1 §2.1).
-const (
-	FlagMore    uint8 = 0x01
-	FlagLong    uint8 = 0x02
-	FlagCommand uint8 = 0x04
+// The framing contracts are defined in internal/zmtp, the package that
+// implements them, so that zmtp does not have to depend on this one.
+// Aliased here so the session layer keeps referring to them as
+// iface.FrameCodec / iface.Flag*.
+type (
+	// FrameCodec is an alias for [zmtp.FrameCodec].
+	FrameCodec = zmtp.FrameCodec
+	// FrameHeaderAppender is an alias for [zmtp.FrameHeaderAppender].
+	FrameHeaderAppender = zmtp.FrameHeaderAppender
 )
 
-// FrameCodec encodes and decodes ZMTP frames. Implementations must be
-// goroutine-safe only to the extent that concurrent Read/Write operate on
-// disjoint io.Reader/io.Writer pairs; a single codec value is typically
-// shared across sessions without synchronization.
-type FrameCodec interface {
-	// ReadFrame reads one frame from r. Returns the flags byte and a body
-	// slice. If dst has sufficient capacity the body aliases dst[:n];
-	// otherwise the body is drawn from the size-tiered frame pool and may
-	// be returned to the internal buffer pool once no longer referenced.
-	ReadFrame(r io.Reader, dst []byte) (flags uint8, body []byte, err error)
-
-	// WriteFrame writes flags + length + body as one ZMTP frame. Multi-byte
-	// lengths are big-endian per the spec. Implementations may internally
-	// batch via net.Buffers; callers should not assume one write = one
-	// socket operation.
-	WriteFrame(w io.Writer, flags uint8, body []byte) error
-}
-
-// FrameHeaderAppender is the allocation-free fast path used by the writer
-// batching loop. It appends the wire-format frame header (flags + length)
-// for a body of len(body) bytes onto scratch and returns the grown scratch.
-// Callers materialize net.Buffers entries from scratch + body slices after
-// the entire batch has been encoded — by that point scratch's underlying
-// array is stable, so subslices referencing scratch[off:off+hdrLen] do not
-// race with further appends.
-//
-// This method allocates no closures and uses no internal sync.Pool: header
-// bytes live in caller-owned scratch storage that the caller recycles
-// across batches.
-type FrameHeaderAppender interface {
-	AppendFrameHeader(scratch []byte, flags uint8, body []byte) (newScratch []byte, headerLen int, err error)
-}
+// ZMTP frame flag bits (ZMTP 3.1 §2.1), aliased from internal/zmtp.
+const (
+	FlagMore    = zmtp.FlagMore
+	FlagLong    = zmtp.FlagLong
+	FlagCommand = zmtp.FlagCommand
+)
 
 // --------------------------------------------------------------------------
 // Security layer
 // --------------------------------------------------------------------------
 
-// ZAPAuthorizer is the server-side authorization hook for mechanisms that
-// delegate policy to RFC 27 ZAP. On success it returns a user-id plus
-// optional metadata to merge into the peer properties. On rejection it
-// should return an error wrapping zmqerr.ErrAuthFailed.
-type ZAPAuthorizer func(domain, address, mech string, credentials [][]byte) (userID string, metadata map[string]string, err error)
+// The security contracts are defined in the public security package, which
+// implements them, so that pkg.go.dev documents them and out-of-tree
+// mechanisms can be written. Aliased here so the session layer keeps
+// referring to them as iface.SecurityMech / iface.Role.
+type (
+	// SecurityMech is an alias for [security.Mech].
+	SecurityMech = security.Mech
+	// ZAPAuthorizer is an alias for [security.ZAPAuthorizer].
+	ZAPAuthorizer = security.ZAPAuthorizer
+	// ZapConfigurable is an alias for [security.ZapConfigurable].
+	ZapConfigurable = security.ZapConfigurable
+	// Role is an alias for [security.Role].
+	Role = security.Role
+)
 
-// ZapConfigurable is an optional extension implemented by security
-// mechanisms that support server-side ZAP authorization.
-type ZapConfigurable interface {
-	ConfigureZAP(authorizer ZAPAuthorizer, domain, address string)
-}
-
-// SecurityMech drives a single handshake exchange and, for mechanisms that
-// require it (CURVE), wraps/unwraps every subsequent frame body.
-//
-// The handshake is modeled as a lock-step NextHandshake loop. The session
-// layer drives it:
-//
-//	out, done, err := mech.NextHandshake(nil)              // seed
-//	for !done {
-//	    write(out); in := read()
-//	    out, done, err = mech.NextHandshake(in)
-//	}
-//
-// For NULL the handshake is a single READY exchange; for CURVE it is the
-// five-step HELLO/WELCOME/INITIATE/READY/MESSAGE sequence.
-type SecurityMech interface {
-	// Name is the greeting mechanism token (e.g. "NULL", "PLAIN", "CURVE"),
-	// unpadded; the greeting encoder pads to 20 bytes.
-	Name() string
-
-	// AsServer reports the value of the greeting as-server byte.
-	AsServer() bool
-
-	// NextHandshake advances the handshake. On the first call, in is nil.
-	// Returns the next outbound command (may be empty on final step) and
-	// done=true when the handshake is complete.
-	NextHandshake(in []byte) (out []byte, done bool, err error)
-
-	// EncodeFrame rewrites a plaintext frame body and its ZMTP flags into
-	// their wire form. NULL/PLAIN preserve both body and flags. CURVE moves
-	// multipart state into the encrypted MESSAGE inner flags byte while
-	// preserving outer flags such as COMMAND.
-	EncodeFrame(flags uint8, plain []byte) (wireFlags uint8, wire []byte, err error)
-
-	// DecodeFrame reverses EncodeFrame. The returned flags are the logical
-	// post-decode frame flags seen by the session layer. Returns
-	// ErrMalformedFrame on MAC failure.
-	DecodeFrame(flags uint8, wire []byte) (plainFlags uint8, plain []byte, err error)
-
-	// Metadata returns local properties sent in READY. Must return after
-	// the handshake is seeded.
-	Metadata() map[string]string
-
-	// SetPeerMetadata is called by the session layer once the peer's READY
-	// has been parsed. Mechanisms may reject (return error) on mismatch
-	// (e.g. Socket-Type incompatibility).
-	SetPeerMetadata(props map[string]string) error
-}
+// Role constants, aliased from the security package.
+const (
+	RoleClient = security.RoleClient
+	RoleServer = security.RoleServer
+)
 
 // --------------------------------------------------------------------------
 // Pipe layer

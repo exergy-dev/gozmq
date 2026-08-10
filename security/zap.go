@@ -210,7 +210,7 @@ func EncodeZapRequest(req *ZapRequest) [][]byte {
 // ZapRequest's byte-slice fields reference the input frames — callers that
 // need independent ownership must copy.
 //
-// Errors wrap zmqerr.ErrMalformedFrame. We are strict about version: only
+// Errors wrap gozmq.ErrMalformedFrame. We are strict about version: only
 // "1.0" is accepted, matching libzmq's zap_handler_v2.
 func DecodeZapRequest(frames [][]byte) (*ZapRequest, error) {
 	if len(frames) < 6 {

@@ -47,7 +47,8 @@ func toKey(b []byte) curve.Key {
 }
 
 // newMechanism picks the security mechanism for a new session based on
-// the socket's configured options. Precedence: CURVE > PLAIN > NULL.
+// the socket's configured options. A WithSecurityMech constructor wins
+// outright; otherwise the precedence is CURVE > PLAIN > NULL.
 // A configured mechanism that cannot be constructed is an error — never
 // a silent downgrade to a weaker mechanism.
 func (s *Socket) newMechanism(role iface.Role) (iface.SecurityMech, error) {
@@ -56,6 +57,16 @@ func (s *Socket) newMechanism(role iface.Role) (iface.SecurityMech, error) {
 	}
 	if len(s.cfg.identity) > 0 {
 		meta["Identity"] = string(s.cfg.identity)
+	}
+	if s.cfg.newSecurityMech != nil {
+		m, err := s.cfg.newSecurityMech(role, meta)
+		if err != nil {
+			return nil, fmt.Errorf("gozmq: WithSecurityMech constructor: %w", err)
+		}
+		if m == nil {
+			return nil, fmt.Errorf("gozmq: WithSecurityMech constructor returned a nil mechanism")
+		}
+		return m, nil
 	}
 	switch {
 	case len(s.cfg.curveSecretKey) == 32 && s.cfg.curveServer:

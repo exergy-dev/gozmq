@@ -7,8 +7,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/zmtp"
+	"github.com/exergy-dev/gozmq/security"
 )
 
 // genPair is a tiny helper wrapping GenerateKeyPair with a fatal-on-error
@@ -123,12 +124,12 @@ func TestCurveMessageFlagsRoundTrip(t *testing.T) {
 	client, server := runHandshake(t)
 	payload := []byte("multipart")
 
-	wireFlags, wire, err := client.EncodeFrame(iface.FlagMore, payload)
+	wireFlags, wire, err := client.EncodeFrame(zmtp.FlagMore, payload)
 	require.NoError(t, err, "client EncodeFrame")
-	require.Zero(t, wireFlags&iface.FlagMore, "wire flags carried outer MORE: %#x", wireFlags)
+	require.Zero(t, wireFlags&zmtp.FlagMore, "wire flags carried outer MORE: %#x", wireFlags)
 	gotFlags, got, err := server.DecodeFrame(wireFlags, wire)
 	require.NoError(t, err, "server DecodeFrame")
-	require.NotZero(t, gotFlags&iface.FlagMore, "decoded flags missing MORE: %#x", gotFlags)
+	require.NotZero(t, gotFlags&zmtp.FlagMore, "decoded flags missing MORE: %#x", gotFlags)
 	require.Equal(t, payload, got, "decoded payload")
 }
 
@@ -267,7 +268,7 @@ func TestCurveMessageReorderRejected(t *testing.T) {
 }
 
 // newMechPair creates a fresh client/server mechanism pair with random keys.
-func newMechPair(t testing.TB) (client, server iface.SecurityMech) {
+func newMechPair(t testing.TB) (client, server security.Mech) {
 	t.Helper()
 	serverPub, serverSec := genPair(t)
 	clientPub, clientSec := genPair(t)
@@ -281,7 +282,7 @@ func newMechPair(t testing.TB) (client, server iface.SecurityMech) {
 // driveToWelcome drives a client/server pair through HELLO + server seed +
 // WELCOME and returns the WELCOME bytes. Used by tests that need to inject
 // faults after the WELCOME step.
-func driveToWelcome(t testing.TB, client, server iface.SecurityMech) []byte {
+func driveToWelcome(t testing.TB, client, server security.Mech) []byte {
 	t.Helper()
 	hello, _, err := client.NextHandshake(nil)
 	require.NoError(t, err, "HELLO")
@@ -294,7 +295,7 @@ func driveToWelcome(t testing.TB, client, server iface.SecurityMech) []byte {
 
 // runHandshake drives a fresh client/server pair through the five-step
 // handshake and returns them ready for traffic-phase tests.
-func runHandshake(t testing.TB) (iface.SecurityMech, iface.SecurityMech) {
+func runHandshake(t testing.TB) (security.Mech, security.Mech) {
 	t.Helper()
 	client, server := newMechPair(t)
 	welcome := driveToWelcome(t, client, server)

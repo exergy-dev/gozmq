@@ -1,7 +1,7 @@
 // Shared mechanism plumbing. Every ZMTP security mechanism carries the same
 // local/peer metadata state and (server-side) RFC 27 ZAP authorization hook,
 // so MechBase centralizes that state plus the corresponding
-// iface.SecurityMech accessor methods. NULL and PLAIN embed it directly;
+// Mech accessor methods. NULL and PLAIN embed it directly;
 // CURVE (security/curve) embeds it across the package boundary, which is why
 // the type and the helpers a mechanism needs are exported. The dependency
 // points strictly from curve to security — nothing in this package may
@@ -12,7 +12,6 @@ package security
 import (
 	"maps"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
 )
 
@@ -22,10 +21,10 @@ import (
 // by value; like the mechanisms themselves it is not safe for concurrent
 // use.
 type MechBase struct {
-	role      iface.Role
+	role      Role
 	localMeta map[string]string
 	peerMeta  map[string]string
-	zapAuth   iface.ZAPAuthorizer
+	zapAuth   ZAPAuthorizer
 	zapDomain string
 	zapAddr   string
 	zapMeta   map[string]string
@@ -33,15 +32,15 @@ type MechBase struct {
 
 // NewMechBase returns the shared mechanism state for role, holding a private
 // copy of localMeta. A nil localMeta is treated as an empty property list.
-func NewMechBase(role iface.Role, localMeta map[string]string) MechBase {
+func NewMechBase(role Role, localMeta map[string]string) MechBase {
 	return MechBase{role: role, localMeta: maps.Clone(localMeta)}
 }
 
 // Role reports which side of the handshake this mechanism drives.
-func (b *MechBase) Role() iface.Role { return b.role }
+func (b *MechBase) Role() Role { return b.role }
 
 // AsServer reports the value of the greeting as-server byte.
-func (b *MechBase) AsServer() bool { return b.role == iface.RoleServer }
+func (b *MechBase) AsServer() bool { return b.role == RoleServer }
 
 // Metadata returns a copy of the local metadata properties sent in the
 // mechanism's metadata-bearing handshake command (READY or INITIATE). The
@@ -57,14 +56,14 @@ func (b *MechBase) SetPeerMetadata(props map[string]string) error {
 }
 
 // PeerMetadata returns the parsed peer metadata, or nil before the handshake
-// completes. Not part of iface.SecurityMech but used by the session layer
+// completes. Not part of Mech but used by the session layer
 // during metadata forwarding and by tests.
 func (b *MechBase) PeerMetadata() map[string]string { return maps.Clone(b.peerMeta) }
 
 // ConfigureZAP wires a server-side RFC 27 authorizer into the mechanism.
 // Client-side mechanisms ignore the hook.
-func (b *MechBase) ConfigureZAP(authorizer iface.ZAPAuthorizer, domain, address string) {
-	if b.role != iface.RoleServer {
+func (b *MechBase) ConfigureZAP(authorizer ZAPAuthorizer, domain, address string) {
+	if b.role != RoleServer {
 		return
 	}
 	b.zapAuth = authorizer

@@ -33,7 +33,6 @@ import (
 	"io"
 	"math"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
 	"github.com/exergy-dev/gozmq/security"
@@ -95,7 +94,7 @@ const (
 	stateDone                           // handshake complete
 )
 
-// curveMech implements iface.SecurityMech for CURVE. The same struct backs
+// curveMech implements security.Mech for CURVE. The same struct backs
 // both client and server roles; role-specific behavior branches inside
 // NextHandshake. The embedded security.MechBase carries the metadata maps
 // and the server-side ZAP hook shared with NULL/PLAIN.
@@ -162,8 +161,8 @@ type curveMech struct {
 //
 // localMeta is the property list sent in the server's READY. A nil map is
 // treated as an empty property list.
-func NewCurveServer(serverSecret Key, localMeta map[string]string) (iface.SecurityMech, error) {
-	m, err := newMech(iface.RoleServer, serverSecret, Key{}, Key{}, localMeta, rand.Reader)
+func NewCurveServer(serverSecret Key, localMeta map[string]string) (security.Mech, error) {
+	m, err := newMech(security.RoleServer, serverSecret, Key{}, Key{}, localMeta, rand.Reader)
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +175,7 @@ func NewCurveServer(serverSecret Key, localMeta map[string]string) (iface.Securi
 //
 // localMeta is the property list sent in INITIATE. A nil map is treated as
 // an empty property list.
-func NewCurveClient(serverPublic, clientPublic, clientSecret Key, localMeta map[string]string) (iface.SecurityMech, error) {
+func NewCurveClient(serverPublic, clientPublic, clientSecret Key, localMeta map[string]string) (security.Mech, error) {
 	// Fail fast on a zero or low-order server key. Doing the check here
 	// (rather than in parseWelcome, where the key is first used in
 	// box.Open) surfaces a misconfigured socket during construction
@@ -187,7 +186,7 @@ func NewCurveClient(serverPublic, clientPublic, clientSecret Key, localMeta map[
 	if err := validatePeerPublicKey(serverPublic[:]); err != nil {
 		return nil, err
 	}
-	m, err := newMech(iface.RoleClient, clientSecret, clientPublic, serverPublic, localMeta, rand.Reader)
+	m, err := newMech(security.RoleClient, clientSecret, clientPublic, serverPublic, localMeta, rand.Reader)
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +198,7 @@ func NewCurveClient(serverPublic, clientPublic, clientSecret Key, localMeta map[
 // symmetric double-check (zero-value is acceptable — we derive it).
 // peerLongTerm is the peer long-term public key; zero for the server (learned
 // from INITIATE) and the server's public key for the client.
-func newMech(role iface.Role, ownSecret, ownPublicHint, peerLongTerm Key, localMeta map[string]string, r io.Reader) (*curveMech, error) {
+func newMech(role security.Role, ownSecret, ownPublicHint, peerLongTerm Key, localMeta map[string]string, r io.Reader) (*curveMech, error) {
 	if r == nil {
 		r = rand.Reader
 	}
@@ -246,10 +245,10 @@ func newMech(role iface.Role, ownSecret, ownPublicHint, peerLongTerm Key, localM
 
 	// Per-role MESSAGE prefix assignment.
 	switch role {
-	case iface.RoleClient:
+	case security.RoleClient:
 		m.encPrefix = prefixMessageC
 		m.decPrefix = prefixMessageS
-	case iface.RoleServer:
+	case security.RoleServer:
 		// Server-side cookie key is a fresh 32-byte random used only to
 		// secretbox cookies across HELLO → INITIATE. It never leaves the
 		// server. Generate lazily-but-now so any RNG error surfaces
@@ -267,7 +266,7 @@ func newMech(role iface.Role, ownSecret, ownPublicHint, peerLongTerm Key, localM
 }
 
 // --------------------------------------------------------------------------
-// iface.SecurityMech implementation.
+// security.Mech implementation.
 // --------------------------------------------------------------------------
 
 // Name is the greeting mechanism token.
@@ -296,9 +295,9 @@ func (m *curveMech) PeerLongTermPublic() Key { return m.peerPublic }
 // into the next call's `in`.
 func (m *curveMech) NextHandshake(in []byte) (out []byte, done bool, err error) {
 	switch m.Role() {
-	case iface.RoleClient:
+	case security.RoleClient:
 		return m.nextClient(in)
-	case iface.RoleServer:
+	case security.RoleServer:
 		return m.nextServer(in)
 	default:
 		return nil, false, fmt.Errorf("gozmq/security/curve: invalid role %d", m.Role())
@@ -871,7 +870,7 @@ func (m *curveMech) EncodeFrame(flags uint8, plain []byte) (uint8, []byte, error
 		m.encScratch = make([]byte, 1+len(plain))
 	}
 	inner := m.encScratch[:1+len(plain)]
-	inner[0] = flags & iface.FlagMore
+	inner[0] = flags & zmtp.FlagMore
 	copy(inner[1:], plain)
 
 	const headerLen = 1 + len(cmdMessage) + 8
@@ -880,7 +879,7 @@ func (m *curveMech) EncodeFrame(flags uint8, plain []byte) (uint8, []byte, error
 	copy(body[1:], cmdMessage)
 	binary.BigEndian.PutUint64(body[1+len(cmdMessage):], counter)
 	body = box.SealAfterPrecomputation(body, inner, (*[24]byte)(&nonce), &m.shared)
-	return flags &^ iface.FlagMore, body, nil
+	return flags &^ zmtp.FlagMore, body, nil
 }
 
 // DecodeFrame reverses EncodeFrame. Returns ErrMalformedFrame on MAC
@@ -921,7 +920,7 @@ func (m *curveMech) DecodeFrame(flags uint8, wire []byte) (uint8, []byte, error)
 	if len(plain) < 1 {
 		return 0, nil, fmt.Errorf("gozmq/security/curve: MESSAGE plaintext empty: %w", zmqerr.ErrMalformedFrame)
 	}
-	if plain[0]&^iface.FlagMore != 0 {
+	if plain[0]&^zmtp.FlagMore != 0 {
 		return 0, nil, fmt.Errorf("gozmq/security/curve: MESSAGE inner flags %#x invalid: %w", plain[0], zmqerr.ErrMalformedFrame)
 	}
 	// Strip the 1-byte inner flags prefix and restore MORE to the logical
@@ -929,7 +928,7 @@ func (m *curveMech) DecodeFrame(flags uint8, wire []byte) (uint8, []byte, error)
 	// produced by box.Open; slicing it (rather than make+copy) is safe —
 	// the backing array has no other referents.
 	m.peerShortNonce = counter + 1
-	return (flags &^ iface.FlagMore) | (plain[0] & iface.FlagMore), plain[1:], nil
+	return (flags &^ zmtp.FlagMore) | (plain[0] & zmtp.FlagMore), plain[1:], nil
 }
 
 // --------------------------------------------------------------------------

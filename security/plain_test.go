@@ -5,8 +5,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/zmtp"
 )
 
 // pumpPlain drives two PLAIN mechanisms against each other until both report
@@ -19,7 +19,7 @@ import (
 // writer emits the failure-path ERROR command before the session tears down,
 // and the peer must observe it to surface its own ErrAuthFailed. The pump
 // returns the pair (clientErr, serverErr); either may be nil on success.
-func pumpPlain(t *testing.T, client, server iface.SecurityMech) (clientErr, serverErr error) {
+func pumpPlain(t *testing.T, client, server Mech) (clientErr, serverErr error) {
 	t.Helper()
 	const maxSteps = 16
 
@@ -244,7 +244,7 @@ func TestPlainEncodeDecodeFrameIdentity(t *testing.T) {
 		input [][]byte
 	}{
 		{flags: 0, input: [][]byte{nil, {}, {0x00}, []byte("hello, zmq"), make([]byte, 4096)}},
-		{flags: iface.FlagMore | iface.FlagCommand, input: [][]byte{[]byte("flagged")}},
+		{flags: zmtp.FlagMore | zmtp.FlagCommand, input: [][]byte{[]byte("flagged")}},
 	} {
 		for _, input := range tc.input {
 			wireFlags, enc, err := m.EncodeFrame(tc.flags, input)

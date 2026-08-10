@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/exergy-dev/gozmq/security"
 )
 
 // Option configures a Socket at construction time. The option type is opaque;
@@ -46,6 +48,8 @@ type socketConfig struct {
 	plainClientUser string
 	plainClientPass string
 	plainClient     bool
+
+	newSecurityMech func(role security.Role, meta map[string]string) (security.Mech, error)
 
 	curveServer    bool
 	curveServerKey []byte
@@ -288,6 +292,36 @@ func WithCurveClient(serverKey, publicKey, secretKey []byte) Option {
 	})
 }
 
+// WithSecurityMech installs a caller-supplied ZMTP security mechanism,
+// bypassing the built-in NULL / PLAIN / CURVE selection entirely. It is
+// mutually exclusive with [WithPlainAuth], [WithPlainClient],
+// [WithCurveServer], and [WithCurveClient].
+//
+// Reach for this only when the shipped mechanisms genuinely do not fit —
+// a private protocol variant, or a fault-injecting test double. A
+// [security.Mech] sits directly on the wire, so a mistake in it is a
+// security bug rather than a correctness bug, and a mechanism gozmq does
+// not ship will not interoperate with libzmq or any other ZMTP peer. If
+// what you actually need is control over *which* peers are allowed rather
+// than how the handshake works, use [WithZapHandler] with a
+// [security.ZapPolicy] instead and keep the vetted cryptography.
+//
+// newMech is called once per session, with the session's role and with the
+// local metadata gozmq advertises in READY (Socket-Type, and Identity when
+// [WithIdentity] is set). The mechanism must include those properties in
+// its own Metadata; the simplest way is to pass the map straight through to
+// [security.NewMechBase] and embed the result. Returning an error fails the
+// session — gozmq never falls back to a weaker mechanism.
+func WithSecurityMech(newMech func(role security.Role, meta map[string]string) (security.Mech, error)) Option {
+	return newOption(func(c *socketConfig) error {
+		if newMech == nil {
+			return fmt.Errorf("gozmq: WithSecurityMech requires a non-nil constructor")
+		}
+		c.newSecurityMech = newMech
+		return nil
+	})
+}
+
 // WithHandshakeTimeout caps the total duration of the ZMTP handshake,
 // covering the greeting exchange plus the security mechanism handshake
 // (NULL, PLAIN, or CURVE) and the READY metadata exchange. Default is 30
@@ -356,6 +390,14 @@ func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 			return fmt.Errorf("gozmq: WithIdentity requires a non-zero leading byte")
 		}
 	}
+	if cfg.newSecurityMech != nil {
+		switch {
+		case cfg.plainAuth != nil || cfg.plainClient:
+			return fmt.Errorf("gozmq: WithSecurityMech is mutually exclusive with the PLAIN options")
+		case len(cfg.curveSecretKey) > 0 || len(cfg.curvePublicKey) > 0 || len(cfg.curveServerKey) > 0 || cfg.curveServer:
+			return fmt.Errorf("gozmq: WithSecurityMech is mutually exclusive with the CURVE options")
+		}
+	}
 	if cfg.routerMandatory && t != Router {
 		return fmt.Errorf("gozmq: WithRouterMandatory only valid on ROUTER sockets")
 	}
@@ -371,6 +413,8 @@ func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 		// options would be a security hazard (e.g. WithPlainAuth on a
 		// raw-TCP listener that authenticates nobody).
 		switch {
+		case cfg.newSecurityMech != nil:
+			return fmt.Errorf("gozmq: WithSecurityMech is not applicable to STREAM sockets (no ZMTP handshake)")
 		case cfg.plainAuth != nil || cfg.plainClient:
 			return fmt.Errorf("gozmq: PLAIN security options are not applicable to STREAM sockets (no ZMTP handshake)")
 		case len(cfg.curveSecretKey) > 0 || len(cfg.curvePublicKey) > 0 || len(cfg.curveServerKey) > 0:
