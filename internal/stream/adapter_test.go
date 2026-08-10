@@ -12,9 +12,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/rkm/gozmq/internal/iface"
-	"github.com/rkm/gozmq/internal/msg"
-	"github.com/rkm/gozmq/internal/testutil"
+	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/msg"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 func TestMain(m *testing.M) { testutil.VerifyTestMain(m) }

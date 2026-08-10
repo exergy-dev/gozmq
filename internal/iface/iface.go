@@ -6,7 +6,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/rkm/gozmq/internal/msg"
+	"github.com/exergy-dev/gozmq/internal/msg"
 )
 
 // Role distinguishes the initiator (client, from Connect) from the acceptor

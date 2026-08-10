@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rkm/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/iface"
 )
 
 // Close tears the socket down. Idempotent: repeated calls return nil,

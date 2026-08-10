@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rkm/gozmq"
+	"github.com/exergy-dev/gozmq"
 )
 
 func TestSocketDisconnect_StopsReconnectAndDetachesPeer(t *testing.T) {

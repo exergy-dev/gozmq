@@ -23,8 +23,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/rkm/gozmq/internal/iface"
-	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
 // Registry is the goroutine-safe scheme → Transport map. The zero value is

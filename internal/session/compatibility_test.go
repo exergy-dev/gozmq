@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/rkm/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/iface"
 )
 
 func TestValidateSocketTypeCompatibility(t *testing.T) {

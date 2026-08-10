@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rkm/gozmq"
+	"github.com/exergy-dev/gozmq"
 )
 
 const largeFrameResetThreshold = 4 * 1024

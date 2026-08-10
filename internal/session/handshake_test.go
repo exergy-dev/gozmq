@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
 // TestDecodeGreeting_MinorVersions: any 3.x minor must be accepted —

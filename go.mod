@@ -1,4 +1,4 @@
-module github.com/rkm/gozmq
+module github.com/exergy-dev/gozmq
 
 go 1.22
 

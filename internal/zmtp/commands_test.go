@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
 func TestCommandRoundTrip(t *testing.T) {

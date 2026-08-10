@@ -6,7 +6,7 @@ import (
 	"maps"
 	"strings"
 
-	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
 // MetadataCodec is the package-level codec for the ZMTP 3.1 READY property

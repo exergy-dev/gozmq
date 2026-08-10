@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rkm/gozmq"
+	"github.com/exergy-dev/gozmq"
 )
 
 func TestRouterMandatory_GozmqRouter_LibzmqDealer(t *testing.T) {

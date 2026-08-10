@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rkm/gozmq"
-	"github.com/rkm/gozmq/security"
-	"github.com/rkm/gozmq/security/curve"
+	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/security"
+	"github.com/exergy-dev/gozmq/security/curve"
 )
 
 func TestZap_Null_GozmqServer(t *testing.T) {

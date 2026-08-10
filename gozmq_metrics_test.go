@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rkm/gozmq"
+	"github.com/exergy-dev/gozmq"
 )
 
 // TestSocketMetrics_PushPullCounters drives a PUSH→PULL pair and checks

@@ -60,8 +60,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/rkm/gozmq/internal/zmqerr"
-	"github.com/rkm/gozmq/internal/zmtp"
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/zmtp"
 )
 
 // ZAP protocol version token (RFC 27 §3.1).

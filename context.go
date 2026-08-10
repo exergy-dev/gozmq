@@ -7,10 +7,10 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/rkm/gozmq/internal/iface"
-	"github.com/rkm/gozmq/internal/zmqerr"
-	"github.com/rkm/gozmq/security"
-	"github.com/rkm/gozmq/transport"
+	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/security"
+	"github.com/exergy-dev/gozmq/transport"
 )
 
 // Context is the top-level resource owner. A Context holds the transport

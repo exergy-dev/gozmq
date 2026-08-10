@@ -9,8 +9,8 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/rkm/gozmq/internal/iface"
-	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
 // ipcScheme is the URL scheme this transport claims. Matches libzmq.

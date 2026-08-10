@@ -3,11 +3,11 @@ package gozmq
 import (
 	"fmt"
 
-	"github.com/rkm/gozmq/internal/iface"
-	"github.com/rkm/gozmq/internal/session"
-	"github.com/rkm/gozmq/internal/zmtp"
-	"github.com/rkm/gozmq/security"
-	"github.com/rkm/gozmq/security/curve"
+	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/session"
+	"github.com/exergy-dev/gozmq/internal/zmtp"
+	"github.com/exergy-dev/gozmq/security"
+	"github.com/exergy-dev/gozmq/security/curve"
 )
 
 // buildSession is the factory the Reconnector (and the acceptLoop) call

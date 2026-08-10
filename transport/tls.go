@@ -7,7 +7,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/rkm/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/iface"
 )
 
 // defaultTLSHandshakeTimeout bounds the server-side TLS handshake performed

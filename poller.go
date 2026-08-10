@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"sync"
 
-	"github.com/rkm/gozmq/internal/socket"
+	"github.com/exergy-dev/gozmq/internal/socket"
 )
 
 // PollEvents is a bitmask of interest sets passed to Poller.Add / Modify

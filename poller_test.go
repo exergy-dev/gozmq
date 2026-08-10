@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rkm/gozmq"
+	"github.com/exergy-dev/gozmq"
 )
 
 // waitPoll issues a single blocking Poll bounded by budget and returns

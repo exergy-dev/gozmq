@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rkm/gozmq"
+	"github.com/exergy-dev/gozmq"
 )
 
 // drainEvents spools events off ch into a slice until the ctx fires or

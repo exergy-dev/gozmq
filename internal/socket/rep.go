@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/rkm/gozmq/internal/iface"
-	"github.com/rkm/gozmq/internal/msg"
-	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/msg"
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
 // repState enumerates the REP lock-step FSM. REP starts in canRecv;

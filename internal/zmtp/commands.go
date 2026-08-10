@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"fmt"
 
-	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
 // Canonical ZMTP 3.1 command names used by the security layer. The spec

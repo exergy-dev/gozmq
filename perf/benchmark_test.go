@@ -25,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rkm/gozmq"
+	"github.com/exergy-dev/gozmq"
 )
 
 // sizes is the canonical message-size ladder for every benchmark. Matches

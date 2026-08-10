@@ -8,10 +8,10 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	gozmq "github.com/rkm/gozmq"
-	"github.com/rkm/gozmq/internal/zmqerr"
-	"github.com/rkm/gozmq/security"
-	"github.com/rkm/gozmq/security/curve"
+	gozmq "github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/security"
+	"github.com/exergy-dev/gozmq/security/curve"
 )
 
 type zapPolicyFunc func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error)

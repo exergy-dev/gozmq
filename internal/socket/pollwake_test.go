@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rkm/gozmq/internal/msg"
-	"github.com/rkm/gozmq/internal/pipe"
-	"github.com/rkm/gozmq/internal/socket"
+	"github.com/exergy-dev/gozmq/internal/msg"
+	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/internal/socket"
 	"github.com/stretchr/testify/require"
 )
 

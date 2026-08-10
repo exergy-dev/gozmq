@@ -1,7 +1,7 @@
 package socket
 
 import (
-	"github.com/rkm/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/iface"
 )
 
 // NewXSubEngine returns a new XSUB socket engine.

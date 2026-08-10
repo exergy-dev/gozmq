@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rkm/gozmq"
+	"github.com/exergy-dev/gozmq"
 )
 
 // newGozmqCtx returns a fresh gozmq.Context wired through t.Cleanup.

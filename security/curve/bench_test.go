@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/rkm/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/iface"
 )
 
 // benchSizes are the payload sizes exercised: a small control-plane-ish

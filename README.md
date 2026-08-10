@@ -10,7 +10,7 @@ build-tagged libzmq interop test harness under `interop/`).
 Requires Go 1.22 or newer.
 
 ```sh
-go get github.com/rkm/gozmq
+go get github.com/exergy-dev/gozmq
 ```
 
 ## Minimal Example
@@ -70,7 +70,7 @@ for untrusted networks.
 
 ## Documentation
 
-- **API reference**: [pkg.go.dev/github.com/rkm/gozmq](https://pkg.go.dev/github.com/rkm/gozmq)
+- **API reference**: [pkg.go.dev/github.com/exergy-dev/gozmq](https://pkg.go.dev/github.com/exergy-dev/gozmq)
   (the package documentation covers security, defaults, STREAM, polling,
   close semantics, and more).
 - **Runnable demos**: the [`examples/`](examples/) directory — one

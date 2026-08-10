@@ -22,7 +22,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/rkm/gozmq"
+	"github.com/exergy-dev/gozmq"
 )
 
 // Codec marshals Go values to bytes and back. Implementations must be

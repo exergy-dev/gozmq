@@ -11,9 +11,9 @@ import (
 	"log"
 	"time"
 
-	"github.com/rkm/gozmq"
-	"github.com/rkm/gozmq/typed"
-	"github.com/rkm/gozmq/typed/codecjson"
+	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/typed"
+	"github.com/exergy-dev/gozmq/typed/codecjson"
 )
 
 // Event is the application-level payload.

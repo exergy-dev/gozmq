@@ -33,10 +33,10 @@ import (
 	"io"
 	"math"
 
-	"github.com/rkm/gozmq/internal/iface"
-	"github.com/rkm/gozmq/internal/zmqerr"
-	"github.com/rkm/gozmq/internal/zmtp"
-	"github.com/rkm/gozmq/security"
+	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/zmtp"
+	"github.com/exergy-dev/gozmq/security"
 
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/nacl/box"

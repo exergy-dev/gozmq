@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/rkm/gozmq/internal/socket"
+	"github.com/exergy-dev/gozmq/internal/socket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

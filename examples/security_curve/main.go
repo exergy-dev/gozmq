@@ -9,8 +9,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/rkm/gozmq"
-	"github.com/rkm/gozmq/security/curve"
+	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/security/curve"
 )
 
 func main() {

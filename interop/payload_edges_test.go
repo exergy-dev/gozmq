@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rkm/gozmq"
+	"github.com/exergy-dev/gozmq"
 )
 
 func TestPayloadEdges_GozmqClient_LibzmqServer(t *testing.T) {

@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rkm/gozmq"
-	"github.com/rkm/gozmq/transport"
+	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/transport"
 )
 
 // newSelfSignedTLSConfig generates a throwaway self-signed ed25519

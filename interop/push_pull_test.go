@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rkm/gozmq"
+	"github.com/exergy-dev/gozmq"
 )
 
 // TestPushPull_GozmqPush_LibzmqPull: gozmq PUSH connects to a libzmq PULL

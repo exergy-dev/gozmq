@@ -5,7 +5,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/rkm/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/iface"
 )
 
 // Defaults that match design §7.1 and the socketConfig defaults in

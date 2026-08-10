@@ -1,10 +1,10 @@
 package gozmq
 
 import (
-	"github.com/rkm/gozmq/internal/iface"
-	"github.com/rkm/gozmq/internal/pipe"
-	"github.com/rkm/gozmq/internal/session"
-	"github.com/rkm/gozmq/internal/stream"
+	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/internal/session"
+	"github.com/exergy-dev/gozmq/internal/stream"
 )
 
 // startStreamAdapter is the STREAM-specific counterpart to startSession:

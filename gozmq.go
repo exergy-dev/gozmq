@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/rkm/gozmq/internal/msg"
-	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/msg"
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
 // This file holds the package-wide value types (SocketType, Msg) and the

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rkm/gozmq"
+	"github.com/exergy-dev/gozmq"
 )
 
 // TestPubSub_GozmqPub_LibzmqSub: gozmq PUB binds, libzmq SUB connects and

@@ -12,8 +12,8 @@ package security
 import (
 	"maps"
 
-	"github.com/rkm/gozmq/internal/iface"
-	"github.com/rkm/gozmq/internal/zmtp"
+	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/zmtp"
 )
 
 // MechBase is the state shared by every security mechanism: the role, the

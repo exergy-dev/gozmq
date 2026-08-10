@@ -1,8 +1,8 @@
 package gozmq
 
 import (
-	"github.com/rkm/gozmq/internal/iface"
-	"github.com/rkm/gozmq/internal/stream"
+	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/stream"
 )
 
 // peerLink unifies the LINGER-drain and teardown of an attached peer so the

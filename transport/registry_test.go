@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

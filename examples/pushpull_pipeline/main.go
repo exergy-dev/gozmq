@@ -11,7 +11,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/rkm/gozmq"
+	"github.com/exergy-dev/gozmq"
 )
 
 type result struct {

@@ -22,9 +22,9 @@ package security
 import (
 	"fmt"
 
-	"github.com/rkm/gozmq/internal/iface"
-	"github.com/rkm/gozmq/internal/zmqerr"
-	"github.com/rkm/gozmq/internal/zmtp"
+	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/zmtp"
 )
 
 // Mechanism token transmitted in the greeting (ZMTP 3.1 §3.3.1).

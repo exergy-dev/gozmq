@@ -5,7 +5,7 @@ package interop
 import (
 	"testing"
 
-	"github.com/rkm/gozmq/security"
+	"github.com/exergy-dev/gozmq/security"
 )
 
 type zapDecisionFunc func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error)

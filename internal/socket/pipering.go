@@ -3,7 +3,7 @@ package socket
 import (
 	"slices"
 
-	"github.com/rkm/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/iface"
 )
 
 // pipeRing is a round-robin set of pipes with a persistent cursor, shared by

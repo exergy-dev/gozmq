@@ -3,7 +3,7 @@ package perf_test
 import (
 	"testing"
 
-	"github.com/rkm/gozmq/internal/testutil"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // TestMain wires in goleak via the shared helper so every benchmark's

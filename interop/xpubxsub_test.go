@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rkm/gozmq"
+	"github.com/exergy-dev/gozmq"
 )
 
 // subscribeFrame builds the ZMTP synthetic subscribe frame that XSUB sends

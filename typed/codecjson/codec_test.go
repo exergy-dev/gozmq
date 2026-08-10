@@ -3,7 +3,7 @@ package codecjson_test
 import (
 	"testing"
 
-	"github.com/rkm/gozmq/typed/codecjson"
+	"github.com/exergy-dev/gozmq/typed/codecjson"
 	"github.com/stretchr/testify/require"
 )
 

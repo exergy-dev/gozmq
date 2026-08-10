@@ -5,7 +5,7 @@ package interop
 import (
 	"testing"
 
-	"github.com/rkm/gozmq/internal/testutil"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // TestMain runs the package's tests under goleak via the shared helper so

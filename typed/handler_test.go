@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rkm/gozmq"
-	"github.com/rkm/gozmq/typed"
+	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/typed"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rkm/gozmq"
+	"github.com/exergy-dev/gozmq"
 )
 
 func TestDisconnect_LibzmqClient_GozmqServer(t *testing.T) {

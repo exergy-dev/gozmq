@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rkm/gozmq"
-	"github.com/rkm/gozmq/typed"
-	"github.com/rkm/gozmq/typed/codecjson"
+	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/typed"
+	"github.com/exergy-dev/gozmq/typed/codecjson"
 )
 
 type Order struct {

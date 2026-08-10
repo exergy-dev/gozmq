@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rkm/gozmq"
+	"github.com/exergy-dev/gozmq"
 )
 
 func ExampleNewContext_pairRoundTrip() {

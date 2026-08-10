@@ -66,8 +66,8 @@ package socket
 import (
 	"sync/atomic"
 
-	"github.com/rkm/gozmq/internal/iface"
-	"github.com/rkm/gozmq/internal/msg"
+	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/msg"
 )
 
 // This file holds the shared engine plumbing: the metric counters struct,

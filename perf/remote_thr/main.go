@@ -18,7 +18,7 @@ import (
 	"runtime/pprof"
 	"time"
 
-	"github.com/rkm/gozmq"
+	"github.com/exergy-dev/gozmq"
 )
 
 func main() {

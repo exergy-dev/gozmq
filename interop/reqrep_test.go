@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rkm/gozmq"
+	"github.com/exergy-dev/gozmq"
 )
 
 // TestReqRep_GozmqReq_LibzmqRep: gozmq REQ connects to a libzmq REP bind and

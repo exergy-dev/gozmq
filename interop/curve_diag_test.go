@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rkm/gozmq"
-	"github.com/rkm/gozmq/security/curve"
+	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/security/curve"
 )
 
 // TestCurve_Diag_LibzmqFlags is a diagnostic-only helper. Un-skip locally

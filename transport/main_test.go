@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rkm/gozmq/internal/testutil"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // TestMain enforces goroutine-leak-free Test runs across the whole package.

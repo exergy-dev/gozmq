@@ -6,7 +6,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/rkm/gozmq"
+	"github.com/exergy-dev/gozmq"
 )
 
 // TestSocketStream_TCP_HTTPEcho validates the end-to-end STREAM wiring:

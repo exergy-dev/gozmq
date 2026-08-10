@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rkm/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )

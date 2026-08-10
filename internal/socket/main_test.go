@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rkm/gozmq/internal/iface"
-	"github.com/rkm/gozmq/internal/testutil"
+	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/stretchr/testify/require"
 )
 

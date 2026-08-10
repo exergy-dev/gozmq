@@ -10,11 +10,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/rkm/gozmq/internal/iface"
-	"github.com/rkm/gozmq/internal/msg"
-	"github.com/rkm/gozmq/internal/session"
-	"github.com/rkm/gozmq/internal/socket"
-	"github.com/rkm/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/msg"
+	"github.com/exergy-dev/gozmq/internal/session"
+	"github.com/exergy-dev/gozmq/internal/socket"
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
 // NewSocket constructs a socket of the given type on this Context.

@@ -8,8 +8,8 @@ import (
 	"io"
 	"net"
 
-	"github.com/rkm/gozmq/internal/iface"
-	"github.com/rkm/gozmq/internal/msg"
+	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/msg"
 )
 
 // Batch caps for write coalescing. The writer pulls additional messages

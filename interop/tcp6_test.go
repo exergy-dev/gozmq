@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rkm/gozmq"
+	"github.com/exergy-dev/gozmq"
 )
 
 func TestTCP6_GozmqClient_LibzmqServer(t *testing.T) {

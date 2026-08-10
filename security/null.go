@@ -21,9 +21,9 @@ package security
 import (
 	"fmt"
 
-	"github.com/rkm/gozmq/internal/iface"
-	"github.com/rkm/gozmq/internal/zmqerr"
-	"github.com/rkm/gozmq/internal/zmtp"
+	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/zmtp"
 )
 
 // nullMechName is the greeting mechanism token for NULL (ZMTP 3.1 §3.2.1).

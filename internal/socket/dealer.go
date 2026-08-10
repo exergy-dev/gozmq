@@ -1,6 +1,6 @@
 package socket
 
-import "github.com/rkm/gozmq/internal/iface"
+import "github.com/exergy-dev/gozmq/internal/iface"
 
 // NewDealerEngine returns a new DEALER socket engine.
 //

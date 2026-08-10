@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rkm/gozmq"
+	"github.com/exergy-dev/gozmq"
 )
 
 // TestDealerRouter_GozmqDealer_LibzmqRouter: gozmq DEALER configured with

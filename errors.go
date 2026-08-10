@@ -1,6 +1,6 @@
 package gozmq
 
-import "github.com/rkm/gozmq/internal/zmqerr"
+import "github.com/exergy-dev/gozmq/internal/zmqerr"
 
 // Sentinel errors returned across the public API. All errors returned from
 // gozmq wrap one of these via errors.Is so callers can dispatch without
