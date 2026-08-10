@@ -1,0 +1,95 @@
+name: nightly
+
+# The PR-path checks are tuned to finish in a few minutes, which means they
+# only ever scratch the surface of the fuzz targets and run each test once.
+# These jobs are where the slow, flake-hunting, long-horizon checks live.
+
+on:
+  schedule:
+    # 04:20 UTC daily.
+    - cron: '20 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: fuzz (10m per target)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Fuzz
+        run: |
+          set -euo pipefail
+          pkgs=$(go list ./...)
+          for pkg in $pkgs; do
+            targets=$(go test -list '^Fuzz' "$pkg" 2>/dev/null | grep '^Fuzz' || true)
+            for t in $targets; do
+              echo "::group::$pkg $t"
+              go test -run '^$' -fuzz "^${t}$" -fuzztime=10m "$pkg"
+              echo "::endgroup::"
+            done
+          done
+      - name: Upload any crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus
+          path: |
+            **/testdata/fuzz/**
+            ~/.cache/go-build/fuzz/**
+
+  flake-hunt:
+    name: repeated race runs
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      # Concurrency bugs in a networking library surface as rare flakes, not
+      # as failures on the first run. Five race-enabled passes is enough to
+      # catch most of what a single CI run hides.
+      - name: Race, five passes
+        env:
+          CGO_ENABLED: '1'
+        run: go test -race -count=5 -timeout 60m ./...
+
+  soak:
+    name: soak (connection churn)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Soak
+        env:
+          GOZMQ_SOAK_DURATION: 10m
+        run: go test -tags soak -run TestSoak -timeout 30m -v ./soak/...
+
+  interop-matrix:
+    name: interop (libzmq ${{ matrix.libzmq }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        libzmq: ['libzmq3-dev']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Install libzmq
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.libzmq }}
+      - name: Interop, repeated
+        env:
+          CGO_ENABLED: '1'
+        run: go test -tags interop -race -count=3 ./interop/...

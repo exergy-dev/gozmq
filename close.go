@@ -137,6 +137,14 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 	// attach watchers in startSession).
 	s.acceptWG.Wait()
 	s.connectWG.Wait()
+
+	// 8. Drop the Context's reference to this socket. Without this a
+	// long-lived Context — the documented one-per-process pattern —
+	// accumulates every socket ever created on it, retaining each
+	// socket's config, engine, and engine-owned maps and channels for
+	// the life of the process.
+	s.ctx.removeSocket(s)
+
 	s.emit(EventClosed, s.LastEndpoint(), "")
 
 	if joined := errors.Join(errs...); joined != nil {

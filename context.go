@@ -132,6 +132,21 @@ func (c *Context) RegisterTransport(t transport.Transport) {
 	c.registry.Register(t)
 }
 
+// removeSocket drops c's reference to a socket that has finished closing,
+// so a long-lived Context does not accumulate dead sockets. Called from
+// (*Socket).CloseCtx after teardown completes.
+//
+// A no-op when the socket is not present, which is the normal case during
+// Context.Close: it detaches the whole slice up front and then closes each
+// socket, so the removal finds nothing left to do.
+func (c *Context) removeSocket(s *Socket) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if i := slices.Index(c.sockets, s); i >= 0 {
+		c.sockets = slices.Delete(c.sockets, i, i+1)
+	}
+}
+
 // Close cancels the Context and tears down every socket created on it.
 // It is idempotent; subsequent Close calls return nil. Subsequent
 // NewSocket calls return ErrContextClosed.
