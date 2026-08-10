@@ -153,3 +153,60 @@ func ExamplePoller() {
 	}
 	// Output: ready
 }
+
+// ExampleProxy is the XSUB/XPUB forwarder from the README: publishers
+// connect to one stable address, subscribers to another, and either side
+// can come and go without the other reconfiguring.
+//
+// Subscriptions travel upstream through the proxy without any special
+// handling — XPUB surfaces each SUBSCRIBE as a message and Proxy forwards
+// it to XSUB, which re-emits it to the real publisher.
+func ExampleProxy() {
+	zctx := gozmq.NewContext()
+	defer zctx.Close()
+
+	// The upstream publisher.
+	pub, _ := zctx.NewSocket(gozmq.Pub)
+	defer pub.Close()
+	_ = pub.Bind("inproc://example-proxy-up")
+
+	// The proxy's two faces.
+	xsub, _ := zctx.NewSocket(gozmq.XSub)
+	defer xsub.Close()
+	_ = xsub.Connect("inproc://example-proxy-up")
+
+	xpub, _ := zctx.NewSocket(gozmq.XPub)
+	defer xpub.Close()
+	_ = xpub.Bind("inproc://example-proxy-down")
+
+	proxyCtx, stop := context.WithCancel(context.Background())
+	defer stop()
+	go func() { _ = gozmq.Proxy(proxyCtx, xsub, xpub, nil) }()
+
+	// A subscriber on the far side.
+	sub, _ := zctx.NewSocket(gozmq.Sub, gozmq.WithSubscribe([]byte("topic.")))
+	defer sub.Close()
+	_ = sub.Connect("inproc://example-proxy-down")
+
+	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// PUB drops messages published before a subscription has propagated,
+	// and here it has two hops to travel, so republish until one lands.
+	for {
+		_ = pub.SendBytes(callCtx, []byte("topic.a|hello"))
+
+		attempt, cancelAttempt := context.WithTimeout(callCtx, 100*time.Millisecond)
+		got, err := sub.RecvBytes(attempt)
+		cancelAttempt()
+		if err == nil {
+			fmt.Printf("%s\n", got)
+			break
+		}
+		if callCtx.Err() != nil {
+			fmt.Println("subscription never propagated")
+			break
+		}
+	}
+	// Output: topic.a|hello
+}

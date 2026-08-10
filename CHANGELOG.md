@@ -4,6 +4,45 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-08-10
+
+First stable release. From this tag, everything exported outside `internal/` is covered by the compatibility promise — with one documented exception: the methods in the `msg` package marked *"Internal plumbing — NOT covered by the compatibility promise"*, which are exported only so gozmq's own packages can reach them across a package boundary.
+
+### Module path
+
+- The module is now `github.com/exergy-dev/gozmq` (was `github.com/rkm/gozmq`). No tags had been published under the old path.
+
+### Breaking changes — public API
+
+The pre-1.0 window was the only chance to get internal types off the public surface. Four exported symbols were aliases to (or took) types under `internal/`, so pkg.go.dev rendered no method set, no struct fields, and parameter types callers could not name.
+
+- **`Msg`**: `internal/msg` is now the public `msg` package. `gozmq.Msg` remains an alias, so **no application code changes** — but the method set is now documented in one place instead of hand-listed in prose. Methods exported only for cross-package internal use (`FromFramesOwned`, `Recycle`, `IsPooled`, `MarkSubscription`, `AppendPooledFrame`, `TransferPool`, `Reset`) each carry an explicit exclusion banner. The size-tiered frame pool moved to `internal/bufpool`, off the public surface entirely.
+- **`SocketMetrics`** is a concrete struct in the root package instead of an alias to `iface.SocketMetrics`; its fields now render.
+- **`Context.RegisterTransport`** takes `transport.Transport` instead of `internal/iface.Transport`. `Transport`, `Conn`, and `Listener` are defined in the public `transport` package and name only standard-library types, so out-of-tree transports (QUIC, WebSocket, fault-injecting harnesses) are now genuinely implementable — the package doc previously claimed the opposite.
+- **`security`**: `SecurityMech` is now `security.Mech` (renamed to avoid `security.SecurityMech` stutter), and `Role`, `ZAPAuthorizer`, and `ZapConfigurable` likewise move to the public package. Constructors (`NewNull`, `NewPlainClient`, `NewPlainServer`, `NewCurveClient`, `NewCurveServer`, `NewMechBase`) now have nameable signatures.
+- **`transport.InprocTransport`** is unexported; `NewInprocTransport` returns `Transport`. Its only extra method was the internal direct-pipe probe.
+
+### Added
+
+- **`Proxy(ctx, frontend, backend, capture)`** — the `zmq_proxy` equivalent, previously missing entirely. Moves whole multipart messages, so ROUTER envelopes and XSUB/XPUB subscription control messages survive the hop with no special casing. Half-duplex pairings only run the direction that can work; capture runs behind a bounded queue on its own goroutine so a slow tap cannot backpressure the data path. See `examples/proxy_xsub_xpub`.
+- **`WithSecurityMech`** — installs a caller-supplied `security.Mech`. Rejected alongside the PLAIN/CURVE options and on STREAM sockets; a constructor error fails the session rather than downgrading to NULL.
+- **`security.EncodeReady` / `DecodeReady` / `EncodeMetadata` / `DecodeMetadata`** — the ZMTP READY and property-list wire format, without which an out-of-tree mechanism could not produce a valid handshake. NULL now uses the same helpers.
+- **`docs/COMPATIBILITY.md`** — the full libzmq inventory: socket types, transports, security mechanisms, a three-way split of `zmq_setsockopt` options (supported / not-applicable-in-Go / not implemented, each with a workaround), and every intentional behavioural divergence in one place.
+- **`SECURITY.md`**, **`CONTRIBUTING.md`**, **`docs/RELEASING.md`**, and GitHub issue templates.
+- **`soak/`** — a build-tagged (`soak`) stability suite that churns connections, subscribers, and aborted handshakes, then asserts goroutine count and heap have returned to baseline. Configurable via `GOZMQ_SOAK_DURATION`; nightly CI runs it for ten minutes.
+
+### Fixed
+
+- **Socket leak on a long-lived Context.** `NewSocket` appended each socket to `Context.sockets` and nothing ever removed one on `Close`, so a Context — the one-per-process pattern the docs recommend — retained every socket it had ever created, along with each socket's config, engine, and engine-owned maps and channels. Roughly 2 KiB per socket: a connection-churning server leaked ~150 MiB per 75k cycles, unbounded. Found by the new soak suite; guarded in the fast suite by `TestContextReleasesClosedSockets`.
+- **Unguarded command-name length.** The session writer open-codes the ZMTP command encoding to control buffer ownership but omitted the length guard `zmtp.EncodeCommand` enforces; a name over 255 bytes would have been silently truncated into a malformed frame. Now panics, matching the codec's contract.
+- **ROUTER identity handover was misdocumented.** `internal/socket/identity.go` described last-writer-wins handover as "matching libzmq"; it is the opposite — libzmq defaults to `ZMQ_ROUTER_HANDOVER=0`, which rejects the new peer. gozmq's behaviour is the better default, but two clients sharing a `WithIdentity` value silently evict each other, and nothing said so. Now documented in `doc.go` and the compatibility matrix.
+
+### Changed
+
+- **CI**: the test matrix now covers the `go.mod` minimum (1.22.x) plus `oldstable` and `stable` — previously only 1.22.x ran, so a break on current Go would have shipped unnoticed. `-race` runs `./...` instead of a hand-listed package set that had already fallen out of date. New lint job and an 80% coverage gate over library packages. Cross-build adds linux/arm64, darwin/arm64, and freebsd/amd64. A new nightly workflow runs 10m-per-target fuzzing, five race passes, the soak suite, and repeated interop runs.
+- **golangci-lint** is now enforced. The first pass reported 82 issues; all are resolved. Two were real (above); the rest were mechanical or suppressed with the rationale recorded in `.golangci.yml`.
+- `README.md` rewritten for release: measured libzmq comparison, compatibility link, stability statement, and a `Proxy` example. The README's snippets are compiler-verified as testable examples.
+
 ### Security
 
 - A socket configured for CURVE could silently fall back to NULL (unauthenticated, plaintext) when the mechanism failed to construct. Mechanism construction failure is now an error and the connection is torn down — never a downgrade to a weaker mechanism (`wiring.go` `newMechanism`).
