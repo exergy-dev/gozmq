@@ -1,4 +1,9 @@
-package msg
+// Package bufpool holds the size-tiered []byte pool that backs inbound ZMTP
+// frame bodies on the session read path. It lives in internal/ because
+// buffer recycling is an implementation detail of the engine layers: the
+// public msg package exposes ownership through (*Msg).Retain / Release, not
+// through raw Get / Put.
+package bufpool
 
 import "sync"
 
@@ -51,7 +56,7 @@ func tierIndexFor(n int) int {
 }
 
 // tierIndexForCap returns the tier index whose size exactly equals c, or -1
-// if c is not a tier capacity. Used by PoolPut to route a slice back to its
+// if c is not a tier capacity. Used by Put to route a slice back to its
 // origin pool and to reject non-pool slices without data corruption.
 func tierIndexForCap(c int) int {
 	for i, s := range bufTierSizes {
@@ -62,22 +67,22 @@ func tierIndexForCap(c int) int {
 	return -1
 }
 
-// PoolGet returns a []byte with len == size and cap >= the tier for that
-// size. For size > the largest tier, PoolGet falls back to make([]byte,
+// Get returns a []byte with len == size and cap >= the tier for that
+// size. For size > the largest tier, Get falls back to make([]byte,
 // size) with cap == size; the caller can still Put that slice but the pool
-// will ignore it (see PoolPut).
+// will ignore it (see Put).
 //
 // The returned bytes are not zeroed; callers treat the buffer as
 // uninitialized storage and write into it (ZMTP body reads do io.ReadFull
 // which overwrites every byte).
-// slicePtrPool recycles *[]byte wrappers so PoolPut can avoid a heap
-// escape on every call. PoolGet returns wrappers here; PoolPut draws
+// slicePtrPool recycles *[]byte wrappers so Put can avoid a heap
+// escape on every call. Get returns wrappers here; Put draws
 // from here. After warm-up the pool is self-sustaining.
 var slicePtrPool = sync.Pool{New: func() any { var b []byte; return &b }}
 
-func PoolGet(size int) []byte {
+func Get(size int) []byte {
 	if size < 0 {
-		panic("gozmq/internal/msg: PoolGet size < 0")
+		panic("gozmq/internal/bufpool: Get size < 0")
 	}
 	i := tierIndexFor(size)
 	if i < 0 {
@@ -90,15 +95,15 @@ func PoolGet(size int) []byte {
 	return b
 }
 
-// PoolPut returns b to the tier pool whose size matches cap(b). Slices
+// Put returns b to the tier pool whose size matches cap(b). Slices
 // with non-tier capacity (including oversize fallbacks or user-provided
-// buffers not drawn from PoolGet) are silently ignored so callers can be
+// buffers not drawn from Get) are silently ignored so callers can be
 // conservative about ownership.
 //
 // Put preserves capacity and resets length to zero; contents are not
 // zeroed — inbound frame bodies are already exposed to the peer, so
 // zeroing would waste cycles without adding any security.
-func PoolPut(b []byte) {
+func Put(b []byte) {
 	if b == nil {
 		return
 	}

@@ -8,8 +8,9 @@ import (
 	"io"
 	"net"
 
+	"github.com/exergy-dev/gozmq/internal/bufpool"
 	"github.com/exergy-dev/gozmq/internal/iface"
-	"github.com/exergy-dev/gozmq/internal/msg"
+	"github.com/exergy-dev/gozmq/msg"
 )
 
 // Batch caps for write coalescing. The writer pulls additional messages
@@ -178,7 +179,7 @@ type bufferWriter interface {
 //
 //   - Fallback path (CURVE / other mechanisms that rewrite body bytes):
 //     encodeOneFrame produces a contiguous [header||body] blob per frame
-//     drawn from msg.PoolGet. The blob is owned by the batch (returned to
+//     drawn from bufpool.Get. The blob is owned by the batch (returned to
 //     the pool on release) and appended directly to b.buffers.
 //
 // release is called after every flush (writeBatchFrom). It recycles any
@@ -202,7 +203,7 @@ type writerBatch struct {
 	// (materializeBuffers records body slices into net.Buffers by
 	// reference, no copy). They MUST NOT be recycled until after
 	// flushBatch's writev has fully consumed the buffers — otherwise
-	// Recycle would PoolPut a pooled inbound frame's backing buffer while
+	// Recycle would bufpool.Put a pooled inbound frame's backing buffer while
 	// the pending write still aliases it (use-after-free / wire
 	// corruption for a re-sent pooled message). release() recycles them
 	// after the flush. Non-pooled messages are tracked too; Recycle is a
@@ -222,7 +223,7 @@ type writerEntry struct {
 
 func (b *writerBatch) release() {
 	for _, owned := range b.ownedBuffers {
-		msg.PoolPut(owned)
+		bufpool.Put(owned)
 	}
 	b.ownedBuffers = b.ownedBuffers[:0]
 	// Recycle source messages only now — after flushBatch has consumed
@@ -331,7 +332,7 @@ func encodeOneFrame(
 		return nil, 0, fmt.Errorf("gozmq/session: serialize frame: %w", err)
 	}
 	// Copy out so scratch can be reused for the next frame.
-	blob := msg.PoolGet(len(scratch.Bytes()))
+	blob := bufpool.Get(len(scratch.Bytes()))
 	copy(blob, scratch.Bytes())
 	return blob, len(blob), nil
 }

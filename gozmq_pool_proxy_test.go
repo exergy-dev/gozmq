@@ -23,7 +23,7 @@ import (
 // proxyIn PULL (receives pooled large frames) -> proxyOut PUSH (re-sends
 // the pooled *Msg) -> sink PULL (verifies byte-exact delivery). Runs many
 // large distinct payloads so the pool is actively cycled while writes are
-// in flight; run with -race to catch the aliased PoolPut.
+// in flight; run with -race to catch the aliased bufpool.Put.
 func TestProxy_PooledLargeFrameRoundTrip(t *testing.T) {
 	// Two PUSH(bind)→PULL(connect) hops. PUSH blocks until its peer
 	// attaches, so no handshake settle is needed before traffic.

@@ -9,8 +9,8 @@ import (
 	"sync"
 
 	"github.com/exergy-dev/gozmq/internal/iface"
-	"github.com/exergy-dev/gozmq/internal/msg"
 	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/msg"
 )
 
 // defaultReadBufSize is the max chunk pulled from conn.Read per iteration.

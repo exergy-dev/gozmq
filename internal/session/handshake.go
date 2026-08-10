@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/exergy-dev/gozmq/internal/bufpool"
 	"github.com/exergy-dev/gozmq/internal/iface"
-	"github.com/exergy-dev/gozmq/internal/msg"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
@@ -160,7 +160,7 @@ func (s *sessionImpl) runSecurityHandshake() error {
 		// `in` is a codec pool buffer from the previous iteration's
 		// ReadFrame. NextHandshake copies anything it retains (metadata
 		// maps, keys), so the scratch can go back to the pool now.
-		msg.PoolPut(in)
+		bufpool.Put(in)
 		in = nil
 		if err != nil {
 			// Mechanisms may return an encoded ERROR command alongside the
@@ -203,15 +203,15 @@ func (s *sessionImpl) runSecurityHandshake() error {
 		// it rather than leaking it from the pool.
 		werr := <-writeErrCh
 		if werr != nil {
-			msg.PoolPut(body)
+			bufpool.Put(body)
 			return fmt.Errorf("gozmq/session: write handshake frame: %w", werr)
 		}
 		if rerr != nil {
-			msg.PoolPut(body)
+			bufpool.Put(body)
 			return fmt.Errorf("gozmq/session: read handshake frame: %w", rerr)
 		}
 		if flags&iface.FlagCommand == 0 {
-			msg.PoolPut(body)
+			bufpool.Put(body)
 			return fmt.Errorf("%w: expected COMMAND frame in handshake, flags=0x%02x", zmqerr.ErrMalformedFrame, flags)
 		}
 		// Do NOT route through Mech.DecodeFrame here: that method is the

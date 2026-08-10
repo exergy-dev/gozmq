@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 
 	"github.com/exergy-dev/gozmq/internal/iface"
-	"github.com/exergy-dev/gozmq/internal/msg"
+	"github.com/exergy-dev/gozmq/msg"
 )
 
 // ErrNilMessage is returned by Send when the caller supplies a nil *Msg.

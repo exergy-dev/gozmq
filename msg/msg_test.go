@@ -4,6 +4,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/exergy-dev/gozmq/internal/bufpool"
 	"github.com/stretchr/testify/require"
 )
 
@@ -46,7 +47,7 @@ func TestMsgReset(t *testing.T) {
 }
 
 func TestMsgResetReleasesPooledFrames(t *testing.T) {
-	pool := PoolGet(1024)
+	pool := bufpool.Get(1024)
 	m := New()
 	m.AppendPooledFrame(pool[:16], pool)
 	holder := m.pooled
@@ -71,7 +72,7 @@ func TestMsgReleaseNoPooledIsNoop(t *testing.T) {
 // TestMsgRetainReleaseDecrements verifies Retain bumps the count and the
 // pooled buffers survive until the final Release.
 func TestMsgRetainReleaseDecrements(t *testing.T) {
-	buf := PoolGet(4 * 1024)
+	buf := bufpool.Get(4 * 1024)
 	for i := range buf {
 		buf[i] = byte(i)
 	}
@@ -91,7 +92,7 @@ func TestMsgRetainReleaseDecrements(t *testing.T) {
 // TestMsgResetForcesReclamation verifies Reset on a *Msg with pooled
 // frames returns them immediately regardless of refcount.
 func TestMsgResetForcesReclamation(t *testing.T) {
-	buf := PoolGet(4 * 1024)
+	buf := bufpool.Get(4 * 1024)
 	m := New()
 	m.AppendPooledFrame(buf[:512], buf)
 	m.Retain()
@@ -103,7 +104,7 @@ func TestMsgResetForcesReclamation(t *testing.T) {
 // TestMsgReleaseIdempotentAfterReclamation ensures a Release after the
 // pool buffers have been reclaimed (e.g. via Reset) is harmless.
 func TestMsgReleaseIdempotentAfterReclamation(t *testing.T) {
-	buf := PoolGet(4 * 1024)
+	buf := bufpool.Get(4 * 1024)
 	m := New()
 	m.AppendPooledFrame(buf[:32], buf)
 	m.Reset()
@@ -127,7 +128,7 @@ func TestFromFramesOwnedAdoptsSlice(t *testing.T) {
 // TestTransferPoolMovesOwnership verifies TransferPool moves the pooled
 // bookkeeping (and refcount) to the destination and disarms the source.
 func TestTransferPoolMovesOwnership(t *testing.T) {
-	buf := PoolGet(8 * 1024)
+	buf := bufpool.Get(8 * 1024)
 	src := New()
 	src.AppendPooledFrame(buf[:64], buf)
 	src.Retain() // refs = 2; the transferred message must inherit it
@@ -152,7 +153,7 @@ func TestTransferPoolMovesOwnership(t *testing.T) {
 // only reclaims when the last reference drops (the PUB fanout contract:
 // N retained references, N concurrent post-flush Recycles, one reclaim).
 func TestRecycleIsRefcountAware(t *testing.T) {
-	buf := PoolGet(8 * 1024)
+	buf := bufpool.Get(8 * 1024)
 	m := New()
 	m.AppendPooledFrame(buf[:128], buf)
 	m.Retain() // refs = 2
@@ -172,12 +173,12 @@ func TestRecycleDoubleReleaseSafe(t *testing.T) {
 	Recycle(plain)
 	require.Equal(t, 1, plain.NumFrames())
 
-	buf := PoolGet(8 * 1024)
+	buf := bufpool.Get(8 * 1024)
 	m := New()
 	m.AppendPooledFrame(buf[:8], buf)
 	Recycle(m)
 	require.False(t, m.IsPooled())
-	Recycle(m) // already reclaimed: must not double-PoolPut or go negative
+	Recycle(m) // already reclaimed: must not double-Put or go negative
 	require.False(t, m.IsPooled())
 }
 
@@ -186,7 +187,7 @@ func TestRecycleDoubleReleaseSafe(t *testing.T) {
 func TestRecycleConcurrent(t *testing.T) {
 	const fanout = 8
 	for iter := 0; iter < 200; iter++ {
-		buf := PoolGet(8 * 1024)
+		buf := bufpool.Get(8 * 1024)
 		m := New()
 		m.AppendPooledFrame(buf[:4096], buf)
 		for i := 1; i < fanout; i++ {

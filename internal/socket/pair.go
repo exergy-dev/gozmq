@@ -7,8 +7,8 @@ import (
 	"sync"
 
 	"github.com/exergy-dev/gozmq/internal/iface"
-	"github.com/exergy-dev/gozmq/internal/msg"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/msg"
 )
 
 // pairEngine implements iface.SocketEngine for the PAIR socket type.

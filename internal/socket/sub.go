@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/exergy-dev/gozmq/internal/iface"
-	"github.com/exergy-dev/gozmq/internal/msg"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/msg"
 )
 
 // SubEngine implements iface.SocketEngine for the SUB socket type and

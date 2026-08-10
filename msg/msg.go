@@ -1,34 +1,47 @@
-// Package msg holds the raw multipart-message type used across the internal
-// layers. It lives in internal/ rather than the public root so the iface
-// package can reference it without creating an import cycle with the public
-// gozmq package (which re-exports Msg via a type alias).
+// Package msg defines Msg, the multipart ZMTP message exchanged by every
+// gozmq socket. The root package re-exports it as [github.com/exergy-dev/gozmq.Msg],
+// so applications normally reach these methods through that alias and never
+// import this package directly. It exists as its own package so the method
+// set is documented in one place and so the internal engine layers can
+// reference it without an import cycle through the root package.
 //
-// Frame ownership and the refcount.
+// # Compatibility
+//
+// The methods in the "Supported API" section of this package are covered by
+// the module's compatibility promise. The methods marked "Internal plumbing"
+// are exported only because gozmq's own internal packages must call them
+// across a package boundary; they are NOT covered by the compatibility
+// promise and may change or disappear in any release. Applications must not
+// call them.
+//
+// # Frame ownership and the refcount
 //
 // Most *Msg values own ordinary heap-allocated frame buffers — these need
 // no explicit reclamation. The session reader's wire-read path, however,
 // optionally hands a *Msg one or more frames backed by buffers drawn from
-// the size-tiered pool (PoolGet / PoolPut). Those buffers can be returned
-// to the pool when the *Msg is no longer needed.
+// an internal size-tiered pool. Those buffers can be returned to the pool
+// when the *Msg is no longer needed.
 //
-// Reclamation is driven by an atomic refcount on the *Msg.
-// AppendPooledFrame sets the refcount to 1 on the first pooled frame; the
-// consumer of the *Msg must call Release when done. When the count reaches
-// zero the pooled buffers are returned to the pool. A runtime finalizer
-// remains as a safety net for callers that drop a *Msg without calling
-// Release; it is not the primary reclamation path and should not be
-// relied on by performance-sensitive code.
+// Reclamation is driven by an atomic refcount on the *Msg. The reader
+// installs the initial reference on the first pooled frame; the consumer of
+// the *Msg calls [Msg.Release] when done. When the count reaches zero the
+// pooled buffers are returned to the pool. A runtime finalizer remains as a
+// safety net for callers that drop a *Msg without calling Release; it is
+// not the primary reclamation path and should not be relied on by
+// performance-sensitive code.
 //
-// BREAKING: callers that consume a *Msg returned by Socket.RecvMsg and
-// care about large-frame throughput should call Release when finished.
-// *Msg values that never carry pooled frames (NewMsg / NewMsgFromBytes /
-// NewMsgFromFrames) treat Release as a no-op, so calling Release
+// Callers that consume a *Msg returned by Socket.RecvMsg and care about
+// large-frame throughput should call Release when finished. *Msg values
+// that never carry pooled frames (New / FromBytes / FromFrames, and the
+// gozmq.NewMsg* constructors) treat Release as a no-op, so calling Release
 // unconditionally on every received *Msg is always safe.
 package msg
 
 import (
 	"runtime"
 	"sync/atomic"
+
+	"github.com/exergy-dev/gozmq/internal/bufpool"
 )
 
 // Msg is a ZMTP message: an ordered sequence of binary frames. The zero value
@@ -45,7 +58,7 @@ type Msg struct {
 	// pooled holds the original pool-allocated buffers that back
 	// entries in frames (possibly subsliced). Populated only by the
 	// session reader via AppendPooledFrame; reclamation walks this
-	// slice on Release / Reset and PoolPuts each entry.
+	// slice on Release / Reset, returning each entry to the buffer pool.
 	pooled [][]byte
 	// refs tracks outstanding references for pooled-frame reclamation.
 	// Zero means "no pooled frames or already reclaimed". The first
@@ -70,7 +83,7 @@ type Msg struct {
 // a sync.Pool of *Msg was measured net-negative because messages are produced
 // on one goroutine and consumed on another, giving a ~0% pool hit rate while
 // still paying the cross-P poolChain steal cost. The size-tiered FRAME-BUFFER
-// pool (PoolGet/PoolPut) is unaffected — that one earns its keep on the
+// pool (internal/bufpool) is unaffected — that one earns its keep on the
 // large-frame wire-read path.
 func New() *Msg {
 	m := &Msg{}
@@ -101,6 +114,9 @@ func FromFrames(frames ...[]byte) *Msg {
 	return out
 }
 
+// Internal plumbing — NOT covered by the compatibility promise; do not
+// call from application code.
+//
 // FromFramesOwned returns a Msg that adopts the frames slice header directly,
 // without copying it. The caller must not retain or mutate frames afterward.
 // This avoids the redundant [][]byte allocation FromFrames makes for
@@ -110,6 +126,9 @@ func FromFramesOwned(frames [][]byte) *Msg {
 	return &Msg{frames: frames}
 }
 
+// Internal plumbing — NOT covered by the compatibility promise; do not
+// call from application code.
+//
 // Recycle releases one reference to m, returning its pool-backed frame
 // buffers to the size-tiered frame pool when the last reference drops
 // (it is the function-form equivalent of Release). The *Msg struct itself
@@ -129,6 +148,9 @@ func Recycle(m *Msg) {
 	m.Release()
 }
 
+// Internal plumbing — NOT covered by the compatibility promise; do not
+// call from application code.
+//
 // IsPooled reports whether m carries any pool-backed frame buffers that
 // require reclamation (via Recycle/Release). It is false for every
 // caller-constructed message (New / FromBytes / FromFrames / FromFramesOwned)
@@ -137,6 +159,9 @@ func Recycle(m *Msg) {
 // the common non-pooled case, where Recycle would be a no-op anyway.
 func (m *Msg) IsPooled() bool { return m.pooled != nil }
 
+// Internal plumbing — NOT covered by the compatibility promise; do not
+// call from application code.
+//
 // MarkSubscription flags m as a genuine subscription command (see the
 // subscription field). Set by the session reader when it converts a
 // wire SUBSCRIBE/CANCEL command into a synthetic single-frame message.
@@ -179,8 +204,11 @@ func (m *Msg) AppendFrame(b []byte) {
 	m.frames = append(m.frames, b)
 }
 
+// Internal plumbing — NOT covered by the compatibility promise; do not
+// call from application code.
+//
 // AppendPooledFrame appends frame to the message and remembers pool as the
-// pool-allocated backing buffer to return via PoolPut when the Msg is
+// pool-allocated backing buffer to return to the buffer pool when the Msg is
 // released. frame may be a subslice of pool. Intended for the session
 // reader only.
 //
@@ -233,7 +261,7 @@ func (m *Msg) Release() {
 // in a finalizer / Reset path).
 func (m *Msg) reclaimPooled() {
 	for _, b := range m.pooled {
-		PoolPut(b)
+		bufpool.Put(b)
 	}
 	clear(m.pooled)
 	m.pooled = nil
@@ -256,6 +284,9 @@ func finalizeMsg(m *Msg) {
 	m.reclaimPooled()
 }
 
+// Internal plumbing — NOT covered by the compatibility promise; do not
+// call from application code.
+//
 // TransferPool moves pool ownership from src to m, so that a newly
 // constructed *Msg (e.g. from FromFrames) inherits the pooled-buffer
 // bookkeeping of the original wire-read *Msg. This prevents use-after-free
@@ -303,6 +334,9 @@ func (m *Msg) TotalSize() int {
 	return n
 }
 
+// Internal plumbing — NOT covered by the compatibility promise; do not
+// call from application code.
+//
 // Reset truncates the frame slice to zero length without releasing capacity
 // and forces immediate reclamation of any pooled buffers. Used internally
 // by tests and helper code that reuses a message value directly; callers

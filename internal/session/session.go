@@ -21,8 +21,8 @@ import (
 	"time"
 
 	"github.com/exergy-dev/gozmq/internal/iface"
-	"github.com/exergy-dev/gozmq/internal/msg"
 	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/msg"
 )
 
 // Config bundles the inputs to New. Conn, Mech, and Codec are

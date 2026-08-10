@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/exergy-dev/gozmq/internal/iface"
-	"github.com/exergy-dev/gozmq/internal/msg"
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/msg"
 )
 
 // DefaultInprocQueueWindow is the time a Dial waits for a matching Listen

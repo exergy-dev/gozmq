@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/exergy-dev/gozmq/internal/msg"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/msg"
 )
 
 // This file holds the package-wide value types (SocketType, Msg) and the
@@ -101,23 +101,10 @@ func (t SocketType) String() string { return socketTypeName(t) }
 // A safety-net finalizer reclaims pooled buffers for callers that drop
 // a *Msg without calling Release, but it is not the primary path.
 //
-// Msg is an alias for an internal type, so its method set does not
-// render on this page. The SUPPORTED methods — the only ones covered by
-// the compatibility promise — are:
-//
-//	Frames() [][]byte        // all frames, by reference
-//	NumFrames() int          // frame count
-//	Bytes() []byte           // sole frame; panics on multipart
-//	SingleFrame() ([]byte, bool)
-//	TotalSize() int          // sum of frame lengths
-//	AppendFrame(b []byte)    // append by reference (no copy)
-//	Retain()                 // add a reference for cross-goroutine shares
-//	Release()                // drop a reference; last one recycles pools
-//	IsSubscription() bool    // XPUB: SUBSCRIBE/CANCEL control message
-//
-// Any other exported method visible on the underlying type is internal
-// plumbing (pool ownership transfer between engine layers) and may
-// change or disappear in any release.
+// Msg is an alias for [msg.Msg]; see that package for the full method
+// set and for which methods the compatibility promise covers. There is
+// no need to import it — the alias makes every method reachable as
+// gozmq.Msg, and the NewMsg* constructors below cover construction.
 type Msg = msg.Msg
 
 // NewMsg returns an empty message.

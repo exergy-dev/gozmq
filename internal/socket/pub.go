@@ -7,8 +7,8 @@ import (
 	"sync/atomic"
 
 	"github.com/exergy-dev/gozmq/internal/iface"
-	"github.com/exergy-dev/gozmq/internal/msg"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/msg"
 )
 
 // Synthetic subscription message format: a single-frame message whose

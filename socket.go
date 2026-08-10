@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/exergy-dev/gozmq/internal/iface"
-	"github.com/exergy-dev/gozmq/internal/msg"
 	"github.com/exergy-dev/gozmq/internal/session"
 	"github.com/exergy-dev/gozmq/internal/socket"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/msg"
 )
 
 // NewSocket constructs a socket of the given type on this Context.
@@ -595,7 +595,19 @@ func (s *Socket) RecvBytes(ctx context.Context) ([]byte, error) {
 //
 // Send-side errors returned to the caller do NOT count as drops — the
 // caller already observed the failure and can decide what to do.
-type SocketMetrics = iface.SocketMetrics
+type SocketMetrics struct {
+	// Sent counts messages successfully handed to a peer pipe.
+	Sent uint64
+	// Recv counts messages successfully delivered to the application.
+	Recv uint64
+	// Dropped counts messages the engine refused to deliver after the
+	// caller's Send already returned successfully (see the drop
+	// semantics above).
+	Dropped uint64
+	// QueueDepth gauges the messages buffered in the engine's inbound
+	// handoff at the instant Metrics was called.
+	QueueDepth uint64
+}
 
 // Metrics returns a point-in-time snapshot of this socket's counters and
 // queue-depth gauge. Safe to call from any goroutine. Returns the zero
@@ -604,7 +616,13 @@ func (s *Socket) Metrics() SocketMetrics {
 	if s.closed.Load() {
 		return SocketMetrics{}
 	}
-	return s.engine.Metrics()
+	m := s.engine.Metrics()
+	return SocketMetrics{
+		Sent:       m.Sent,
+		Recv:       m.Recv,
+		Dropped:    m.Dropped,
+		QueueDepth: m.QueueDepth,
+	}
 }
 
 // Monitor registers ch to receive Events matching mask, replacing any

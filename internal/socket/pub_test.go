@@ -6,11 +6,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/exergy-dev/gozmq/internal/bufpool"
 	"github.com/exergy-dev/gozmq/internal/iface"
-	"github.com/exergy-dev/gozmq/internal/msg"
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/msg"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -337,7 +338,7 @@ func TestPub_FanoutPooledMessageRecycledOnce(t *testing.T) {
 
 	// Build a pooled message the way the session reader does for >4KiB
 	// frames.
-	buf := msg.PoolGet(8 * 1024)
+	buf := bufpool.Get(8 * 1024)
 	m := msg.New()
 	m.AppendFrame([]byte("t")) // topic
 	m.AppendPooledFrame(buf, buf)
@@ -387,7 +388,7 @@ func TestPub_DropOnHWMReleasesReservedReference(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	require.NoError(t, full.Send(ctx, msg.FromBytes([]byte("plug"))), "saturate full peer")
 
-	buf := msg.PoolGet(8 * 1024)
+	buf := bufpool.Get(8 * 1024)
 	m := msg.New()
 	m.AppendFrame([]byte("t"))
 	m.AppendPooledFrame(buf, buf)

@@ -6,8 +6,8 @@ import (
 	"sync"
 
 	"github.com/exergy-dev/gozmq/internal/iface"
-	"github.com/exergy-dev/gozmq/internal/msg"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/msg"
 )
 
 // NewXPubEngineV returns a new XPUB socket engine. When verbose is true

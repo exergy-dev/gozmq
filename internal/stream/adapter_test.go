@@ -13,8 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq/internal/iface"
-	"github.com/exergy-dev/gozmq/internal/msg"
 	"github.com/exergy-dev/gozmq/internal/testutil"
+	"github.com/exergy-dev/gozmq/msg"
 )
 
 func TestMain(m *testing.M) { testutil.VerifyTestMain(m) }

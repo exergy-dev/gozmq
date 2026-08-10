@@ -14,8 +14,8 @@ import (
 	"io"
 	"math"
 
+	"github.com/exergy-dev/gozmq/internal/bufpool"
 	"github.com/exergy-dev/gozmq/internal/iface"
-	"github.com/exergy-dev/gozmq/internal/msg"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
@@ -179,7 +179,7 @@ func reuseOrAllocate(dst []byte, n int) []byte {
 	if cap(dst) >= n {
 		return dst[:n]
 	}
-	return msg.PoolGet(n)
+	return bufpool.Get(n)
 }
 
 // wrapEOF normalizes "stream ended mid-frame" into ErrUnexpectedEOF wrapped

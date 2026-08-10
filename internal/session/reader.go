@@ -9,9 +9,10 @@ import (
 	"net"
 	"unsafe"
 
+	"github.com/exergy-dev/gozmq/internal/bufpool"
 	"github.com/exergy-dev/gozmq/internal/iface"
-	"github.com/exergy-dev/gozmq/internal/msg"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/msg"
 )
 
 // largeFrameThreshold picks the boundary between the always-copy receive
@@ -45,14 +46,14 @@ func (s *sessionImpl) runReader() {
 	// pool and the zero-copy AppendPooledFrame path is unaffected.
 	//
 	// scratch itself must NEVER be returned to the frame pool (its 4 KiB
-	// capacity matches a pool tier, so PoolPut would accept it and a later
-	// PoolGet could hand it out while the reader still overwrites it on
+	// capacity matches a pool tier, so bufpool.Put would accept it and a later
+	// bufpool.Get could hand it out while the reader still overwrites it on
 	// every frame): putBody identity-checks every return site.
 	scratch := make([]byte, largeFrameThreshold)
 	scratchPtr := unsafe.SliceData(scratch)
 	putBody := func(body []byte) {
 		if unsafe.SliceData(body) != scratchPtr {
-			msg.PoolPut(body)
+			bufpool.Put(body)
 		}
 	}
 
@@ -124,7 +125,7 @@ func (s *sessionImpl) runReader() {
 		//     Release.
 		//
 		//   - Large CURVE: decoded is a fresh box.Open slice, not a
-		//     pool buffer. Attach as an ordinary heap frame and PoolPut
+		//     pool buffer. Attach as an ordinary heap frame and bufpool.Put
 		//     the ciphertext scratch.
 		if current == nil {
 			s.lastInboundUnix.Store(s.cfg.Now())

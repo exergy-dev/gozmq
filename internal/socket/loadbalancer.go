@@ -7,8 +7,8 @@ import (
 	"sync/atomic"
 
 	"github.com/exergy-dev/gozmq/internal/iface"
-	"github.com/exergy-dev/gozmq/internal/msg"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/msg"
 )
 
 // LoadBalancer is a round-robin outbound dispatcher across a dynamic set of
