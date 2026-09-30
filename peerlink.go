@@ -13,8 +13,8 @@ import (
 //   - beginDrain signals "no more inbound; flush what's queued, keep the
 //     conn alive" (session: CancelWriter; direct/stream: nothing to do).
 //   - drained fires when the outbound flush is complete (session:
-//     WriterFlushed; direct pipe: the peer closed its end; stream: never
-//     linger-drained, so a pre-closed channel).
+//     WriterFlushed; direct pipe: the peer received everything we sent;
+//     stream: never linger-drained, so a pre-closed channel).
 //   - stop is the hard teardown run after the drain (session: Stop;
 //     direct: pipe.Close; stream: adapter.Close).
 type peerLink interface {
@@ -39,13 +39,22 @@ func (l sessionLink) beginDrain()              { l.s.CancelWriter() }
 func (l sessionLink) drained() <-chan struct{} { return l.s.WriterFlushed() }
 func (l sessionLink) stop() error              { return l.s.Stop() }
 
-// pipeLink wraps a direct (inproc-bypass) engine pipe. Its drain is the peer
-// closing its end so buffered messages can be consumed.
+// pipeLink wraps a direct (inproc-bypass) engine pipe. Its drain ends once
+// the peer socket has received everything we sent: the peer is usually
+// alive and would never close its end, so waiting for that held Close for
+// the full linger.
 type pipeLink struct{ p iface.Pipe }
 
-func (l pipeLink) beginDrain()              {}
-func (l pipeLink) drained() <-chan struct{} { return l.p.Closed() }
-func (l pipeLink) stop() error              { _ = l.p.Close(); return nil }
+func (l pipeLink) beginDrain() {}
+func (l pipeLink) drained() <-chan struct{} {
+	// Direct pipes always come from pipe.NewPair; the fallback only keeps
+	// a foreign iface.Pipe correct (it drains when either end closes).
+	if sd, ok := l.p.(interface{ SendDrained() <-chan struct{} }); ok {
+		return sd.SendDrained()
+	}
+	return l.p.Closed()
+}
+func (l pipeLink) stop() error { _ = l.p.Close(); return nil }
 
 // streamLink wraps a raw-bytes STREAM adapter. STREAM is not linger-drained
 // (its writer half-closes or exits on ctx), so drained returns immediately.

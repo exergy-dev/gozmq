@@ -450,3 +450,48 @@ func TestDrained_CloseAfterDrainKeepsBufferedMessage(t *testing.T) {
 	_, err = b.Recv(ctx)
 	require.ErrorIs(t, err, io.EOF)
 }
+
+// TestSendDrained_FiresWhenPeerConsumed: with both ends open, SendDrained
+// stays pending while anything we sent is unread (including an HWM-0
+// relay's queue), fires once the peer has received it all, and fires when
+// either end closes.
+func TestSendDrained_FiresWhenPeerConsumed(t *testing.T) {
+	ctx := context.Background()
+	for _, hwm := range []int{0, 500} {
+		a, b := NewPair(hwm, hwm, PeerInfo{}, PeerInfo{})
+		const n = 100
+		for i := 0; i < n; i++ {
+			require.NoError(t, a.Send(ctx, msg.FromBytes([]byte{byte(i)})), "hwm=%d Send[%d]", hwm, i)
+		}
+		drained := a.(*end).SendDrained()
+		for i := 0; i < n; i++ {
+			select {
+			case <-drained:
+				require.FailNow(t, "SendDrained fired with messages unread", "hwm=%d read=%d", hwm, i)
+			default:
+			}
+			m, err := b.Recv(ctx)
+			require.NoError(t, err)
+			require.Equal(t, byte(i), m.Bytes()[0], "hwm=%d Recv[%d]", hwm, i)
+		}
+		select {
+		case <-drained:
+		case <-time.After(time.Second):
+			require.FailNow(t, "SendDrained did not fire after the peer read everything", "hwm=%d", hwm)
+		}
+		_ = a.Close()
+		_ = b.Close()
+
+		// Nothing consumed, but the peer closes: fires too.
+		a, b = NewPair(hwm, hwm, PeerInfo{}, PeerInfo{})
+		require.NoError(t, a.Send(ctx, msg.FromBytes([]byte("x"))))
+		drained = a.(*end).SendDrained()
+		_ = b.Close()
+		select {
+		case <-drained:
+		case <-time.After(time.Second):
+			require.FailNow(t, "SendDrained did not fire on peer close", "hwm=%d", hwm)
+		}
+		_ = a.Close()
+	}
+}

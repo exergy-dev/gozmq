@@ -284,7 +284,7 @@ func (s *Socket) Connect(endpoint string) error {
 			}
 		}
 	}
-	rc := session.NewReconnector(session.ReconnectConfig{
+	cfg := session.ReconnectConfig{
 		Dial: func(ctx context.Context) (iface.Conn, error) {
 			return tr.Dial(ctx, endpoint)
 		},
@@ -300,12 +300,18 @@ func (s *Socket) Connect(endpoint string) error {
 		InitialBackoff: s.cfg.reconnectInterval,
 		MaxBackoff:     s.cfg.reconnectIntervalMax,
 		JitterFraction: 0.2,
-		OnAttach: func(p iface.Pipe) {
+		OnAttach: func(p iface.Pipe) error {
+			// A refused pipe (PAIR already has a peer, engine closed)
+			// fails the attempt: the Reconnector stops the session and
+			// backs off instead of leaving it running unattached.
+			if err := s.engine.AttachPipe(p); err != nil {
+				return err
+			}
 			// EventConnected marks the post-handshake attach on
 			// the client side (libzmq parity: Connected fires once
 			// the pipe is wired up, not at raw TCP-dial success).
 			s.emit(EventConnected, endpoint, "")
-			_ = s.engine.AttachPipe(p)
+			return nil
 		},
 		OnDetach: func(p iface.Pipe) {
 			_ = s.engine.DetachPipe(p)
@@ -325,20 +331,19 @@ func (s *Socket) Connect(endpoint string) error {
 			}
 		},
 		Logger: s.cfg.logger,
-	})
+	}
 
+	// Start under s.mu so CloseCtx either sees the reconnector (and stops
+	// it) or we see closed and never start it.
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.closed.Load() {
-		s.mu.Unlock()
 		return ErrSocketClosed
 	}
 	s.reconnectors = append(s.reconnectors, reconnectEntry{
 		endpoint: endpoint,
-		rc:       rc,
+		rc:       session.StartReconnector(s.runCtx, cfg),
 	})
-	s.mu.Unlock()
-
-	rc.Start(s.runCtx)
 	return nil
 }
 
@@ -650,7 +655,11 @@ func (s *Socket) RecvBytes(ctx context.Context) ([]byte, error) {
 	defer m.Release()
 	f, ok := m.SingleFrame()
 	if !ok {
-		return nil, fmt.Errorf("gozmq: RecvBytes received a %d-frame message; use RecvMsg for multipart", m.NumFrames())
+		// ErrFSMViolation: a valid message met the wrong receive call (as
+		// with Subscribe on a non-SUB); ErrMalformedFrame would wrongly
+		// suggest a wire error and a torn-down session.
+		return nil, fmt.Errorf("gozmq: RecvBytes received a %d-frame message; use RecvMsg for multipart: %w",
+			m.NumFrames(), zmqerr.ErrFSMViolation)
 	}
 	return bytes.Clone(f), nil
 }

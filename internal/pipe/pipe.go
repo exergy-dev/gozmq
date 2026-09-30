@@ -10,6 +10,7 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/exergy-dev/gozmq/internal/pipeiface"
 	"github.com/exergy-dev/gozmq/msg"
@@ -368,11 +369,46 @@ func (e *end) DrainRecv(ctx context.Context) (*msg.Msg, error) {
 
 // Drained returns a channel closed once every message the peer sent
 // towards this end is observable on RecvCh: for an HWM-0 direction, after
-// the peer closed (or SealRecv) and the relay flushed its queue and
-// exited; for channel-backed directions it is always closed. From then
-// on closing this end loses nothing — Recv returns buffered messages
-// before EOF — and no relay goroutine is left to leak.
+// the peer closed (or SealRecv, or the peer's SendDrained) and the relay
+// flushed its queue and exited; for channel-backed directions it is
+// always closed. From then on closing this end loses nothing — Recv
+// returns buffered messages before EOF — and no relay goroutine is left
+// to leak.
 func (e *end) Drained() <-chan struct{} { return e.recvDir.drainedCh() }
+
+// SendDrained seals this end's send direction and returns a channel
+// closed once the peer has received every message this end sent, or
+// either end closed. It is the linger-drain signal for a pipe whose peer
+// is another live socket (inproc direct pipes), which may never close its
+// end. Call it only once this end will send nothing more (after
+// engine.Close): like SealRecv, a later Send may never be delivered.
+//
+// Engines consume through RecvCh with no hook to observe, so after the
+// HWM-0 relay (if any) has flushed its queue this polls the delivery
+// channel until it is empty, backing off to 10ms between checks.
+func (e *end) SendDrained() <-chan struct{} {
+	d := e.sendDir
+	d.closeInput()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		select {
+		case <-d.drainedCh():
+		case <-e.shared.either:
+			return
+		}
+		for wait := 50 * time.Microsecond; len(d.out) > 0; wait = min(2*wait, 10*time.Millisecond) {
+			t := time.NewTimer(wait)
+			select {
+			case <-t.C:
+			case <-e.shared.either:
+				t.Stop()
+				return
+			}
+		}
+	}()
+	return done
+}
 
 // TryRecv returns one buffered message if available without blocking.
 // It is intentionally not part of pipeiface.Pipe; the session writer uses

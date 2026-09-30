@@ -48,6 +48,8 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
   `transport.Listener.Accept` documents its terminal errors (`net.ErrClosed`,
   ctx errors); closed-listener errors match `net.ErrClosed`.
 - `tcp://host:*` binds an ephemeral port; TCP socket options are best-effort.
+- `EventConnectDelayed`/`EventConnectRetried` are no longer emitted while a
+  socket is closing.
 
 ### Removed
 
@@ -112,6 +114,13 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
   honours ctx when the accept queue is full.
 - ipc: a stale socket file left by a crashed process no longer blocks `Bind`;
   `Close` no longer unlinks a path another listener may have re-bound.
+- `Socket.Close` on an inproc (direct-pipe) connection no longer waits the
+  full linger while the peer socket is alive; it returns as soon as the peer
+  has received everything sent.
+- A client connection whose pipe the engine refuses (e.g. a PAIR that already
+  has a peer) is now torn down and retried with backoff instead of staying
+  open unattached; `EventConnected` is emitted only after a successful attach.
+- `RecvBytes`' multipart-message error now wraps `ErrFSMViolation`.
 
 ## [1.0.0] - 2026-08-10
 

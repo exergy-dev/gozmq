@@ -145,20 +145,20 @@ func TestReconnector_DialRetriesThenSucceeds(t *testing.T) {
 			sessMu.Unlock()
 			return s, nil
 		},
-		OnAttach: func(p iface.Pipe) {
+		OnAttach: func(p iface.Pipe) error {
 			attaches.Add(1)
 			select {
 			case attached <- p:
 			default:
 			}
+			return nil
 		},
 		OnDetach: func(p iface.Pipe) {
 			detaches.Add(1)
 		},
 	}
 
-	r := NewReconnector(cfg)
-	r.Start(context.Background())
+	r := StartReconnector(context.Background(), cfg)
 	defer r.Stop()
 
 	// Wait for the first successful attach (after two dial failures).
@@ -220,9 +220,8 @@ func TestReconnector_ContextCancellationStopsLoop(t *testing.T) {
 		NewSession: func(c iface.Conn) (iface.Session, error) { return newStubSession(nil), nil },
 	}
 
-	r := NewReconnector(cfg)
 	ctx, cancel := context.WithCancel(context.Background())
-	r.Start(ctx)
+	r := StartReconnector(ctx, cfg)
 
 	// Wait for at least one dial attempt, then cancel the external ctx.
 	select {
@@ -256,8 +255,7 @@ func TestReconnector_StopWakesSleepingBackoff(t *testing.T) {
 		NewSession: func(c iface.Conn) (iface.Session, error) { return newStubSession(nil), nil },
 	}
 
-	r := NewReconnector(cfg)
-	r.Start(context.Background())
+	r := StartReconnector(context.Background(), cfg)
 
 	// Give the loop a moment to fail its first dial and enter the
 	// backoff sleep.
@@ -267,23 +265,6 @@ func TestReconnector_StopWakesSleepingBackoff(t *testing.T) {
 	require.NoError(t, r.Stop())
 	elapsed := time.Since(start)
 	assert.LessOrEqual(t, elapsed, time.Second, "Stop expected prompt wake from 10s backoff")
-}
-
-// TestReconnector_StopBeforeStart exercises the no-Start path.
-func TestReconnector_StopBeforeStart(t *testing.T) {
-	r := NewReconnector(ReconnectConfig{
-		InitialBackoff: time.Millisecond,
-		Dial:           func(ctx context.Context) (iface.Conn, error) { return nil, errors.New("x") },
-		NewSession:     func(c iface.Conn) (iface.Session, error) { return newStubSession(nil), nil },
-	})
-	done := make(chan error, 1)
-	go func() { done <- r.Stop() }()
-	select {
-	case err := <-done:
-		assert.NoError(t, err, "Stop before Start")
-	case <-time.After(time.Second):
-		require.FailNow(t, "Stop before Start hung")
-	}
 }
 
 // TestReconnector_HandshakeFailureTriggersBackoff: a session whose
@@ -313,11 +294,13 @@ func TestReconnector_HandshakeFailureTriggersBackoff(t *testing.T) {
 			return stubConn{}, nil
 		},
 		NewSession: func(c iface.Conn) (iface.Session, error) { return newStubSession(hsErr), nil },
-		OnAttach:   func(_ iface.Pipe) { assert.Fail(t, "OnAttach should not fire on handshake failure") },
+		OnAttach: func(_ iface.Pipe) error {
+			assert.Fail(t, "OnAttach should not fire on handshake failure")
+			return nil
+		},
 	}
 
-	r := NewReconnector(cfg)
-	r.Start(context.Background())
+	r := StartReconnector(context.Background(), cfg)
 
 	select {
 	case <-done:
@@ -325,6 +308,48 @@ func TestReconnector_HandshakeFailureTriggersBackoff(t *testing.T) {
 		require.FailNow(t, "did not see 4 dial attempts", "got %d", attempts.Load())
 	}
 	_ = r.Stop()
+}
+
+// TestReconnector_AttachFailureStopsSession: an OnAttach error (the engine
+// refused the pipe) stops that session without OnDetach, and counts as a
+// failed attempt: the attempt counter keeps advancing across redials
+// instead of resetting as it does after a successful attach.
+func TestReconnector_AttachFailureStopsSession(t *testing.T) {
+	sessions := make(chan *stubSession, 1)
+	retries := make(chan int, 16)
+	cfg := ReconnectConfig{
+		InitialBackoff: time.Millisecond,
+		Dial:           func(ctx context.Context) (iface.Conn, error) { return stubConn{}, nil },
+		NewSession: func(c iface.Conn) (iface.Session, error) {
+			s := newStubSession(nil)
+			select {
+			case sessions <- s:
+			default:
+			}
+			return s, nil
+		},
+		OnAttach: func(iface.Pipe) error { return errors.New("refused") },
+		OnDetach: func(iface.Pipe) { assert.Fail(t, "OnDetach after a refused attach") },
+		OnRetry: func(attempt int, _ time.Duration) {
+			select {
+			case retries <- attempt:
+			default:
+			}
+		},
+	}
+	r := StartReconnector(context.Background(), cfg)
+	defer r.Stop()
+
+	first := <-sessions
+	waitClosed(t, first.done, time.Second, "refused session was not stopped")
+	for want := 1; want <= 3; want++ {
+		select {
+		case got := <-retries:
+			require.Equal(t, want, got, "attempt counter reset by a refused attach")
+		case <-time.After(time.Second):
+			require.FailNow(t, "no retry after refused attach", "want attempt %d", want)
+		}
+	}
 }
 
 // TestReconnector_QuiesceDuringDialBackoff: Quiesce arriving while the
@@ -345,11 +370,13 @@ func TestReconnector_QuiesceDuringDialBackoff(t *testing.T) {
 			return nil, errors.New("refused")
 		},
 		NewSession: func(c iface.Conn) (iface.Session, error) { return newStubSession(nil), nil },
-		OnAttach:   func(_ iface.Pipe) { assert.Fail(t, "OnAttach must not fire after Quiesce") },
+		OnAttach: func(_ iface.Pipe) error {
+			assert.Fail(t, "OnAttach must not fire after Quiesce")
+			return nil
+		},
 	}
 
-	r := NewReconnector(cfg)
-	r.Start(context.Background())
+	r := StartReconnector(context.Background(), cfg)
 	defer r.Stop()
 
 	// Wait for the first (failing) dial; the loop is now in (or headed
@@ -417,7 +444,7 @@ func TestApplyJitter_ZeroFractionIsIdentity(t *testing.T) {
 // (5.0) must be clamped by ReconnectConfig.normalize to 1.0. After
 // normalize, applyJitter samples are bounded by [0, 2*base].
 //
-// We call normalize directly rather than NewReconnector because we only
+// We call normalize directly rather than StartReconnector because we only
 // need the clamped fraction value — standing up a full Reconnector would
 // pull in Dial/NewSession stubs for no benefit.
 func TestApplyJitter_ClampedExtreme(t *testing.T) {
@@ -491,71 +518,6 @@ func TestApplyJitter_InRange(t *testing.T) {
 	// Symmetry sanity: with 10k samples we should see both sides.
 	assert.True(t, sawBelow, "no sample below base; distribution not symmetric")
 	assert.True(t, sawAbove, "no sample above base; distribution not symmetric")
-}
-
-// TestReconnect_OnRetryPanic_DoesNotStall verifies the state-before-
-// callback ordering: if OnRetry panics on attempt=1, the loop must
-// still advance to attempt=2 on the next retry.
-//
-// Strategy:
-//   - stub Dial that always fails (forces the dial-failure retry branch)
-//   - OnRetry panics on the first invocation, records attempts on
-//     subsequent ones
-//   - wait for attempt=2 (proving the loop survived and incremented)
-//   - Stop and assert clean shutdown (goroutine exits)
-func TestReconnect_OnRetryPanic_DoesNotStall(t *testing.T) {
-	attemptsSeen := make(chan int, 16)
-	var onRetryN atomic.Int32
-
-	cfg := ReconnectConfig{
-		InitialBackoff: 2 * time.Millisecond,
-		MaxBackoff:     5 * time.Millisecond,
-		JitterFraction: 0,
-		Dial: func(ctx context.Context) (iface.Conn, error) {
-			return nil, errors.New("always refused")
-		},
-		NewSession: func(c iface.Conn) (iface.Session, error) { return newStubSession(nil), nil },
-		OnRetry: func(attempt int, backoff time.Duration) {
-			n := onRetryN.Add(1)
-			// Record what we saw (non-blocking) regardless of panic path.
-			select {
-			case attemptsSeen <- attempt:
-			default:
-			}
-			if n == 1 {
-				panic("user callback boom")
-			}
-		},
-	}
-
-	r := NewReconnector(cfg)
-	r.Start(context.Background())
-
-	// Collect attempts until we've seen ≥2 or timeout.
-	deadline := time.After(2 * time.Second)
-	seen := make([]int, 0, 4)
-	for len(seen) < 2 {
-		select {
-		case a := <-attemptsSeen:
-			seen = append(seen, a)
-		case <-deadline:
-			require.FailNow(t, "did not see ≥2 OnRetry invocations",
-				"got %v (n=%d)", seen, onRetryN.Load())
-		}
-	}
-
-	assert.Equal(t, 1, seen[0], "first OnRetry attempt")
-	assert.Equal(t, 2, seen[1], "second OnRetry attempt (loop must advance past panic)")
-
-	// Loop must still be alive and Stop must return cleanly.
-	stopped := make(chan error, 1)
-	go func() { stopped <- r.Stop() }()
-	select {
-	case err := <-stopped:
-		assert.NoError(t, err, "Stop after panicking callback")
-	case <-time.After(2 * time.Second):
-		require.FailNow(t, "Stop hung after panicking OnRetry — loop goroutine leaked")
-	}
 }
 
 // TestNextBackoff covers the exponential-doubling and cap logic.

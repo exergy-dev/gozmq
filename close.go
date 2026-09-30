@@ -98,8 +98,8 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 	//   beginDrain()    → session writers drain queued messages to conn and
 	//                     exit (conn stays open); direct/stream: no-op
 	//   drained()       → wait up to linger for each link's flush to finish
-	//                     (session WriterFlushed; direct pipe peer-close;
-	//                     stream: immediate)
+	//                     (session WriterFlushed; direct pipe: peer received
+	//                     everything; stream: immediate)
 	//   runCancel()     → cascades into reconnector ctx → loop exits
 	//   stop()          → conn.Close / pipe.Close → readers exit, Done fires
 	//
@@ -108,7 +108,7 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 	// after engine.Close returns.
 	//
 	// CRUCIAL: runCancel MUST NOT fire before the drain finishes. The
-	// Reconnector watches s.runCtx, and when it cancels, the loop's
+	// Reconnector's ctx derives from s.runCtx, and when it cancels, the loop's
 	// `<-r.ctx.Done()` branch calls sess.Stop() — which closes the conn
 	// and aborts the writer mid-drain. Holding runCancel until after the
 	// drain keeps the reconnector loop parked until the writer finishes.
