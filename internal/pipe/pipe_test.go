@@ -397,3 +397,56 @@ func TestSetRecvReady_LateRegistrationArmsIfPending(t *testing.T) {
 		require.Fail(t, "late-registered gate not armed despite buffered data")
 	}
 }
+
+// TestSealRecv_DrainRecvDeliversWholeQueue: after SealRecv (peer still
+// open), DrainRecv hands out every queued message in order and only then
+// reports EOF — for HWM-0 it must wait out the relay rather than stop at
+// the first momentarily empty channel.
+func TestSealRecv_DrainRecvDeliversWholeQueue(t *testing.T) {
+	for _, hwm := range []int{0, 500} {
+		a, b := NewPair(hwm, hwm, PeerInfo{}, PeerInfo{})
+		ctx := context.Background()
+		const n = 500
+		for i := 0; i < n; i++ {
+			require.NoError(t, a.Send(ctx, msg.FromBytes([]byte{byte(i)})), "hwm=%d Send[%d]", hwm, i)
+		}
+		be := b.(*end)
+		be.SealRecv()
+		for i := 0; i < n; i++ {
+			m, err := be.DrainRecv(ctx)
+			require.NoError(t, err, "hwm=%d DrainRecv[%d]", hwm, i)
+			require.Equal(t, byte(i), m.Bytes()[0], "hwm=%d DrainRecv[%d]", hwm, i)
+		}
+		_, err := be.DrainRecv(ctx)
+		require.ErrorIs(t, err, io.EOF, "hwm=%d: EOF once drained", hwm)
+		select {
+		case <-be.Drained():
+		default:
+			require.Fail(t, "Drained not closed after the relay flushed", "hwm=%d", hwm)
+		}
+		_ = a.Close()
+		_ = b.Close()
+	}
+}
+
+// TestDrained_CloseAfterDrainKeepsBufferedMessage: once Drained fires, the
+// receiving end may be closed without losing the message still sitting in
+// its channel, and the relay has already exited.
+func TestDrained_CloseAfterDrainKeepsBufferedMessage(t *testing.T) {
+	a, b := NewPair(0, 0, PeerInfo{}, PeerInfo{})
+	ctx := context.Background()
+	require.NoError(t, a.Send(ctx, msg.FromBytes([]byte("last"))))
+	require.NoError(t, a.Close())
+	be := b.(*end)
+	select {
+	case <-be.Drained():
+	case <-time.After(time.Second):
+		require.FailNow(t, "Drained not closed after sender close")
+	}
+	require.NoError(t, b.Close())
+	m, err := b.Recv(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "last", string(m.Bytes()))
+	_, err = b.Recv(ctx)
+	require.ErrorIs(t, err, io.EOF)
+}

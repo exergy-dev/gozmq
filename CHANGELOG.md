@@ -4,6 +4,21 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
 
 ## [Unreleased]
 
+### Fixed
+
+- `Socket.Close` with a positive linger now flushes the entire outbound queue
+  when `WithSendHWM(0)` is set; previously only a few hundred messages of a
+  large backlog were sent.
+- `WithRecvHWM(0)` sockets no longer leak a goroutine (and its queued
+  messages) per disconnected peer after `Close`.
+- Session teardown no longer sets `SO_LINGER(2)` on TCP connections, which
+  made `Close` block up to 2s per connection and reset it on expiry.
+- A custom security mechanism named "NULL" or "PLAIN" no longer has its
+  `EncodeFrame`/`DecodeFrame` skipped; the zero-copy framing path is opt-in
+  via an `IdentityFraming() bool` method.
+- `WithHeartbeat` timeout 0 now means 3× the interval, as documented
+  (previously 2×).
+
 ## [1.0.0] - 2026-08-10
 
 First stable release. From this tag, everything exported outside `internal/` is covered by the compatibility promise — with one documented exception: the methods in the `msg` package marked *"Internal plumbing — NOT covered by the compatibility promise"*, which are exported only so gozmq's own packages can reach them across a package boundary.

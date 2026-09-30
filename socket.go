@@ -296,6 +296,7 @@ func (s *Socket) Connect(endpoint string) error {
 		OnDetach: func(p iface.Pipe) {
 			_ = s.engine.DetachPipe(p)
 			s.emit(EventDisconnected, endpoint, "")
+			s.closeDetachedPipe(p)
 		},
 		OnRetry: func(attempt int, backoff time.Duration) {
 			// Convention: the first backoff after a dial/handshake
@@ -514,6 +515,52 @@ func (s *Socket) startSession(conn iface.Conn, role iface.Role) {
 		_ = s.engine.DetachPipe(sess.Pipe())
 		s.emit(EventDisconnected, remote, "")
 		_ = sess.Stop()
+		s.closeDetachedPipe(sess.Pipe())
+	}()
+}
+
+// closeDetachedPipe closes the engine-side end of a session pipe after the
+// engine has detached it. Nothing else ever closes that end, and with
+// WithRecvHWM(0) the inbound relay goroutine (and its queue) would
+// otherwise wait forever for a reader that is gone.
+//
+// It must not close too early: an engine may still be draining the
+// detached pipe to EOF (FairQueue's forwarder does), and closing the
+// receiving end of an HWM-0 direction discards the relay's unflushed
+// queue. So it closes once the pipe is Drained — every message is then
+// in the channel, which Recv still returns before EOF on a closed end,
+// and the relay has exited — or once the socket shuts down and no one
+// will read it. Channel-backed pipes are always Drained and close at
+// once; otherwise a goroutine waits, tracked by connectWG (added under
+// s.mu while not closed, so it happens before CloseCtx's Wait).
+func (s *Socket) closeDetachedPipe(p iface.Pipe) {
+	dp, ok := p.(interface{ Drained() <-chan struct{} })
+	if !ok {
+		_ = p.Close()
+		return
+	}
+	drained := dp.Drained()
+	select {
+	case <-drained:
+		_ = p.Close()
+		return
+	default:
+	}
+	s.mu.Lock()
+	if s.closed.Load() {
+		s.mu.Unlock()
+		_ = p.Close()
+		return
+	}
+	s.connectWG.Add(1)
+	s.mu.Unlock()
+	go func() {
+		defer s.connectWG.Done()
+		select {
+		case <-drained:
+		case <-s.runCtx.Done():
+		}
+		_ = p.Close()
 	}()
 }
 

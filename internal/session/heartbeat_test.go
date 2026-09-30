@@ -292,3 +292,16 @@ func TestHeartbeat_ReaderParkedOnBackpressureIsNotTimeout(t *testing.T) {
 	clk.Advance(2 * time.Second)
 	waitClosed(t, s.Done(), 2*time.Second, "timeout did not resume after the reader unparked")
 }
+
+// TestHeartbeat_DefaultTimeoutIsThreeIntervals: HeartbeatTimeout 0 means
+// 3× the interval (the documented 90 s for the 30 s default interval),
+// visible as the PING TTL.
+func TestHeartbeat_DefaultTimeoutIsThreeIntervals(t *testing.T) {
+	clk := newFakeClock()
+	_, peer := newHeartbeatSession(t, clk, 100*time.Millisecond, 0, 8)
+	frames := peer.startReadLoop()
+	rest := waitCommand(t, frames, "PING", 2*time.Second)
+	require.GreaterOrEqual(t, len(rest), 2, "PING body missing TTL")
+	require.Equal(t, uint16(3), binary.BigEndian.Uint16(rest[:2]),
+		"default timeout should be 3× the 100ms interval (3 deciseconds)")
+}

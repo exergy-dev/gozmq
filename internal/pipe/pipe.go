@@ -133,7 +133,9 @@ func (d *direction) start() {
 // Leak caveat: after the sender closes, the relay parks pushing q into
 // out until the receiver consumes or closes. A receiver that neither
 // reads nor closes keeps the relay (and q) alive — the same lifetime
-// rule as any unclosed pipe end.
+// rule as any unclosed pipe end. The socket layer therefore closes a
+// detached session pipe's engine end once it is Drained or the socket
+// closes.
 func (d *direction) run() {
 	var q []*msg.Msg
 	for {
@@ -319,37 +321,64 @@ func (e *end) Recv(ctx context.Context) (*msg.Msg, error) {
 	case <-e.myCh:
 		return nil, io.EOF
 	case <-e.peerCh:
-		// Peer closed. For an HWM-0 direction the relay may still be
-		// flushing its queue into recvCh, so wait for drainedCh before
-		// reporting EOF — otherwise queued messages would be silently
-		// dropped. For channel-backed directions drainedCh is pre-closed
-		// and this reduces to a single non-blocking drain.
-		for {
-			select {
-			case m := <-e.recvCh:
-				return m, nil
-			case <-e.myCh:
-				// Our own end closed too; the relay exits without
-				// flushing, so don't wait on drainedCh.
-				return nil, io.EOF
-			case <-e.recvDir.drainedCh():
-				select {
-				case m := <-e.recvCh:
-					return m, nil
-				default:
-					return nil, io.EOF
-				}
-			}
+		// Peer closed: hand out whatever is still owed, then EOF.
+		return e.DrainRecv(ctx)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// SealRecv declares that the peer will send nothing more towards this
+// end, without closing either end. An HWM-0 direction's relay then
+// flushes its queue and closes drained, which is what lets DrainRecv tell
+// "empty for good" from "relay still refilling the channel". A message
+// the peer sends after SealRecv may never be delivered, so call it only
+// once the peer has stopped sending (the session writer's linger drain
+// runs after engine.Close). A no-op for channel-backed directions.
+func (e *end) SealRecv() { e.recvDir.closeInput() }
+
+// DrainRecv returns the next message still owed to this end once no more
+// input can arrive: the peer closed, or SealRecv was called. For an HWM-0
+// direction it blocks while the relay is still flushing its queue, so a
+// momentarily empty channel is not mistaken for the end; for
+// channel-backed directions it is a non-blocking receive. It returns
+// io.EOF once everything has been delivered or this end is closed, and
+// ctx.Err() if ctx ends first. Called before either signal, it just
+// waits for a message or ctx.
+func (e *end) DrainRecv(ctx context.Context) (*msg.Msg, error) {
+	select {
+	case m := <-e.recvCh:
+		return m, nil
+	case <-e.myCh:
+		// Our own end closed; the relay exits without flushing, so
+		// don't wait on drainedCh.
+		return nil, io.EOF
+	case <-e.recvDir.drainedCh():
+		// Every remaining message is already in recvCh.
+		select {
+		case m := <-e.recvCh:
+			return m, nil
+		default:
+			return nil, io.EOF
 		}
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 }
 
+// Drained returns a channel closed once every message the peer sent
+// towards this end is observable on RecvCh: for an HWM-0 direction, after
+// the peer closed (or SealRecv) and the relay flushed its queue and
+// exited; for channel-backed directions it is always closed. From then
+// on closing this end loses nothing — Recv returns buffered messages
+// before EOF — and no relay goroutine is left to leak.
+func (e *end) Drained() <-chan struct{} { return e.recvDir.drainedCh() }
+
 // TryRecv returns one buffered message if available without blocking.
 // It is intentionally not part of pipeiface.Pipe; the session writer uses
-// it opportunistically via a local type assertion during linger drains
-// to avoid racing a pre-cancelled context against a ready receive.
+// it to top up a write batch. An empty result does not mean the queue is
+// finished (an HWM-0 relay may be about to refill the channel); use
+// DrainRecv for that.
 func (e *end) TryRecv() (*msg.Msg, bool) {
 	if e.isClosed.Load() {
 		return nil, false

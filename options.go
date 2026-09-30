@@ -155,7 +155,8 @@ func WithReconnectIntervalMax(d time.Duration) Option {
 // PING commands are sent on an otherwise-idle session; timeout is the
 // duration without any inbound frame (data or PONG) after which the peer
 // is considered dead and the session is torn down. Defaults: 30s interval,
-// 90s timeout. Heartbeats are disabled automatically when the peer
+// 90s timeout. A timeout of 0 means 3× interval; an interval of 0
+// disables heartbeats. Heartbeats are disabled automatically when the peer
 // advertises ZMTP 3.0 in the greeting. Heartbeating is the only reliable
 // way to detect a half-open TCP connection (e.g. a peer killed without a
 // FIN, or a NAT that dropped the flow) — disabling it is discouraged on

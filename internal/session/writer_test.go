@@ -558,3 +558,40 @@ func TestReader_HandlesPingWhileWriterBlocked(t *testing.T) {
 	require.Equal(t, []byte("ctx1"), waitCommand(t, frames, "PONG", 2*time.Second),
 		"PONG must echo the PING context")
 }
+
+// --------------------------------------------------------------------------
+// TestWriter_LingerDrainUnboundedQueue: with SendHWM 0 the outbound
+// direction is an unbounded relay that refills the pipe's receive channel
+// one message at a time, so a TryRecv-until-empty drain stops early. The
+// linger drain must flush every queued message.
+// --------------------------------------------------------------------------
+
+func TestWriter_LingerDrainUnboundedQueue(t *testing.T) {
+	for _, hwm := range []int{0, 64} {
+		t.Run(fmt.Sprintf("sendHWM=%d", hwm), func(t *testing.T) {
+			sA, sB, _ := newWriterTestPair(t, hwm, 0)
+			const N = 5000
+			ctx := testCtx(t, 5*time.Second)
+			got := make(chan int, 1)
+			go func() {
+				k := 0
+				for {
+					rc, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+					_, err := sB.Pipe().Recv(rc)
+					cancel()
+					if err != nil {
+						got <- k
+						return
+					}
+					k++
+				}
+			}()
+			for i := 0; i < N; i++ {
+				require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("x"))), "Send[%d]", i)
+			}
+			sA.CancelWriter()
+			waitClosed(t, sA.WriterFlushed(), 5*time.Second, "WriterFlushed did not close after CancelWriter")
+			require.Equal(t, N, <-got, "messages delivered by the linger drain")
+		})
+	}
+}

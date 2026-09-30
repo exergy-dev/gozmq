@@ -20,8 +20,9 @@ func (s *sessionImpl) runHeartbeat() {
 	interval := s.cfg.HeartbeatInterval
 	timeout := s.cfg.HeartbeatTimeout
 	if timeout <= 0 {
-		// design default: 2× interval if not configured.
-		timeout = 2 * interval
+		// Documented default (see WithHeartbeat): 3× interval, i.e. 90 s
+		// for the 30 s default interval.
+		timeout = 3 * interval
 	}
 
 	ticker := time.NewTicker(interval)

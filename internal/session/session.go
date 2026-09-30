@@ -127,9 +127,10 @@ type sessionImpl struct {
 	reader io.Reader
 	encode frameEncoder
 	decode frameDecoder
-	// identityMech reports a NULL/PLAIN security mechanism: encode and
-	// decode are identity transforms, so frame bodies cross the wire
-	// unmodified. Gates the reader's zero-copy pooled-frame path.
+	// identityMech reports an identity-framing mechanism (NULL/PLAIN; see
+	// sessionFramePaths): encode and decode are identity transforms, so
+	// frame bodies cross the wire unmodified. Gates the reader's
+	// zero-copy pooled-frame path.
 	identityMech bool
 	directHeader iface.FrameHeaderAppender
 
@@ -167,7 +168,7 @@ type sessionImpl struct {
 
 	// writerCtx / writerCancel are a separate context for the writer's
 	// blocking Recv call. Cancelling writerCtx causes the writer to drain
-	// remaining messages non-blocking and exit — WITHOUT closing the conn.
+	// the remaining queue and exit — WITHOUT closing the conn.
 	// Socket.Close calls CancelWriter after engine.Close so the writer
 	// flushes the outbound queue while the conn stays alive for the reader.
 	writerCtx    context.Context
@@ -237,15 +238,23 @@ func monoNow() int64 {
 type frameEncoder func(flags uint8, body []byte) (uint8, []byte, error)
 type frameDecoder func(flags uint8, body []byte) (uint8, []byte, error)
 
+// identityFramer is implemented by mechanisms whose EncodeFrame and
+// DecodeFrame are the identity transform (NULL, PLAIN), opting them into
+// the zero-copy framing path.
+type identityFramer interface {
+	IdentityFraming() bool
+}
+
 // sessionFramePaths picks the per-frame encode/decode functions and
-// reports whether the mechanism is an identity transform (NULL/PLAIN).
+// reports whether the mechanism is an identity transform. The mechanism
+// must declare that via identityFramer: keying on Name() would silently
+// bypass the frame transform of any custom mechanism that happens to be
+// called "NULL" or "PLAIN".
 func sessionFramePaths(mech iface.SecurityMech) (frameEncoder, frameDecoder, bool) {
-	switch mech.Name() {
-	case "NULL", "PLAIN":
+	if f, ok := mech.(identityFramer); ok && f.IdentityFraming() {
 		return identityEncodeFrame, identityDecodeFrame, true
-	default:
-		return mech.EncodeFrame, mech.DecodeFrame, false
 	}
+	return mech.EncodeFrame, mech.DecodeFrame, false
 }
 
 // sessionChanPipe is the channel-level surface the session requires of
@@ -263,6 +272,10 @@ type sessionChanPipe interface {
 	TryRecv() (*msg.Msg, bool)
 	// TrySend is a non-blocking Send; false when full or closed.
 	TrySend(*msg.Msg) bool
+	// SealRecv and DrainRecv let the writer flush the whole outbound
+	// queue at linger/close time; see pipe.end for the semantics.
+	SealRecv()
+	DrainRecv(ctx context.Context) (*msg.Msg, error)
 }
 
 // asSessionChanPipe asserts the channel-level surface once, where the
@@ -271,7 +284,7 @@ type sessionChanPipe interface {
 func asSessionChanPipe(p iface.Pipe) sessionChanPipe {
 	cp, ok := p.(sessionChanPipe)
 	if !ok {
-		panic(fmt.Sprintf("gozmq/session: pipe %T lacks the channel-level accessors (RecvCh/TryRecv/TrySend); *pipe.end is the only supported pipe implementation", p))
+		panic(fmt.Sprintf("gozmq/session: pipe %T lacks the channel-level accessors (RecvCh/TryRecv/TrySend/SealRecv/DrainRecv); *pipe.end is the only supported pipe implementation", p))
 	}
 	return cp
 }
@@ -337,15 +350,14 @@ func (s *sessionImpl) Stop() error {
 		// Closing the conn unblocks any in-flight Read/Write inside the
 		// reader/writer goroutines. We do this even if Start was never
 		// called so a half-constructed session releases its conn.
-		// Match shutdown()'s graceful-close path so Stop, too, waits for
-		// the TCP kernel send buffer to drain before the conn is torn
-		// down (otherwise rapid Close-then-process-exit loses in-flight
-		// data; see closeConnGraceful).
+		// A plain close: the kernel keeps delivering already-written data
+		// after close(2), whereas a timed SO_LINGER would block here (per
+		// session, sequentially during Socket.Close) and RST on expiry.
 		// isShutdownErr covers both the test double's io.ErrClosedPipe and
 		// the net.ErrClosed a real conn returns when shutdown() already
 		// closed it — the common teardown path must not surface a spurious
 		// "use of closed network connection".
-		if err := closeConnGraceful(s.cfg.Conn); err != nil && !isShutdownErr(err) {
+		if err := s.cfg.Conn.Close(); err != nil && !isShutdownErr(err) {
 			s.stopErr.CompareAndSwap(nil, &err)
 		}
 		// If the handshake hasn't completed yet, signal so observers
@@ -400,7 +412,7 @@ func (s *sessionImpl) Done() <-chan struct{} { return s.stopped }
 func (s *sessionImpl) WriterFlushed() <-chan struct{} { return s.writerExited }
 
 // CancelWriter cancels the writer goroutine's blocking Recv, causing it
-// to drain remaining messages non-blocking and exit. The conn stays alive
+// to drain the remaining queue and exit. The conn stays alive
 // so in-flight conn.Write calls complete. Call before sess.Stop() to
 // implement LINGER drain without data loss.
 func (s *sessionImpl) CancelWriter() { s.writerCancel() }
@@ -513,26 +525,10 @@ func (s *sessionImpl) enqueueCommand(name string, body []byte) {
 // closes the session-side pipe (waking the engine).
 func (s *sessionImpl) shutdown() {
 	s.cancel()
-	_ = closeConnGraceful(s.cfg.Conn)
+	_ = s.cfg.Conn.Close()
 	if s.sessionPipe != nil {
 		_ = s.sessionPipe.Close()
 	}
-}
-
-// closeConnGraceful closes c after ensuring buffered TCP data is flushed.
-// For *net.TCPConn (via the SetLinger method on the iface.Conn wrapper)
-// it sets SO_LINGER with a positive timeout so close(2) blocks until
-// the kernel acknowledges the data or the timeout elapses — otherwise
-// a rapid Close-then-process-exit races the kernel's async FIN
-// transmission and queued data gets dropped before the peer TCP stack
-// can deliver it. The timeout is intentionally short (a few seconds):
-// user-space drain has already completed, so only the kernel send
-// buffer + in-flight ACKs remain.
-func closeConnGraceful(c io.Closer) error {
-	if ls, ok := c.(interface{ SetLinger(sec int) error }); ok {
-		_ = ls.SetLinger(2)
-	}
-	return c.Close()
 }
 
 // Compile-time check.

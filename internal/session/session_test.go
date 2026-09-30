@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -434,6 +435,93 @@ func TestSession_CancelWriter_DoesNotCloseConnUntilStop(t *testing.T) {
 	waitClosed(t, connA.Closed(), time.Second, "Stop did not close the conn")
 }
 
+// xorMech is a fakeMech whose frame transform is NOT the identity, so a
+// session that skipped EncodeFrame/DecodeFrame would put plaintext on the
+// wire. Its name is configurable to prove the fast path is not chosen by
+// Name().
+type xorMech struct{ *fakeMech }
+
+func xorBytes(b []byte) []byte {
+	out := make([]byte, len(b))
+	for i, c := range b {
+		out[i] = c ^ 0x5a
+	}
+	return out
+}
+
+func (m xorMech) EncodeFrame(flags uint8, b []byte) (uint8, []byte, error) {
+	return flags, xorBytes(b), nil
+}
+func (m xorMech) DecodeFrame(flags uint8, b []byte) (uint8, []byte, error) {
+	return flags, xorBytes(b), nil
+}
+
+// identityFramingMech opts into the zero-copy framing path explicitly.
+type identityFramingMech struct{ *fakeMech }
+
+func (identityFramingMech) IdentityFraming() bool { return true }
+
+// TestSession_FramePathsIgnoreMechName: a mechanism named "PLAIN" (or
+// "NULL") that transforms frame bodies must still have its EncodeFrame/
+// DecodeFrame applied; only a mechanism that declares IdentityFraming
+// takes the bypass.
+func TestSession_FramePathsIgnoreMechName(t *testing.T) {
+	for _, name := range []string{"PLAIN", "NULL"} {
+		t.Run(name, func(t *testing.T) {
+			connA, connB := newFakeConnPair()
+			sA, sB := startPair(t,
+				Config{Conn: connA, Mech: xorMech{newFakeMech(name, false, nil)}, SendHWM: 4, RecvHWM: 4},
+				// B decodes with the identity transform, so it sees the
+				// raw wire bytes A produced.
+				Config{Conn: connB, Mech: newFakeMech("NULL", true, nil), SendHWM: 4, RecvHWM: 4},
+			)
+			require.False(t, sA.(*sessionImpl).identityMech, "name alone must not select identity framing")
+			ctx := testCtx(t, 2*time.Second)
+			require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("hello"))))
+			got, err := sB.Pipe().Recv(ctx)
+			require.NoError(t, err)
+			require.Equal(t, xorBytes([]byte("hello")), got.Bytes(), "A's EncodeFrame was bypassed")
+
+			// And the reverse direction: A must DecodeFrame what B sends.
+			require.NoError(t, sB.Pipe().Send(ctx, msg.FromBytes(xorBytes([]byte("back")))))
+			got, err = sA.Pipe().Recv(ctx)
+			require.NoError(t, err)
+			require.Equal(t, "back", string(got.Bytes()), "A's DecodeFrame was bypassed")
+		})
+	}
+
+	s := New(Config{Conn: &fakeConn{}, Mech: identityFramingMech{newFakeMech("CUSTOM", false, nil)}, Codec: fakeCodec{}})
+	require.True(t, s.(*sessionImpl).identityMech, "IdentityFraming() true must select identity framing")
+	s = New(Config{Conn: &fakeConn{}, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{}})
+	require.False(t, s.(*sessionImpl).identityMech, "a mech without IdentityFraming takes the generic path")
+}
+
+// lingerRecordingConn records SetLinger calls. Stop must close the conn
+// plainly: SO_LINGER with a timeout makes close(2) block (and RST on
+// expiry), while the kernel already delivers queued data after a normal
+// close.
+type lingerRecordingConn struct {
+	*fakeConn
+	lingerCalls atomic.Int32
+}
+
+func (c *lingerRecordingConn) SetLinger(int) error {
+	c.lingerCalls.Add(1)
+	return nil
+}
+
+func TestSession_StopDoesNotSetLinger(t *testing.T) {
+	connA, connB := newFakeConnPair()
+	lc := &lingerRecordingConn{fakeConn: connA}
+	sA, sB := startPair(t,
+		Config{Conn: lc, Mech: newFakeMech("NULL", false, nil), SendHWM: 4, RecvHWM: 4},
+		Config{Conn: connB, Mech: newFakeMech("NULL", true, nil), SendHWM: 4, RecvHWM: 4},
+	)
+	require.NoError(t, sA.Stop())
+	require.NoError(t, sB.Stop())
+	require.Zero(t, lc.lingerCalls.Load(), "Stop/shutdown must not set SO_LINGER")
+}
+
 // --------------------------------------------------------------------------
 // helpers
 // --------------------------------------------------------------------------
@@ -688,14 +776,15 @@ func TestReader_MaxMessageSize_OverLimit(t *testing.T) {
 // --------------------------------------------------------------------------
 
 // startZmtpPair is startPair with the real ZMTP framing codec on both
-// ends, so the reader's scratch-vs-pool dst handling is exercised.
+// ends, so the reader's scratch-vs-pool dst handling is exercised. The
+// mechs declare IdentityFraming so the zero-copy paths are taken.
 func startZmtpPair(t *testing.T, hwm int) (sA, sB iface.Session) {
 	t.Helper()
 	connA, connB := newFakeConnPair()
 	return startPair(t,
-		Config{Conn: connA, Mech: newFakeMech("NULL", false, nil),
+		Config{Conn: connA, Mech: identityFramingMech{newFakeMech("NULL", false, nil)},
 			Codec: zmtp.NewFrameCodec(zmtp.MaxBodyUnlimited), SendHWM: hwm, RecvHWM: hwm},
-		Config{Conn: connB, Mech: newFakeMech("NULL", true, nil),
+		Config{Conn: connB, Mech: identityFramingMech{newFakeMech("NULL", true, nil)},
 			Codec: zmtp.NewFrameCodec(zmtp.MaxBodyUnlimited), SendHWM: hwm, RecvHWM: hwm},
 	)
 }

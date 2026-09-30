@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 
 	"github.com/exergy-dev/gozmq/internal/bufpool"
@@ -47,8 +46,8 @@ const (
 //
 // The writer waits on s.writerCtx (a child of s.ctx) alongside the pipe.
 // Socket.Close's LINGER drain calls CancelWriter() which cancels only
-// writerCtx. The writer then drains remaining messages non-blocking and
-// exits WITHOUT closing the conn — so in-flight writes complete before
+// writerCtx. The writer then drains the rest of the queue (see
+// drainSessionPipe) and exits WITHOUT closing the conn — so in-flight writes complete before
 // sess.Stop() closes the conn.
 func (s *sessionImpl) runWriter() {
 	defer s.wg.Done()
@@ -108,12 +107,10 @@ func (s *sessionImpl) writerNext(recvCh <-chan *msg.Msg) (*msg.Msg, error) {
 	case m := <-recvCh:
 		return m, nil
 	case <-s.sessionPipe.Closed():
-		// Mirror pipe.end.Recv's closed-path semantics: hand out any
-		// message already buffered before reporting EOF.
-		if m, ok := s.sessionPipe.TryRecv(); ok {
-			return m, nil
-		}
-		return nil, io.EOF
+		// Hand out everything still queued before reporting EOF. A single
+		// TryRecv would stop at the first empty channel, while an HWM-0
+		// relay may still be flushing the rest of its queue into it.
+		return s.sessionPipe.DrainRecv(s.writerCtx)
 	case <-s.writerCtx.Done():
 		return nil, s.writerCtx.Err()
 	}
@@ -363,17 +360,23 @@ func (s *sessionImpl) flushBatch(buffers *net.Buffers) error {
 	return nil
 }
 
-// drainSessionPipe pulls any remaining messages from sessionPipe
-// non-blocking and flushes them via the shared batching path. Returns
-// when the pipe is empty or a write error occurs (writeBatchFrom logs
-// and shuts the session down on genuine errors). Called after writerCtx
-// cancellation to flush the outbound queue before the writer goroutine
-// exits.
+// drainSessionPipe flushes every remaining queued message via the shared
+// batching path. Returns when the queue is exhausted, the session stops,
+// or a write error occurs (writeBatchFrom logs and shuts the session down
+// on genuine errors). Called after writerCtx cancellation to flush the
+// outbound queue before the writer goroutine exits.
+//
+// CancelWriter runs after engine.Close, so nothing more will be sent:
+// sealing the direction makes an HWM-0 relay flush and signal drained,
+// letting DrainRecv wait for the true end of the queue instead of
+// stopping at the first momentarily empty channel. s.ctx (cancelled by
+// Stop when the linger expires) bounds the wait.
 func (s *sessionImpl) drainSessionPipe() {
+	s.sessionPipe.SealRecv()
 	var batch writerBatch
 	for {
-		m, ok := s.sessionPipe.TryRecv()
-		if !ok {
+		m, err := s.sessionPipe.DrainRecv(s.ctx)
+		if err != nil {
 			return
 		}
 		if err := s.writeBatchFrom(&batch, m); err != nil {
