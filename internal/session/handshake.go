@@ -233,24 +233,11 @@ func (s *sessionImpl) finalizePeerMetadata() error {
 	if err != nil {
 		return err
 	}
-	if err := s.cfg.Mech.SetPeerMetadata(props); err != nil {
-		return fmt.Errorf("gozmq/session: set peer metadata: %w", err)
-	}
-	if err := validateSocketTypeCompatibility(s.cfg.Mech.Metadata(), props); err != nil {
-		return err
-	}
-	return nil
+	return validateSocketTypeCompatibility(s.cfg.Mech.Metadata(), props)
 }
 
 func peerMetadataFromMechanism(m iface.SecurityMech) (map[string]string, error) {
-	type peerMetaReader interface {
-		PeerMetadata() map[string]string
-	}
-	pm, ok := m.(peerMetaReader)
-	if !ok {
-		return nil, fmt.Errorf("gozmq/session: mechanism %q does not expose peer metadata", m.Name())
-	}
-	props := pm.PeerMetadata()
+	props := m.PeerMetadata()
 	if props == nil {
 		return nil, fmt.Errorf("gozmq/session: mechanism %q finished handshake without peer metadata", m.Name())
 	}

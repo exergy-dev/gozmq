@@ -58,7 +58,7 @@ working example.
 | `PLAIN` | ✅ | RFC 24. Cleartext credentials — pair with `tls+tcp://`. |
 | `CURVE` | ✅ | RFC 25/26, mutual auth + forward secrecy. No rekey (see below). |
 | `GSSAPI` | ❌ | RFC 38. Not implemented. |
-| ZAP (RFC 27) | ✅ | `WithZapHandler` + `WithZapDomain`, for PLAIN and CURVE. |
+| ZAP (RFC 27) | ✅ | `WithZAPHandler` + `WithZAPDomain`: PLAIN and CURVE servers (bound or connected), and accepting NULL sockets with a ZAP domain. Called in-process, not over `inproc://zeromq.zap.01`; `ZAPHandler.ServeRequest` serves that socket for libzmq peers. The user-id surfaces as the `User-Id` peer property; ZAP metadata never overrides `Identity` or `Socket-Type`. |
 
 Custom mechanisms are possible via `security.Mech` and `WithSecurityMech`,
 but are almost never the right answer — see the
@@ -87,7 +87,7 @@ but are almost never the right answer — see the
 | `ZMQ_HANDSHAKE_IVL` | `WithHandshakeTimeout` |
 | `ZMQ_PLAIN_SERVER` / `ZMQ_PLAIN_USERNAME` / `ZMQ_PLAIN_PASSWORD` | `WithPlainAuth`, `WithPlainClient` |
 | `ZMQ_CURVE_SERVER` / `ZMQ_CURVE_*KEY` | `WithCurveServer`, `WithCurveClient` |
-| `ZMQ_ZAP_DOMAIN` | `WithZapDomain` |
+| `ZMQ_ZAP_DOMAIN` | `WithZAPDomain` |
 | `ZMQ_LAST_ENDPOINT` | `Socket.LastEndpoint` |
 | `ZMQ_TCP_KEEPALIVE` / `_IDLE` | `transport.TCPTransport.KeepAlive` / `.KeepAlivePeriod` † |
 | `ZMQ_SNDBUF` / `ZMQ_RCVBUF` | `transport.TCPTransport.WriteBufferSize` / `.ReadBufferSize` † |
@@ -201,6 +201,9 @@ use a direct-pipe bypass that skips the session layer, and therefore the ZAP
 hook. libzmq also performs no ZAP check on inproc, so this matches — but it
 does mean a Context-level ZAP handler never sees inproc peers.
 
+Sockets with PLAIN, CURVE, or a `WithSecurityMech` mechanism never take the
+direct pipe: every inproc connection runs the full handshake.
+
 ### CURVE nonce exhaustion
 
 RFC 26 expects rekeying long before the per-direction 64-bit nonce counter
@@ -209,7 +212,7 @@ down cleanly with `ErrNonceExhausted`. Reaching this requires ~2^64 frames on
 one session, so it is a defensive check rather than an operational limit —
 but if you see it in logs, rotate keys and reconnect.
 
-### libzmq's malformed PLAIN ERROR command
+### libzmq's malformed ERROR command
 
 libzmq's `plain_server_t::produce_error` writes the C literal `"\x5ERROR"`
 where `"\5ERROR"` was intended. C hex escapes consume every following hex
@@ -222,7 +225,8 @@ bad-password handshake against a real libzmq server surface as a malformed
 frame rather than an authentication failure. gozmq therefore accepts this
 one byte sequence — matched in full, only after the strict parse has already
 failed — and reports `ErrAuthFailed` as it should. No other malformed
-command name is accepted.
+command name is accepted. The NULL and CURVE clients share the same ERROR
+recogniser (`security.DecodeError`), so the tolerance applies to them too.
 
 gozmq itself always emits well-formed ERROR commands.
 

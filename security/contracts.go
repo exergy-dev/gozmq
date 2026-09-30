@@ -12,20 +12,6 @@ const (
 	RoleServer
 )
 
-// ZAPAuthorizer is the server-side authorization hook for mechanisms that
-// delegate policy to RFC 27 ZAP. On success it returns a user-id plus
-// optional metadata to merge into the peer properties. On rejection it
-// should return an error wrapping gozmq.ErrAuthFailed.
-type ZAPAuthorizer func(domain, address, mech string, credentials [][]byte) (userID string, metadata map[string]string, err error)
-
-// ZapConfigurable is an optional extension implemented by security
-// mechanisms that support server-side ZAP authorization. The session layer
-// type-asserts for it and, when present, installs the Context's ZAP handler
-// before driving the handshake.
-type ZapConfigurable interface {
-	ConfigureZAP(authorizer ZAPAuthorizer, domain, address string)
-}
-
 // Mech drives a single handshake exchange and, for mechanisms that
 // require it (CURVE), wraps/unwraps every subsequent frame body.
 //
@@ -47,7 +33,7 @@ type ZapConfigurable interface {
 // correctness bug. Embed [MechBase] to inherit the metadata and ZAP
 // plumbing, read the relevant RFC (23 for the ZMTP framing, 24 for PLAIN,
 // 25/26 for CURVE, 27 for ZAP), and test against libzmq. Prefer the shipped
-// mechanisms — NULL, PLAIN, CURVE — plus a [ZapPolicy] for authorization
+// mechanisms — NULL, PLAIN, CURVE — plus a [ZAPHandler] for authorization
 // policy, which is the extension point most applications actually want.
 type Mech interface {
 	// Name is the greeting mechanism token (e.g. "NULL", "PLAIN", "CURVE"),
@@ -77,8 +63,9 @@ type Mech interface {
 	// the handshake is seeded.
 	Metadata() map[string]string
 
-	// SetPeerMetadata is called by the session layer once the peer's READY
-	// has been parsed. Mechanisms may reject (return error) on mismatch
-	// (e.g. Socket-Type incompatibility).
-	SetPeerMetadata(props map[string]string) error
+	// PeerMetadata returns the properties the peer advertised during the
+	// handshake. The session layer reads it once NextHandshake reports done,
+	// to check Socket-Type compatibility and learn the peer's Identity; a
+	// nil map at that point fails the session.
+	PeerMetadata() map[string]string
 }

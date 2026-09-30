@@ -15,7 +15,7 @@ import (
 func TestZap_Null_GozmqServer(t *testing.T) {
 	t.Run("accept", func(t *testing.T) {
 		events := make(chan gozmq.Event, 16)
-		ctxZmq := gozmq.NewContext(gozmq.WithZapHandler(security.NewZapHandler(zapDecisionFunc(func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
+		ctxZmq := gozmq.NewContext(gozmq.WithZAPHandler(security.ZAPHandler(func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
 			if domain != "global" || mech != "NULL" {
 				t.Fatalf("unexpected ZAP request domain=%q mech=%q", domain, mech)
 			}
@@ -23,11 +23,11 @@ func TestZap_Null_GozmqServer(t *testing.T) {
 				t.Fatalf("unexpected NULL credentials: %v", credentials)
 			}
 			return "anonymous", nil, nil
-		}))))
+		})))
 		defer ctxZmq.Close()
 
 		server, err := ctxZmq.NewSocket(gozmq.Pair,
-			gozmq.WithZapDomain("global"),
+			gozmq.WithZAPDomain("global"),
 			gozmq.WithMonitor(events, gozmq.EventAll))
 		if err != nil {
 			t.Fatalf("server: %v", err)
@@ -54,13 +54,13 @@ func TestZap_Null_GozmqServer(t *testing.T) {
 
 	t.Run("reject", func(t *testing.T) {
 		events := make(chan gozmq.Event, 16)
-		ctxZmq := gozmq.NewContext(gozmq.WithZapHandler(security.NewZapHandler(zapDecisionFunc(func(string, string, string, [][]byte) (string, map[string]string, error) {
+		ctxZmq := gozmq.NewContext(gozmq.WithZAPHandler(security.ZAPHandler(func(string, string, string, [][]byte) (string, map[string]string, error) {
 			return "", nil, gozmq.ErrAuthFailed
-		}))))
+		})))
 		defer ctxZmq.Close()
 
 		server, err := ctxZmq.NewSocket(gozmq.Pair,
-			gozmq.WithZapDomain("global"),
+			gozmq.WithZAPDomain("global"),
 			gozmq.WithMonitor(events, gozmq.EventAll))
 		if err != nil {
 			t.Fatalf("server: %v", err)
@@ -89,7 +89,7 @@ func TestZap_Null_GozmqServer(t *testing.T) {
 func TestZap_Null_LibzmqServer(t *testing.T) {
 	t.Run("accept", func(t *testing.T) {
 		libCtx := newLibCtx(t)
-		zapDone := startLibzmqZAPHandler(t, libCtx, zapDecisionFunc(func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
+		zapDone := startLibzmqZAPHandler(t, libCtx, func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
 			if domain != "global" || mech != "NULL" {
 				t.Fatalf("unexpected ZAP request domain=%q mech=%q", domain, mech)
 			}
@@ -97,7 +97,7 @@ func TestZap_Null_LibzmqServer(t *testing.T) {
 				t.Fatalf("unexpected NULL credentials: %v", credentials)
 			}
 			return "anonymous", nil, nil
-		}))
+		})
 
 		server := libCtx.NewSocket(ZMQ_PAIR)
 		t.Cleanup(func() { _ = server.Close() })
@@ -134,9 +134,9 @@ func TestZap_Null_LibzmqServer(t *testing.T) {
 
 	t.Run("reject", func(t *testing.T) {
 		libCtx := newLibCtx(t)
-		zapDone := startLibzmqZAPHandler(t, libCtx, zapDecisionFunc(func(string, string, string, [][]byte) (string, map[string]string, error) {
+		zapDone := startLibzmqZAPHandler(t, libCtx, func(string, string, string, [][]byte) (string, map[string]string, error) {
 			return "", nil, gozmq.ErrAuthFailed
-		}))
+		})
 
 		server := libCtx.NewSocket(ZMQ_PAIR)
 		t.Cleanup(func() { _ = server.Close() })
@@ -175,7 +175,7 @@ func TestZap_Null_LibzmqServer(t *testing.T) {
 func TestZap_Plain_GozmqServer(t *testing.T) {
 	t.Run("accept", func(t *testing.T) {
 		events := make(chan gozmq.Event, 16)
-		ctxZmq := gozmq.NewContext(gozmq.WithZapHandler(security.NewZapHandler(zapDecisionFunc(func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
+		ctxZmq := gozmq.NewContext(gozmq.WithZAPHandler(security.ZAPHandler(func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
 			if domain != "global" || mech != "PLAIN" {
 				t.Fatalf("unexpected ZAP request domain=%q mech=%q", domain, mech)
 			}
@@ -183,12 +183,12 @@ func TestZap_Plain_GozmqServer(t *testing.T) {
 				t.Fatalf("unexpected credentials: %q", credentials)
 			}
 			return "alice", nil, nil
-		}))))
+		})))
 		defer ctxZmq.Close()
 
 		server, err := ctxZmq.NewSocket(gozmq.Pair,
 			gozmq.WithPlainAuth(func(string, string) bool { return false }),
-			gozmq.WithZapDomain("global"),
+			gozmq.WithZAPDomain("global"),
 			gozmq.WithMonitor(events, gozmq.EventAll))
 		if err != nil {
 			t.Fatalf("server: %v", err)
@@ -221,14 +221,14 @@ func TestZap_Plain_GozmqServer(t *testing.T) {
 
 	t.Run("reject", func(t *testing.T) {
 		events := make(chan gozmq.Event, 16)
-		ctxZmq := gozmq.NewContext(gozmq.WithZapHandler(security.NewZapHandler(zapDecisionFunc(func(string, string, string, [][]byte) (string, map[string]string, error) {
+		ctxZmq := gozmq.NewContext(gozmq.WithZAPHandler(security.ZAPHandler(func(string, string, string, [][]byte) (string, map[string]string, error) {
 			return "", nil, gozmq.ErrAuthFailed
-		}))))
+		})))
 		defer ctxZmq.Close()
 
 		server, err := ctxZmq.NewSocket(gozmq.Pair,
 			gozmq.WithPlainAuth(func(string, string) bool { return true }),
-			gozmq.WithZapDomain("global"),
+			gozmq.WithZAPDomain("global"),
 			gozmq.WithMonitor(events, gozmq.EventAll))
 		if err != nil {
 			t.Fatalf("server: %v", err)
@@ -263,7 +263,7 @@ func TestZap_Plain_GozmqServer(t *testing.T) {
 func TestZap_Plain_LibzmqServer(t *testing.T) {
 	t.Run("accept", func(t *testing.T) {
 		libCtx := newLibCtx(t)
-		zapDone := startLibzmqZAPHandler(t, libCtx, zapDecisionFunc(func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
+		zapDone := startLibzmqZAPHandler(t, libCtx, func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
 			if domain != "global" || mech != "PLAIN" {
 				t.Fatalf("unexpected ZAP request domain=%q mech=%q", domain, mech)
 			}
@@ -271,7 +271,7 @@ func TestZap_Plain_LibzmqServer(t *testing.T) {
 				t.Fatalf("unexpected credentials: %q", credentials)
 			}
 			return "alice", nil, nil
-		}))
+		})
 
 		server := libCtx.NewSocket(ZMQ_PAIR)
 		t.Cleanup(func() { _ = server.Close() })
@@ -313,9 +313,9 @@ func TestZap_Plain_LibzmqServer(t *testing.T) {
 
 	t.Run("reject", func(t *testing.T) {
 		libCtx := newLibCtx(t)
-		zapDone := startLibzmqZAPHandler(t, libCtx, zapDecisionFunc(func(string, string, string, [][]byte) (string, map[string]string, error) {
+		zapDone := startLibzmqZAPHandler(t, libCtx, func(string, string, string, [][]byte) (string, map[string]string, error) {
 			return "", nil, gozmq.ErrAuthFailed
-		}))
+		})
 
 		server := libCtx.NewSocket(ZMQ_PAIR)
 		t.Cleanup(func() { _ = server.Close() })
@@ -368,7 +368,7 @@ func TestZap_Curve_GozmqServer(t *testing.T) {
 
 	t.Run("accept", func(t *testing.T) {
 		events := make(chan gozmq.Event, 16)
-		ctxZmq := gozmq.NewContext(gozmq.WithZapHandler(security.NewZapHandler(zapDecisionFunc(func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
+		ctxZmq := gozmq.NewContext(gozmq.WithZAPHandler(security.ZAPHandler(func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
 			if domain != "global" || mech != "CURVE" {
 				t.Fatalf("unexpected ZAP request domain=%q mech=%q", domain, mech)
 			}
@@ -376,12 +376,12 @@ func TestZap_Curve_GozmqServer(t *testing.T) {
 				t.Fatalf("unexpected credentials: %x", credentials)
 			}
 			return "client", nil, nil
-		}))))
+		})))
 		defer ctxZmq.Close()
 
 		server, err := ctxZmq.NewSocket(gozmq.Pair,
 			gozmq.WithCurveServer(serverSec[:]),
-			gozmq.WithZapDomain("global"),
+			gozmq.WithZAPDomain("global"),
 			gozmq.WithMonitor(events, gozmq.EventAll))
 		if err != nil {
 			t.Fatalf("server: %v", err)
@@ -417,14 +417,14 @@ func TestZap_Curve_GozmqServer(t *testing.T) {
 
 	t.Run("reject", func(t *testing.T) {
 		events := make(chan gozmq.Event, 16)
-		ctxZmq := gozmq.NewContext(gozmq.WithZapHandler(security.NewZapHandler(zapDecisionFunc(func(string, string, string, [][]byte) (string, map[string]string, error) {
+		ctxZmq := gozmq.NewContext(gozmq.WithZAPHandler(security.ZAPHandler(func(string, string, string, [][]byte) (string, map[string]string, error) {
 			return "", nil, gozmq.ErrAuthFailed
-		}))))
+		})))
 		defer ctxZmq.Close()
 
 		server, err := ctxZmq.NewSocket(gozmq.Pair,
 			gozmq.WithCurveServer(serverSec[:]),
-			gozmq.WithZapDomain("global"),
+			gozmq.WithZAPDomain("global"),
 			gozmq.WithMonitor(events, gozmq.EventAll))
 		if err != nil {
 			t.Fatalf("server: %v", err)
@@ -471,7 +471,7 @@ func TestZap_Curve_LibzmqServer(t *testing.T) {
 
 	t.Run("accept", func(t *testing.T) {
 		libCtx := newLibCtx(t)
-		zapDone := startLibzmqZAPHandler(t, libCtx, zapDecisionFunc(func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
+		zapDone := startLibzmqZAPHandler(t, libCtx, func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
 			if domain != "global" || mech != "CURVE" {
 				t.Fatalf("unexpected ZAP request domain=%q mech=%q", domain, mech)
 			}
@@ -479,7 +479,7 @@ func TestZap_Curve_LibzmqServer(t *testing.T) {
 				t.Fatalf("unexpected credentials: %x", credentials)
 			}
 			return "client", nil, nil
-		}))
+		})
 
 		server := libCtx.NewSocket(ZMQ_PAIR)
 		t.Cleanup(func() { _ = server.Close() })
@@ -527,9 +527,9 @@ func TestZap_Curve_LibzmqServer(t *testing.T) {
 
 	t.Run("reject", func(t *testing.T) {
 		libCtx := newLibCtx(t)
-		zapDone := startLibzmqZAPHandler(t, libCtx, zapDecisionFunc(func(string, string, string, [][]byte) (string, map[string]string, error) {
+		zapDone := startLibzmqZAPHandler(t, libCtx, func(string, string, string, [][]byte) (string, map[string]string, error) {
 			return "", nil, gozmq.ErrAuthFailed
-		}))
+		})
 
 		server := libCtx.NewSocket(ZMQ_PAIR)
 		t.Cleanup(func() { _ = server.Close() })

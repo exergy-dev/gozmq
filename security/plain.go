@@ -225,7 +225,7 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		// The credentials stay in locals only and are dropped as soon as
 		// the auth decision below is made.
 		switch {
-		case m.zapAuth != nil:
+		case m.zap != nil:
 			if err := m.AuthorizeZAP(plainMechName, [][]byte{[]byte(user), []byte(pass)}); err != nil {
 				out := encodeCommand(plainCmdError, encodeErrorReason("Invalid username or password"))
 				m.state = plainDone

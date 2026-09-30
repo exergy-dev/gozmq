@@ -20,6 +20,14 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
   are now rejected.
 - A ZAP policy returning an over-long metadata name no longer panics inside
   the handshake; it yields a 500 response.
+- ZAP metadata can no longer override the peer's ZMTP `Identity` or
+  `Socket-Type`; it only adds properties the peer did not send. The ZAP
+  user-id is surfaced as the `User-Id` peer property, as in libzmq.
+- **Breaking:** `NewSocket` rejects `WithPlainAuth` combined with
+  `WithPlainClient`, and PLAIN options combined with CURVE options
+  (previously CURVE silently won).
+- An in-process ZAP handler's error is now preserved in the handshake error
+  chain.
 
 ### Added
 
@@ -50,6 +58,16 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
 - `tcp://host:*` binds an ephemeral port; TCP socket options are best-effort.
 - `EventConnectDelayed`/`EventConnectRetried` are no longer emitted while a
   socket is closing.
+- **Breaking:** `security.Mech` now requires `PeerMetadata() map[string]string`;
+  `SetPeerMetadata` is removed from the interface and from `MechBase`.
+- **Breaking:** `WithZapHandler(*security.ZapHandler)` →
+  `WithZAPHandler(security.ZAPHandler)`, called directly instead of via an
+  in-process ZAP encode/decode; `WithZapDomain` → `WithZAPDomain`.
+- **Breaking:** ZAP codec renamed to consistent spelling:
+  `ZapRequest`/`ZapResponse` → `ZAPRequest`/`ZAPResponse`;
+  `Encode/DecodeZapRequest/Response` → `Encode/DecodeZAPRequest/Response`;
+  `ZapStatus*` → `ZAPStatus*`; `ErrZapTemporary` → `ErrZAPTemporary`;
+  `MechBase.ConfigureZAP` takes a `security.ZAPHandler`.
 
 ### Removed
 
@@ -57,6 +75,11 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
   run lazily on the connection's first I/O, inside the ZMTP handshake,
   bounded by `WithHandshakeTimeout` (default 30s); `WithHandshakeTimeout(0)`
   therefore also leaves the TLS handshake unbounded.
+- **Breaking:** `security.ZAPAuthorizer`, `security.ZapPolicy`,
+  `security.ZapHandler` (struct), `security.NewZapHandler` and
+  `security.ZapConfigurable`, replaced by the single func type
+  `security.ZAPHandler` (whose `ServeRequest` method serves RFC 27 wire
+  requests).
 
 ### Fixed
 

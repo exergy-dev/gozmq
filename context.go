@@ -2,13 +2,10 @@ package gozmq
 
 import (
 	"context"
-	"fmt"
 	"slices"
 	"sync"
 	"sync/atomic"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
-	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/security"
 	"github.com/exergy-dev/gozmq/transport"
 )
@@ -23,8 +20,8 @@ type Context struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	registry *transport.Registry
-	zapAuth  iface.ZAPAuthorizer
+	registry   *transport.Registry
+	zapHandler security.ZAPHandler
 
 	mu      sync.Mutex
 	sockets []*Socket
@@ -37,39 +34,15 @@ type contextOptionFunc func(*Context)
 
 func (f contextOptionFunc) applyContext(c *Context) { f(c) }
 
-// WithZapHandler installs a context-level RFC 27 ZAP handler used by
-// server-side PLAIN and CURVE handshakes.
-func WithZapHandler(handler *security.ZapHandler) ContextOption {
-	return contextOptionFunc(func(c *Context) {
-		if handler == nil {
-			c.zapAuth = nil
-			return
-		}
-		c.zapAuth = func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
-			req := &security.ZapRequest{
-				Domain:      domain,
-				Address:     address,
-				Mechanism:   mech,
-				Credentials: credentials,
-			}
-			resp, err := security.DecodeZapResponse(handler.ServeRequest(security.EncodeZapRequest(req)))
-			if err != nil {
-				return "", nil, fmt.Errorf("gozmq: decode ZAP response: %w", err)
-			}
-			switch resp.StatusCode {
-			case security.ZapStatusOK:
-				return resp.UserID, resp.Metadata, nil
-			case security.ZapStatusTempError:
-				return "", nil, fmt.Errorf("gozmq: ZAP temporary failure: %s: %w", resp.StatusText, security.ErrZapTemporary)
-			case security.ZapStatusClientError:
-				return "", nil, fmt.Errorf("gozmq: ZAP rejected %s peer: %s: %w", mech, resp.StatusText, zmqerr.ErrAuthFailed)
-			case security.ZapStatusServerError:
-				return "", nil, fmt.Errorf("gozmq: ZAP server error: %s", resp.StatusText)
-			default:
-				return "", nil, fmt.Errorf("gozmq: unknown ZAP status code %q", resp.StatusCode)
-			}
-		}
-	})
+// WithZAPHandler installs a context-level RFC 27 ZAP handler. It authorizes
+// the peer on the server side of every PLAIN and CURVE handshake, whether that
+// socket binds or connects (the PLAIN/CURVE role comes from the options, not
+// the transport direction), and on the accepting side of NULL handshakes on
+// sockets with a [WithZAPDomain]. It is called directly in each handshake
+// goroutine; a rejection fails the handshake with an error wrapping the
+// handler's own. A nil handler removes it.
+func WithZAPHandler(handler security.ZAPHandler) ContextOption {
+	return contextOptionFunc(func(c *Context) { c.zapHandler = handler })
 }
 
 // NewContext creates a new Context. Call Close to release resources.

@@ -272,19 +272,6 @@ func TestPlainMetadataIsolated(t *testing.T) {
 	require.Equal(t, "REQ", again["Socket-Type"], "Metadata not isolated on return")
 }
 
-func TestPlainSetPeerMetadataStores(t *testing.T) {
-	m := NewPlainServer(func(string, string) bool { return true }, nil).(*plainMech)
-	props := map[string]string{"Socket-Type": "PAIR"}
-	require.NoError(t, m.SetPeerMetadata(props))
-	require.Equal(t, props, m.PeerMetadata())
-
-	props["Socket-Type"] = "PUB"
-	require.Equal(t, "PAIR", m.PeerMetadata()["Socket-Type"], "PeerMetadata not isolated from caller mutations")
-
-	require.NoError(t, m.SetPeerMetadata(nil))
-	require.Nil(t, m.PeerMetadata(), "PeerMetadata after nil-set should be nil")
-}
-
 func TestPlainHelloEncodesLengthPrefixedCredentials(t *testing.T) {
 	// Drive only the client seed and inspect the wire bytes: they must
 	// match RFC 24 §4 exactly.

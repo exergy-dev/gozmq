@@ -61,10 +61,7 @@ func TestNullHandshakeEndToEnd(t *testing.T) {
 	require.NoError(t, err, "client ingest")
 	require.True(t, clientDone, "client ingest: done should be true")
 
-	// Peer metadata round-tripped through the handshake. We cast to the
-	// concrete type to access PeerMetadata; the public iface uses
-	// SetPeerMetadata (session-layer side of the contract), so tests peek
-	// at what the mechanism stored.
+	// Peer metadata round-tripped through the handshake.
 	clientImpl := client.(*nullMech)
 	serverImpl := server.(*nullMech)
 
@@ -100,20 +97,29 @@ func TestNullEncodeDecodeFrameIdentity(t *testing.T) {
 	}
 }
 
-// TestNullSetPeerMetadataStores checks SetPeerMetadata is a pure store
-// (NULL does no validation) and that nil clears the state.
-func TestNullSetPeerMetadataStores(t *testing.T) {
+// TestMergePeerMetadata: the stored peer metadata is a private copy, and
+// what ZAP returns cannot rewrite the properties the peer sent — only the
+// ZAP user-id is authoritative, surfacing as "User-Id" as in libzmq.
+func TestMergePeerMetadata(t *testing.T) {
 	m := NewNull(RoleServer, nil).(*nullMech)
-	props := map[string]string{"Socket-Type": "PAIR"}
-	require.NoError(t, m.SetPeerMetadata(props))
-	require.Equal(t, props, m.PeerMetadata())
+	require.Nil(t, m.PeerMetadata(), "peer metadata before the handshake")
 
-	// Mutating the caller's map must not affect the stored copy.
+	props := map[string]string{"Socket-Type": "PAIR", "Identity": "peer", "user-id": "spoofed"}
+	m.MergePeerMetadata(props)
 	props["Socket-Type"] = "PUB"
 	require.Equal(t, "PAIR", m.PeerMetadata()["Socket-Type"], "PeerMetadata not isolated from caller mutations")
 
-	require.NoError(t, m.SetPeerMetadata(nil))
-	require.Nil(t, m.PeerMetadata(), "PeerMetadata after nil-set should be nil")
+	m.ConfigureZAP(func(string, string, string, [][]byte) (string, map[string]string, error) {
+		return "alice", map[string]string{"socket-type": "PUB", "IDENTITY": "zap", "Tenant": "t1"}, nil
+	}, "global", "addr")
+	require.NoError(t, m.AuthorizeZAP(nullMechName, nil))
+	m.MergePeerMetadata(map[string]string{"Socket-Type": "PAIR", "Identity": "peer", "user-id": "spoofed"})
+	require.Equal(t, map[string]string{
+		"Socket-Type": "PAIR",
+		"Identity":    "peer",
+		"Tenant":      "t1",
+		"User-Id":     "alice",
+	}, m.PeerMetadata())
 }
 
 // TestNullNextHandshakeRejectsMalformed covers the defensive error paths in
@@ -204,10 +210,10 @@ func pumpNull(t *testing.T, client, server Mech) (clientErr, serverErr error) {
 	return cerr, serr
 }
 
-// TestNullZAP_AcceptMergesMetadata wires a ZAP authorizer into a NULL
-// server and asserts (a) the authorizer is consulted with the configured
-// domain/address, and (b) the metadata from the ZAP reply is merged into
-// the peer metadata, overlaying the peer-supplied properties.
+// TestNullZAP_AcceptMergesMetadata wires a ZAP handler into a NULL server and
+// asserts (a) the handler is consulted with the configured domain/address,
+// and (b) the ZAP reply adds to the peer metadata without overriding the
+// peer-supplied Identity or Socket-Type, and its user-id becomes "User-Id".
 func TestNullZAP_AcceptMergesMetadata(t *testing.T) {
 	client := NewNull(RoleClient, map[string]string{
 		"Socket-Type": "PAIR",
@@ -219,7 +225,7 @@ func TestNullZAP_AcceptMergesMetadata(t *testing.T) {
 	server.(*nullMech).ConfigureZAP(func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
 		gotDomain, gotAddr, gotMech = domain, address, mech
 		require.Empty(t, credentials, "NULL carries no credentials")
-		return "anon", map[string]string{"User-Id": "anon", "Identity": "zap-overrides"}, nil
+		return "anon", map[string]string{"Identity": "zap-overrides", "Socket-Type": "PUB", "Tenant": "t1"}, nil
 	}, "global", "127.0.0.1:1234")
 
 	cerr, serr := pumpNull(t, client, server)
@@ -231,9 +237,10 @@ func TestNullZAP_AcceptMergesMetadata(t *testing.T) {
 	require.Equal(t, "NULL", gotMech)
 
 	peer := server.(*nullMech).PeerMetadata()
-	require.Equal(t, "PAIR", peer["Socket-Type"], "peer-supplied property lost")
-	require.Equal(t, "anon", peer["User-Id"], "ZAP metadata not merged")
-	require.Equal(t, "zap-overrides", peer["Identity"], "ZAP metadata must win on collision")
+	require.Equal(t, "PAIR", peer["Socket-Type"], "ZAP metadata overrode the peer's Socket-Type")
+	require.Equal(t, "client-1", peer["Identity"], "ZAP metadata overrode the peer's Identity")
+	require.Equal(t, "t1", peer["Tenant"], "ZAP metadata not merged")
+	require.Equal(t, "anon", peer["User-Id"], "ZAP user-id not surfaced")
 }
 
 // TestNullZAP_RejectEmitsError asserts that a ZAP rejection surfaces an

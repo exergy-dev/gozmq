@@ -78,10 +78,6 @@ const (
 type (
 	// SecurityMech is an alias for [security.Mech].
 	SecurityMech = security.Mech
-	// ZAPAuthorizer is an alias for [security.ZAPAuthorizer].
-	ZAPAuthorizer = security.ZAPAuthorizer
-	// ZapConfigurable is an alias for [security.ZapConfigurable].
-	ZapConfigurable = security.ZapConfigurable
 	// Role is an alias for [security.Role].
 	Role = security.Role
 )

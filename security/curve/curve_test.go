@@ -346,21 +346,6 @@ func TestCurveClientConstructorValidatesSecretPublic(t *testing.T) {
 	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "constructor accepted mismatched public")
 }
 
-// TestCurveSetPeerMetadataStores mirrors the NULL test: SetPeerMetadata is
-// a pure store; nil clears.
-func TestCurveSetPeerMetadataStores(t *testing.T) {
-	_, serverSec := genPair(t)
-	m, err := NewCurveServer(serverSec, nil)
-	require.NoError(t, err, "NewCurveServer")
-	props := map[string]string{"Socket-Type": "REQ"}
-	require.NoError(t, m.SetPeerMetadata(props), "SetPeerMetadata")
-	props["Socket-Type"] = "REP"
-	impl := m.(*curveMech)
-	require.Equal(t, "REQ", impl.PeerMetadata()["Socket-Type"], "PeerMetadata not isolated from caller mutation")
-	require.NoError(t, m.SetPeerMetadata(nil), "SetPeerMetadata(nil)")
-	require.Nil(t, impl.PeerMetadata(), "PeerMetadata after nil-set")
-}
-
 // TestCurve_NonceExhaustion_Send asserts EncodeFrame refuses to emit a
 // frame once ourShortNonce has reached math.MaxUint64. The guard wraps
 // zmqerr.ErrNonceExhausted so operators can detect the condition.
@@ -557,8 +542,8 @@ func TestCurveZAP_RejectEmitsError(t *testing.T) {
 	require.NotEqual(t, stateDone, server.(*curveMech).state, "server reached stateDone despite ZAP rejection")
 }
 
-// TestCurveZAP_AcceptMergesMetadata asserts the metadata returned by the
-// ZAP authorizer is merged into the server's peer metadata, overlaying the
+// TestCurveZAP_AcceptMergesMetadata asserts the user-id returned by the ZAP
+// handler reaches the server's peer metadata as "User-Id", alongside the
 // client's INITIATE properties.
 func TestCurveZAP_AcceptMergesMetadata(t *testing.T) {
 	serverPub, serverSec := genPair(t)
@@ -575,7 +560,7 @@ func TestCurveZAP_AcceptMergesMetadata(t *testing.T) {
 		require.Equal(t, "CURVE", mech)
 		require.Len(t, credentials, 1)
 		require.Equal(t, clientPub[:], credentials[0], "ZAP credential is not the client long-term public")
-		return "alice", map[string]string{"User-Id": "alice"}, nil
+		return "alice", nil, nil
 	}, "global", "127.0.0.1:1")
 
 	welcome := driveToWelcome(t, client, server)
@@ -587,5 +572,5 @@ func TestCurveZAP_AcceptMergesMetadata(t *testing.T) {
 
 	peer := server.(*curveMech).PeerMetadata()
 	require.Equal(t, "DEALER", peer["Socket-Type"], "client property lost")
-	require.Equal(t, "alice", peer["User-Id"], "ZAP metadata not merged")
+	require.Equal(t, "alice", peer["User-Id"], "ZAP user-id not surfaced")
 }

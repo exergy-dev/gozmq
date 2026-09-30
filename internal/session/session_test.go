@@ -143,9 +143,9 @@ type fakeMech struct {
 	props     map[string]string
 	peerProps map[string]string
 
-	step         int
-	mu           sync.Mutex
-	setPeerCalls int
+	step          int
+	mu            sync.Mutex
+	peerMetaCalls int
 }
 
 func (m *fakeMech) Name() string   { return m.name }
@@ -157,16 +157,10 @@ func (m *fakeMech) DecodeFrame(flags uint8, b []byte) (uint8, []byte, error) {
 	return flags, b, nil
 }
 func (m *fakeMech) Metadata() map[string]string { return copyProps(m.props) }
-func (m *fakeMech) SetPeerMetadata(props map[string]string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.setPeerCalls++
-	m.peerProps = copyProps(props)
-	return nil
-}
 func (m *fakeMech) PeerMetadata() map[string]string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.peerMetaCalls++
 	return copyProps(m.peerProps)
 }
 
@@ -246,11 +240,11 @@ func TestSession_Handshake_AndRoundTrip(t *testing.T) {
 	)
 
 	// Verify the engine-facing pipe surfaces the peer's identity from
-	// metadata propagated through SetPeerMetadata after the handshake.
+	// metadata the session read through Mech.PeerMetadata after the handshake.
 	mechA := sA.(*sessionImpl).cfg.Mech.(*fakeMech)
 	mechB := sB.(*sessionImpl).cfg.Mech.(*fakeMech)
-	require.Equal(t, 1, mechA.setPeerCalls, "A SetPeerMetadata calls")
-	require.Equal(t, 1, mechB.setPeerCalls, "B SetPeerMetadata calls")
+	require.Positive(t, mechA.peerMetaCalls, "A PeerMetadata calls")
+	require.Positive(t, mechB.peerMetaCalls, "B PeerMetadata calls")
 	require.Equal(t, "B", string(sA.Pipe().PeerIdentity()), "A pipe peer identity")
 	require.Equal(t, "A", string(sB.Pipe().PeerIdentity()), "B pipe peer identity")
 

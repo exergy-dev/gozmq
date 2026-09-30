@@ -3,7 +3,6 @@ package zmtp
 import (
 	"encoding/binary"
 	"fmt"
-	"maps"
 	"strings"
 
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
@@ -99,22 +98,4 @@ func (metadataCodec) Decode(raw []byte) (map[string]string, error) {
 		out[name] = value
 	}
 	return out, nil
-}
-
-// MergeMeta returns a new map combining base and overlay, with overlay keys
-// winning on collision. Either argument may be empty or nil. Used by the
-// security mechanisms to layer ZAP-supplied metadata over peer-supplied
-// properties.
-func MergeMeta(base, overlay map[string]string) map[string]string {
-	if len(base) == 0 {
-		return maps.Clone(overlay)
-	}
-	if len(overlay) == 0 {
-		return maps.Clone(base)
-	}
-	out := maps.Clone(base)
-	for k, v := range overlay {
-		out[k] = v
-	}
-	return out
 }

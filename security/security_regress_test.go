@@ -1,6 +1,8 @@
 package security
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -9,7 +11,7 @@ import (
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
-// rejectAll is a ZAP authorizer that refuses every peer.
+// rejectAll is a ZAP handler that refuses every peer.
 func rejectAll(string, string, string, [][]byte) (string, map[string]string, error) {
 	return "", nil, zmqerr.ErrAuthFailed
 }
@@ -23,7 +25,7 @@ var libzmqBrokenError = []byte{0x5E, 'R', 'R', 'O', 'R', 0x03, '4', '0', '0'}
 // reason, not a malformed frame.
 func TestNullClientReportsServerError(t *testing.T) {
 	srv := NewNull(RoleServer, nil)
-	srv.(ZapConfigurable).ConfigureZAP(rejectAll, "global", "addr")
+	srv.(*nullMech).ConfigureZAP(rejectAll, "global", "addr")
 	cli := NewNull(RoleClient, nil)
 
 	ready, _, err := cli.NextHandshake(nil)
@@ -109,6 +111,26 @@ func TestNullZAP_SkippedWithoutDomain(t *testing.T) {
 	require.False(t, called, "NULL consulted ZAP without a domain")
 }
 
+// TestZAPErrorChainPreserved: an in-process ZAP handler's error reaches the
+// handshake error as-is, not re-encoded through a ZAP status code, so callers
+// can errors.Is/As on their own error types.
+func TestZAPErrorChainPreserved(t *testing.T) {
+	revoked := errors.New("key revoked")
+	srv := NewNull(RoleServer, nil)
+	srv.(*nullMech).ConfigureZAP(func(string, string, string, [][]byte) (string, map[string]string, error) {
+		return "", nil, fmt.Errorf("%w: %w", revoked, zmqerr.ErrAuthFailed)
+	}, "global", "addr")
+	cli := NewNull(RoleClient, nil)
+
+	ready, _, err := cli.NextHandshake(nil)
+	require.NoError(t, err)
+	_, _, err = srv.NextHandshake(nil)
+	require.NoError(t, err)
+	_, _, err = srv.NextHandshake(ready)
+	require.ErrorIs(t, err, revoked)
+	require.ErrorIs(t, err, zmqerr.ErrAuthFailed)
+}
+
 // TestZapResponseLongMetadataName: a policy returning a metadata name that
 // cannot be encoded must produce a 500 response, not panic inside the
 // handshake.
@@ -116,38 +138,32 @@ func TestZapResponseLongMetadataName(t *testing.T) {
 	long := strings.Repeat("n", 256)
 	var frames [][]byte
 	require.NotPanics(t, func() {
-		frames = EncodeZapResponse(&ZapResponse{
+		frames = EncodeZAPResponse(&ZAPResponse{
 			RequestID:  []byte("id"),
-			StatusCode: ZapStatusOK,
+			StatusCode: ZAPStatusOK,
 			StatusText: "OK",
 			UserID:     "alice",
 			Metadata:   map[string]string{long: "x"},
 		})
 	})
-	resp, err := DecodeZapResponse(frames)
+	resp, err := DecodeZAPResponse(frames)
 	require.NoError(t, err)
-	require.Equal(t, ZapStatusServerError, resp.StatusCode)
+	require.Equal(t, ZAPStatusServerError, resp.StatusCode)
 	require.Equal(t, "id", string(resp.RequestID))
 	require.Empty(t, resp.UserID, "a failed response must not carry a user-id")
 	require.Empty(t, resp.Metadata)
 
 	// Through the handler: the policy's success is overridden.
-	h := NewZapHandler(zapPolicyFunc(func(string, string, string, [][]byte) (string, map[string]string, error) {
+	h := ZAPHandler(func(string, string, string, [][]byte) (string, map[string]string, error) {
 		return "alice", map[string]string{long: "x"}, nil
-	}))
+	})
 	var out [][]byte
 	require.NotPanics(t, func() {
-		out = h.ServeRequest(EncodeZapRequest(&ZapRequest{RequestID: []byte("r"), Mechanism: "NULL"}))
+		out = h.ServeRequest(EncodeZAPRequest(&ZAPRequest{RequestID: []byte("r"), Mechanism: "NULL"}))
 	})
-	resp, err = DecodeZapResponse(out)
+	resp, err = DecodeZAPResponse(out)
 	require.NoError(t, err)
-	require.Equal(t, ZapStatusServerError, resp.StatusCode)
-}
-
-type zapPolicyFunc func(domain, address, mech string, creds [][]byte) (string, map[string]string, error)
-
-func (f zapPolicyFunc) Authenticate(d, a, m string, c [][]byte) (string, map[string]string, error) {
-	return f(d, a, m, c)
+	require.Equal(t, ZAPStatusServerError, resp.StatusCode)
 }
 
 // TestIdentityFramingMarker: NULL and PLAIN (both roles) leave frames

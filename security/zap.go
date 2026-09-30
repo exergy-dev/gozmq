@@ -10,16 +10,15 @@
 // Scope
 // -----
 //
-// This package owns the ZAP request/response codec and the handler policy
-// interface:
+// This package owns the ZAP policy type and the request/response codec:
 //
-//   EncodeZapRequest, DecodeZapRequest
-//   EncodeZapResponse, DecodeZapResponse
-//   ZapHandler.ServeRequest (pure: request -> response)
+//   ZAPHandler (the policy) and ZAPHandler.ServeRequest (request -> response)
+//   EncodeZAPRequest, DecodeZAPRequest
+//   EncodeZAPResponse, DecodeZAPResponse
 //
 // all as pure logic over [][]byte frames, testable without any socket.
-// gozmq does not bind "inproc://zeromq.zap.01": a ZapHandler installed with
-// gozmq.WithZapHandler is called directly, in the handshake goroutine, by
+// gozmq does not bind "inproc://zeromq.zap.01": a ZAPHandler installed with
+// gozmq.WithZAPHandler is called directly, in the handshake goroutine, by
 // the server side of PLAIN, CURVE, and (when a ZAP domain is set) NULL. The
 // codec is exported so an application can also serve RFC 27 on a real
 // socket, e.g. for libzmq peers in the same process.
@@ -31,7 +30,7 @@
 //
 //	frame 0: version    — ASCII "1.0"
 //	frame 1: request-id — opaque; handler copies verbatim into response
-//	frame 2: domain     — ASCII, set by server via WithZapDomain
+//	frame 2: domain     — ASCII, set by server via WithZAPDomain
 //	frame 3: address    — ASCII string representation of peer's network address
 //	frame 4: identity   — ZMTP Identity metadata from peer, or empty
 //	frame 5: mechanism  — "NULL" | "PLAIN" | "CURVE"
@@ -69,15 +68,15 @@ const zapVersion = "1.0"
 
 // ZAP status codes (RFC 27 §3.2).
 const (
-	ZapStatusOK          = "200"
-	ZapStatusTempError   = "300"
-	ZapStatusClientError = "400"
-	ZapStatusServerError = "500"
+	ZAPStatusOK          = "200"
+	ZAPStatusTempError   = "300"
+	ZAPStatusClientError = "400"
+	ZAPStatusServerError = "500"
 )
 
-// ZapRequest is the decoded form of a RFC 27 §3.1 request. All frames are
+// ZAPRequest is the decoded form of a RFC 27 §3.1 request. All frames are
 // kept as []byte because the identity and credentials are opaque binary.
-type ZapRequest struct {
+type ZAPRequest struct {
 	Version     string // must be "1.0"
 	RequestID   []byte // opaque, echoed in response
 	Domain      string
@@ -87,8 +86,8 @@ type ZapRequest struct {
 	Credentials [][]byte // mechanism-specific
 }
 
-// ZapResponse is the decoded form of a RFC 27 §3.2 response.
-type ZapResponse struct {
+// ZAPResponse is the decoded form of a RFC 27 §3.2 response.
+type ZAPResponse struct {
 	Version    string
 	RequestID  []byte
 	StatusCode string
@@ -97,50 +96,43 @@ type ZapResponse struct {
 	Metadata   map[string]string
 }
 
-// ZapPolicy is the user-supplied authorizer. Implementations make an
-// authorization decision based on the mechanism-specific credentials and
-// return either a user-id + optional metadata (success) or an error
-// (failure). ServeRequest translates the error into a ZAP status code:
+// ZAPHandler is an RFC 27 authorization policy. It is given the ZAP domain,
+// the peer's address, the mechanism name, and that mechanism's credentials
+// (PLAIN: username and password; CURVE: the client's 32-byte long-term public
+// key; NULL: none), and accepts the peer by returning a nil error.
+//
+// gozmq.WithZAPHandler installs one on a Context, which then calls it
+// directly from the server side of each handshake, concurrently when
+// handshakes overlap; a rejection fails the
+// handshake with an error wrapping the one returned here. On success a
+// non-empty userID becomes the peer's "User-Id" property, and metadata adds
+// properties under names the peer did not send itself.
+//
+// ServeRequest adapts the same function to the RFC 27 wire protocol, mapping
+// its error to a status code:
 //
 //   - nil error                      -> 200 OK
+//   - error wrapping ErrZAPTemporary -> 300 Temporary Error
 //   - error wrapping ErrAuthFailed   -> 400 Client Error
 //   - any other error                -> 500 Server Error
 //
-// A policy that wants to signal a temporary failure (300) can wrap
-// ErrZapTemporary (declared below) in its returned error. This isolates
-// policy code from the ZAP wire code.
-type ZapPolicy interface {
-	Authenticate(domain, address, mech string, credentials [][]byte) (userID string, metadata map[string]string, err error)
-}
+// so a rejection should wrap gozmq.ErrAuthFailed.
+type ZAPHandler func(domain, address, mech string, credentials [][]byte) (userID string, metadata map[string]string, err error)
 
-// ErrZapTemporary, when wrapped by a ZapPolicy.Authenticate error, produces a
-// 300 "temporary error" response instead of 400/500. Callers should wrap it
-// via fmt.Errorf("...: %w", security.ErrZapTemporary).
-var ErrZapTemporary = errors.New("gozmq/security/zap: temporary authentication failure")
-
-// ZapHandler is the handler-side runtime for request/response ZAP policy.
-type ZapHandler struct {
-	policy ZapPolicy
-}
-
-// NewZapHandler returns a ZapHandler that dispatches incoming requests to
-// policy. A nil policy is programmer error.
-func NewZapHandler(policy ZapPolicy) *ZapHandler {
-	if policy == nil {
-		panic("gozmq/security/zap: NewZapHandler requires a non-nil policy")
-	}
-	return &ZapHandler{policy: policy}
-}
+// ErrZAPTemporary, when wrapped by a ZAPHandler error, marks the failure as
+// temporary: a 300 response instead of 400/500. Wrap it via
+// fmt.Errorf("...: %w", security.ErrZAPTemporary).
+var ErrZAPTemporary = errors.New("gozmq/security/zap: temporary authentication failure")
 
 // ServeRequest executes one request/response cycle. It parses the raw frames,
-// invokes the policy, and serializes the reply. Malformed input produces a
+// invokes h, and serializes the reply. Malformed input produces a
 // 500 response per RFC 27 §3.2 so the peer mechanism sees a terminating
 // failure rather than a timeout.
 //
 // The frames slice ownership is the caller's; this function does not retain
 // or mutate it.
-func (h *ZapHandler) ServeRequest(reqFrames [][]byte) [][]byte {
-	req, err := DecodeZapRequest(reqFrames)
+func (h ZAPHandler) ServeRequest(reqFrames [][]byte) [][]byte {
+	req, err := DecodeZAPRequest(reqFrames)
 	if err != nil {
 		// Build a minimal 500 response. We try to echo the request-id if
 		// it was readable (frame index 1), otherwise emit an empty one.
@@ -148,47 +140,47 @@ func (h *ZapHandler) ServeRequest(reqFrames [][]byte) [][]byte {
 		if len(reqFrames) >= 2 {
 			reqID = bytes.Clone(reqFrames[1])
 		}
-		return EncodeZapResponse(&ZapResponse{
+		return EncodeZAPResponse(&ZAPResponse{
 			Version:    zapVersion,
 			RequestID:  reqID,
-			StatusCode: ZapStatusServerError,
+			StatusCode: ZAPStatusServerError,
 			StatusText: "malformed ZAP request",
 		})
 	}
 
-	userID, metadata, perr := h.policy.Authenticate(req.Domain, req.Address, req.Mechanism, req.Credentials)
-	resp := &ZapResponse{
+	userID, metadata, perr := h(req.Domain, req.Address, req.Mechanism, req.Credentials)
+	resp := &ZAPResponse{
 		Version:   zapVersion,
 		RequestID: bytes.Clone(req.RequestID),
 	}
 	switch {
 	case perr == nil:
-		resp.StatusCode = ZapStatusOK
+		resp.StatusCode = ZAPStatusOK
 		resp.StatusText = "OK"
 		resp.UserID = userID
 		resp.Metadata = metadata
-	case errors.Is(perr, ErrZapTemporary):
-		resp.StatusCode = ZapStatusTempError
+	case errors.Is(perr, ErrZAPTemporary):
+		resp.StatusCode = ZAPStatusTempError
 		resp.StatusText = perr.Error()
 	case errors.Is(perr, zmqerr.ErrAuthFailed):
-		resp.StatusCode = ZapStatusClientError
+		resp.StatusCode = ZAPStatusClientError
 		resp.StatusText = perr.Error()
 	default:
-		resp.StatusCode = ZapStatusServerError
+		resp.StatusCode = ZAPStatusServerError
 		resp.StatusText = perr.Error()
 	}
-	return EncodeZapResponse(resp)
+	return EncodeZAPResponse(resp)
 }
 
 // ---------------------------------------------------------------------------
 // Codec — request
 // ---------------------------------------------------------------------------
 
-// EncodeZapRequest serializes req into the RFC 27 §3.1 multi-frame form. The
+// EncodeZAPRequest serializes req into the RFC 27 §3.1 multi-frame form. The
 // returned slice holds the request frames in order and aliases req.RequestID,
 // req.Identity, and each req.Credentials[i] — callers must not mutate those
 // byte slices while the encoded frames are in flight.
-func EncodeZapRequest(req *ZapRequest) [][]byte {
+func EncodeZAPRequest(req *ZAPRequest) [][]byte {
 	frames := make([][]byte, 0, 6+len(req.Credentials))
 	version := req.Version
 	if version == "" {
@@ -206,13 +198,13 @@ func EncodeZapRequest(req *ZapRequest) [][]byte {
 	return frames
 }
 
-// DecodeZapRequest parses a multi-frame ZAP request. The returned
-// ZapRequest's byte-slice fields reference the input frames — callers that
+// DecodeZAPRequest parses a multi-frame ZAP request. The returned
+// ZAPRequest's byte-slice fields reference the input frames — callers that
 // need independent ownership must copy.
 //
 // Errors wrap gozmq.ErrMalformedFrame. We are strict about version: only
 // "1.0" is accepted, matching libzmq's zap_handler_v2.
-func DecodeZapRequest(frames [][]byte) (*ZapRequest, error) {
+func DecodeZAPRequest(frames [][]byte) (*ZAPRequest, error) {
 	if len(frames) < 6 {
 		return nil, fmt.Errorf("gozmq/security/zap: request needs >=6 frames, got %d: %w", len(frames), zmqerr.ErrMalformedFrame)
 	}
@@ -220,7 +212,7 @@ func DecodeZapRequest(frames [][]byte) (*ZapRequest, error) {
 	if version != zapVersion {
 		return nil, fmt.Errorf("gozmq/security/zap: unsupported version %q: %w", version, zmqerr.ErrMalformedFrame)
 	}
-	req := &ZapRequest{
+	req := &ZAPRequest{
 		Version:   version,
 		RequestID: frames[1],
 		Domain:    string(frames[2]),
@@ -262,7 +254,7 @@ func DecodeZapRequest(frames [][]byte) (*ZapRequest, error) {
 // Codec — response
 // ---------------------------------------------------------------------------
 
-// EncodeZapResponse serializes resp into RFC 27 §3.2 multi-frame form. A nil
+// EncodeZAPResponse serializes resp into RFC 27 §3.2 multi-frame form. A nil
 // Metadata map is treated as empty (zero-length frame 5). The returned slice
 // does NOT alias resp's fields — we allocate fresh frames because responses
 // typically flow on a socket that will pool/retain them.
@@ -270,14 +262,14 @@ func DecodeZapRequest(frames [][]byte) (*ZapRequest, error) {
 // Metadata a property list cannot carry (a name over 255 bytes, or a value
 // over 2^32-1) is a policy bug; rather than panic inside a handshake, the
 // response is replaced with a 500 carrying no user-id or metadata.
-func EncodeZapResponse(resp *ZapResponse) [][]byte {
+func EncodeZAPResponse(resp *ZAPResponse) [][]byte {
 	version := resp.Version
 	if version == "" {
 		version = zapVersion
 	}
 	statusCode, statusText, userID, meta := resp.StatusCode, resp.StatusText, resp.UserID, resp.Metadata
-	if err := validateZapMetadata(meta); err != nil {
-		statusCode, statusText, userID, meta = ZapStatusServerError, err.Error(), "", nil
+	if err := validateZAPMetadata(meta); err != nil {
+		statusCode, statusText, userID, meta = ZAPStatusServerError, err.Error(), "", nil
 	}
 
 	return [][]byte{
@@ -290,9 +282,9 @@ func EncodeZapResponse(resp *ZapResponse) [][]byte {
 	}
 }
 
-// validateZapMetadata reports whether meta fits a ZMTP property list, whose
+// validateZAPMetadata reports whether meta fits a ZMTP property list, whose
 // encoder panics otherwise.
-func validateZapMetadata(meta map[string]string) error {
+func validateZAPMetadata(meta map[string]string) error {
 	for name, value := range meta {
 		if len(name) > 255 {
 			return fmt.Errorf("gozmq/security/zap: metadata name length %d exceeds 255", len(name))
@@ -304,9 +296,9 @@ func validateZapMetadata(meta map[string]string) error {
 	return nil
 }
 
-// DecodeZapResponse parses a multi-frame ZAP response. Version mismatch or a
+// DecodeZAPResponse parses a multi-frame ZAP response. Version mismatch or a
 // short frame count produces ErrMalformedFrame.
-func DecodeZapResponse(frames [][]byte) (*ZapResponse, error) {
+func DecodeZAPResponse(frames [][]byte) (*ZAPResponse, error) {
 	if len(frames) != 6 {
 		return nil, fmt.Errorf("gozmq/security/zap: response needs 6 frames, got %d: %w", len(frames), zmqerr.ErrMalformedFrame)
 	}
@@ -318,7 +310,7 @@ func DecodeZapResponse(frames [][]byte) (*ZapResponse, error) {
 	if err != nil {
 		return nil, err // already wraps ErrMalformedFrame
 	}
-	return &ZapResponse{
+	return &ZAPResponse{
 		Version:    version,
 		RequestID:  frames[1],
 		StatusCode: string(frames[2]),

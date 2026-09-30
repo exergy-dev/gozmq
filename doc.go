@@ -56,8 +56,8 @@
 //   - [WithPlainAuth] / [WithPlainClient] — username/password authentication.
 //     Credentials travel in cleartext unless the underlying transport is
 //     wrapped in tls+tcp://. Server-side PLAIN and CURVE authorization can
-//     also be delegated to an RFC 27 handler via [WithZapHandler] plus the
-//     per-socket [WithZapDomain].
+//     also be delegated to an RFC 27 handler via [WithZAPHandler] plus the
+//     per-socket [WithZAPDomain].
 //   - [WithCurveServer] / [WithCurveClient] — CurveZMQ mutual authentication
 //     with forward-secret encryption using long-term Curve25519 keys.
 //

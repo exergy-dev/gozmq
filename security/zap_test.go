@@ -34,7 +34,7 @@ func (p *mockPolicy) Authenticate(_, _, mech string, creds [][]byte) (string, ma
 // ---------------------------------------------------------------------------
 
 func TestZapRequestRoundTrip(t *testing.T) {
-	req := &ZapRequest{
+	req := &ZAPRequest{
 		Version:     "1.0",
 		RequestID:   []byte{0x01, 0x02, 0x03},
 		Domain:      "global",
@@ -43,9 +43,9 @@ func TestZapRequestRoundTrip(t *testing.T) {
 		Mechanism:   "PLAIN",
 		Credentials: [][]byte{[]byte("alice"), []byte("hunter2")},
 	}
-	frames := EncodeZapRequest(req)
+	frames := EncodeZAPRequest(req)
 	require.Len(t, frames, 8)
-	got, err := DecodeZapRequest(frames)
+	got, err := DecodeZAPRequest(frames)
 	require.NoError(t, err)
 	require.Equal(t, req.Version, got.Version)
 	require.Equal(t, req.Domain, got.Domain)
@@ -59,7 +59,7 @@ func TestZapRequestRoundTrip(t *testing.T) {
 }
 
 func TestZapResponseRoundTrip(t *testing.T) {
-	resp := &ZapResponse{
+	resp := &ZAPResponse{
 		Version:    "1.0",
 		RequestID:  []byte{0x10, 0x20},
 		StatusCode: "200",
@@ -67,9 +67,9 @@ func TestZapResponseRoundTrip(t *testing.T) {
 		UserID:     "alice",
 		Metadata:   map[string]string{"Role": "admin"},
 	}
-	frames := EncodeZapResponse(resp)
+	frames := EncodeZAPResponse(resp)
 	require.Len(t, frames, 6)
-	got, err := DecodeZapResponse(frames)
+	got, err := DecodeZAPResponse(frames)
 	require.NoError(t, err)
 	require.Equal(t, resp.Version, got.Version)
 	require.Equal(t, resp.StatusCode, got.StatusCode)
@@ -80,19 +80,19 @@ func TestZapResponseRoundTrip(t *testing.T) {
 }
 
 func TestZapResponseEncodeIsolatesInput(t *testing.T) {
-	// EncodeZapResponse must not alias resp's fields — callers commonly mutate
+	// EncodeZAPResponse must not alias resp's fields — callers commonly mutate
 	// the scratch buffer after handing it off.
 	reqID := []byte{0x01, 0x02}
-	resp := &ZapResponse{
+	resp := &ZAPResponse{
 		RequestID:  reqID,
 		StatusCode: "200",
 		StatusText: "OK",
 		UserID:     "u",
 	}
-	frames := EncodeZapResponse(resp)
+	frames := EncodeZAPResponse(resp)
 	// Mutate caller's RequestID; the frame in `frames` must be unchanged.
 	reqID[0] = 0xff
-	require.NotEqual(t, byte(0xff), frames[1][0], "EncodeZapResponse aliases input RequestID")
+	require.NotEqual(t, byte(0xff), frames[1][0], "EncodeZAPResponse aliases input RequestID")
 }
 
 // ---------------------------------------------------------------------------
@@ -104,9 +104,9 @@ func TestZapServeValidRequest200(t *testing.T) {
 		userID:   "alice",
 		metadata: map[string]string{"User-Id": "alice"},
 	}
-	h := NewZapHandler(policy)
+	h := ZAPHandler(policy.Authenticate)
 
-	req := EncodeZapRequest(&ZapRequest{
+	req := EncodeZAPRequest(&ZAPRequest{
 		Version:     "1.0",
 		RequestID:   []byte("req-1"),
 		Domain:      "global",
@@ -117,9 +117,9 @@ func TestZapServeValidRequest200(t *testing.T) {
 	})
 	respFrames := h.ServeRequest(req)
 
-	resp, err := DecodeZapResponse(respFrames)
+	resp, err := DecodeZAPResponse(respFrames)
 	require.NoError(t, err)
-	require.Equal(t, ZapStatusOK, resp.StatusCode)
+	require.Equal(t, ZAPStatusOK, resp.StatusCode)
 	require.Equal(t, "alice", resp.UserID)
 	require.Equal(t, []byte("req-1"), resp.RequestID)
 	require.Equal(t, "alice", resp.Metadata["User-Id"])
@@ -134,9 +134,9 @@ func TestZapServeInvalidCreds400(t *testing.T) {
 	policy := &mockPolicy{
 		err: fmt.Errorf("bad password: %w", zmqerr.ErrAuthFailed),
 	}
-	h := NewZapHandler(policy)
+	h := ZAPHandler(policy.Authenticate)
 
-	req := EncodeZapRequest(&ZapRequest{
+	req := EncodeZAPRequest(&ZAPRequest{
 		Version:     "1.0",
 		RequestID:   []byte("req-2"),
 		Domain:      "global",
@@ -146,9 +146,9 @@ func TestZapServeInvalidCreds400(t *testing.T) {
 	})
 	respFrames := h.ServeRequest(req)
 
-	resp, err := DecodeZapResponse(respFrames)
+	resp, err := DecodeZAPResponse(respFrames)
 	require.NoError(t, err)
-	require.Equal(t, ZapStatusClientError, resp.StatusCode)
+	require.Equal(t, ZAPStatusClientError, resp.StatusCode)
 	require.Empty(t, resp.UserID, "UserID on failure should be empty")
 	require.NotEmpty(t, resp.StatusText, "StatusText should contain policy error message")
 }
@@ -158,7 +158,7 @@ func TestZapServeMalformedRequest500(t *testing.T) {
 	policy := &mockPolicy{
 		userID: "must-not-see",
 	}
-	h := NewZapHandler(policy)
+	h := ZAPHandler(policy.Authenticate)
 
 	cases := []struct {
 		name   string
@@ -174,7 +174,7 @@ func TestZapServeMalformedRequest500(t *testing.T) {
 		},
 		{
 			name: "wrong-version",
-			frames: EncodeZapRequest(&ZapRequest{
+			frames: EncodeZAPRequest(&ZAPRequest{
 				Version:     "2.0", // unsupported
 				RequestID:   []byte("req-x"),
 				Domain:      "global",
@@ -185,7 +185,7 @@ func TestZapServeMalformedRequest500(t *testing.T) {
 		},
 		{
 			name: "unknown-mechanism",
-			frames: EncodeZapRequest(&ZapRequest{
+			frames: EncodeZAPRequest(&ZAPRequest{
 				Version:   "1.0",
 				RequestID: []byte("req-x"),
 				Domain:    "global",
@@ -195,7 +195,7 @@ func TestZapServeMalformedRequest500(t *testing.T) {
 		},
 		{
 			name: "plain-wrong-cred-count",
-			frames: EncodeZapRequest(&ZapRequest{
+			frames: EncodeZAPRequest(&ZAPRequest{
 				Version:     "1.0",
 				RequestID:   []byte("req-x"),
 				Domain:      "global",
@@ -206,7 +206,7 @@ func TestZapServeMalformedRequest500(t *testing.T) {
 		},
 		{
 			name: "curve-wrong-key-length",
-			frames: EncodeZapRequest(&ZapRequest{
+			frames: EncodeZAPRequest(&ZAPRequest{
 				Version:     "1.0",
 				RequestID:   []byte("req-x"),
 				Domain:      "global",
@@ -221,9 +221,9 @@ func TestZapServeMalformedRequest500(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			policy.lastMechanism = ""
 			respFrames := h.ServeRequest(tc.frames)
-			resp, err := DecodeZapResponse(respFrames)
+			resp, err := DecodeZAPResponse(respFrames)
 			require.NoError(t, err)
-			require.Equal(t, ZapStatusServerError, resp.StatusCode)
+			require.Equal(t, ZAPStatusServerError, resp.StatusCode)
 			require.Empty(t, policy.lastMechanism, "policy was called on malformed request")
 		})
 	}
@@ -231,11 +231,11 @@ func TestZapServeMalformedRequest500(t *testing.T) {
 
 func TestZapServeTemporaryFailure300(t *testing.T) {
 	policy := &mockPolicy{
-		err: fmt.Errorf("backend unreachable: %w", ErrZapTemporary),
+		err: fmt.Errorf("backend unreachable: %w", ErrZAPTemporary),
 	}
-	h := NewZapHandler(policy)
+	h := ZAPHandler(policy.Authenticate)
 
-	req := EncodeZapRequest(&ZapRequest{
+	req := EncodeZAPRequest(&ZAPRequest{
 		Version:     "1.0",
 		RequestID:   []byte("req-3"),
 		Domain:      "global",
@@ -244,18 +244,18 @@ func TestZapServeTemporaryFailure300(t *testing.T) {
 		Credentials: [][]byte{[]byte("u"), []byte("p")},
 	})
 	respFrames := h.ServeRequest(req)
-	resp, err := DecodeZapResponse(respFrames)
+	resp, err := DecodeZAPResponse(respFrames)
 	require.NoError(t, err)
-	require.Equal(t, ZapStatusTempError, resp.StatusCode)
+	require.Equal(t, ZAPStatusTempError, resp.StatusCode)
 }
 
 func TestZapServeGenericErrorIsServerError(t *testing.T) {
 	policy := &mockPolicy{
 		err: errors.New("bug in policy"),
 	}
-	h := NewZapHandler(policy)
+	h := ZAPHandler(policy.Authenticate)
 
-	req := EncodeZapRequest(&ZapRequest{
+	req := EncodeZAPRequest(&ZAPRequest{
 		Version:     "1.0",
 		RequestID:   []byte("req-4"),
 		Domain:      "global",
@@ -264,26 +264,26 @@ func TestZapServeGenericErrorIsServerError(t *testing.T) {
 		Credentials: [][]byte{[]byte("u"), []byte("p")},
 	})
 	respFrames := h.ServeRequest(req)
-	resp, err := DecodeZapResponse(respFrames)
+	resp, err := DecodeZAPResponse(respFrames)
 	require.NoError(t, err)
-	require.Equal(t, ZapStatusServerError, resp.StatusCode)
+	require.Equal(t, ZAPStatusServerError, resp.StatusCode)
 }
 
 func TestZapServeRequestIDEcho(t *testing.T) {
 	// Malformed requests should still echo the request-id when frame 1 is
 	// readable, so the peer can correlate the failure with its request.
 	policy := &mockPolicy{}
-	h := NewZapHandler(policy)
+	h := ZAPHandler(policy.Authenticate)
 
 	// Too few frames but frame 1 (request-id) is present.
 	respFrames := h.ServeRequest([][]byte{
 		[]byte("1.0"),
 		[]byte("req-echo"),
 	})
-	resp, err := DecodeZapResponse(respFrames)
+	resp, err := DecodeZAPResponse(respFrames)
 	require.NoError(t, err)
 	require.Equal(t, []byte("req-echo"), resp.RequestID)
-	require.Equal(t, ZapStatusServerError, resp.StatusCode)
+	require.Equal(t, ZAPStatusServerError, resp.StatusCode)
 }
 
 func TestZapNullMechanismAllowsZeroCreds(t *testing.T) {
@@ -293,9 +293,9 @@ func TestZapNullMechanismAllowsZeroCreds(t *testing.T) {
 	policy := &mockPolicy{
 		userID: "anon",
 	}
-	h := NewZapHandler(policy)
+	h := ZAPHandler(policy.Authenticate)
 
-	req := EncodeZapRequest(&ZapRequest{
+	req := EncodeZAPRequest(&ZAPRequest{
 		Version:   "1.0",
 		RequestID: []byte("req-5"),
 		Domain:    "global",
@@ -303,21 +303,21 @@ func TestZapNullMechanismAllowsZeroCreds(t *testing.T) {
 		Mechanism: "NULL",
 	})
 	respFrames := h.ServeRequest(req)
-	resp, err := DecodeZapResponse(respFrames)
+	resp, err := DecodeZAPResponse(respFrames)
 	require.NoError(t, err)
-	require.Equal(t, ZapStatusOK, resp.StatusCode)
+	require.Equal(t, ZAPStatusOK, resp.StatusCode)
 	require.Empty(t, policy.lastCreds)
 }
 
 func TestZapCurveMechanismRequiresKey(t *testing.T) {
 	policy := &mockPolicy{userID: "pk"}
-	h := NewZapHandler(policy)
+	h := ZAPHandler(policy.Authenticate)
 
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i)
 	}
-	req := EncodeZapRequest(&ZapRequest{
+	req := EncodeZAPRequest(&ZAPRequest{
 		Version:     "1.0",
 		RequestID:   []byte("req-6"),
 		Domain:      "global",
@@ -326,14 +326,8 @@ func TestZapCurveMechanismRequiresKey(t *testing.T) {
 		Credentials: [][]byte{key},
 	})
 	respFrames := h.ServeRequest(req)
-	resp, err := DecodeZapResponse(respFrames)
+	resp, err := DecodeZAPResponse(respFrames)
 	require.NoError(t, err)
-	require.Equal(t, ZapStatusOK, resp.StatusCode)
+	require.Equal(t, ZAPStatusOK, resp.StatusCode)
 	require.Equal(t, key, policy.lastCreds[0])
-}
-
-func TestNewZapHandlerPanicsOnNilPolicy(t *testing.T) {
-	require.Panics(t, func() {
-		_ = NewZapHandler(nil)
-	})
 }

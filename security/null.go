@@ -14,7 +14,7 @@
 //
 // What applications usually want to customize is authorization policy, not
 // the mechanism. That is pluggable without touching the wire: implement
-// [ZapPolicy] and install it with gozmq.WithZapHandler. A ZAP policy decides
+// [ZAPHandler] and install it with gozmq.WithZAPHandler. A ZAP handler decides
 // which PLAIN credentials or CURVE public keys are allowed, per RFC 27,
 // while the vetted mechanism implementations keep handling the cryptography.
 //

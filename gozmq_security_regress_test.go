@@ -201,11 +201,11 @@ func TestSecurity_PreAuthAllocationBounded(t *testing.T) {
 // Context's ZAP handler.
 func TestSecurity_ZapConsultedForConnectingServer(t *testing.T) {
 	var zapCalls atomic.Int64
-	handler := security.NewZapHandler(zapPolicy(func(string, string, string, [][]byte) (string, map[string]string, error) {
+	handler := security.ZAPHandler(func(string, string, string, [][]byte) (string, map[string]string, error) {
 		zapCalls.Add(1)
 		return "", nil, gozmq.ErrAuthFailed
-	}))
-	zctx := gozmq.NewContext(gozmq.WithZapHandler(handler))
+	})
+	zctx := gozmq.NewContext(gozmq.WithZAPHandler(handler))
 	t.Cleanup(func() { _ = zctx.Close() })
 
 	cliSide, err := zctx.NewSocket(gozmq.Push, gozmq.WithPlainClient("alice", "pw"))
@@ -215,17 +215,11 @@ func TestSecurity_ZapConsultedForConnectingServer(t *testing.T) {
 
 	authSide, err := zctx.NewSocket(gozmq.Pull,
 		gozmq.WithPlainAuth(func(string, string) bool { return true }),
-		gozmq.WithZapDomain("global"))
+		gozmq.WithZAPDomain("global"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = authSide.Close() })
 	require.NoError(t, authSide.Connect(cliSide.LastEndpoint()))
 
 	requireNoDelivery(t, cliSide, authSide, "ZAP-rejected PLAIN client")
 	require.Positive(t, zapCalls.Load(), "ZAP handler never consulted")
-}
-
-type zapPolicy func(domain, address, mech string, creds [][]byte) (string, map[string]string, error)
-
-func (f zapPolicy) Authenticate(d, a, m string, c [][]byte) (string, map[string]string, error) {
-	return f(d, a, m, c)
 }

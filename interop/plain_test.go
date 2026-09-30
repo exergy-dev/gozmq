@@ -124,7 +124,7 @@ func TestPlain_LibzmqClient_GozmqServer_BadPassword(t *testing.T) {
 
 func TestPlain_GozmqClient_LibzmqServer(t *testing.T) {
 	libCtx := newLibCtx(t)
-	zapDone := startLibzmqZAPHandler(t, libCtx, zapDecisionFunc(func(_domain, _address, mech string, credentials [][]byte) (string, map[string]string, error) {
+	zapDone := startLibzmqZAPHandler(t, libCtx, func(_domain, _address, mech string, credentials [][]byte) (string, map[string]string, error) {
 		if mech != "PLAIN" || len(credentials) != 2 {
 			return "", nil, gozmq.ErrAuthFailed
 		}
@@ -132,7 +132,7 @@ func TestPlain_GozmqClient_LibzmqServer(t *testing.T) {
 			return "", nil, gozmq.ErrAuthFailed
 		}
 		return "alice", nil, nil
-	}))
+	})
 
 	server := libCtx.NewSocket(ZMQ_PAIR)
 	t.Cleanup(func() { _ = server.Close() })
@@ -205,7 +205,7 @@ func TestPlain_GozmqClient_LibzmqServer(t *testing.T) {
 
 func TestPlain_GozmqClient_LibzmqServer_BadPassword(t *testing.T) {
 	libCtx := newLibCtx(t)
-	zapDone := startLibzmqZAPHandler(t, libCtx, zapDecisionFunc(func(_domain, _address, mech string, credentials [][]byte) (string, map[string]string, error) {
+	zapDone := startLibzmqZAPHandler(t, libCtx, func(_domain, _address, mech string, credentials [][]byte) (string, map[string]string, error) {
 		if mech != "PLAIN" || len(credentials) != 2 {
 			return "", nil, gozmq.ErrAuthFailed
 		}
@@ -213,7 +213,7 @@ func TestPlain_GozmqClient_LibzmqServer_BadPassword(t *testing.T) {
 			return "", nil, gozmq.ErrAuthFailed
 		}
 		return "alice", nil, nil
-	}))
+	})
 
 	server := libCtx.NewSocket(ZMQ_PAIR)
 	t.Cleanup(func() { _ = server.Close() })
@@ -317,7 +317,7 @@ func TestPlain_LibzmqClient_GozmqServer_EmptyUsername(t *testing.T) {
 
 func TestPlain_GozmqClient_LibzmqServer_EmptyUsername(t *testing.T) {
 	libCtx := newLibCtx(t)
-	zapDone := startLibzmqZAPHandler(t, libCtx, zapDecisionFunc(func(_domain, _address, mech string, credentials [][]byte) (string, map[string]string, error) {
+	zapDone := startLibzmqZAPHandler(t, libCtx, func(_domain, _address, mech string, credentials [][]byte) (string, map[string]string, error) {
 		if mech != "PLAIN" || len(credentials) != 2 {
 			return "", nil, gozmq.ErrAuthFailed
 		}
@@ -325,7 +325,7 @@ func TestPlain_GozmqClient_LibzmqServer_EmptyUsername(t *testing.T) {
 			return "", nil, gozmq.ErrAuthFailed
 		}
 		return "anonymous", nil, nil
-	}))
+	})
 
 	server := libCtx.NewSocket(ZMQ_PAIR)
 	t.Cleanup(func() { _ = server.Close() })
@@ -422,7 +422,7 @@ func TestPlain_LibzmqClient_GozmqServer_TooLongUsername(t *testing.T) {
 func TestPlain_ReqRep_Transparent(t *testing.T) {
 	t.Run("gozmq-req-libzmq-rep", func(t *testing.T) {
 		libCtx := newLibCtx(t)
-		zapDone := startLibzmqZAPHandler(t, libCtx, zapDecisionFunc(func(_domain, _address, mech string, credentials [][]byte) (string, map[string]string, error) {
+		zapDone := startLibzmqZAPHandler(t, libCtx, func(_domain, _address, mech string, credentials [][]byte) (string, map[string]string, error) {
 			if mech != "PLAIN" || len(credentials) != 2 {
 				return "", nil, gozmq.ErrAuthFailed
 			}
@@ -430,7 +430,7 @@ func TestPlain_ReqRep_Transparent(t *testing.T) {
 				return "", nil, gozmq.ErrAuthFailed
 			}
 			return "alice", nil, nil
-		}))
+		})
 		rep := libCtx.NewSocket(ZMQ_REP)
 		t.Cleanup(func() { _ = rep.Close() })
 		if err := rep.SetOption(ZMQ_PLAIN_SERVER, 1); err != nil {
@@ -552,7 +552,7 @@ func TestPlain_ReqRep_Transparent(t *testing.T) {
 func TestPlain_DealerRouter_Transparent(t *testing.T) {
 	t.Run("gozmq-dealer-libzmq-router", func(t *testing.T) {
 		libCtx := newLibCtx(t)
-		zapDone := startLibzmqZAPHandler(t, libCtx, zapDecisionFunc(func(_domain, _address, mech string, credentials [][]byte) (string, map[string]string, error) {
+		zapDone := startLibzmqZAPHandler(t, libCtx, func(_domain, _address, mech string, credentials [][]byte) (string, map[string]string, error) {
 			if mech != "PLAIN" || len(credentials) != 2 {
 				return "", nil, gozmq.ErrAuthFailed
 			}
@@ -560,7 +560,7 @@ func TestPlain_DealerRouter_Transparent(t *testing.T) {
 				return "", nil, gozmq.ErrAuthFailed
 			}
 			return "alice", nil, nil
-		}))
+		})
 		router := libCtx.NewSocket(ZMQ_ROUTER)
 		t.Cleanup(func() { _ = router.Close() })
 		if err := router.SetOption(ZMQ_PLAIN_SERVER, 1); err != nil {
@@ -748,7 +748,7 @@ func TestPlain_PubSub_Transparent(t *testing.T) {
 
 	t.Run("libzmq-pub-gozmq-sub", func(t *testing.T) {
 		libCtx := newLibCtx(t)
-		zapDone := startLibzmqZAPHandler(t, libCtx, zapDecisionFunc(func(_domain, _address, mech string, credentials [][]byte) (string, map[string]string, error) {
+		zapDone := startLibzmqZAPHandler(t, libCtx, func(_domain, _address, mech string, credentials [][]byte) (string, map[string]string, error) {
 			if mech != "PLAIN" || len(credentials) != 2 {
 				return "", nil, gozmq.ErrAuthFailed
 			}
@@ -756,7 +756,7 @@ func TestPlain_PubSub_Transparent(t *testing.T) {
 				return "", nil, gozmq.ErrAuthFailed
 			}
 			return "alice", nil, nil
-		}))
+		})
 		pub := libCtx.NewSocket(ZMQ_PUB)
 		t.Cleanup(func() { _ = pub.Close() })
 		if err := pub.SetOption(ZMQ_PLAIN_SERVER, 1); err != nil {

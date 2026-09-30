@@ -14,16 +14,10 @@ import (
 	"github.com/exergy-dev/gozmq/security/curve"
 )
 
-type zapPolicyFunc func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error)
-
-func (f zapPolicyFunc) Authenticate(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
-	return f(domain, address, mech, credentials)
-}
-
 func TestZapHandler_IntegratesWithPlainHandshake(t *testing.T) {
 	t.Run("accept", func(t *testing.T) {
 		var plainAuthCalls atomic.Int32
-		handler := security.NewZapHandler(zapPolicyFunc(func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
+		handler := security.ZAPHandler(func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
 			require.Equal(t, "global", domain)
 			require.Equal(t, "PLAIN", mech)
 			require.Len(t, credentials, 2)
@@ -31,9 +25,9 @@ func TestZapHandler_IntegratesWithPlainHandshake(t *testing.T) {
 			require.Equal(t, "hunter2", string(credentials[1]))
 			require.NotEmpty(t, address, "address unexpectedly empty")
 			return "alice", map[string]string{"Role": "admin"}, nil
-		}))
+		})
 
-		ctxZmq := gozmq.NewContext(gozmq.WithZapHandler(handler))
+		ctxZmq := gozmq.NewContext(gozmq.WithZAPHandler(handler))
 		defer ctxZmq.Close()
 
 		serverEvents := make(chan gozmq.Event, 16)
@@ -42,7 +36,7 @@ func TestZapHandler_IntegratesWithPlainHandshake(t *testing.T) {
 				plainAuthCalls.Add(1)
 				return false
 			}),
-			gozmq.WithZapDomain("global"),
+			gozmq.WithZAPDomain("global"),
 			gozmq.WithMonitor(serverEvents, gozmq.EventAll))
 		require.NoError(t, err)
 		defer server.Close()
@@ -66,17 +60,17 @@ func TestZapHandler_IntegratesWithPlainHandshake(t *testing.T) {
 	})
 
 	t.Run("reject", func(t *testing.T) {
-		handler := security.NewZapHandler(zapPolicyFunc(func(string, string, string, [][]byte) (string, map[string]string, error) {
+		handler := security.ZAPHandler(func(string, string, string, [][]byte) (string, map[string]string, error) {
 			return "", nil, zmqerr.ErrAuthFailed
-		}))
+		})
 
-		ctxZmq := gozmq.NewContext(gozmq.WithZapHandler(handler))
+		ctxZmq := gozmq.NewContext(gozmq.WithZAPHandler(handler))
 		defer ctxZmq.Close()
 
 		serverEvents := make(chan gozmq.Event, 16)
 		server, err := ctxZmq.NewSocket(gozmq.Pair,
 			gozmq.WithPlainAuth(func(string, string) bool { return true }),
-			gozmq.WithZapDomain("global"),
+			gozmq.WithZAPDomain("global"),
 			gozmq.WithMonitor(serverEvents, gozmq.EventAll))
 		require.NoError(t, err)
 		defer server.Close()
@@ -99,22 +93,22 @@ func TestZapHandler_IntegratesWithCurveHandshake(t *testing.T) {
 	require.NoError(t, err, "client keypair")
 
 	t.Run("accept", func(t *testing.T) {
-		handler := security.NewZapHandler(zapPolicyFunc(func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
+		handler := security.ZAPHandler(func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {
 			require.Equal(t, "global", domain)
 			require.Equal(t, "CURVE", mech)
 			require.Len(t, credentials, 1)
 			require.Equal(t, string(clientPub[:]), string(credentials[0]))
 			require.NotEmpty(t, address, "address unexpectedly empty")
 			return "client", nil, nil
-		}))
+		})
 
-		ctxZmq := gozmq.NewContext(gozmq.WithZapHandler(handler))
+		ctxZmq := gozmq.NewContext(gozmq.WithZAPHandler(handler))
 		defer ctxZmq.Close()
 
 		serverEvents := make(chan gozmq.Event, 16)
 		server, err := ctxZmq.NewSocket(gozmq.Pair,
 			gozmq.WithCurveServer(serverSec[:]),
-			gozmq.WithZapDomain("global"),
+			gozmq.WithZAPDomain("global"),
 			gozmq.WithMonitor(serverEvents, gozmq.EventAll))
 		require.NoError(t, err)
 		defer server.Close()
@@ -137,17 +131,17 @@ func TestZapHandler_IntegratesWithCurveHandshake(t *testing.T) {
 	})
 
 	t.Run("reject", func(t *testing.T) {
-		handler := security.NewZapHandler(zapPolicyFunc(func(string, string, string, [][]byte) (string, map[string]string, error) {
+		handler := security.ZAPHandler(func(string, string, string, [][]byte) (string, map[string]string, error) {
 			return "", nil, zmqerr.ErrAuthFailed
-		}))
+		})
 
-		ctxZmq := gozmq.NewContext(gozmq.WithZapHandler(handler))
+		ctxZmq := gozmq.NewContext(gozmq.WithZAPHandler(handler))
 		defer ctxZmq.Close()
 
 		serverEvents := make(chan gozmq.Event, 16)
 		server, err := ctxZmq.NewSocket(gozmq.Pair,
 			gozmq.WithCurveServer(serverSec[:]),
-			gozmq.WithZapDomain("global"),
+			gozmq.WithZAPDomain("global"),
 			gozmq.WithMonitor(serverEvents, gozmq.EventAll))
 		require.NoError(t, err)
 		defer server.Close()

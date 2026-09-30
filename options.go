@@ -226,21 +226,27 @@ func WithSubscribe(prefix []byte) Option {
 	})
 }
 
-// WithPlainAuth installs the server-side PLAIN credential validator. The
-// callback is invoked for each inbound handshake with the credentials the
-// client sent; returning true allows the session, false rejects it with
-// [ErrAuthFailed]. PLAIN credentials traverse the wire in cleartext —
-// only use this mechanism on a trusted link (inproc, ipc, loopback) or
-// wrapped in tls+tcp://. For untrusted networks prefer [WithCurveServer]
-// / [WithCurveClient].
+// WithPlainAuth makes the socket the PLAIN server and installs its credential
+// validator. The callback is invoked for each handshake with the credentials
+// the client sent; returning true allows the session, false rejects it with
+// [ErrAuthFailed]. When the Context has a [WithZAPHandler], that handler
+// decides instead. As with libzmq's ZMQ_PLAIN_SERVER, the PLAIN role is
+// independent of Bind/Connect: the socket is the server on every connection.
+// It cannot be combined with [WithPlainClient] or the CURVE options.
+//
+// PLAIN credentials traverse the wire in cleartext — only use this mechanism
+// on a trusted link (inproc, ipc, loopback) or wrapped in tls+tcp://. For
+// untrusted networks prefer [WithCurveServer] / [WithCurveClient].
 func WithPlainAuth(fn func(user, pass string) bool) Option {
 	return newOption(func(c *socketConfig) error { c.plainAuth = fn; return nil })
 }
 
-// WithPlainClient configures the socket to present PLAIN credentials
-// (username, password) to the server during the ZMTP handshake. Credentials
-// are sent in cleartext; wrap in tls+tcp:// or switch to CURVE for any
-// network you do not trust.
+// WithPlainClient makes the socket the PLAIN client, presenting (username,
+// password) to the server during the ZMTP handshake. The PLAIN role is
+// independent of Bind/Connect: the socket is the client on every connection,
+// including those it accepts. It cannot be combined with [WithPlainAuth] or
+// the CURVE options. Credentials are sent in cleartext; wrap in tls+tcp:// or
+// switch to CURVE for any network you do not trust.
 func WithPlainClient(username, password string) Option {
 	return newOption(func(c *socketConfig) error {
 		c.plainClient = true
@@ -250,10 +256,13 @@ func WithPlainClient(username, password string) Option {
 	})
 }
 
-// WithZapDomain sets the RFC 27 ZAP domain presented to the context-level
-// ZAP handler for server-side PLAIN or CURVE authorization. The default is
-// the empty domain, matching libzmq.
-func WithZapDomain(domain string) Option {
+// WithZAPDomain sets the RFC 27 ZAP domain presented to the Context's
+// [WithZAPHandler] when it authorizes this socket's peers. PLAIN and CURVE
+// servers consult the handler whatever the domain; NULL sockets consult it,
+// for the connections they accept, only when a domain is set, as in libzmq,
+// so a handler installed for PLAIN or CURVE does not start vetting every NULL
+// socket. The default is the empty domain.
+func WithZAPDomain(domain string) Option {
 	return newOption(func(c *socketConfig) error {
 		c.zapDomain = domain
 		return nil
@@ -304,15 +313,22 @@ func WithCurveClient(serverKey, publicKey, secretKey []byte) Option {
 // security bug rather than a correctness bug, and a mechanism gozmq does
 // not ship will not interoperate with libzmq or any other ZMTP peer. If
 // what you actually need is control over *which* peers are allowed rather
-// than how the handshake works, use [WithZapHandler] with a
-// [security.ZapPolicy] instead and keep the vetted cryptography.
+// than how the handshake works, use [WithZAPHandler] instead and keep the
+// vetted cryptography.
 //
 // newMech is called once per session, with the session's role and with the
 // local metadata gozmq advertises in READY (Socket-Type, and Identity when
 // [WithIdentity] is set). The mechanism must include those properties in
-// its own Metadata; the simplest way is to pass the map straight through to
-// [security.NewMechBase] and embed the result. Returning an error fails the
-// session — gozmq never falls back to a weaker mechanism.
+// its own Metadata, and report the peer's through PeerMetadata once the
+// handshake is done; the simplest way is to pass the map straight through to
+// [security.NewMechBase], embed the result, and call its MergePeerMetadata.
+// Returning an error fails the session — gozmq never falls back to a weaker
+// mechanism.
+//
+// Each inbound handshake frame is capped at 64 KiB, whatever
+// [WithMaxMessageSize] says, so an unauthenticated peer cannot make the
+// socket allocate more. A socket with a custom mechanism never takes the
+// inproc direct-pipe shortcut; every connection runs the handshake.
 func WithSecurityMech(newMech func(role security.Role, meta map[string]string) (security.Mech, error)) Option {
 	return newOption(func(c *socketConfig) error {
 		if newMech == nil {
@@ -391,13 +407,20 @@ func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 			return fmt.Errorf("gozmq: WithIdentity requires a non-zero leading byte")
 		}
 	}
-	if cfg.newSecurityMech != nil {
-		switch {
-		case cfg.plainAuth != nil || cfg.plainClient:
-			return fmt.Errorf("gozmq: WithSecurityMech is mutually exclusive with the PLAIN options")
-		case len(cfg.curveSecretKey) > 0 || len(cfg.curvePublicKey) > 0 || len(cfg.curveServerKey) > 0 || cfg.curveServer:
-			return fmt.Errorf("gozmq: WithSecurityMech is mutually exclusive with the CURVE options")
-		}
+	// At most one mechanism per socket: otherwise newMechanism would silently
+	// pick one (CURVE over PLAIN), or fail every session rather than NewSocket
+	// (PLAIN server plus client).
+	plainSet := cfg.plainAuth != nil || cfg.plainClient
+	curveSet := len(cfg.curveSecretKey) > 0 || len(cfg.curvePublicKey) > 0 || len(cfg.curveServerKey) > 0 || cfg.curveServer
+	switch {
+	case cfg.newSecurityMech != nil && plainSet:
+		return fmt.Errorf("gozmq: WithSecurityMech is mutually exclusive with the PLAIN options")
+	case cfg.newSecurityMech != nil && curveSet:
+		return fmt.Errorf("gozmq: WithSecurityMech is mutually exclusive with the CURVE options")
+	case cfg.plainAuth != nil && cfg.plainClient:
+		return fmt.Errorf("gozmq: WithPlainAuth and WithPlainClient are mutually exclusive")
+	case plainSet && curveSet:
+		return fmt.Errorf("gozmq: the PLAIN and CURVE options are mutually exclusive")
 	}
 	if cfg.routerMandatory && t != Router {
 		return fmt.Errorf("gozmq: WithRouterMandatory only valid on ROUTER sockets")
@@ -416,9 +439,9 @@ func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 		switch {
 		case cfg.newSecurityMech != nil:
 			return fmt.Errorf("gozmq: WithSecurityMech is not applicable to STREAM sockets (no ZMTP handshake)")
-		case cfg.plainAuth != nil || cfg.plainClient:
+		case plainSet:
 			return fmt.Errorf("gozmq: PLAIN security options are not applicable to STREAM sockets (no ZMTP handshake)")
-		case len(cfg.curveSecretKey) > 0 || len(cfg.curvePublicKey) > 0 || len(cfg.curveServerKey) > 0:
+		case curveSet:
 			return fmt.Errorf("gozmq: CURVE security options are not applicable to STREAM sockets (no ZMTP handshake)")
 		case len(cfg.identity) > 0:
 			return fmt.Errorf("gozmq: WithIdentity is not applicable to STREAM sockets (no ZMTP handshake)")
@@ -427,7 +450,7 @@ func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 		case cfg.handshakeTimeoutSet:
 			return fmt.Errorf("gozmq: WithHandshakeTimeout is not applicable to STREAM sockets (no ZMTP handshake)")
 		case cfg.zapDomain != "":
-			return fmt.Errorf("gozmq: WithZapDomain is not applicable to STREAM sockets (no ZMTP handshake)")
+			return fmt.Errorf("gozmq: WithZAPDomain is not applicable to STREAM sockets (no ZMTP handshake)")
 		}
 	}
 	if err := validateCurveKey("secret", cfg.curveSecretKey); err != nil {

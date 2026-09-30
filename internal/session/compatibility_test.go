@@ -119,8 +119,8 @@ func TestSession_HandshakeRejectsIncompatibleSocketTypes(t *testing.T) {
 
 	mechA := sA.(*sessionImpl).cfg.Mech.(*fakeMech)
 	mechB := sB.(*sessionImpl).cfg.Mech.(*fakeMech)
-	require.Equal(t, 1, mechA.setPeerCalls, "A SetPeerMetadata calls")
-	require.Equal(t, 1, mechB.setPeerCalls, "B SetPeerMetadata calls")
+	require.Positive(t, mechA.peerMetaCalls, "A PeerMetadata calls")
+	require.Positive(t, mechB.peerMetaCalls, "B PeerMetadata calls")
 	require.Equal(t, "REQ", mechA.PeerMetadata()["Socket-Type"], "A peer socket type")
 	require.Equal(t, "REQ", mechB.PeerMetadata()["Socket-Type"], "B peer socket type")
 	require.Nil(t, sA.Pipe(), "A Pipe() = non-nil after handshake rejection, want nil")

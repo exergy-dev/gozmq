@@ -33,19 +33,20 @@ func TestNewMechanism_PlainRoleFromOption(t *testing.T) {
 	}
 }
 
-// TestNewMechanism_PlainServerAndClientConflict: a socket cannot be both the
-// PLAIN server and the PLAIN client; now that the role no longer comes from
-// bind/connect, that combination is an error instead of a silent pick.
-func TestNewMechanism_PlainServerAndClientConflict(t *testing.T) {
+// TestNewSocket_RejectsConflictingSecurityOptions: a socket cannot be both
+// the PLAIN server and the PLAIN client, nor PLAIN and CURVE at once. NewSocket
+// rejects these, rather than failing every session later (PLAIN server plus
+// client) or silently picking CURVE.
+func TestNewSocket_RejectsConflictingSecurityOptions(t *testing.T) {
 	zctx := NewContext()
 	defer func() { _ = zctx.Close() }()
-	s, err := zctx.NewSocket(Pair,
-		WithPlainAuth(func(string, string) bool { return true }),
-		WithPlainClient("u", "p"))
-	require.NoError(t, err)
-	defer func() { _ = s.Close() }()
-	for _, role := range []iface.Role{iface.RoleClient, iface.RoleServer} {
-		_, err := s.newMechanism(role)
-		require.ErrorContains(t, err, "mutually exclusive")
+	key := make([]byte, 32)
+	for name, opts := range map[string][]Option{
+		"plain server+client": {WithPlainAuth(func(string, string) bool { return true }), WithPlainClient("u", "p")},
+		"plain server+curve":  {WithPlainAuth(func(string, string) bool { return true }), WithCurveServer(key)},
+		"plain client+curve":  {WithPlainClient("u", "p"), WithCurveClient(key, key, key)},
+	} {
+		_, err := zctx.NewSocket(Pair, opts...)
+		require.ErrorContains(t, err, "mutually exclusive", name)
 	}
 }

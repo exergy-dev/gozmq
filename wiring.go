@@ -22,9 +22,9 @@ func (s *Socket) buildSession(conn iface.Conn, role iface.Role) (iface.Session, 
 	}
 	// Key ZAP off the mechanism's handshake role, not the transport role: a
 	// PLAIN or CURVE server that Connects still authorizes its peer.
-	if mech.AsServer() {
-		if cfg, ok := mech.(iface.ZapConfigurable); ok && s.ctx.zapAuth != nil {
-			cfg.ConfigureZAP(s.ctx.zapAuth, s.cfg.zapDomain, conn.RemoteEndpoint())
+	if mech.AsServer() && s.ctx.zapHandler != nil {
+		if cfg, ok := mech.(zapConfigurable); ok {
+			cfg.ConfigureZAP(s.ctx.zapHandler, s.cfg.zapDomain, conn.RemoteEndpoint())
 		}
 	}
 	codec := zmtp.NewFrameCodec(s.cfg.maxMessageSize)
@@ -42,6 +42,13 @@ func (s *Socket) buildSession(conn iface.Conn, role iface.Role) (iface.Session, 
 	}), nil
 }
 
+// zapConfigurable is implemented by mechanisms that take a ZAP handler; the
+// built-in ones, and custom ones embedding security.MechBase, get it from
+// MechBase.
+type zapConfigurable interface {
+	ConfigureZAP(handler security.ZAPHandler, domain, address string)
+}
+
 func toKey(b []byte) curve.Key {
 	var k curve.Key
 	copy(k[:], b)
@@ -49,8 +56,8 @@ func toKey(b []byte) curve.Key {
 }
 
 // newMechanism picks the security mechanism for a new session based on
-// the socket's configured options. A WithSecurityMech constructor wins
-// outright; otherwise the precedence is CURVE > PLAIN > NULL.
+// the socket's configured options, which validateSocketConfig has already
+// limited to at most one mechanism; with none configured it is NULL.
 // A configured mechanism that cannot be constructed is an error — never
 // a silent downgrade to a weaker mechanism.
 //
@@ -88,8 +95,6 @@ func (s *Socket) newMechanism(role iface.Role) (iface.SecurityMech, error) {
 			return nil, fmt.Errorf("gozmq: CURVE client mechanism: %w", err)
 		}
 		return m, nil
-	case s.cfg.plainAuth != nil && s.cfg.plainClient:
-		return nil, fmt.Errorf("gozmq: WithPlainAuth and WithPlainClient are mutually exclusive")
 	case s.cfg.plainAuth != nil:
 		return security.NewPlainServer(s.cfg.plainAuth, meta), nil
 	case s.cfg.plainClient:

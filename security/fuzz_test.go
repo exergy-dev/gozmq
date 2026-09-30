@@ -85,20 +85,20 @@ func joinFrames(frames [][]byte) []byte {
 	return out
 }
 
-// FuzzDecodeZapRequest checks DecodeZapRequest and a full ServeRequest.
+// FuzzDecodeZapRequest checks DecodeZAPRequest and a full ServeRequest.
 func FuzzDecodeZapRequest(f *testing.F) {
-	f.Add(joinFrames(EncodeZapRequest(&ZapRequest{RequestID: []byte("1"), Mechanism: "NULL"})))
-	f.Add(joinFrames(EncodeZapRequest(&ZapRequest{RequestID: []byte("2"), Mechanism: "PLAIN",
+	f.Add(joinFrames(EncodeZAPRequest(&ZAPRequest{RequestID: []byte("1"), Mechanism: "NULL"})))
+	f.Add(joinFrames(EncodeZAPRequest(&ZAPRequest{RequestID: []byte("2"), Mechanism: "PLAIN",
 		Credentials: [][]byte{[]byte("u"), []byte("p")}})))
-	f.Add(joinFrames(EncodeZapRequest(&ZapRequest{RequestID: []byte("3"), Mechanism: "CURVE",
+	f.Add(joinFrames(EncodeZAPRequest(&ZAPRequest{RequestID: []byte("3"), Mechanism: "CURVE",
 		Credentials: [][]byte{make([]byte, 32)}})))
-	h := NewZapHandler(zapPolicyFunc(func(string, string, string, [][]byte) (string, map[string]string, error) {
+	h := ZAPHandler(func(string, string, string, [][]byte) (string, map[string]string, error) {
 		return "u", map[string]string{"k": "v"}, nil
-	}))
+	})
 	f.Fuzz(func(t *testing.T, raw []byte) {
 		frames := splitFrames(raw)
-		_, _ = DecodeZapRequest(frames)
-		if _, err := DecodeZapResponse(h.ServeRequest(frames)); err != nil {
+		_, _ = DecodeZAPRequest(frames)
+		if _, err := DecodeZAPResponse(h.ServeRequest(frames)); err != nil {
 			t.Fatalf("ServeRequest produced an undecodable response: %v", err)
 		}
 	})
@@ -107,15 +107,15 @@ func FuzzDecodeZapRequest(f *testing.F) {
 // FuzzDecodeZapResponse checks that an accepted response re-encodes to
 // something that decodes to the same thing.
 func FuzzDecodeZapResponse(f *testing.F) {
-	f.Add(joinFrames(EncodeZapResponse(&ZapResponse{RequestID: []byte("1"), StatusCode: ZapStatusOK,
+	f.Add(joinFrames(EncodeZAPResponse(&ZAPResponse{RequestID: []byte("1"), StatusCode: ZAPStatusOK,
 		StatusText: "OK", UserID: "u", Metadata: map[string]string{"k": "v"}})))
-	f.Add(joinFrames(EncodeZapResponse(&ZapResponse{StatusCode: ZapStatusClientError})))
+	f.Add(joinFrames(EncodeZAPResponse(&ZAPResponse{StatusCode: ZAPStatusClientError})))
 	f.Fuzz(func(t *testing.T, raw []byte) {
-		resp, err := DecodeZapResponse(splitFrames(raw))
+		resp, err := DecodeZAPResponse(splitFrames(raw))
 		if err != nil {
 			return
 		}
-		again, err := DecodeZapResponse(EncodeZapResponse(resp))
+		again, err := DecodeZAPResponse(EncodeZAPResponse(resp))
 		if err != nil {
 			t.Fatalf("re-decode: %v", err)
 		}

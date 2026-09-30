@@ -32,7 +32,7 @@ func TestNewSocketRejectsInvalidOptionCombinations(t *testing.T) {
 		{name: "identity-on-stream", typ: Stream, opt: WithIdentity([]byte("id"))},
 		{name: "heartbeat-on-stream", typ: Stream, opt: WithHeartbeat(time.Second, 3*time.Second)},
 		{name: "handshake-timeout-on-stream", typ: Stream, opt: WithHandshakeTimeout(time.Second)},
-		{name: "zap-domain-on-stream", typ: Stream, opt: WithZapDomain("global")},
+		{name: "zap-domain-on-stream", typ: Stream, opt: WithZAPDomain("global")},
 	}
 
 	for _, tc := range cases {

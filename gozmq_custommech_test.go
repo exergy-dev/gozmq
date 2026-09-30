@@ -62,9 +62,7 @@ func (m *xorMech) NextHandshake(in []byte) (out []byte, done bool, err error) {
 		if err != nil {
 			return nil, false, err
 		}
-		if err := m.SetPeerMetadata(props); err != nil {
-			return nil, false, err
-		}
+		m.MergePeerMetadata(props)
 		m.gotReady = true
 		return nil, true, nil
 	}
@@ -130,6 +128,49 @@ func TestWithSecurityMechOutOfTree(t *testing.T) {
 	require.Equal(t, "pong", string(reply))
 
 	require.Greater(t, frames.Load(), int64(0), "custom mechanism never saw a frame")
+}
+
+// forwardingMech implements security.Mech purely by delegation, without
+// embedding MechBase, so the session can rely on nothing but the interface —
+// PeerMetadata included.
+type forwardingMech struct{ inner security.Mech }
+
+func (f forwardingMech) Name() string                    { return f.inner.Name() }
+func (f forwardingMech) AsServer() bool                  { return f.inner.AsServer() }
+func (f forwardingMech) Metadata() map[string]string     { return f.inner.Metadata() }
+func (f forwardingMech) PeerMetadata() map[string]string { return f.inner.PeerMetadata() }
+func (f forwardingMech) NextHandshake(in []byte) ([]byte, bool, error) {
+	return f.inner.NextHandshake(in)
+}
+func (f forwardingMech) EncodeFrame(flags uint8, b []byte) (uint8, []byte, error) {
+	return f.inner.EncodeFrame(flags, b)
+}
+func (f forwardingMech) DecodeFrame(flags uint8, b []byte) (uint8, []byte, error) {
+	return f.inner.DecodeFrame(flags, b)
+}
+
+func TestWithSecurityMechWithoutMechBase(t *testing.T) {
+	mech := gozmq.WithSecurityMech(func(role security.Role, meta map[string]string) (security.Mech, error) {
+		return forwardingMech{security.NewNull(role, meta)}, nil
+	})
+	zctx := gozmq.NewContext()
+	defer func() { _ = zctx.Close() }()
+
+	rep, err := zctx.NewSocket(gozmq.Rep, mech)
+	require.NoError(t, err)
+	defer func() { _ = rep.Close() }()
+	require.NoError(t, rep.Bind("tcp://127.0.0.1:0"))
+	req, err := zctx.NewSocket(gozmq.Req, mech)
+	require.NoError(t, err)
+	defer func() { _ = req.Close() }()
+	require.NoError(t, req.Connect(rep.LastEndpoint()))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, req.SendBytes(ctx, []byte("ping")))
+	got, err := rep.RecvBytes(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "ping", string(got))
 }
 
 func TestWithSecurityMechRejectsConflicts(t *testing.T) {

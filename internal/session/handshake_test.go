@@ -60,7 +60,7 @@ func TestHandshake_RejectsMechanismMismatch(t *testing.T) {
 		require.NotErrorIs(t, err, zmqerr.ErrAuthFailed, label)
 		require.Nil(t, s.Pipe(), label)
 	}
-	require.Zero(t, sA.(*sessionImpl).cfg.Mech.(*fakeMech).setPeerCalls, "A reached the security handshake")
+	require.Zero(t, sA.(*sessionImpl).cfg.Mech.(*fakeMech).step, "A reached the security handshake")
 }
 
 // TestHandshake_BoundsPreAuthFrameSize: a handshake frame announcing more

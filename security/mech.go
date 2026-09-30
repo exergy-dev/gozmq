@@ -11,24 +11,28 @@ package security
 
 import (
 	"maps"
-
-	"github.com/exergy-dev/gozmq/internal/zmtp"
+	"strings"
 )
 
 // MechBase is the state shared by every security mechanism: the role, the
 // local metadata advertised during the handshake, the peer metadata learned
-// from it, and the optional server-side ZAP authorizer. Mechanisms embed it
-// by value; like the mechanisms themselves it is not safe for concurrent
-// use.
+// from it, and the optional server-side ZAP handler with its verdict.
+// Mechanisms embed it by value; like the mechanisms themselves it is not safe
+// for concurrent use.
 type MechBase struct {
 	role      Role
 	localMeta map[string]string
 	peerMeta  map[string]string
-	zapAuth   ZAPAuthorizer
+	zap       ZAPHandler
 	zapDomain string
 	zapAddr   string
+	zapUserID string
 	zapMeta   map[string]string
 }
+
+// userIDProperty is the peer property carrying the ZAP user-id, named as
+// libzmq's ZMQ_MSG_PROPERTY_USER_ID.
+const userIDProperty = "User-Id"
 
 // NewMechBase returns the shared mechanism state for role, holding a private
 // copy of localMeta. A nil localMeta is treated as an empty property list.
@@ -47,49 +51,70 @@ func (b *MechBase) AsServer() bool { return b.role == RoleServer }
 // copy guards against external mutation after construction.
 func (b *MechBase) Metadata() map[string]string { return maps.Clone(b.localMeta) }
 
-// SetPeerMetadata stores the peer's parsed metadata-bearing command
-// properties. Mechanisms perform no validation here; Socket-Type
-// compatibility checks live in the socket engine layer per design §5.3.
-func (b *MechBase) SetPeerMetadata(props map[string]string) error {
-	b.peerMeta = maps.Clone(props)
-	return nil
-}
-
-// PeerMetadata returns the parsed peer metadata, or nil before the handshake
-// completes. Not part of Mech but used by the session layer
-// during metadata forwarding and by tests.
+// PeerMetadata returns a copy of the peer metadata stored by
+// [MechBase.MergePeerMetadata], or nil before then.
 func (b *MechBase) PeerMetadata() map[string]string { return maps.Clone(b.peerMeta) }
 
-// ConfigureZAP wires a server-side RFC 27 authorizer into the mechanism.
-// Client-side mechanisms ignore the hook.
-func (b *MechBase) ConfigureZAP(authorizer ZAPAuthorizer, domain, address string) {
+// ConfigureZAP installs a server-side ZAP handler. The socket calls it, before
+// the handshake, on any server-side mechanism that has this method when its
+// Context has a handler, so a mechanism embedding MechBase only needs to call
+// [MechBase.AuthorizeZAP]. Client-side mechanisms ignore it.
+func (b *MechBase) ConfigureZAP(handler ZAPHandler, domain, address string) {
 	if b.role != RoleServer {
 		return
 	}
-	b.zapAuth = authorizer
+	b.zap = handler
 	b.zapDomain = domain
 	b.zapAddr = address
 }
 
-// AuthorizeZAP consults the configured authorizer with the
-// mechanism-specific credentials. It is a no-op (returning nil) when no
-// authorizer is configured. On success the metadata from the ZAP reply is
-// retained for MergePeerMetadata to overlay onto the peer metadata.
+// AuthorizeZAP consults the configured handler with the mechanism-specific
+// credentials and returns its error unchanged. It is a no-op (returning nil)
+// when no handler is configured. On success the handler's user-id and
+// metadata are kept for [MechBase.MergePeerMetadata].
 func (b *MechBase) AuthorizeZAP(mech string, credentials [][]byte) error {
-	if b.zapAuth == nil {
+	if b.zap == nil {
 		return nil
 	}
-	_, meta, err := b.zapAuth(b.zapDomain, b.zapAddr, mech, credentials)
+	userID, meta, err := b.zap(b.zapDomain, b.zapAddr, mech, credentials)
 	if err != nil {
 		return err
 	}
-	b.zapMeta = maps.Clone(meta)
+	b.zapUserID, b.zapMeta = userID, maps.Clone(meta)
 	return nil
 }
 
-// MergePeerMetadata stores props, overlaid with any ZAP-reply metadata, as
-// the peer metadata. Mechanisms call it from the handshake step that parses
-// the peer's metadata-bearing command.
+// MergePeerMetadata stores props as the peer metadata, adding what ZAP
+// returned. Mechanisms call it from the handshake step that parses the peer's
+// metadata-bearing command. ZAP metadata only fills in property names the
+// peer did not send (names compare case-insensitively, as in ZMTP), so a
+// policy cannot rewrite the peer's Identity or Socket-Type. A non-empty ZAP
+// user-id becomes the "User-Id" property, as in libzmq, replacing any the peer
+// claimed for itself.
 func (b *MechBase) MergePeerMetadata(props map[string]string) {
-	b.peerMeta = zmtp.MergeMeta(props, b.zapMeta)
+	peer := make(map[string]string, len(props)+len(b.zapMeta)+1)
+	maps.Copy(peer, props)
+	for name, value := range b.zapMeta {
+		if !hasProperty(props, name) {
+			peer[name] = value
+		}
+	}
+	if b.zapUserID != "" {
+		for name := range peer {
+			if strings.EqualFold(name, userIDProperty) {
+				delete(peer, name)
+			}
+		}
+		peer[userIDProperty] = b.zapUserID
+	}
+	b.peerMeta = peer
+}
+
+func hasProperty(props map[string]string, name string) bool {
+	for k := range props {
+		if strings.EqualFold(k, name) {
+			return true
+		}
+	}
+	return false
 }
