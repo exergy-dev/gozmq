@@ -175,6 +175,9 @@ Behaviour:
 
 ### Fixed
 
+- A ZAP handler rejection that does not wrap `ErrAuthFailed` is still
+  reported as an authorization failure (`ErrAuthFailed`,
+  `EventHandshakeFailedAuth`), with the handler's error kept in the chain.
 - Forwarding a received message (`RecvMsg` → `SendMsg` → `Release`) no longer
   corrupts large frames in flight.
 - Frame slices kept after dropping their `*Msg` are no longer recycled by a

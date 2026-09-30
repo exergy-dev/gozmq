@@ -16,8 +16,8 @@ import "github.com/exergy-dev/gozmq/internal/zmqerr"
 //   - Context.NewSocket and Proxy report invalid configuration (option
 //     values and combinations, socket pairings) with plain descriptive
 //     errors.
-//   - A ZAP handler's rejection is wrapped as returned; handlers should wrap
-//     ErrAuthFailed (see security.ZAPHandler).
+//   - A ZAP handler's rejection always wraps ErrAuthFailed, with the
+//     handler's own error kept in the chain.
 //
 // Failures on an established session do not reach SendMsg or RecvMsg: the
 // session is torn down and the error surfaces on the monitor channel.
@@ -67,7 +67,7 @@ var (
 	// ErrAuthFailed is reported when the security mechanism rejects a
 	// peer — PLAIN credentials refused by the server's validator, CURVE
 	// handshake boxes that fail to open, a server's ERROR command seen by
-	// a client, or a ZAP handler rejection that wraps it. Surfaces on
+	// a client, or any ZAP handler rejection. Surfaces on
 	// monitor channels as EventHandshakeFailedAuth.
 	ErrAuthFailed = zmqerr.ErrAuthFailed
 

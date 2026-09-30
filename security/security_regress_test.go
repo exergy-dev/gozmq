@@ -131,6 +131,26 @@ func TestZAPErrorChainPreserved(t *testing.T) {
 	require.ErrorIs(t, err, zmqerr.ErrAuthFailed)
 }
 
+// TestZAPPlainErrorIsAuthFailure: a handler that rejects with a bare error
+// (not wrapping ErrAuthFailed) is still an authorization failure, and its
+// own error stays in the chain.
+func TestZAPPlainErrorIsAuthFailure(t *testing.T) {
+	denied := errors.New("not on the allowlist")
+	srv := NewNull(RoleServer, nil)
+	srv.(*nullMech).ConfigureZAP(func(string, string, string, [][]byte) (string, map[string]string, error) {
+		return "", nil, denied
+	}, "global", "addr")
+	cli := NewNull(RoleClient, nil)
+
+	ready, _, err := cli.NextHandshake(nil)
+	require.NoError(t, err)
+	_, _, err = srv.NextHandshake(nil)
+	require.NoError(t, err)
+	_, _, err = srv.NextHandshake(ready)
+	require.ErrorIs(t, err, zmqerr.ErrAuthFailed)
+	require.ErrorIs(t, err, denied)
+}
+
 // TestZapResponseLongMetadataName: a policy returning a metadata name that
 // cannot be encoded must produce a 500 response, not panic inside the
 // handshake.

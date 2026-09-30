@@ -43,9 +43,11 @@ linters:
 
     gosec:
       excludes:
-        # G404: math/rand is used only for reconnect-backoff jitter, which
-        # is not a security decision. Everything cryptographic uses
-        # crypto/rand — see security/curve.
+        # G404: math/rand/v2 is used for reconnect-backoff jitter and for the
+        # random start of ROUTER/STREAM auto-identity counters (its global
+        # generator is ChaCha8, seeded from OS entropy, which is enough to
+        # keep identities unpredictable to peers). Everything cryptographic
+        # uses crypto/rand — see security/curve.
         - G404
         # G115 (integer overflow on conversion): every site in this module
         # was audited individually. All are `byte(len(x))` / `uint32(len(x))`

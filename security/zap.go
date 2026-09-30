@@ -103,8 +103,8 @@ type ZAPResponse struct {
 //
 // gozmq.WithZAPHandler installs one on a Context, which then calls it
 // directly from the server side of each handshake, concurrently when
-// handshakes overlap; a rejection fails the
-// handshake with an error wrapping the one returned here. On success a
+// handshakes overlap; a rejection fails the handshake with an error that
+// wraps both gozmq.ErrAuthFailed and the one returned here. On success a
 // non-empty userID becomes the peer's "User-Id" property, and metadata adds
 // properties under names the peer did not send itself.
 //
@@ -116,7 +116,7 @@ type ZAPResponse struct {
 //   - error wrapping ErrAuthFailed   -> 400 Client Error
 //   - any other error                -> 500 Server Error
 //
-// so a rejection should wrap gozmq.ErrAuthFailed.
+// so, for wire interop, a rejection should wrap gozmq.ErrAuthFailed.
 type ZAPHandler func(domain, address, mech string, credentials [][]byte) (userID string, metadata map[string]string, err error)
 
 // ErrZAPTemporary, when wrapped by a ZAPHandler error, marks the failure as

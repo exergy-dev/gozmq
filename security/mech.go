@@ -10,8 +10,12 @@
 package security
 
 import (
+	"errors"
+	"fmt"
 	"maps"
 	"strings"
+
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
 // MechBase is the state shared by every security mechanism: the role, the
@@ -69,15 +73,20 @@ func (b *MechBase) ConfigureZAP(handler ZAPHandler, domain, address string) {
 }
 
 // AuthorizeZAP consults the configured handler with the mechanism-specific
-// credentials and returns its error unchanged. It is a no-op (returning nil)
-// when no handler is configured. On success the handler's user-id and
-// metadata are kept for [MechBase.MergePeerMetadata].
+// credentials. A rejection is an authorization failure whatever the handler
+// returned, so its error is wrapped with ErrAuthFailed unless it already
+// wraps it (the handler's error stays in the chain). It is a no-op
+// (returning nil) when no handler is configured. On success the handler's
+// user-id and metadata are kept for [MechBase.MergePeerMetadata].
 func (b *MechBase) AuthorizeZAP(mech string, credentials [][]byte) error {
 	if b.zap == nil {
 		return nil
 	}
 	userID, meta, err := b.zap(b.zapDomain, b.zapAddr, mech, credentials)
 	if err != nil {
+		if !errors.Is(err, zmqerr.ErrAuthFailed) {
+			err = fmt.Errorf("%w: ZAP handler: %w", zmqerr.ErrAuthFailed, err)
+		}
 		return err
 	}
 	b.zapUserID, b.zapMeta = userID, maps.Clone(meta)

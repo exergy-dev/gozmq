@@ -223,3 +223,34 @@ func TestSecurity_ZapConsultedForConnectingServer(t *testing.T) {
 	requireNoDelivery(t, cliSide, authSide, "ZAP-rejected PLAIN client")
 	require.Positive(t, zapCalls.Load(), "ZAP handler never consulted")
 }
+
+// TestSecurity_ZAPPlainErrorReportsAuthFailure: a ZAP handler that rejects
+// with a bare error (not wrapping ErrAuthFailed) is still reported as an
+// authorization failure on the server's monitor.
+func TestSecurity_ZAPPlainErrorReportsAuthFailure(t *testing.T) {
+	handler := security.ZAPHandler(func(string, string, string, [][]byte) (string, map[string]string, error) {
+		return "", nil, errors.New("not on the allowlist")
+	})
+	zctx := gozmq.NewContext(gozmq.WithZAPHandler(handler))
+	t.Cleanup(func() { _ = zctx.Close() })
+
+	srvEvents := make(chan gozmq.Event, 64)
+	srv, err := zctx.NewSocket(gozmq.Pull,
+		gozmq.WithPlainAuth(func(string, string) bool { return true }),
+		gozmq.WithZAPDomain("global"),
+		gozmq.WithMonitor(srvEvents, gozmq.EventAll))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Close() })
+	require.NoError(t, srv.Bind("tcp://127.0.0.1:0"))
+
+	cli, err := zctx.NewSocket(gozmq.Push, gozmq.WithPlainClient("alice", "pw"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cli.Close() })
+	require.NoError(t, cli.Connect(srv.LastEndpoint()))
+
+	collected := waitForEvents(t, srvEvents, 3*time.Second, func(evts []gozmq.Event) bool {
+		return hasType(evts, gozmq.EventHandshakeFailedAuth)
+	})
+	require.True(t, hasType(collected, gozmq.EventHandshakeFailedAuth),
+		"ZAP rejection not reported as an auth failure; events=%v", eventTypes(collected))
+}
