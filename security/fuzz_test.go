@@ -85,8 +85,8 @@ func joinFrames(frames [][]byte) []byte {
 	return out
 }
 
-// FuzzDecodeZapRequest checks DecodeZAPRequest and a full ServeRequest.
-func FuzzDecodeZapRequest(f *testing.F) {
+// FuzzDecodeZAPRequest checks DecodeZAPRequest and a full ServeRequest.
+func FuzzDecodeZAPRequest(f *testing.F) {
 	f.Add(joinFrames(EncodeZAPRequest(&ZAPRequest{RequestID: []byte("1"), Mechanism: "NULL"})))
 	f.Add(joinFrames(EncodeZAPRequest(&ZAPRequest{RequestID: []byte("2"), Mechanism: "PLAIN",
 		Credentials: [][]byte{[]byte("u"), []byte("p")}})))
@@ -104,9 +104,9 @@ func FuzzDecodeZapRequest(f *testing.F) {
 	})
 }
 
-// FuzzDecodeZapResponse checks that an accepted response re-encodes to
+// FuzzDecodeZAPResponse checks that an accepted response re-encodes to
 // something that decodes to the same thing.
-func FuzzDecodeZapResponse(f *testing.F) {
+func FuzzDecodeZAPResponse(f *testing.F) {
 	f.Add(joinFrames(EncodeZAPResponse(&ZAPResponse{RequestID: []byte("1"), StatusCode: ZAPStatusOK,
 		StatusText: "OK", UserID: "u", Metadata: map[string]string{"k": "v"}})))
 	f.Add(joinFrames(EncodeZAPResponse(&ZAPResponse{StatusCode: ZAPStatusClientError})))
