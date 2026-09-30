@@ -282,8 +282,8 @@ func TestRouter_SynthesizedIdentitiesAreDistinct(t *testing.T) {
 //
 // Half the peers are anonymous (empty PeerIdentity, synthesized
 // routing id) and half are named. The test drives enough churn to
-// exercise the in-flight Detach window; the detachedIdOf side cache
-// plus pointer-keyed lookup eliminates both failure modes.
+// exercise the in-flight Detach window; stamping from the identity stored
+// on the source pipe eliminates both failure modes.
 //
 // Run with -race -count=20 to shake loose any remaining ordering bug.
 func TestRouter_IdentityStableUnderDetachChurn(t *testing.T) {
@@ -386,8 +386,8 @@ func TestRouter_IdentityStableUnderDetachChurn(t *testing.T) {
 				// Close the old ends after the swap. Any message still
 				// buffered in oldEng's forwarder has already been
 				// handed to the FairQueue's inbound channel or is
-				// about to be; the engine's detachedIdOf will carry
-				// the identity either way.
+				// about to be; the pipe's routing ID carries the
+				// identity either way.
 				_ = oldEng.Close()
 				_ = oldPrx.Close()
 				// Short pause so we don't just hammer the lock.
@@ -531,4 +531,58 @@ func TestRouter_IdentityStableUnderDetachChurn(t *testing.T) {
 	}
 	assert.NotZero(t, recvCount.Load(), "tracker saw zero messages; expected some of %d (sends=%d)", iterations, sendsDone.Load())
 	t.Logf("tracker validated %d messages (successful sends: %d / %d)", recvCount.Load(), sendsDone.Load(), iterations)
+}
+
+// TestRouter_RecvAfterDetachKeepsIdentity: messages a peer delivered before
+// it left, received after DetachPipe, carry that peer's routing identity,
+// not a replacement peer's, in both direct (sole peer) and forwarder mode.
+func TestRouter_RecvAfterDetachKeepsIdentity(t *testing.T) {
+	for _, extraPeer := range []bool{false, true} {
+		t.Run(fmt.Sprintf("extraPeer=%v", extraPeer), func(t *testing.T) {
+			t.Parallel()
+			eng := socket.NewRouterEngine(false)
+			defer eng.Close()
+			ctx := testCtx(t)
+
+			if extraPeer {
+				x, y := pipe.NewPair(8, 8, pipe.PeerInfo{Identity: []byte("idle")}, pipe.PeerInfo{})
+				defer closePipes(x, y)
+				require.NoError(t, eng.AttachPipe(x))
+			}
+			a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{}) // anonymous
+			defer closePipes(a, b)
+			require.NoError(t, eng.AttachPipe(a))
+			require.NoError(t, b.Send(ctx, msg.FromBytes([]byte("a0"))))
+			m, err := eng.Recv(ctx)
+			require.NoError(t, err)
+			idA := m.Frames()[0]
+
+			const n = 4
+			for i := 1; i <= n; i++ {
+				require.NoError(t, b.Send(ctx, msg.FromBytes(fmt.Appendf(nil, "a%d", i))))
+			}
+			require.NoError(t, b.Close())
+			require.NoError(t, eng.DetachPipe(a))
+			require.NoError(t, a.Close())
+
+			c, d := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+			defer closePipes(c, d)
+			require.NoError(t, eng.AttachPipe(c))
+			require.NoError(t, d.Send(ctx, msg.FromBytes([]byte("c"))))
+
+			next := 1
+			for range n + 1 {
+				m, err := eng.Recv(ctx)
+				require.NoError(t, err)
+				id, body := m.Frames()[0], string(m.Frames()[1])
+				if body == "c" {
+					require.NotEqual(t, idA, id, "replacement peer reused the departed identity")
+					continue
+				}
+				require.Equal(t, fmt.Sprintf("a%d", next), body, "per-peer FIFO")
+				require.Equal(t, idA, id, "departed peer's message restamped")
+				next++
+			}
+		})
+	}
 }

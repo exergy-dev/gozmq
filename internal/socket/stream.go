@@ -23,8 +23,7 @@ import (
 // is the norm for raw TCP), inbound messages are fair-queued and stamped with
 // the source identity, and outbound messages route by their leading identity
 // frame. STREAM differs from ROUTER only in its Send framing (it concatenates
-// the body frames into one raw byte run) and that it has no post-detach cache
-// and is always mandatory.
+// the body frames into one raw byte run) and that it is always mandatory.
 //
 // Zero-length-body half-close: libzmq treats an outbound Msg whose body
 // concatenates to zero bytes as "close this peer." The engine forwards an empty
@@ -56,8 +55,7 @@ type streamEngine struct {
 //     verbatim. An empty body means "close the conn" (STREAM half-close).
 //   - The pipe's PeerIdentity may be empty; the engine synthesizes one.
 func NewStreamEngine() Engine {
-	// detachCache=false: STREAM has no post-detach identity grace cache.
-	return &streamEngine{identityRouter: newIdentityRouter("stream", false)}
+	return &streamEngine{identityRouter: newIdentityRouter("stream")}
 }
 
 // Send routes by the leading identity frame and writes the concatenation of the

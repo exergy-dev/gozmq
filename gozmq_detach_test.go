@@ -1,6 +1,7 @@
 package gozmq_test
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -29,20 +30,27 @@ func waitEvent(t *testing.T, events <-chan gozmq.Event, typ gozmq.EventType) {
 // TestPeerDetach_QueuedMessagesSurvive: messages a sender already delivered
 // into the receiver's pipe stay receivable after the sender disconnects,
 // whether the departing pipe was the only peer (direct mode) or one of
-// several (forwarder mode).
+// several (forwarder mode). A ROUTER receiver still stamps them with the
+// departed peer's identity.
 func TestPeerDetach_QueuedMessagesSurvive(t *testing.T) {
 	for _, transport := range []string{"tcp", "inproc"} {
 		for _, extraPeer := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/extraPeer=%v", transport, extraPeer), func(t *testing.T) {
-				testPeerDetachQueued(t, transport, extraPeer)
-			})
+			for _, router := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/extraPeer=%v/router=%v", transport, extraPeer, router), func(t *testing.T) {
+					testPeerDetachQueued(t, transport, extraPeer, router)
+				})
+			}
 		}
 	}
 }
 
-func testPeerDetachQueued(t *testing.T, transport string, extraPeer bool) {
+func testPeerDetachQueued(t *testing.T, transport string, extraPeer, router bool) {
+	recvType, sendType := gozmq.Pull, gozmq.Push
+	if router {
+		recvType, sendType = gozmq.Router, gozmq.Dealer
+	}
 	events := make(chan gozmq.Event, 64)
-	zctx, pull := newTestSocket(t, gozmq.Pull, gozmq.WithMonitor(events, gozmq.EventDisconnected))
+	zctx, pull := newTestSocket(t, recvType, gozmq.WithMonitor(events, gozmq.EventDisconnected))
 	ep := "tcp://127.0.0.1:0"
 	if transport == "inproc" {
 		ep = "inproc://" + t.Name()
@@ -51,7 +59,7 @@ func testPeerDetachQueued(t *testing.T, transport string, extraPeer bool) {
 	ep = pull.LastEndpoint()
 
 	if extraPeer {
-		idle, err := zctx.NewSocket(gozmq.Push)
+		idle, err := zctx.NewSocket(sendType)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = idle.Close() })
 		require.NoError(t, idle.Connect(ep))
@@ -63,13 +71,26 @@ func testPeerDetachQueued(t *testing.T, transport string, extraPeer bool) {
 	if transport == "inproc" {
 		linger = 50 * time.Millisecond
 	}
-	push, err := zctx.NewSocket(gozmq.Push, gozmq.WithLinger(linger))
+	push, err := zctx.NewSocket(sendType, gozmq.WithLinger(linger))
 	require.NoError(t, err)
 	require.NoError(t, push.Connect(ep))
 
+	// recv returns the body and, for ROUTER, the stamped identity.
+	recv := func(ctx context.Context) (id []byte, body string, err error) {
+		m, err := pull.RecvMsg(ctx)
+		if err != nil {
+			return nil, "", err
+		}
+		f := m.Frames()
+		if router {
+			return f[0], string(f[1]), nil
+		}
+		return nil, string(f[0]), nil
+	}
+
 	ctx := testCtx(t)
 	require.NoError(t, push.SendBytes(ctx, []byte("warmup")))
-	_, err = pull.RecvBytes(ctx)
+	peerID, _, err := recv(ctx)
 	require.NoError(t, err)
 
 	const n = 500
@@ -82,9 +103,10 @@ func testPeerDetachQueued(t *testing.T, transport string, extraPeer bool) {
 
 	ctx = testCtx(t)
 	for i := range n {
-		b, err := pull.RecvBytes(ctx)
+		id, body, err := recv(ctx)
 		require.NoError(t, err, "recv %d of %d after sender detached", i, n)
-		require.Equal(t, fmt.Sprint(i), string(b))
+		require.Equal(t, fmt.Sprint(i), body)
+		require.Equal(t, peerID, id, "identity of message %d", i)
 	}
 }
 

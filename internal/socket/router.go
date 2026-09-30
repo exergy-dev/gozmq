@@ -15,8 +15,8 @@ import (
 // ROUTER is the identity-aware counterpart to DEALER. Most of its behavior —
 // identity assignment, fair-queued recv with identity stamping, identity-keyed
 // send routing, Poller signalling — lives in the shared identityRouter base.
-// ROUTER adds: a configurable mandatory flag, a dropped counter for silent
-// route-misses, and a bounded post-detach identity cache.
+// ROUTER adds: a configurable mandatory flag and a dropped counter for silent
+// route-misses.
 //
 // Send: the outbound message's leading frame is the peer identity; the engine
 // routes the remaining frames to the matching pipe. An unknown identity — or a
@@ -24,11 +24,8 @@ import (
 // (mandatory=false, libzmq default) or returns ErrRouteUnknown
 // (mandatory=true).
 //
-// Recv is race-safe against concurrent Detach: a message enqueued by a pipe's
-// forwarder before Detach ran still resolves to that pipe's original identity
-// via the post-detach side cache (identityRouter.detachedIdOf, enabled here at
-// construction), keyed by the *pipe.End pointer so a newer peer with a
-// colliding PeerIdentity is never confused for the departed original.
+// Recv is race-safe against concurrent Detach: the identity travels with the
+// source pipe (see identityRouter).
 
 type routerEngine struct {
 	identityRouter
@@ -43,9 +40,7 @@ type routerEngine struct {
 // match an attached peer; otherwise such sends are silently dropped.
 func NewRouterEngine(mandatory bool) Engine {
 	return &routerEngine{
-		// detachCache=true: ROUTER keeps the post-detach identity cache so
-		// Recv can stamp messages from just-detached peers (see doc above).
-		identityRouter: newIdentityRouter("router", true),
+		identityRouter: newIdentityRouter("router"),
 		mandatory:      mandatory,
 	}
 }

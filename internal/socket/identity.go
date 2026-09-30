@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/rand/v2"
-	"slices"
 	"sync"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
@@ -18,11 +17,18 @@ import (
 // (ROUTER and STREAM). Both map each attached pipe to a routing identity,
 // fair-queue inbound messages, stamp the source identity as the leading recv
 // frame, and route outbound messages by their leading identity frame. The
-// engines differ only in their own Send framing and Metrics, plus whether
-// the post-detach identity cache below is enabled (ROUTER yes, STREAM no).
+// engines differ only in their own Send framing and Metrics.
 //
-// Concurrency: idOf/pipeOf/nextID/closed and the detach cache are guarded by mu;
-// sent/recv are atomic.
+// The identity assigned at attach is also stored on the pipe itself
+// (pipe.End.SetRoutingID), and Recv stamps from there. A message that a
+// forwarder hands over after DetachPipe, or that a closed pipe drains
+// afterwards, therefore still carries its sender's identity, and nothing
+// needs to outlive the detach: the engine keeps no reference to a departed
+// pipe. Nor is it ever looked up by identity bytes, so a newer peer
+// claiming the same identity can't be confused with the departed one.
+//
+// Concurrency: idOf/pipeOf/nextID/closed are guarded by mu; sent/recv are
+// atomic.
 type identityRouter struct {
 	fq   *FairQueue
 	name string // engine name for error messages ("router"/"stream")
@@ -54,73 +60,16 @@ type identityRouter struct {
 	sendGate readyGate
 
 	counters
-
-	// detachedIdOf retains, post-Detach, the identity in use for a pipe at
-	// Detach time, so Recv can still stamp in-flight messages correctly
-	// (race-safety against a concurrent Detach; see routerEngine doc).
-	// Bounded to routerDetachCacheCap, FIFO eviction via detachedOrder.
-	// nil when the cache is disabled (STREAM): all lookups miss and the
-	// remember/remove helpers no-op.
-	detachedIdOf  map[*pipe.End][]byte
-	detachedOrder []*pipe.End
 }
 
-func newIdentityRouter(name string, detachCache bool) identityRouter {
-	var detached map[*pipe.End][]byte
-	if detachCache {
-		detached = make(map[*pipe.End][]byte)
-	}
+func newIdentityRouter(name string) identityRouter {
 	return identityRouter{
-		fq:           NewFairQueue(),
-		name:         name,
-		idOf:         make(map[*pipe.End][]byte),
-		pipeOf:       make(map[string]*pipe.End),
-		nextID:       rand.Uint32(),
-		sendGate:     newReadyGate(),
-		detachedIdOf: detached,
-	}
-}
-
-// routerDetachCacheCap bounds the side cache of identities for recently
-// detached pipes. A small FIFO cap suffices: the FairQueue inbound channel has
-// capacity 1 and a detached pipe's forwarder exits shortly after Detach, so the
-// window in which it can still produce messages is short. Under extreme churn a
-// handful of in-flight messages predating eviction fall back to the pipe's
-// advertised PeerIdentity (never cross-wired to a newer peer, since the key is
-// the pipe pointer).
-const routerDetachCacheCap = 1024
-
-// rememberDetachedLocked stores (pipe -> identity) in the post-detach side
-// cache, evicting the oldest entry if full. No-op when the cache is disabled
-// (nil map). Caller must hold e.mu.
-func (e *identityRouter) rememberDetachedLocked(p *pipe.End, id []byte) {
-	if e.detachedIdOf == nil {
-		return
-	}
-	if _, exists := e.detachedIdOf[p]; exists {
-		// Unreachable in practice (Detach runs once per pipe); guard drift.
-		e.detachedIdOf[p] = id
-		return
-	}
-	if len(e.detachedOrder) >= routerDetachCacheCap {
-		evict := e.detachedOrder[0]
-		e.detachedOrder = e.detachedOrder[1:]
-		delete(e.detachedIdOf, evict)
-	}
-	e.detachedIdOf[p] = id
-	e.detachedOrder = append(e.detachedOrder, p)
-}
-
-// removeDetachedLocked drops any cached detach entry for p, called from Attach
-// so re-attaching a reused pipe value doesn't leave a stale entry. Caller must
-// hold e.mu.
-func (e *identityRouter) removeDetachedLocked(p *pipe.End) {
-	if _, ok := e.detachedIdOf[p]; !ok {
-		return
-	}
-	delete(e.detachedIdOf, p)
-	if i := slices.Index(e.detachedOrder, p); i >= 0 {
-		e.detachedOrder = slices.Delete(e.detachedOrder, i, i+1)
+		fq:       NewFairQueue(),
+		name:     name,
+		idOf:     make(map[*pipe.End][]byte),
+		pipeOf:   make(map[string]*pipe.End),
+		nextID:   rand.Uint32(),
+		sendGate: newReadyGate(),
 	}
 }
 
@@ -173,7 +122,7 @@ func (e *identityRouter) AttachPipe(p *pipe.End) error {
 	idCopy := bytes.Clone(id)
 	e.idOf[p] = idCopy
 	e.pipeOf[string(idCopy)] = p
-	e.removeDetachedLocked(p)
+	p.SetRoutingID(idCopy) // before fq.Attach: Recv reads it for every message
 	e.signalReadyWriteLocked()
 	e.mu.Unlock()
 	return e.fq.Attach(p)
@@ -189,35 +138,23 @@ func (e *identityRouter) DetachPipe(p *pipe.End) error {
 		if cur, ok := e.pipeOf[string(id)]; ok && cur == p {
 			delete(e.pipeOf, string(id))
 		}
-		e.rememberDetachedLocked(p, id)
 	}
 	e.mu.Unlock()
 	return e.fq.Detach(p)
 }
 
 // Recv fair-queues across attached pipes and prepends the source peer's
-// routing identity as the leading frame. Identity resolution tolerates a
-// concurrent Detach via the post-detach cache (ROUTER; nil and always a
-// miss for STREAM); if both miss, it falls back to the pipe's advertised
-// PeerIdentity.
+// routing identity as the leading frame. The identity comes from the source
+// pipe (set by AttachPipe), so it is right even if the pipe has since been
+// detached.
 func (e *identityRouter) Recv(ctx context.Context) (*msg.Msg, error) {
 	m, src, err := e.fq.RecvWithSource(ctx)
 	if err != nil {
 		return nil, err
 	}
-	e.mu.Lock()
-	id := e.idOf[src]
-	if id == nil {
-		id = e.detachedIdOf[src]
-	}
-	e.mu.Unlock()
-	if id == nil {
-		id = src.PeerIdentity()
-	}
-	// Prepend the identity in a fresh frame slice. id is already the
-	// defensive clone made once at AttachPipe (or the post-detach cache /
-	// PeerIdentity fallback) and is never mutated afterward, so prepend it
-	// directly without re-cloning per Recv.
+	// id is the defensive clone made once at AttachPipe and never mutated
+	// afterwards, so prepend it without re-cloning per Recv.
+	id := src.RoutingID()
 	e.recv.Add(1)
 	out := prependFrames([][]byte{id}, m)
 	m.Release()
@@ -236,8 +173,6 @@ func (e *identityRouter) Close() error {
 	e.closed = true
 	e.idOf = nil
 	e.pipeOf = nil
-	e.detachedIdOf = nil
-	e.detachedOrder = nil
 	e.mu.Unlock()
 	return e.fq.Close()
 }

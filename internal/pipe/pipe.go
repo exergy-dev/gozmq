@@ -278,6 +278,12 @@ type End struct {
 	// Poller-facing readiness gate to the pipe so a blocking Poller.Poll
 	// wakes on data arrival without a forwarder goroutine.
 	recvReady atomic.Pointer[recvReadyGate]
+
+	// routingID is the identity a ROUTER or STREAM engine assigned this end
+	// on attach. It travels with the pipe, so a message received after the
+	// engine detached the pipe is still stamped with the right identity
+	// without the engine retaining anything per departed peer.
+	routingID atomic.Pointer[[]byte]
 }
 
 // recvReadyGate wraps the registered gate channel so it can sit behind an
@@ -475,6 +481,19 @@ func (e *End) Close() error {
 
 // Closed returns a channel that is closed once either end has been closed.
 func (e *End) Closed() <-chan struct{} { return e.shared.either }
+
+// SetRoutingID records id as this end's routing identity (see the routingID
+// field doc). The engine sets it before attaching the end, so every message
+// the end yields can read it; id must not be mutated afterwards.
+func (e *End) SetRoutingID(id []byte) { e.routingID.Store(&id) }
+
+// RoutingID returns the identity last set by SetRoutingID, or nil.
+func (e *End) RoutingID() []byte {
+	if id := e.routingID.Load(); id != nil {
+		return *id
+	}
+	return nil
+}
 
 // PeerIdentity returns the ZMTP Identity advertised by the peer in its
 // READY metadata. Empty when the peer did not set one.
