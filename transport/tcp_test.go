@@ -16,12 +16,12 @@ import (
 )
 
 // listenLoopback binds tcp://127.0.0.1:0 and returns the resolved Listener.
-func listenLoopback(t *testing.T) (*TCPTransport, *tcpListener) {
+func listenLoopback(t *testing.T) (*TCPTransport, Listener) {
 	t.Helper()
 	tr := NewTCPTransport()
 	l, err := tr.Listen(context.Background(), "tcp://127.0.0.1:0")
 	require.NoError(t, err, "Listen")
-	return tr, l.(*tcpListener)
+	return tr, l
 }
 
 func TestTCP_RoundTrip_Bytes(t *testing.T) {

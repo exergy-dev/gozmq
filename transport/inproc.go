@@ -98,7 +98,7 @@ func (it *inprocTransport) Dial(ctx context.Context, endpoint string) (Conn, err
 	it.mu.Lock()
 	if l, ok := it.listeners[name]; ok {
 		it.mu.Unlock()
-		return l.dialIn(name)
+		return l.dialIn(ctx, name)
 	}
 	// No listener yet; park a waiter.
 	w := newInprocWaiter()
@@ -111,18 +111,19 @@ func (it *inprocTransport) Dial(ctx context.Context, endpoint string) (Conn, err
 
 	select {
 	case l := <-w.resultCh:
-		return l.dialIn(name)
+		return l.dialIn(ctx, name)
 	case <-ctx.Done():
 		if l := it.cancelWaiter(name, w); l != nil {
 			// Listen won the CAS concurrently; honor the delivered listener
-			// rather than spuriously failing this Dial.
-			return l.dialIn(name)
+			// rather than spuriously failing this Dial. ctx is already done,
+			// so detach it or the handoff would fail at random.
+			return l.dialIn(context.WithoutCancel(ctx), name)
 		}
 		return nil, ctx.Err()
 	case <-timer.C:
 		if l := it.cancelWaiter(name, w); l != nil {
 			// Listen won the CAS concurrently; honor the delivered listener.
-			return l.dialIn(name)
+			return l.dialIn(ctx, name)
 		}
 		return nil, fmt.Errorf("%w: inproc endpoint %q not bound within %v", zmqerr.ErrEndpointInvalid, endpoint, it.queueWindow)
 	}
@@ -251,8 +252,6 @@ type inprocListener struct {
 	acceptCh     chan *inprocConn
 	directPipeCh chan *pipeiface.DirectPipeOffer
 
-	mu        sync.Mutex
-	closed    bool
 	closeCh   chan struct{}
 	closeOnce sync.Once
 }
@@ -296,32 +295,62 @@ func (l *inprocListener) AcceptDirectPipe(ctx context.Context) (*pipeiface.Direc
 	}
 }
 
-// OfferDirectPipe pushes a direct-pipe offer to the bind side.
+// OfferDirectPipe pushes a direct-pipe offer to the bind side. It blocks
+// while the offer queue is full; the DirectPipeAcceptor interface carries
+// no ctx, so only Close interrupts that wait.
 func (l *inprocListener) OfferDirectPipe(offer *pipeiface.DirectPipeOffer) error {
-	select {
-	case l.directPipeCh <- offer:
-		return nil
-	case <-l.closeCh:
-		return listenerClosedErr()
-	}
+	return enqueue(context.Background(), l.directPipeCh, l.closeCh, offer, closeOffer)
 }
 
 func (l *inprocListener) Close() error {
 	l.closeOnce.Do(func() {
-		l.mu.Lock()
-		l.closed = true
 		close(l.closeCh)
-		l.mu.Unlock()
 		l.t.removeListener(l.name, l)
 		// Drain & close any pending accepts and direct-pipe offers so their
-		// dialing peers fail promptly.
-		drainChan(l.acceptCh, func(c *inprocConn) {
-			_ = c.Close()
-		})
-		drainChan(l.directPipeCh, func(offer *pipeiface.DirectPipeOffer) {
-			_ = offer.BindPipe.Close()
-		})
+		// dialing peers fail promptly. A handoff racing this drain re-drains
+		// itself (see enqueue).
+		drainChan(l.acceptCh, closeInprocConn)
+		drainChan(l.directPipeCh, closeOffer)
 	})
+	return nil
+}
+
+func closeInprocConn(c *inprocConn)           { _ = c.Close() }
+func closeOffer(o *pipeiface.DirectPipeOffer) { _ = o.BindPipe.Close() }
+
+// enqueue hands v to a listener queue, honoring ctx and closeCh while the
+// queue is full. Once closeCh is closed nothing receives from ch, and select
+// picks at random when the send and closeCh are both ready, so v can land
+// after Close has drained ch. After a successful send we therefore re-check
+// closeCh and, if closed, drain ch ourselves (discarding each item). If v
+// was still queued, the handoff failed. If Close's drain got it first, v
+// was discarded there and the caller sees its peer close promptly.
+func enqueue[T comparable](ctx context.Context, ch chan T, closeCh <-chan struct{}, v T, discard func(T)) error {
+	select {
+	case <-closeCh:
+		return listenerClosedErr()
+	default:
+	}
+	select {
+	case ch <- v:
+	case <-closeCh:
+		return listenerClosedErr()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-closeCh:
+	default:
+		return nil
+	}
+	stranded := false
+	drainChan(ch, func(x T) {
+		stranded = stranded || x == v
+		discard(x)
+	})
+	if stranded {
+		return listenerClosedErr()
+	}
 	return nil
 }
 
@@ -342,13 +371,12 @@ func drainChan[T any](ch <-chan T, fn func(T)) {
 // dialIn is the Dial-side hand-off into an established Listener. We forge
 // a fresh pipe pair — one end becomes the dialer's Conn, the other is
 // queued onto the listener's acceptCh.
-func (l *inprocListener) dialIn(name string) (Conn, error) {
-	l.mu.Lock()
-	if l.closed {
-		l.mu.Unlock()
+func (l *inprocListener) dialIn(ctx context.Context, name string) (Conn, error) {
+	select {
+	case <-l.closeCh:
 		return nil, listenerClosedErr()
+	default:
 	}
-	l.mu.Unlock()
 
 	endpoint := "inproc://" + name
 	// Pipe HWM here only governs the inproc transport-level buffer. Real
@@ -364,15 +392,13 @@ func (l *inprocListener) dialIn(name string) (Conn, error) {
 	serverConn := newInprocConn(serverPipe, endpoint, endpoint)
 
 	// Hand the server-side conn to the listener. If the listener is
-	// closing we drop it.
-	select {
-	case l.acceptCh <- serverConn:
-		return clientConn, nil
-	case <-l.closeCh:
+	// closing (or ctx ends while the queue is full) we drop both ends.
+	if err := enqueue(ctx, l.acceptCh, l.closeCh, serverConn, closeInprocConn); err != nil {
 		_ = serverConn.Close()
 		_ = clientConn.Close()
-		return nil, listenerClosedErr()
+		return nil, err
 	}
+	return clientConn, nil
 }
 
 // --------------------------------------------------------------------------

@@ -5,125 +5,91 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
-type acceptResult struct {
-	c   net.Conn
-	err error
-}
-
+// listenerClosedErr is returned by Accept (and by inproc dials) once the
+// listener is closed. It matches net.ErrClosed, the terminal condition
+// documented on Listener.Accept, as well as ErrEndpointInvalid.
 func listenerClosedErr() error {
-	return fmt.Errorf("%w: listener closed", zmqerr.ErrEndpointInvalid)
+	return fmt.Errorf("%w: listener closed: %w", zmqerr.ErrEndpointInvalid, net.ErrClosed)
 }
 
-// listenerCloseState is the shared close machinery for the net-based listeners
-// (tcp/tls/ipc). It is embedded so the listener exposes closed/closeCh to
-// acceptWithDeadline and a single idempotent closeWith for teardown.
-type listenerCloseState struct {
-	closed    atomic.Bool
-	closeCh   chan struct{}
+// aLongTimeAgo is a non-zero deadline in the past; setting it on a listener
+// wakes a blocked Accept immediately.
+var aLongTimeAgo = time.Unix(1, 0)
+
+// netListener adapts a stream net.Listener (tcp, tls+tcp, ipc) to Listener.
+//
+// Accept blocks in the underlying Accept. Close unblocks it by closing the
+// socket; ctx cancellation unblocks it by setting a past deadline on the
+// listener (both *net.TCPListener and *net.UnixListener support that).
+type netListener struct {
+	l        net.Listener
+	endpoint string
+	// wrap adapts an accepted conn to the scheme's Conn. It runs on the
+	// accept path, so it must not block (in particular: no TLS handshake).
+	wrap func(net.Conn) Conn
+
+	// sem admits one Accept at a time. The cancellation deadline lives on
+	// the shared listener, so concurrent Accepts with different ctxs would
+	// otherwise wake (and could wedge) each other.
+	sem       chan struct{}
 	closeOnce sync.Once
 }
 
-func newListenerCloseState() listenerCloseState {
-	return listenerCloseState{closeCh: make(chan struct{})}
+func newNetListener(l net.Listener, endpoint string, wrap func(net.Conn) Conn) *netListener {
+	return &netListener{l: l, endpoint: endpoint, wrap: wrap, sem: make(chan struct{}, 1)}
 }
 
-// closeWith marks the listener closed, wakes any parked acceptWithDeadline via
-// closeCh, and runs teardown exactly once. Later calls are no-ops returning nil.
-func (s *listenerCloseState) closeWith(teardown func() error) error {
+func (l *netListener) Endpoint() string { return l.endpoint }
+
+func (l *netListener) Accept(ctx context.Context) (Conn, error) {
+	select {
+	case l.sem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { <-l.sem }()
+
+	dl, _ := l.l.(interface{ SetDeadline(time.Time) error })
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		stop := func() bool { return true }
+		if dl != nil {
+			// Clear any deadline a previous Accept's cancellation left behind.
+			_ = dl.SetDeadline(time.Time{})
+			stop = context.AfterFunc(ctx, func() { _ = dl.SetDeadline(aLongTimeAgo) })
+		}
+		c, err := l.l.Accept()
+		stop()
+		switch {
+		case err == nil:
+			return l.wrap(c), nil
+		case errors.Is(err, net.ErrClosed):
+			return nil, listenerClosedErr()
+		case errors.Is(err, os.ErrDeadlineExceeded):
+			// Our ctx fired (the loop head returns its error), or a late
+			// AfterFunc from an earlier Accept's ctx did; retry.
+			continue
+		default:
+			return nil, err
+		}
+	}
+}
+
+// Close closes the socket, waking any blocked Accept with a net.ErrClosed
+// error. Idempotent: later calls return nil.
+func (l *netListener) Close() error {
 	var err error
-	s.closeOnce.Do(func() {
-		s.closed.Store(true)
-		close(s.closeCh)
-		err = teardown()
-	})
+	l.closeOnce.Do(func() { err = l.l.Close() })
 	return err
 }
 
-func acceptWithDeadline(
-	ctx context.Context,
-	l net.Listener,
-	closeCh <-chan struct{},
-	closed func() bool,
-	pollInterval time.Duration,
-	setDeadline func(time.Time) error,
-	onAccept func(net.Conn) (net.Conn, error),
-) (net.Conn, error) {
-	if closed() {
-		return nil, listenerClosedErr()
-	}
-
-	resCh := make(chan acceptResult, 1)
-	go func() {
-		for {
-			_ = setDeadline(time.Now().Add(pollInterval))
-			c, err := l.Accept()
-			if err != nil {
-				if closed() {
-					resCh <- acceptResult{err: listenerClosedErr()}
-					return
-				}
-				if isTimeout(err) {
-					select {
-					case <-ctx.Done():
-						resCh <- acceptResult{err: ctx.Err()}
-						return
-					case <-closeCh:
-						resCh <- acceptResult{err: listenerClosedErr()}
-						return
-					default:
-						continue
-					}
-				}
-				resCh <- acceptResult{err: err}
-				return
-			}
-			_ = setDeadline(time.Time{})
-			if onAccept != nil {
-				wrapped, err := onAccept(c)
-				if err != nil {
-					_ = c.Close()
-					resCh <- acceptResult{err: err}
-					return
-				}
-				c = wrapped
-			}
-			resCh <- acceptResult{c: c}
-			return
-		}
-	}()
-
-	select {
-	case r := <-resCh:
-		return r.c, r.err
-	case <-ctx.Done():
-		go closeAcceptedWhenReady(resCh)
-		return nil, ctx.Err()
-	case <-closeCh:
-		go closeAcceptedWhenReady(resCh)
-		return nil, listenerClosedErr()
-	}
-}
-
-func closeAcceptedWhenReady(resCh <-chan acceptResult) {
-	r := <-resCh
-	if r.c != nil {
-		_ = r.c.Close()
-	}
-}
-
-// isTimeout reports whether err is a net.Error timeout. Used by the Accept
-// poll loop to distinguish "no peer yet" from real errors.
-func isTimeout(err error) bool {
-	var ne net.Error
-	if errors.As(err, &ne) {
-		return ne.Timeout()
-	}
-	return false
-}
+var _ Listener = (*netListener)(nil)

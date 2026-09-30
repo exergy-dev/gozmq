@@ -95,8 +95,9 @@ func splitEndpoint(endpoint string) (scheme, address string, err error) {
 
 // parseTCPEndpoint parses a "scheme://host:port" endpoint into a net.Dial
 // or net.Listen address. When dial is true, wildcard hosts ("*") and
-// ephemeral ports ("0" or empty) are rejected; when false, "*" expands to
-// "" (all interfaces) and ephemeral ports are left for the OS to resolve.
+// ephemeral ports ("0", "*" or empty) are rejected; when false, a "*" host
+// expands to "" (all interfaces), a "*" port to "0", and ephemeral ports are
+// left for the OS to resolve.
 func parseTCPEndpoint(endpoint, expectedScheme string, dial bool) (string, error) {
 	scheme, addr, err := splitEndpoint(endpoint)
 	if err != nil {
@@ -113,12 +114,15 @@ func parseTCPEndpoint(endpoint, expectedScheme string, dial bool) (string, error
 		if host == "*" {
 			return "", fmt.Errorf("%w: wildcard host %q not allowed on Dial", zmqerr.ErrEndpointInvalid, addr)
 		}
-		if port == "" || port == "0" {
+		if port == "" || port == "0" || port == "*" {
 			return "", fmt.Errorf("%w: port must be specified for Dial", zmqerr.ErrEndpointInvalid)
 		}
 	} else {
 		if host == "*" {
 			host = ""
+		}
+		if port == "*" { // libzmq: any free port
+			port = "0"
 		}
 	}
 	return net.JoinHostPort(host, port), nil

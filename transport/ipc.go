@@ -7,7 +7,7 @@ import (
 	"net"
 	"os"
 	"runtime"
-	"time"
+	"syscall"
 
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
@@ -15,25 +15,20 @@ import (
 // ipcScheme is the URL scheme this transport claims. Matches libzmq.
 const ipcScheme = "ipc"
 
-// ipcAcceptPollInterval mirrors the TCP accept poll (tcpAcceptPollInterval)
-// so ctx cancellation / Close unblock Accept within the same bounded latency
-// on every net-based transport.
-const ipcAcceptPollInterval = 5 * time.Millisecond
-
 // IPCTransport implements Transport over Unix domain sockets,
 // matching libzmq's "ipc" scheme (design §7.2). Endpoint syntax:
 //
 //	ipc:///path/to/file.sock   — filesystem-namespace socket
 //	ipc://@name                — abstract-namespace socket (Linux only)
 //
-// The abstract namespace uses a leading NUL byte in the sun_path of the
-// sockaddr; in Go we spell that by prefixing the path with "\x00". We
-// translate the "@" sigil to that form on Dial/Listen and back to "@" in
-// LocalEndpoint/RemoteEndpoint so callers see the original syntax.
+// The path is handed to the OS as written: on Linux, Go's syscall layer
+// already maps a leading '@' to the abstract namespace's leading NUL byte
+// (and back again in reported addresses).
 //
-// Listener Close removes the socket file — but only when the file is in
-// the filesystem namespace AND we created it via Listen. Abstract
-// sockets have no inode to remove.
+// Listener Close removes the socket file it created (net.UnixListener's
+// unlink-on-close). Abstract sockets have no inode to remove. A socket file
+// left behind by a crashed process is reclaimed on Listen once a probe dial
+// shows nothing is listening on it.
 //
 // Concurrency: all exported methods are safe for concurrent use. Exported
 // configuration fields should only be mutated before the transport is
@@ -51,149 +46,97 @@ func NewIPCTransport() *IPCTransport { return &IPCTransport{} }
 // Scheme reports "ipc".
 func (t *IPCTransport) Scheme() string { return ipcScheme }
 
-// Dial connects to endpoint. Respects ctx via net.Dialer.DialContext; the
-// dialer resolves the abstract-namespace sigil before handing to the OS.
+// Dial connects to endpoint. Respects ctx via net.Dialer.DialContext.
 func (t *IPCTransport) Dial(ctx context.Context, endpoint string) (Conn, error) {
-	addr, displayAddr, abstract, err := parseIPCAddress(endpoint)
+	path, abstract, err := parseIPCAddress(endpoint)
 	if err != nil {
 		return nil, err
 	}
 	if abstract && runtime.GOOS != "linux" {
 		return nil, fmt.Errorf("%w: abstract-namespace ipc is Linux-only", zmqerr.ErrEndpointInvalid)
 	}
-	d := net.Dialer{}
-	c, err := d.DialContext(ctx, "unix", addr)
+	var d net.Dialer
+	c, err := d.DialContext(ctx, "unix", path)
 	if err != nil {
 		return nil, err
 	}
-	return newIPCConn(c, "ipc://"+displayAddr, "ipc://"+displayAddr), nil
+	return newIPCConn(c, "ipc://"+path, "ipc://"+path), nil
 }
 
 // Listen binds endpoint. For filesystem paths we create the socket inode
 // and (if FilePerm is set) chmod it. For abstract namespaces we skip the
 // chmod path entirely.
-func (t *IPCTransport) Listen(_ context.Context, endpoint string) (Listener, error) {
-	addr, displayAddr, abstract, err := parseIPCAddress(endpoint)
+func (t *IPCTransport) Listen(ctx context.Context, endpoint string) (Listener, error) {
+	path, abstract, err := parseIPCAddress(endpoint)
 	if err != nil {
 		return nil, err
 	}
 	if abstract && runtime.GOOS != "linux" {
 		return nil, fmt.Errorf("%w: abstract-namespace ipc is Linux-only", zmqerr.ErrEndpointInvalid)
 	}
-	l, err := net.Listen("unix", addr)
+	var lc net.ListenConfig
+	l, err := lc.Listen(ctx, "unix", path)
+	if err != nil && !abstract && errors.Is(err, syscall.EADDRINUSE) && reclaimStaleSocket(ctx, path) {
+		l, err = lc.Listen(ctx, "unix", path)
+	}
 	if err != nil {
 		return nil, err
 	}
 	// Chmod only makes sense for the filesystem namespace.
 	if !abstract && t.FilePerm != 0 {
-		if err := os.Chmod(addr, t.FilePerm); err != nil {
-			_ = l.Close()
-			_ = os.Remove(addr)
+		if err := os.Chmod(path, t.FilePerm); err != nil {
+			_ = l.Close() // unlinks the file
 			return nil, fmt.Errorf("%w: chmod socket: %s", zmqerr.ErrEndpointInvalid, err.Error())
 		}
 	}
-	return newIPCListener(l, addr, displayAddr, abstract), nil
+	endpoint = "ipc://" + path
+	return newNetListener(l, endpoint, func(c net.Conn) Conn {
+		return newIPCConn(c, endpoint, endpoint)
+	}), nil
 }
 
-// parseIPCAddress decodes an ipc endpoint. Returns:
-//   - addr: the net.Listen / net.Dial address, with "@name" translated to
-//     "\x00name" (the Linux abstract-namespace spelling).
-//   - displayAddr: the original user-facing form ("/path" or "@name").
-//   - abstract: true for the abstract namespace.
-func parseIPCAddress(endpoint string) (addr, displayAddr string, abstract bool, err error) {
+// reclaimStaleSocket removes the socket file at path if nothing is listening
+// on it (a leftover from a process that died without unlinking), reporting
+// whether it did. Only a socket whose probe dial is refused is removed: a
+// live listener, a regular file, or an inconclusive probe is left alone.
+func reclaimStaleSocket(ctx context.Context, path string) bool {
+	fi, err := os.Lstat(path)
+	if err != nil || fi.Mode().Type() != os.ModeSocket {
+		return false
+	}
+	var d net.Dialer
+	c, err := d.DialContext(ctx, "unix", path)
+	if err == nil {
+		_ = c.Close()
+		return false
+	}
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		return false
+	}
+	err = os.Remove(path)
+	return err == nil || errors.Is(err, os.ErrNotExist)
+}
+
+// parseIPCAddress decodes an ipc endpoint into the path handed to the OS
+// ("/path" or "@name") and whether it names the abstract namespace.
+func parseIPCAddress(endpoint string) (path string, abstract bool, err error) {
 	scheme, raw, err := splitEndpoint(endpoint)
 	if err != nil {
-		return "", "", false, err
+		return "", false, err
 	}
 	if scheme != ipcScheme {
-		return "", "", false, fmt.Errorf("%w: scheme %q passed to ipc transport", zmqerr.ErrEndpointInvalid, scheme)
+		return "", false, fmt.Errorf("%w: scheme %q passed to ipc transport", zmqerr.ErrEndpointInvalid, scheme)
 	}
 	if raw == "" {
-		return "", "", false, fmt.Errorf("%w: empty ipc path", zmqerr.ErrEndpointInvalid)
+		return "", false, fmt.Errorf("%w: empty ipc path", zmqerr.ErrEndpointInvalid)
 	}
 	if raw[0] == '@' {
-		name := raw[1:]
-		if name == "" {
-			return "", "", false, fmt.Errorf("%w: empty abstract-namespace name", zmqerr.ErrEndpointInvalid)
+		if len(raw) == 1 {
+			return "", false, fmt.Errorf("%w: empty abstract-namespace name", zmqerr.ErrEndpointInvalid)
 		}
-		// Linux spells the abstract namespace with a leading NUL byte.
-		return "\x00" + name, "@" + name, true, nil
+		return raw, true, nil
 	}
-	return raw, raw, false, nil
-}
-
-// --------------------------------------------------------------------------
-// ipcListener — Listener with ctx-aware Accept and socket-file
-// cleanup on Close.
-// --------------------------------------------------------------------------
-
-// ipcListener follows the tcpListener poll pattern. Close removes the
-// socket file (filesystem namespace only) and unblocks pending Accept.
-type ipcListener struct {
-	l        net.Listener
-	path     string // the raw address we passed to net.Listen (for Remove)
-	display  string // "@name" or "/path" for endpoint-string reporting
-	abstract bool
-	endpoint string
-	listenerCloseState
-}
-
-func newIPCListener(l net.Listener, path, display string, abstract bool) *ipcListener {
-	return &ipcListener{
-		l:                  l,
-		path:               path,
-		display:            display,
-		abstract:           abstract,
-		endpoint:           "ipc://" + display,
-		listenerCloseState: newListenerCloseState(),
-	}
-}
-
-func (l *ipcListener) Endpoint() string { return l.endpoint }
-
-func (l *ipcListener) Accept(ctx context.Context) (Conn, error) {
-	c, err := acceptWithDeadline(
-		ctx,
-		l.l,
-		l.closeCh,
-		l.closed.Load,
-		ipcAcceptPollInterval,
-		func(t time.Time) error {
-			if ul, ok := l.l.(*net.UnixListener); ok {
-				return ul.SetDeadline(t)
-			}
-			return nil
-		},
-		nil,
-	)
-	if err != nil {
-		return nil, err
-	}
-	return newIPCConn(c, l.endpoint, l.endpoint), nil
-}
-
-// Close stops accepting and removes the socket file. Filesystem sockets
-// created by net.Listen leave a stale inode behind; we clean it up so
-// repeated bind/unbind cycles do not accumulate cruft. Abstract sockets
-// have no inode and need no cleanup. Idempotent.
-func (l *ipcListener) Close() error {
-	return l.closeWith(func() error {
-		// net.UnixListener.Close already removes the socket file by
-		// default when SetUnlinkOnClose(true) is set (Go default). We
-		// still call os.Remove defensively below in case the listener
-		// was constructed by some future path that disables it, and to
-		// guarantee our contract ("listener close removes the socket
-		// file if we created it").
-		firstErr := l.l.Close()
-		if !l.abstract {
-			if err := os.Remove(l.path); err != nil && !errors.Is(err, os.ErrNotExist) {
-				if firstErr == nil {
-					firstErr = err
-				}
-			}
-		}
-		return firstErr
-	})
+	return raw, false, nil
 }
 
 // --------------------------------------------------------------------------
@@ -222,6 +165,5 @@ func (c *ipcConn) WriteBuffers(buffers *net.Buffers) (int64, error) {
 // Compile-time interface checks.
 var (
 	_ Transport = (*IPCTransport)(nil)
-	_ Listener  = (*ipcListener)(nil)
 	_ Conn      = (*ipcConn)(nil)
 )

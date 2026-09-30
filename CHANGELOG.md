@@ -42,6 +42,19 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
   `WithRouterMandatory` silently drops (counted in `Metrics.Dropped`); ROUTER
   with it and STREAM return an error wrapping `ErrRouteUnknown` instead of a
   raw `io.ErrClosedPipe`.
+- **Breaking:** `transport.TCPTransport` read/write buffer sizes default to 0
+  (OS autotuning) instead of 8 MiB.
+- tcp/tls/ipc `Accept` blocks instead of polling every 5ms.
+  `transport.Listener.Accept` documents its terminal errors (`net.ErrClosed`,
+  ctx errors); closed-listener errors match `net.ErrClosed`.
+- `tcp://host:*` binds an ephemeral port; TCP socket options are best-effort.
+
+### Removed
+
+- **Breaking:** `transport.TLSTransport.HandshakeTimeout`. TLS handshakes now
+  run lazily on the connection's first I/O, inside the ZMTP handshake,
+  bounded by `WithHandshakeTimeout` (default 30s); `WithHandshakeTimeout(0)`
+  therefore also leaves the TLS handshake unbounded.
 
 ### Fixed
 
@@ -89,6 +102,16 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
   `ErrAuthFailed` with the reason, not `ErrMalformedFrame`.
 - NULL consults the ZAP handler only when a ZAP domain is set, matching
   libzmq.
+- A per-connection accept error (failed TLS handshake, EMFILE, socket-option
+  failure) no longer stops a bound socket from accepting; it is reported as
+  `EventAcceptFailed` and retried with capped backoff.
+- Silent or non-TLS clients no longer stall a tls+tcp listener; a non-TLS
+  server no longer parks the TLS reconnector.
+- `Bind` racing `Close` no longer leaks the listener.
+- inproc: a connect racing listener close can no longer be stranded; `Dial`
+  honours ctx when the accept queue is full.
+- ipc: a stale socket file left by a crashed process no longer blocks `Bind`;
+  `Close` no longer unlinks a path another listener may have re-bound.
 
 ## [1.0.0] - 2026-08-10
 

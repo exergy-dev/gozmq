@@ -69,6 +69,20 @@ type Conn interface {
 // Listener accepts incoming ZMTP connections on a bound endpoint.
 type Listener interface {
 	// Accept blocks until an incoming connection arrives or ctx cancels.
+	//
+	// Errors: once the listener is closed, Accept must return an error
+	// matching net.ErrClosed (errors.Is); when ctx ends, ctx.Err(). Those
+	// are the only terminal errors. Anything else is treated as a failure
+	// of one connection attempt (EMFILE, a failed socket option, a peer
+	// that reset before accept): a socket reports it as EventAcceptFailed
+	// and calls Accept again after a short, capped backoff. An
+	// implementation whose Accept keeps failing after Close without
+	// matching net.ErrClosed therefore keeps its socket retrying.
+	//
+	// Accept should not perform per-connection protocol work such as a TLS
+	// handshake: the socket accepts sequentially, so a slow peer would stall
+	// every connection queued behind it. Defer such work to the Conn's first
+	// Read or Write, which the session bounds with SetDeadline.
 	Accept(ctx context.Context) (Conn, error)
 	// Endpoint returns the actual bound endpoint (wildcards resolved).
 	Endpoint() string

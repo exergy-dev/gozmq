@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -203,20 +204,10 @@ func (s *Socket) Bind(endpoint string) error {
 		return err
 	}
 
-	s.mu.Lock()
-	s.listeners = append(s.listeners, l)
-	resolved := l.Endpoint()
-	s.lastEndpoint = resolved
-	s.mu.Unlock()
-
-	s.emit(EventListening, resolved, "")
-
-	s.acceptWG.Add(1)
-	go s.acceptLoop(l)
-	// If the listener supports direct-pipe bypass (inproc), start a
-	// second accept loop that handles direct-pipe offers from connecting
-	// sockets. The regular acceptLoop above is still required even for
-	// inproc — two dial paths verifiably reach it:
+	// If the listener supports direct-pipe bypass (inproc), a second
+	// accept loop handles direct-pipe offers from connecting sockets. The
+	// regular acceptLoop is still required even for inproc — two dial
+	// paths verifiably reach it:
 	//   - a dialer with PLAIN/CURVE configured skips the direct-pipe
 	//     path in Connect and dials through transport.InprocTransport,
 	//     whose dialIn hands a conn to Listener.Accept;
@@ -228,8 +219,31 @@ func (s *Socket) Bind(endpoint string) error {
 	// no-security dialer cannot see our config and will still offer a
 	// direct pipe, so the loop must actively REJECT (close) those offers —
 	// leaving them undrained would hang the dialer silently.
-	if acceptor, ok := l.(iface.DirectPipeAcceptor); ok {
+	acceptor, direct := l.(iface.DirectPipeAcceptor)
+
+	// Close may have run while Listen was in flight. Re-check under s.mu,
+	// which CloseCtx takes to snapshot s.listeners: either Close sees this
+	// listener and closes it, or we see closed and close it ourselves. The
+	// acceptWG.Adds sit in the same critical section so they cannot race
+	// CloseCtx's acceptWG.Wait.
+	s.mu.Lock()
+	if s.closed.Load() {
+		s.mu.Unlock()
+		_ = l.Close()
+		return ErrSocketClosed
+	}
+	s.listeners = append(s.listeners, l)
+	resolved := l.Endpoint()
+	s.lastEndpoint = resolved
+	s.acceptWG.Add(1)
+	if direct {
 		s.acceptWG.Add(1)
+	}
+	s.mu.Unlock()
+
+	s.emit(EventListening, resolved, "")
+	go s.acceptLoop(l)
+	if direct {
 		go s.acceptDirectPipeLoop(acceptor)
 	}
 	return nil
@@ -422,19 +436,37 @@ func (s *Socket) watchClientHandshake(sess iface.Session, endpoint string) {
 
 func (s *Socket) acceptLoop(l iface.Listener) {
 	defer s.acceptWG.Done()
+	// Retry backoff after an Accept error: a persistent failure (EMFILE,
+	// say) must not spin, but a transient one should recover quickly.
+	const (
+		minBackoff = 5 * time.Millisecond
+		maxBackoff = time.Second
+	)
 	bound := l.Endpoint()
+	var backoff time.Duration
 	for {
 		conn, err := l.Accept(s.runCtx)
 		if err != nil {
-			// Normal teardown on listener Close / ctx cancel:
-			// emit EventAcceptFailed so external observers see the
-			// terminal transition (with ctx.Err reason on shutdown,
-			// or the underlying net error on a real failure).
-			if !s.closed.Load() {
-				s.emit(EventAcceptFailed, bound, err.Error())
+			// Only a closed listener (Unbind/Close) or socket shutdown ends
+			// the loop. Anything else — EMFILE, a socket-option failure, an
+			// out-of-tree transport's per-connection error — concerns one
+			// connection attempt while the listener stays open: report it
+			// and retry.
+			if errors.Is(err, net.ErrClosed) || s.runCtx.Err() != nil {
+				return
 			}
-			return
+			s.emit(EventAcceptFailed, bound, err.Error())
+			backoff = min(max(2*backoff, minBackoff), maxBackoff)
+			t := time.NewTimer(backoff)
+			select {
+			case <-t.C:
+			case <-s.runCtx.Done():
+				t.Stop()
+				return
+			}
+			continue
 		}
+		backoff = 0
 		s.emit(EventAccepted, conn.RemoteEndpoint(), "")
 		if s.socketType == Stream {
 			s.startStreamAdapter(conn)

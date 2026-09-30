@@ -14,9 +14,6 @@ const (
 	defaultTCPKeepAlive     = true
 	defaultTCPKeepAliveIdle = 30 * time.Second
 	defaultTCPNoDelay       = true
-	tcpAcceptPollInterval   = 5 * time.Millisecond
-	defaultTCPReadBuffer    = 8 << 20
-	defaultTCPWriteBuffer   = 8 << 20
 )
 
 // TCPTransport implements Transport over the standard library's
@@ -39,9 +36,9 @@ type TCPTransport struct {
 	// NoDelay toggles TCP_NODELAY (Nagle disable).
 	NoDelay bool
 	// ReadBufferSize / WriteBufferSize set SO_RCVBUF / SO_SNDBUF on every
-	// dialed and accepted connection. The constructors default both to
-	// 8 MiB (throughput headroom for high-bandwidth-delay paths); set to 0
-	// to keep the OS default sizing instead.
+	// dialed and accepted connection. Zero (the default) leaves the OS
+	// sizing alone; on Linux, setting either disables the kernel's buffer
+	// autotuning for that direction, so only set them to pin a size.
 	ReadBufferSize  int
 	WriteBufferSize int
 }
@@ -56,8 +53,6 @@ func newTCP(network string) *TCPTransport {
 		KeepAlive:       defaultTCPKeepAlive,
 		KeepAlivePeriod: defaultTCPKeepAliveIdle,
 		NoDelay:         defaultTCPNoDelay,
-		ReadBufferSize:  defaultTCPReadBuffer,
-		WriteBufferSize: defaultTCPWriteBuffer,
 	}
 }
 
@@ -84,17 +79,15 @@ func (t *TCPTransport) Dial(ctx context.Context, endpoint string) (Conn, error) 
 	if err != nil {
 		return nil, err
 	}
-	if err := t.applySocketOptions(c); err != nil {
-		_ = c.Close()
-		return nil, err
-	}
+	t.applySocketOptions(c)
 	return newTCPConn(c, t.scheme), nil
 }
 
 // Listen binds endpoint. For "tcp://*:port" the wildcard expands to
 // 0.0.0.0 (or :: for tcp6). Endpoint() on the returned Listener reports the
-// resolved address — important for ephemeral-port (port 0) bindings.
-func (t *TCPTransport) Listen(_ context.Context, endpoint string) (Listener, error) {
+// resolved address — important for ephemeral-port (port 0 or "*")
+// bindings. ctx bounds host-name resolution.
+func (t *TCPTransport) Listen(ctx context.Context, endpoint string) (Listener, error) {
 	addr, err := t.parseListenAddress(endpoint)
 	if err != nil {
 		return nil, err
@@ -102,14 +95,14 @@ func (t *TCPTransport) Listen(_ context.Context, endpoint string) (Listener, err
 	lc := net.ListenConfig{
 		KeepAlive: t.keepAliveSetting(),
 	}
-	// Listen does not strictly need a Context, but the iface lets callers
-	// pass one; honoring it via ListenConfig.Listen keeps the door open if
-	// we add resolver hooks later.
-	l, err := lc.Listen(context.Background(), t.Network, addr)
+	l, err := lc.Listen(ctx, t.Network, addr)
 	if err != nil {
 		return nil, err
 	}
-	return newTCPListener(l, t), nil
+	return newNetListener(l, formatTCPEndpoint(t.scheme, l.Addr()), func(c net.Conn) Conn {
+		t.applySocketOptions(c)
+		return newTCPConn(c, t.scheme)
+	}), nil
 }
 
 func (t *TCPTransport) keepAliveSetting() time.Duration {
@@ -127,23 +120,23 @@ func (t *TCPTransport) keepAliveSetting() time.Duration {
 // here: net.Dialer.KeepAlive (Dial) and net.ListenConfig.KeepAlive (Accept)
 // — both fed by keepAliveSetting() — already enable SO_KEEPALIVE and set the
 // idle period on dialed and accepted connections alike.
-func (t *TCPTransport) applySocketOptions(c net.Conn) error {
+//
+// Best-effort: these are tuning knobs, and a connection that could not take
+// one (e.g. the peer already reset it) is still usable or will fail on its
+// own. Failing Dial/Accept over them would turn a tuning miss into an
+// outage.
+func (t *TCPTransport) applySocketOptions(c net.Conn) {
 	tc, ok := c.(*net.TCPConn)
 	if !ok {
-		return nil
+		return
 	}
-	if err := tc.SetNoDelay(t.NoDelay); err != nil {
-		return err
-	}
+	_ = tc.SetNoDelay(t.NoDelay)
 	if t.ReadBufferSize > 0 {
-		if err := tc.SetReadBuffer(t.ReadBufferSize); err != nil {
-			return err
-		}
+		_ = tc.SetReadBuffer(t.ReadBufferSize)
 	}
 	if t.WriteBufferSize > 0 {
-		return tc.SetWriteBuffer(t.WriteBufferSize)
+		_ = tc.SetWriteBuffer(t.WriteBufferSize)
 	}
-	return nil
 }
 
 func (t *TCPTransport) parseAddress(endpoint string) (string, error) {
@@ -197,63 +190,4 @@ func formatTCPEndpoint(scheme string, a net.Addr) string {
 		return ""
 	}
 	return scheme + "://" + a.String()
-}
-
-// --------------------------------------------------------------------------
-// tcpListener — Listener adapter over net.Listener with ctx-aware
-// Accept and Close-wakes-Accept semantics.
-// --------------------------------------------------------------------------
-
-// tcpListener implements Listener over a net.Listener. Accept honors
-// ctx via a poll-with-deadline pattern: we set a short read deadline on the
-// underlying listener (when supported) so that a concurrent Close or a ctx
-// cancellation trips Accept within bounded latency. On Close, in-flight
-// Accepts return a wrapped ErrEndpointInvalid (i.e. "this endpoint is no
-// longer accepting") rather than blocking indefinitely.
-type tcpListener struct {
-	l        net.Listener
-	t        *TCPTransport
-	endpoint string
-	listenerCloseState
-}
-
-func newTCPListener(l net.Listener, t *TCPTransport) *tcpListener {
-	return &tcpListener{
-		l:                  l,
-		t:                  t,
-		endpoint:           formatTCPEndpoint(t.scheme, l.Addr()),
-		listenerCloseState: newListenerCloseState(),
-	}
-}
-
-func (l *tcpListener) Endpoint() string { return l.endpoint }
-
-func (l *tcpListener) Accept(ctx context.Context) (Conn, error) {
-	c, err := acceptWithDeadline(
-		ctx,
-		l.l,
-		l.closeCh,
-		l.closed.Load,
-		tcpAcceptPollInterval,
-		func(t time.Time) error {
-			if tl, ok := l.l.(*net.TCPListener); ok {
-				return tl.SetDeadline(t)
-			}
-			return nil
-		},
-		func(c net.Conn) (net.Conn, error) {
-			if err := l.t.applySocketOptions(c); err != nil {
-				return nil, err
-			}
-			return c, nil
-		},
-	)
-	if err != nil {
-		return nil, err
-	}
-	return newTCPConn(c, l.t.scheme), nil
-}
-
-func (l *tcpListener) Close() error {
-	return l.closeWith(l.l.Close)
 }
