@@ -96,6 +96,12 @@ func (m *nullMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		if in == nil {
 			return nil, false, fmt.Errorf("gozmq/security/null: nil peer input on handshake step 2: %w", zmqerr.ErrMalformedFrame)
 		}
+		if reason, isErr, err := DecodeError(in); isErr {
+			if err != nil {
+				return nil, false, err
+			}
+			return nil, false, fmt.Errorf("gozmq/security/null: server rejected handshake: %q: %w", reason, zmqerr.ErrAuthFailed)
+		}
 		props, err := m.decodeReady(in)
 		if err != nil {
 			return nil, false, err
@@ -123,7 +129,7 @@ func (m *nullMech) nextServer(in []byte) ([]byte, bool, error) {
 		if err != nil {
 			return nil, false, err
 		}
-		if err := m.AuthorizeZAP(nullMechName, nil); err != nil {
+		if err := m.authorizeNull(); err != nil {
 			// Mirror PLAIN: emit a ZMTP ERROR command alongside the wrapped
 			// error so the peer sees an auth-failure reason rather than an
 			// abrupt close. The reason text is short and opaque so as not
@@ -140,6 +146,19 @@ func (m *nullMech) nextServer(in []byte) ([]byte, bool, error) {
 	}
 	return nil, true, nil
 }
+
+// authorizeNull consults ZAP only when a ZAP domain is set, as libzmq does,
+// so a Context-wide handler installed for PLAIN/CURVE sockets does not start
+// vetting every NULL socket too.
+func (m *nullMech) authorizeNull() error {
+	if m.zapDomain == "" {
+		return nil
+	}
+	return m.AuthorizeZAP(nullMechName, nil)
+}
+
+// IdentityFraming reports that NULL frames cross the wire unmodified.
+func (*nullMech) IdentityFraming() bool { return true }
 
 // EncodeFrame is the identity codec for NULL — no per-frame rewriting.
 func (*nullMech) EncodeFrame(flags uint8, plain []byte) (uint8, []byte, error) {

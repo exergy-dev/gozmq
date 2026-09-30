@@ -53,10 +53,12 @@ func EncodeReady(meta map[string]string) []byte {
 // gozmq.ErrMalformedFrame when body is not a well-formed READY — a
 // truncated command, a different command name, or malformed properties.
 //
-// Feed the result to [MechBase.MergePeerMetadata] (or
-// [MechBase.SetPeerMetadata], which additionally runs the Socket-Type
-// compatibility check) so the session layer sees the peer's identity and
-// socket type.
+// Feed the result to [MechBase.MergePeerMetadata] so the session layer sees
+// the peer's identity and socket type. (The session layer runs the
+// Socket-Type compatibility check itself after the handshake.)
+//
+// A peer that rejects the handshake answers with ERROR instead of READY;
+// check for that with [DecodeError] first.
 func DecodeReady(body []byte) (map[string]string, error) {
 	cmd, err := zmtp.DecodeCommand(body)
 	if err != nil {
@@ -66,4 +68,23 @@ func DecodeReady(body []byte) (map[string]string, error) {
 		return nil, fmt.Errorf("gozmq/security: expected READY command, got %q: %w", cmd.Name, zmqerr.ErrMalformedFrame)
 	}
 	return DecodeMetadata(cmd.Body)
+}
+
+// DecodeError reports whether body is a ZMTP ERROR command: the reply a peer
+// sends in place of the expected handshake command when it rejects the
+// handshake, e.g. after a ZAP denial. isError is false for any other
+// command, including one too malformed to name. When isError is true, reason
+// is the peer's reason text, or err wraps gozmq.ErrMalformedFrame if that
+// text is truncated. A mechanism should report a decoded ERROR as an error
+// wrapping gozmq.ErrAuthFailed.
+//
+// Like PLAIN, it tolerates the mis-encoded ERROR name libzmq emits (see
+// libzmqBrokenErrorPrefix in plain.go).
+func DecodeError(body []byte) (reason string, isError bool, err error) {
+	name, payload, perr := parseCommand(body)
+	if perr != nil || name != zmtp.CmdError {
+		return "", false, nil //nolint:nilerr // not an ERROR; the caller's own parser reports malformed input
+	}
+	reason, err = parseErrorReason(payload)
+	return reason, true, err
 }

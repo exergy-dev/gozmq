@@ -429,14 +429,14 @@ func TestCurve_RejectsZeroClientLongKey(t *testing.T) {
 }
 
 // TestCurve_RejectsLowOrderClientLongKey: same as above but uses a
-// known order-8 point rather than zero. Confirms the low-order list
-// is consulted in addition to the all-zero fast-path.
+// known order-8 point rather than zero, so the rejection cannot come from
+// an all-zero special case.
 func TestCurve_RejectsLowOrderClientLongKey(t *testing.T) {
 	client, server := newMechPair(t)
 	welcome := driveToWelcome(t, client, server)
-	// Inject the order-8 point A as the client's advertised C.
+	// Inject an order-8 point as the client's advertised C.
 	cImpl := client.(*curveMech)
-	cImpl.ourPublic = Key(lowOrderPoints[2])
+	cImpl.ourPublic = lowOrderEncodings(t)["order8a"]
 	initiate, _, err := client.NextHandshake(welcome)
 	require.NoError(t, err, "client INITIATE build")
 	_, _, err = server.NextHandshake(initiate)
@@ -473,9 +473,9 @@ func TestCurve_RejectsZeroServerKey(t *testing.T) {
 // also reject each of the canonical Curve25519 low-order points.
 func TestCurve_RejectsLowOrderServerKey(t *testing.T) {
 	clientPub, clientSec := genPair(t)
-	for i, pt := range lowOrderPoints {
-		_, err := NewCurveClient(Key(pt), clientPub, clientSec, nil)
-		require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "low-order point %d", i)
+	for name, pt := range lowOrderEncodings(t) {
+		_, err := NewCurveClient(pt, clientPub, clientSec, nil)
+		require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "low-order point %s", name)
 	}
 }
 

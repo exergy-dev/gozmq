@@ -4,6 +4,28 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
 
 ## [Unreleased]
 
+### Security
+
+- PLAIN: a `WithPlainAuth` socket that connected, or a `WithPlainClient`
+  socket that bound, silently used NULL and authenticated nobody. The PLAIN
+  role now follows the option; setting both is an error.
+- ZAP now also vets PLAIN/CURVE servers that connect rather than bind.
+- inproc: `WithSecurityMech` sockets took the direct-pipe bypass and ran no
+  handshake at all.
+- Handshake frames are capped at 64 KiB; an unauthenticated peer could make
+  the server allocate up to `MaxMessageSize` (64 MiB) per connection with a
+  9-byte header.
+- CURVE: low-order public keys with bit 255 set were accepted, letting a
+  client forge the INITIATE vouch without a secret key. All low-order keys
+  are now rejected.
+- A ZAP policy returning an over-long metadata name no longer panics inside
+  the handshake; it yields a 500 response.
+
+### Added
+
+- `security.DecodeError` for recognising a peer's ERROR command in custom
+  mechanisms.
+
 ### Changed
 
 - **Behaviour change — PAIR:** a peer disconnect is no longer surfaced to
@@ -61,6 +83,12 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
   SUBSCRIBE now yields the matching CANCEL and no longer suppresses later
   SUBSCRIBEs for that prefix; a peer can no longer CANCEL a prefix it never
   subscribed to.
+- The greeting rejects a peer announcing a different security mechanism, as
+  ZMTP and libzmq require.
+- NULL and CURVE clients report a server ERROR (e.g. ZAP denial) as
+  `ErrAuthFailed` with the reason, not `ErrMalformedFrame`.
+- NULL consults the ZAP handler only when a ZAP domain is set, matching
+  libzmq.
 
 ## [1.0.0] - 2026-08-10
 

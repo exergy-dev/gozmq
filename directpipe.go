@@ -51,12 +51,12 @@ func (s *Socket) connectStream(tr iface.Transport, endpoint string) error {
 // Direct-pipe (inproc session bypass)
 // --------------------------------------------------------------------------
 
-// hasSecurityMech reports whether the socket is configured with PLAIN or
-// CURVE security. Direct-pipe bypass is only safe when the transport is
-// in-process AND no security handshake is required.
+// hasSecurityMech reports whether the socket is configured with PLAIN,
+// CURVE, or a WithSecurityMech mechanism. Direct-pipe bypass is only safe
+// when the transport is in-process AND no security handshake is required.
 func (s *Socket) hasSecurityMech() bool {
 	return s.cfg.plainClient || s.cfg.plainAuth != nil ||
-		(len(s.cfg.curveSecretKey) == 32)
+		len(s.cfg.curveSecretKey) == 32 || s.cfg.newSecurityMech != nil
 }
 
 // connectDirectPipe is the inproc fast path that replaces the full

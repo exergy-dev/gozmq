@@ -27,7 +27,6 @@ package curve
 
 import (
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -322,6 +321,9 @@ func (m *curveMech) nextClient(in []byte) ([]byte, bool, error) {
 		if in == nil {
 			return nil, false, fmt.Errorf("gozmq/security/curve: client expected WELCOME, got nil: %w", zmqerr.ErrMalformedFrame)
 		}
+		if err := peerError(in); err != nil {
+			return nil, false, err
+		}
 		cookie, err := m.parseWelcome(in)
 		if err != nil {
 			return nil, false, err
@@ -336,6 +338,9 @@ func (m *curveMech) nextClient(in []byte) ([]byte, bool, error) {
 	case stateInitiateSent:
 		if in == nil {
 			return nil, false, fmt.Errorf("gozmq/security/curve: client expected READY, got nil: %w", zmqerr.ErrMalformedFrame)
+		}
+		if err := peerError(in); err != nil {
+			return nil, false, err
 		}
 		if err := m.parseReady(in); err != nil {
 			return nil, false, err
@@ -589,9 +594,6 @@ func (m *curveMech) parseWelcome(body []byte) ([]byte, error) {
 
 // buildInitiate constructs the INITIATE command body on the client side.
 // Layout: [8]"INITIATE" + cookie(96) + short-nonce(8) + initiate-box(variable).
-//
-// This is the last step that uses the client's long-term secret c; it is
-// wiped (best-effort) before returning.
 func (m *curveMech) buildInitiate(cookie []byte) ([]byte, error) {
 	if len(cookie) != cookieSize {
 		return nil, fmt.Errorf("gozmq/security/curve: INITIATE cookie length %d != %d", len(cookie), cookieSize)
@@ -614,8 +616,6 @@ func (m *curveMech) buildInitiate(cookie []byte) ([]byte, error) {
 	if err := assertLen(len(vouchBox), vouchBoxSize, "vouch box"); err != nil {
 		return nil, err
 	}
-	// The vouch was the long-term secret's last use on the client.
-	wipe(m.ourSecret[:])
 	// Vouch wire form: 16-byte random nonce suffix || 80-byte cipher.
 	vouch := make([]byte, 0, vouchSize)
 	vouch = append(vouch, vouchR[:]...)
@@ -764,9 +764,9 @@ func (m *curveMech) parseInitiate(body []byte) ([]byte, error) {
 	}
 	m.MergePeerMetadata(props)
 	m.peerShortNonce = counter + 1
-	// The handshake no longer needs the server's long-term secret or the
-	// cookie key; drop both (best-effort) now that INITIATE is accepted.
-	wipe(m.ourSecret[:])
+	// The per-connection cookie key is no longer needed; drop it
+	// (best-effort). The long-term secret is not wiped: the socket's
+	// configuration keeps its own copy for every later connection.
 	wipe(m.cookieKey[:])
 	return nil, nil
 }
@@ -971,6 +971,20 @@ func errorCommand(reason string) []byte {
 	return zmtp.EncodeCommand(zmtp.Command{Name: zmtp.CmdError, Body: payload})
 }
 
+// peerError returns an error wrapping ErrAuthFailed when body is the ERROR
+// a server sends instead of WELCOME or READY to reject the handshake, and
+// nil for any other command. An ERROR with a truncated reason is malformed.
+func peerError(body []byte) error {
+	reason, isErr, err := security.DecodeError(body)
+	if !isErr {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("gozmq/security/curve: server rejected handshake: %q: %w", reason, zmqerr.ErrAuthFailed)
+}
+
 // wipe overwrites b with zeros. Zeroization in Go is strictly best-effort:
 // the runtime may already have copied the secret during stack growth or GC,
 // and the compiler may elide stores it can prove dead. It still shortens
@@ -1039,110 +1053,26 @@ func (m *curveMech) requireCounterAdvance(counter uint64, frame string) error {
 	return nil
 }
 
-// lowOrderPoints lists the known Curve25519 u-coordinates whose order
-// divides 8 (so X25519 with these as the peer's public collapses to a
-// predictable small-subgroup element regardless of our secret). RFC 7748
-// §6.1 calls these out as points an implementation should reject when
-// contributory behaviour is required; CurveZMQ relies on contributory
-// ECDH through nacl/box, so we reject these before they reach box.Seal
-// or box.Open.
-//
-// The eight values are the canonical list published by Daniel J.
-// Bernstein and re-used by libsodium's crypto_scalarmult validation:
-//
-//  1. 0x00 × 32                    — zero u-coordinate (order 4 point)
-//  2. 0x01 followed by 0x00 × 31   — order-1 point
-//  3. 325606250916557431795983626356110631294008115727848805560023387167927233504  — order-8 point (little-endian below)
-//  4. 39382357235489614581723060781553021112529911719440698176882885853963445705823 — order-8 point (second)
-//  5. p - 1                         — order-2 point
-//  6. p                             — equivalent to 0 mod p
-//  7. p + 1                         — equivalent to 1 mod p
-//  8. p + (order-8 point #1)        — wrap-around variants
-//
-// Hard-coded little-endian 32-byte encodings follow. They're also
-// reachable via the constants used by x/crypto/curve25519 internally,
-// but that package does not export them, so we mirror the list here.
-var lowOrderPoints = [...][32]byte{
-	// 0 (also p, p*2, ...).
-	{
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	},
-	// 1 (order 1).
-	{
-		0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	},
-	// Order-8 point A.
-	{
-		0xe0, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae,
-		0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4, 0x6a,
-		0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd,
-		0x86, 0x62, 0x05, 0x16, 0x5f, 0x49, 0xb8, 0x00,
-	},
-	// Order-8 point B.
-	{
-		0x5f, 0x9c, 0x95, 0xbc, 0xa3, 0x50, 0x8c, 0x24,
-		0xb1, 0xd0, 0xb1, 0x55, 0x9c, 0x83, 0xef, 0x5b,
-		0x04, 0x44, 0x5c, 0xc4, 0x58, 0x1c, 0x8e, 0x86,
-		0xd8, 0x22, 0x4e, 0xdd, 0xd0, 0x9f, 0x11, 0x57,
-	},
-	// p - 1 (order 2).
-	{
-		0xec, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
-	},
-	// p (≡ 0) — wrap-around of the zero point.
-	{
-		0xed, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
-	},
-	// p + 1 (≡ 1) — wrap-around of the order-1 point.
-	{
-		0xee, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
-	},
-	// p + order-8 point A — wrap-around.
-	{
-		0xcd, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae,
-		0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4, 0x6a,
-		0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd,
-		0x86, 0x62, 0x05, 0x16, 0x5f, 0x49, 0xb8, 0x80,
-	},
-}
+// lowOrderProbe is an arbitrary fixed scalar for validatePeerPublicKey.
+// X25519 clamps it to a multiple of 8, so the product is zero exactly for
+// the small-order points, whatever the scalar.
+var lowOrderProbe = [KeySize]byte{1}
 
-// validatePeerPublicKey rejects the all-zero key and Curve25519 low-order
-// points before they are used in box.Open/box.Seal. Returns an error
-// wrapping ErrAuthFailed on rejection.
+// validatePeerPublicKey rejects the all-zero key and every Curve25519
+// low-order point, in any encoding (including non-canonical ones and those
+// with bit 255 set, which RFC 7748 masks off), before it is used in
+// box.Open/box.Seal. nacl/box does not check: a low-order peer key makes the
+// shared key a constant anyone can compute. Returns an error wrapping
+// ErrAuthFailed on rejection.
 //
-// All comparisons are constant-time (crypto/subtle) to avoid timing
-// oracles. The check is cheap — eight 32-byte compares — and runs once
-// per handshake per peer key, not per MESSAGE, so there is no hot-path
-// cost.
+// curve25519.X25519 returns an error precisely when its output is all zero,
+// i.e. when the point has small order, and runs in constant time. It costs
+// one scalar multiplication per handshake per peer key, never per MESSAGE.
 func validatePeerPublicKey(pk []byte) error {
 	if len(pk) != KeySize {
 		return fmt.Errorf("gozmq/security/curve: peer public key length %d != %d: %w", len(pk), KeySize, zmqerr.ErrAuthFailed)
 	}
-	var zero [KeySize]byte
-	if subtle.ConstantTimeCompare(pk, zero[:]) == 1 {
-		return fmt.Errorf("gozmq/security/curve: peer public key is zero or low-order: %w", zmqerr.ErrAuthFailed)
-	}
-	// Collapse the hit flag into a single bit without branching on pk.
-	var hit int
-	for i := range lowOrderPoints {
-		hit |= subtle.ConstantTimeCompare(pk, lowOrderPoints[i][:])
-	}
-	if hit != 0 {
+	if _, err := curve25519.X25519(lowOrderProbe[:], pk); err != nil {
 		return fmt.Errorf("gozmq/security/curve: peer public key is zero or low-order: %w", zmqerr.ErrAuthFailed)
 	}
 	return nil

@@ -111,6 +111,9 @@ func NewPlainServer(authenticate func(user, pass string) bool, localMeta map[str
 // Name reports the greeting mechanism token, unpadded.
 func (*plainMech) Name() string { return plainMechName }
 
+// IdentityFraming reports that PLAIN frames cross the wire unmodified.
+func (*plainMech) IdentityFraming() bool { return true }
+
 // EncodeFrame is the identity codec for PLAIN — no per-frame rewriting.
 func (*plainMech) EncodeFrame(flags uint8, plain []byte) (uint8, []byte, error) {
 	return flags, plain, nil

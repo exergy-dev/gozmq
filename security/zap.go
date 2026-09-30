@@ -1,10 +1,10 @@
 // ZAP (ZeroMQ Authentication Protocol) handler-side codec.
 //
 // RFC 27 (https://rfc.zeromq.org/spec/27) defines an inproc authorization
-// protocol: a security mechanism (PLAIN or CURVE), on the server side of a
-// connection, issues a ZAP request to a user-supplied ZAP handler socket
-// bound to "inproc://zeromq.zap.01". The handler replies with a status code
-// that determines whether the connection is accepted, along with an optional
+// protocol: a security mechanism, on the server side of a connection,
+// issues a ZAP request to a ZAP handler socket bound to
+// "inproc://zeromq.zap.01". The handler replies with a status code that
+// determines whether the connection is accepted, along with an optional
 // user-id and a metadata property list forwarded to the mechanism.
 //
 // Scope
@@ -17,12 +17,12 @@
 //   EncodeZapResponse, DecodeZapResponse
 //   ZapHandler.ServeRequest (pure: request -> response)
 //
-// all as pure logic over [][]byte frames, testable without any socket. The
-// ZAP handler itself is a user-supplied inproc socket (typically REP-style)
-// bound to "inproc://zeromq.zap.01" on the Context; the authenticatee side
-// of a security mechanism consults it during the handshake by routing
-// frames through ServeRequest. The CURVE integration invokes the handler
-// via that inproc endpoint.
+// all as pure logic over [][]byte frames, testable without any socket.
+// gozmq does not bind "inproc://zeromq.zap.01": a ZapHandler installed with
+// gozmq.WithZapHandler is called directly, in the handshake goroutine, by
+// the server side of PLAIN, CURVE, and (when a ZAP domain is set) NULL. The
+// codec is exported so an application can also serve RFC 27 on a real
+// socket, e.g. for libzmq peers in the same process.
 //
 // Wire format per RFC 27 §3
 // -------------------------
@@ -266,21 +266,42 @@ func DecodeZapRequest(frames [][]byte) (*ZapRequest, error) {
 // Metadata map is treated as empty (zero-length frame 5). The returned slice
 // does NOT alias resp's fields — we allocate fresh frames because responses
 // typically flow on a socket that will pool/retain them.
+//
+// Metadata a property list cannot carry (a name over 255 bytes, or a value
+// over 2^32-1) is a policy bug; rather than panic inside a handshake, the
+// response is replaced with a 500 carrying no user-id or metadata.
 func EncodeZapResponse(resp *ZapResponse) [][]byte {
 	version := resp.Version
 	if version == "" {
 		version = zapVersion
 	}
-	metadataBytes := zmtp.MetadataCodec.Encode(resp.Metadata)
+	statusCode, statusText, userID, meta := resp.StatusCode, resp.StatusText, resp.UserID, resp.Metadata
+	if err := validateZapMetadata(meta); err != nil {
+		statusCode, statusText, userID, meta = ZapStatusServerError, err.Error(), "", nil
+	}
 
 	return [][]byte{
 		bytes.Clone([]byte(version)),
 		bytes.Clone(resp.RequestID),
-		bytes.Clone([]byte(resp.StatusCode)),
-		bytes.Clone([]byte(resp.StatusText)),
-		bytes.Clone([]byte(resp.UserID)),
-		metadataBytes,
+		bytes.Clone([]byte(statusCode)),
+		bytes.Clone([]byte(statusText)),
+		bytes.Clone([]byte(userID)),
+		zmtp.MetadataCodec.Encode(meta),
 	}
+}
+
+// validateZapMetadata reports whether meta fits a ZMTP property list, whose
+// encoder panics otherwise.
+func validateZapMetadata(meta map[string]string) error {
+	for name, value := range meta {
+		if len(name) > 255 {
+			return fmt.Errorf("gozmq/security/zap: metadata name length %d exceeds 255", len(name))
+		}
+		if uint64(len(value)) > 0xFFFFFFFF {
+			return fmt.Errorf("gozmq/security/zap: metadata %q value length %d exceeds 2^32-1", name, len(value))
+		}
+	}
+	return nil
 }
 
 // DecodeZapResponse parses a multi-frame ZAP response. Version mismatch or a

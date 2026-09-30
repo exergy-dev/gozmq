@@ -12,11 +12,11 @@ import (
 	"github.com/exergy-dev/gozmq/internal/bufpool"
 	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/zmtp"
 )
 
-// Greeting layout constants. Duplicated from zmtp/greeting.go on purpose:
-// the session package does not import zmtp directly. The byte layout is
-// fixed by ZMTP 3.1 §2.1 and will not drift.
+// Greeting layout constants, mirroring zmtp/greeting.go. The byte layout
+// is fixed by ZMTP 3.1 §2.1 and will not drift.
 const (
 	greetingSize        = 64
 	greetingMechOff     = 12
@@ -27,6 +27,12 @@ const (
 	greetingSigPrefix   = 0xFF
 	greetingSigTerm     = 0x7F
 )
+
+// handshakeMaxFrame caps inbound handshake frames: the codec allocates a body
+// from its length header, so a MaxMessageSize cap would let an unauthenticated
+// peer pin that much per connection, while real handshake commands are a few
+// hundred bytes.
+const handshakeMaxFrame = 64 << 10
 
 // doHandshake drives greeting + security handshake under HandshakeTimeout.
 // On any failure it returns an error wrapping zmqerr.ErrHandshakeTimeout
@@ -116,24 +122,18 @@ func (s *sessionImpl) exchangeGreeting() error {
 	if err != nil {
 		return err
 	}
-	// We do not require strict mechanism agreement here — the security
-	// layer's NextHandshake will fail naturally if the peer chose a
-	// different mechanism. We only assert that the peer also speaks
-	// ZMTP 3.x (decode would have rejected anything else) and record
-	// the heartbeat capability: any minor >= 1 is treated as 3.1
-	// (heartbeats available). design §5.4: skip PING/PONG if peer is
-	// 3.0.
+	// ZMTP requires both peers to use the same mechanism and to close the
+	// connection otherwise, as libzmq does. Leaving it to the mechanism's
+	// parser would let a first message that happens to parse run the
+	// handshake against a peer speaking something else.
+	if mech != s.cfg.Mech.Name() {
+		return fmt.Errorf("gozmq/session: security mechanism mismatch: peer %q, ours %q", mech, s.cfg.Mech.Name())
+	}
+	// Decode already rejected anything but ZMTP 3.x. Any minor >= 1 is
+	// treated as 3.1 (heartbeats available); design §5.4: skip PING/PONG
+	// if the peer is 3.0.
 	if peerMinor >= 0x01 {
 		s.peerHeartbeats = true
-	}
-	// Mechanism mismatch is informational; the actual negotiation rule
-	// is decided by NextHandshake. We log if there's a mismatch so it's
-	// observable in tests.
-	if mech != s.cfg.Mech.Name() {
-		s.cfg.Logger.Debug(
-			"gozmq/session: peer mechanism differs from ours",
-			"peer", mech, "ours", s.cfg.Mech.Name(),
-		)
 	}
 	return nil
 }
@@ -151,9 +151,10 @@ func (s *sessionImpl) exchangeGreeting() error {
 //
 // "Message" here is whatever NextHandshake returns — it's not framed
 // in any particular way at the session level; for NULL/PLAIN it's a
-// single READY command body. We use the FrameCodec for the wire form
-// so the codec sees every command exchange.
+// single READY command body. Writes go through the session's FrameCodec;
+// reads use a ZMTP codec capped at handshakeMaxFrame (see there).
 func (s *sessionImpl) runSecurityHandshake() error {
+	readCodec := zmtp.NewFrameCodec(handshakeMaxFrame)
 	var in []byte
 	for {
 		out, done, err := s.cfg.Mech.NextHandshake(in)
@@ -201,7 +202,7 @@ func (s *sessionImpl) runSecurityHandshake() error {
 		}
 
 		// Read the peer's next handshake message.
-		flags, body, rerr := s.cfg.Codec.ReadFrame(s.reader, nil)
+		flags, body, rerr := readCodec.ReadFrame(s.reader, nil)
 		// Always reap the writer before propagating either error. On the
 		// error paths body is nil or an unreferenced pool buffer — return
 		// it rather than leaking it from the pool.

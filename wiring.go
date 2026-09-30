@@ -20,7 +20,9 @@ func (s *Socket) buildSession(conn iface.Conn, role iface.Role) (iface.Session, 
 	if err != nil {
 		return nil, err
 	}
-	if role == iface.RoleServer {
+	// Key ZAP off the mechanism's handshake role, not the transport role: a
+	// PLAIN or CURVE server that Connects still authorizes its peer.
+	if mech.AsServer() {
 		if cfg, ok := mech.(iface.ZapConfigurable); ok && s.ctx.zapAuth != nil {
 			cfg.ConfigureZAP(s.ctx.zapAuth, s.cfg.zapDomain, conn.RemoteEndpoint())
 		}
@@ -51,6 +53,11 @@ func toKey(b []byte) curve.Key {
 // outright; otherwise the precedence is CURVE > PLAIN > NULL.
 // A configured mechanism that cannot be constructed is an error — never
 // a silent downgrade to a weaker mechanism.
+//
+// PLAIN and CURVE take their handshake role from the options alone, like
+// libzmq's ZMQ_PLAIN_SERVER / ZMQ_CURVE_SERVER: a WithPlainAuth socket is
+// the PLAIN server whether it binds or connects. Only NULL and custom
+// mechanisms see the transport role.
 func (s *Socket) newMechanism(role iface.Role) (iface.SecurityMech, error) {
 	meta := map[string]string{
 		"Socket-Type": socketTypeName(s.socketType),
@@ -81,9 +88,11 @@ func (s *Socket) newMechanism(role iface.Role) (iface.SecurityMech, error) {
 			return nil, fmt.Errorf("gozmq: CURVE client mechanism: %w", err)
 		}
 		return m, nil
-	case s.cfg.plainAuth != nil && role == iface.RoleServer:
+	case s.cfg.plainAuth != nil && s.cfg.plainClient:
+		return nil, fmt.Errorf("gozmq: WithPlainAuth and WithPlainClient are mutually exclusive")
+	case s.cfg.plainAuth != nil:
 		return security.NewPlainServer(s.cfg.plainAuth, meta), nil
-	case s.cfg.plainClient && role == iface.RoleClient:
+	case s.cfg.plainClient:
 		return security.NewPlainClient(s.cfg.plainClientUser, s.cfg.plainClientPass, meta), nil
 	}
 	return security.NewNull(role, meta), nil
