@@ -4,6 +4,14 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
 
 ## [Unreleased]
 
+### Changed
+
+- **Behaviour change — PAIR:** a peer disconnect is no longer surfaced to
+  the application. `RecvMsg` delivers any messages the old peer left
+  buffered, then blocks until the next peer attaches (libzmq semantics)
+  instead of returning `io.EOF`; a `SendMsg` racing the disconnect waits
+  for the next peer instead of returning `io.ErrClosedPipe`.
+
 ### Fixed
 
 - `Socket.Close` with a positive linger now flushes the entire outbound queue
@@ -18,6 +26,13 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
   via an `IdentityFraming() bool` method.
 - `WithHeartbeat` timeout 0 now means 3× the interval, as documented
   (previously 2×).
+- REQ/REP: concurrent `SendMsg`/`RecvMsg` calls could both pass the
+  state-machine check (two requests in flight, or an overwritten REP
+  envelope); the loser now gets `ErrFSMViolation`.
+- REP: a reply to a requester that has just disconnected is dropped
+  silently instead of returning a raw `io.ErrClosedPipe`.
+- PAIR: a reconnecting peer is no longer rejected when it attaches before
+  the previous peer's pipe has been detached.
 
 ## [1.0.0] - 2026-08-10
 

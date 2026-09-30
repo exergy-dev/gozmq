@@ -15,11 +15,18 @@ import (
 // after a successful Send it transitions to canRecv; after a successful
 // Recv it returns to canSend. Calling Send in canRecv (or Recv in
 // canSend) is an ErrFSMViolation.
+//
+// sending and receiving mark a Send or Recv in progress. They are
+// reserved under e.mu before the engine lock is dropped, so a concurrent
+// call sees them and fails with ErrFSMViolation instead of both passing
+// the check and putting two requests (or two readers) in flight.
 type reqState uint8
 
 const (
 	reqStateCanSend reqState = iota
 	reqStateCanRecv
+	reqStateSending
+	reqStateReceiving
 )
 
 // reqEngine implements iface.SocketEngine for the REQ socket type.
@@ -53,7 +60,8 @@ const (
 // request.
 //
 // Thread-safe: Send and Recv serialize against each other via the engine
-// mutex plus the FSM state. Recv reads the sticky pipe's receive channel
+// mutex plus the FSM state; a call made while another is in progress
+// returns ErrFSMViolation. Recv reads the sticky pipe's receive channel
 // inline — no per-request goroutine or context is allocated; the parked
 // Recv unblocks on the sticky pipe's Closed() signal or on the engine's
 // closeCh.
@@ -128,11 +136,42 @@ func (e *reqEngine) Send(ctx context.Context, m *msg.Msg) error {
 		return fmt.Errorf("req send: %w", zmqerr.ErrSocketClosed)
 	}
 	if e.state != reqStateCanSend {
+		state := e.state
 		e.mu.Unlock()
-		return fmt.Errorf("req send: out of order (Recv expected next): %w", zmqerr.ErrFSMViolation)
+		return fmt.Errorf("req send: %s: %w", state.violation(), zmqerr.ErrFSMViolation)
 	}
+	e.state = reqStateSending
 	e.mu.Unlock()
 
+	if err := e.send(ctx, m); err != nil {
+		e.mu.Lock()
+		if e.state == reqStateSending {
+			e.state = reqStateCanSend
+			if e.ring.len() > 0 {
+				e.sendGate.arm()
+			}
+		}
+		e.mu.Unlock()
+		return err
+	}
+	return nil
+}
+
+// violation describes why a call is out of order in state s.
+func (s reqState) violation() string {
+	switch s {
+	case reqStateCanSend:
+		return "out of order (Send expected next)"
+	case reqStateCanRecv:
+		return "out of order (Recv expected next)"
+	default:
+		return "another Send or Recv is in progress"
+	}
+}
+
+// send delivers one request with the FSM reserved in reqStateSending. On
+// success it moves the FSM to canRecv; on error the caller restores canSend.
+func (e *reqEngine) send(ctx context.Context, m *msg.Msg) error {
 	// Build wire message: empty delimiter + caller's frames. The slice is
 	// built locally and handed off, so adopt it directly (no extra copy).
 	var body [][]byte
@@ -229,9 +268,11 @@ func (e *reqEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		return nil, fmt.Errorf("req recv: %w", zmqerr.ErrSocketClosed)
 	}
 	if e.state != reqStateCanRecv {
+		state := e.state
 		e.mu.Unlock()
-		return nil, fmt.Errorf("req recv: out of order (Send expected next): %w", zmqerr.ErrFSMViolation)
+		return nil, fmt.Errorf("req recv: %s: %w", state.violation(), zmqerr.ErrFSMViolation)
 	}
+	e.state = reqStateReceiving
 	sticky := e.sticky
 	closeCh := e.closeCh
 	e.mu.Unlock()
@@ -242,13 +283,14 @@ func (e *reqEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		// intact: the reply is still in flight and a retried Recv must
 		// await it (libzmq EAGAIN semantics). Peer-gone and close reset
 		// to canSend so a fresh Send can pick a new peer.
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, err
-		}
 		e.mu.Lock()
-		if e.state == reqStateCanRecv {
-			e.state = reqStateCanSend
-			e.sticky = nil
+		if e.state == reqStateReceiving {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				e.state = reqStateCanRecv
+			} else {
+				e.state = reqStateCanSend
+				e.sticky = nil
+			}
 		}
 		e.mu.Unlock()
 		return nil, err

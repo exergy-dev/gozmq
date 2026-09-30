@@ -87,6 +87,106 @@ func TestRep_DoubleRecvFSMViolation(t *testing.T) {
 	require.ErrorIs(t, err, zmqerr.ErrFSMViolation, "second recv")
 }
 
+// TestRep_ConcurrentRecvFSMViolation: a second Recv while one is already
+// parked fails fast instead of overwriting the first one's envelope.
+func TestRep_ConcurrentRecvFSMViolation(t *testing.T) {
+	t.Parallel()
+	eng := socket.NewRepEngine()
+	defer eng.Close()
+
+	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(a, b)
+	mustAttach(t, eng, a)
+
+	ctx := testCtx(t)
+	mc1, ec1 := recvAsync(ctx, eng)
+	time.Sleep(20 * time.Millisecond)
+	rctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	_, err := eng.Recv(rctx)
+	cancel()
+	require.ErrorIs(t, err, zmqerr.ErrFSMViolation, "concurrent recv")
+
+	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte("id"), []byte{}, []byte("q"))))
+	select {
+	case m := <-mc1:
+		require.Equal(t, "q", string(m.Bytes()))
+	case err := <-ec1:
+		require.Failf(t, "first recv failed", "%v", err)
+	case <-ctx.Done():
+		require.Fail(t, "first recv did not get the request")
+	}
+	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("a"))))
+	got, err := b.Recv(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []byte("id"), got.Frames()[0], "reply keeps the first request's envelope")
+}
+
+// TestRep_RecvCtxCancelRestoresCanRecv: a Recv abandoned by its context
+// releases the in-flight reservation.
+func TestRep_RecvCtxCancelRestoresCanRecv(t *testing.T) {
+	t.Parallel()
+	eng := socket.NewRepEngine()
+	defer eng.Close()
+
+	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(a, b)
+	mustAttach(t, eng, a)
+
+	rctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := eng.Recv(rctx)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	ctx := testCtx(t)
+	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("q"))))
+	got, err := eng.Recv(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "q", string(got.Bytes()))
+}
+
+// TestRep_SendToVanishedRequester: a reply whose requester closed before
+// the socket layer detached its pipe is dropped silently (libzmq), not
+// surfaced as a raw io.ErrClosedPipe; the FSM returns to canRecv.
+func TestRep_SendToVanishedRequester(t *testing.T) {
+	t.Parallel()
+	eng := socket.NewRepEngine()
+	defer eng.Close()
+
+	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(a, b)
+	mustAttach(t, eng, a)
+
+	ctx := testCtx(t)
+	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("q"))))
+	_, err := eng.Recv(ctx)
+	require.NoError(t, err)
+	require.NoError(t, b.Close())
+
+	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("a"))))
+	require.Zero(t, eng.Metrics().Sent, "dropped reply must not count as sent")
+	err = eng.Send(ctx, msg.FromBytes([]byte("a")))
+	require.ErrorIs(t, err, zmqerr.ErrFSMViolation, "FSM back to canRecv")
+}
+
+// TestRep_SkipsMalformedRequest: a request with no empty delimiter is
+// dropped and Recv moves on to the next one.
+func TestRep_SkipsMalformedRequest(t *testing.T) {
+	t.Parallel()
+	eng := socket.NewRepEngine()
+	defer eng.Close()
+
+	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(a, b)
+	mustAttach(t, eng, a)
+
+	ctx := testCtx(t)
+	require.NoError(t, b.Send(ctx, msg.FromBytes([]byte("no-delimiter"))))
+	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("good"))))
+	got, err := eng.Recv(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "good", string(got.Bytes()))
+}
+
 // TestRep_SendBeforeRecvFSMViolation asserts that Send without a prior
 // Recv returns ErrFSMViolation.
 func TestRep_SendBeforeRecvFSMViolation(t *testing.T) {

@@ -3,7 +3,9 @@ package socket
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"sync"
 
 	"github.com/exergy-dev/gozmq/internal/iface"
@@ -14,11 +16,14 @@ import (
 // repState enumerates the REP lock-step FSM. REP starts in canRecv;
 // after a successful Recv it transitions to canSend; after a successful
 // Send it returns to canRecv. Out-of-order calls return ErrFSMViolation.
+// receiving marks a Recv in progress, reserved under e.mu so a concurrent
+// Recv fails instead of overwriting the first one's envelope.
 type repState uint8
 
 const (
 	repStateCanRecv repState = iota
 	repStateCanSend
+	repStateReceiving
 )
 
 // repEngine implements iface.SocketEngine for the REP socket type.
@@ -46,7 +51,8 @@ const (
 // canRecv so the application may continue.
 //
 // Thread-safe: Send and Recv serialize via the engine mutex; the FSM
-// state guards alternation.
+// state guards alternation, and a Recv made while another is in progress
+// returns ErrFSMViolation.
 type repEngine struct {
 	fq *FairQueue
 
@@ -99,15 +105,26 @@ func (e *repEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		e.mu.Unlock()
 		return nil, fmt.Errorf("rep recv: %w", zmqerr.ErrSocketClosed)
 	}
-	if e.state != repStateCanRecv {
+	switch e.state {
+	case repStateCanRecv:
+	case repStateReceiving:
+		e.mu.Unlock()
+		return nil, fmt.Errorf("rep recv: another Recv is in progress: %w", zmqerr.ErrFSMViolation)
+	default:
 		e.mu.Unlock()
 		return nil, fmt.Errorf("rep recv: out of order (Send expected next): %w", zmqerr.ErrFSMViolation)
 	}
+	e.state = repStateReceiving
 	e.mu.Unlock()
 
 	for {
 		m, src, err := e.fq.RecvWithSource(ctx)
 		if err != nil {
+			e.mu.Lock()
+			if e.state == repStateReceiving {
+				e.state = repStateCanRecv
+			}
+			e.mu.Unlock()
 			return nil, err
 		}
 		envelope, body, ok := splitRepEnvelope(m)
@@ -115,6 +132,7 @@ func (e *repEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 			// Malformed incoming frame — skip it and keep receiving.
 			// Strict libzmq drops such frames silently; we do the same
 			// to stay interop-safe.
+			msg.Recycle(m)
 			continue
 		}
 		e.mu.Lock()
@@ -168,6 +186,11 @@ func (e *repEngine) Send(ctx context.Context, m *msg.Msg) error {
 	// without the extra copy FromFrames would make.
 	wire := msg.FromFramesOwned(wireFrames)
 	if err := peer.Send(ctx, wire); err != nil {
+		if errors.Is(err, io.ErrClosedPipe) {
+			// The requester vanished before its detach landed; drop the
+			// reply silently, as for a detached peer above.
+			return nil
+		}
 		return err
 	}
 	e.sent.Add(1)

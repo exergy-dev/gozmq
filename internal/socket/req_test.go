@@ -2,6 +2,7 @@ package socket_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -78,6 +79,127 @@ func TestReq_DoubleSendFSMViolation(t *testing.T) {
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("1"))), "first send")
 	err := eng.Send(ctx, msg.FromBytes([]byte("2")))
 	require.ErrorIs(t, err, zmqerr.ErrFSMViolation, "second send")
+}
+
+// TestReq_ConcurrentSendsOneWins: the canSend check and the transition
+// must be atomic, so of several concurrent Sends exactly one puts a
+// request in flight and the rest fail with ErrFSMViolation. The pipe
+// starts full so every Send that passes the check parks, widening the
+// race window.
+func TestReq_ConcurrentSendsOneWins(t *testing.T) {
+	t.Parallel()
+	eng := socket.NewReqEngine()
+	defer eng.Close()
+
+	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(a, b)
+	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("fill"))))
+	mustAttach(t, eng, a)
+
+	ctx := testCtx(t)
+	const n = 8
+	errs := make(chan error, n)
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		go func() {
+			<-start
+			errs <- eng.Send(ctx, msg.FromBytes([]byte("q")))
+		}()
+	}
+	close(start)
+	// Give every Send time to get past the state check before the peer
+	// frees pipe capacity.
+	time.Sleep(50 * time.Millisecond)
+
+	// Collect results while the peer drains, so the winner (and, without
+	// the atomic reservation, any extra in-flight requests) can land.
+	var ok, fsm, requests int
+	deadline := time.After(time.Second)
+	for ok+fsm < n {
+		rctx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+		if m, err := b.Recv(rctx); err == nil && m.NumFrames() == 2 {
+			requests++
+		}
+		cancel()
+		for drained := false; !drained; {
+			select {
+			case err := <-errs:
+				switch {
+				case err == nil:
+					ok++
+				case errors.Is(err, zmqerr.ErrFSMViolation):
+					fsm++
+				default:
+					require.Failf(t, "unexpected send error", "%v", err)
+				}
+			default:
+				drained = true
+			}
+		}
+		select {
+		case <-deadline:
+			require.Failf(t, "sends did not finish", "ok=%d fsm=%d", ok, fsm)
+		default:
+		}
+	}
+	require.Equal(t, 1, ok, "exactly one Send should win")
+	require.Equal(t, n-1, fsm)
+	require.LessOrEqual(t, requests, 1, "only one request may be in flight")
+}
+
+// TestReq_ConcurrentRecvFSMViolation: a second Recv while one is already
+// awaiting the reply fails fast instead of racing it for the reply.
+func TestReq_ConcurrentRecvFSMViolation(t *testing.T) {
+	t.Parallel()
+	eng := socket.NewReqEngine()
+	defer eng.Close()
+
+	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(a, b)
+	mustAttach(t, eng, a)
+
+	ctx := testCtx(t)
+	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))))
+	_, err := b.Recv(ctx)
+	require.NoError(t, err)
+
+	mc1, ec1 := recvAsync(ctx, eng)
+	time.Sleep(20 * time.Millisecond)
+	_, err = eng.Recv(ctx)
+	require.ErrorIs(t, err, zmqerr.ErrFSMViolation, "concurrent recv")
+
+	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("a"))))
+	select {
+	case m := <-mc1:
+		require.Equal(t, "a", string(m.Bytes()))
+	case err := <-ec1:
+		require.Failf(t, "first recv failed", "%v", err)
+	case <-ctx.Done():
+		require.Fail(t, "first recv did not get the reply")
+	}
+	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q2"))), "FSM back to canSend")
+}
+
+// TestReq_SendCtxCancelRestoresCanSend: a Send abandoned by its context
+// must release the in-flight reservation so the next Send can proceed.
+func TestReq_SendCtxCancelRestoresCanSend(t *testing.T) {
+	t.Parallel()
+	eng := socket.NewReqEngine()
+	defer eng.Close()
+
+	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(a, b)
+	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("fill"))))
+	mustAttach(t, eng, a)
+
+	sctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, eng.Send(sctx, msg.FromBytes([]byte("q"))), context.DeadlineExceeded)
+
+	ctx := testCtx(t)
+	_, err := b.Recv(ctx) // drain the filler
+	require.NoError(t, err)
+	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))))
 }
 
 // TestReq_RecvBeforeSendFSMViolation asserts that Recv without a prior
