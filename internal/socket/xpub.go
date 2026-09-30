@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -22,13 +22,13 @@ import (
 // libzmq default is verbose=false (dedup enabled); callers that want to
 // observe every subscriber churn event must opt in with verbose=true.
 // Mirrors the semantics of ZMQ_XPUB_VERBOSE on a classic libzmq XPUB.
-func NewXPubEngineV(verbose bool) iface.SocketEngine {
+func NewXPubEngineV(verbose bool) Engine {
 	e := &xpubEngine{
 		verbose:  verbose,
 		recvGate: newReadyGate(),
 		notify:   make(chan struct{}, 1),
 		prefRefs: make(map[string]int),
-		peerSubs: make(map[iface.Pipe]map[string]int),
+		peerSubs: make(map[*pipe.End]map[string]int),
 	}
 	e.pub = newPubEngineBase(e.onSubscription)
 	return e
@@ -63,8 +63,8 @@ type xpubEngine struct {
 	mu sync.Mutex
 	// pending holds the surfaced events not yet returned by Recv.
 	pending  []*msg.Msg
-	prefRefs map[string]int                // prefix -> subscriptions across all peers
-	peerSubs map[iface.Pipe]map[string]int // pipe -> prefix -> subscriptions from that pipe
+	prefRefs map[string]int               // prefix -> subscriptions across all peers
+	peerSubs map[*pipe.End]map[string]int // pipe -> prefix -> subscriptions from that pipe
 }
 
 // onSubscription is the pub engine's onSub hook; see xpubEngine.
@@ -72,7 +72,7 @@ type xpubEngine struct {
 // A CANCEL only counts if the peer itself holds the prefix: otherwise a
 // peer could release another peer's subscription and surface a CANCEL
 // while that peer is still subscribed.
-func (e *xpubEngine) onSubscription(p iface.Pipe, subscribe bool, prefix []byte, m *msg.Msg) {
+func (e *xpubEngine) onSubscription(p *pipe.End, subscribe bool, prefix []byte, m *msg.Msg) {
 	key := string(prefix)
 	e.mu.Lock()
 	surface := e.verbose
@@ -114,7 +114,7 @@ func (e *xpubEngine) signal() {
 }
 
 // AttachPipe delegates to the embedded pub engine.
-func (e *xpubEngine) AttachPipe(p iface.Pipe) error { return e.pub.AttachPipe(p) }
+func (e *xpubEngine) AttachPipe(p *pipe.End) error { return e.pub.AttachPipe(p) }
 
 // DetachPipe removes a peer and releases every subscription it still
 // held. For each prefix whose aggregate count hits zero, a CANCEL is
@@ -124,16 +124,14 @@ func (e *xpubEngine) AttachPipe(p iface.Pipe) error { return e.pub.AttachPipe(p)
 //
 // The peer's reader is stopped first, so no command from p can be
 // applied after its subscriptions are released.
-func (e *xpubEngine) DetachPipe(p iface.Pipe) error {
+func (e *xpubEngine) DetachPipe(p *pipe.End) error {
 	err := e.pub.DetachPipe(p)
 	e.mu.Lock()
 	queued := false
 	for prefix, count := range e.peerSubs[p] {
 		if e.prefRefs[prefix] -= count; e.prefRefs[prefix] <= 0 {
 			delete(e.prefRefs, prefix)
-			cm := msg.FromBytes(subscriptionFrame(false, []byte(prefix)))
-			cm.MarkSubscription()
-			e.pending = append(e.pending, cm)
+			e.pending = append(e.pending, msg.FromBytes(subscriptionFrame(false, []byte(prefix))))
 			queued = true
 		}
 	}
@@ -155,7 +153,7 @@ func (e *xpubEngine) Close() error { return e.pub.Close() }
 // Metrics reports the embedded pub engine's counters (sent per Send call,
 // dropped per HWM-rejected peer, recv per event returned by Recv) with the
 // event queue length as QueueDepth.
-func (e *xpubEngine) Metrics() iface.SocketMetrics {
+func (e *xpubEngine) Metrics() Metrics {
 	e.mu.Lock()
 	depth := uint64(len(e.pending))
 	e.mu.Unlock()
@@ -171,8 +169,6 @@ func (e *xpubEngine) CanRecvNow() bool {
 	defer e.mu.Unlock()
 	return len(e.pending) > 0
 }
-
-var _ Pollable = (*xpubEngine)(nil)
 
 // Recv returns the next queued SUBSCRIBE/CANCEL event. Which events are
 // queued (all, or only prefix-presence transitions) was decided when the

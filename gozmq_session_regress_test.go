@@ -14,7 +14,7 @@ import (
 
 // TestLingerDrainsUnboundedQueue: Socket.Close with a positive linger must
 // flush the whole outbound queue, including an HWM-0 (unbounded) one whose
-// relay goroutine refills the pipe one message at a time. The receiving
+// overflow spills past the pipe's channel. The receiving
 // side runs with an idle second PUSH peer so its FairQueue is in
 // multi-peer (forwarder) mode, which drains a detached pipe to EOF.
 func TestLingerDrainsUnboundedQueue(t *testing.T) {
@@ -71,11 +71,11 @@ func TestLingerDrainsUnboundedQueue(t *testing.T) {
 	}
 }
 
-// TestRecvHWM0NoRelayLeak: an HWM-0 inbound pipe whose session has ended
-// with messages still queued must not keep its relay goroutine alive past
+// TestRecvHWM0NoLeak: an HWM-0 inbound pipe whose session has ended with
+// messages still queued must not keep any goroutine alive past
 // Socket.Close, on either the bind (accepted session) or the connect
 // (reconnector) side.
-func TestRecvHWM0NoRelayLeak(t *testing.T) {
+func TestRecvHWM0NoLeak(t *testing.T) {
 	for _, pullBinds := range []bool{true, false} {
 		t.Run(fmt.Sprintf("pullBinds=%v", pullBinds), func(t *testing.T) {
 			defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
@@ -96,7 +96,7 @@ func TestRecvHWM0NoRelayLeak(t *testing.T) {
 			for i := 0; i < 100; i++ {
 				require.NoError(t, push.SendBytes(c, []byte("x")))
 			}
-			// Let the messages reach pull's relay, then end the session
+			// Let the messages reach pull's pipe, then end the session
 			// from the push side while they are still unread.
 			time.Sleep(100 * time.Millisecond)
 			require.NoError(t, push.Close())

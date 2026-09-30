@@ -15,7 +15,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
@@ -25,9 +24,9 @@ import (
 // makeRouterPeers creates len(ids) pipe pairs where engineEnds[i] sees a
 // peer whose PeerIdentity is ids[i]. Returned ends must be closed by the
 // caller.
-func makeRouterPeers(ids [][]byte, hwm int) (engineEnds, peerEnds []iface.Pipe) {
-	engineEnds = make([]iface.Pipe, len(ids))
-	peerEnds = make([]iface.Pipe, len(ids))
+func makeRouterPeers(ids [][]byte, hwm int) (engineEnds, peerEnds []*pipe.End) {
+	engineEnds = make([]*pipe.End, len(ids))
+	peerEnds = make([]*pipe.End, len(ids))
 	for i, id := range ids {
 		a, b := pipe.NewPair(hwm, hwm, pipe.PeerInfo{Identity: id}, pipe.PeerInfo{})
 		engineEnds[i] = a
@@ -232,7 +231,7 @@ func TestRouter_SynthesizedIdentitiesAreDistinct(t *testing.T) {
 	defer eng.Close()
 	ctx := testCtx(t)
 
-	attach := func(info pipe.PeerInfo) iface.Pipe {
+	attach := func(info pipe.PeerInfo) *pipe.End {
 		a, b := pipe.NewPair(4, 4, info, pipe.PeerInfo{})
 		t.Cleanup(func() { closePipes(a, b) })
 		mustAttach(t, eng, a)
@@ -253,7 +252,7 @@ func TestRouter_SynthesizedIdentitiesAreDistinct(t *testing.T) {
 	binary.BigEndian.PutUint32(squatter[1:], binary.BigEndian.Uint32(firstID[1:])+1)
 
 	const n = 200
-	peers := []iface.Pipe{attach(pipe.PeerInfo{Identity: squatter})}
+	peers := []*pipe.End{attach(pipe.PeerInfo{Identity: squatter})}
 	for range n {
 		peers = append(peers, attach(pipe.PeerInfo{}))
 	}
@@ -307,8 +306,8 @@ func TestRouter_IdentityStableUnderDetachChurn(t *testing.T) {
 		id   []byte
 		anon bool
 		mu   sync.Mutex
-		eng  iface.Pipe // router-side end (currently attached to eng)
-		prx  iface.Pipe // peer-side end
+		eng  *pipe.End // router-side end (currently attached to eng)
+		prx  *pipe.End // peer-side end
 	}
 
 	slots := make([]*peerSlot, nPeers)

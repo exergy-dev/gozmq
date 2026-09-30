@@ -8,7 +8,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
 )
@@ -52,7 +51,7 @@ func TestHandshake_RejectsMechanismMismatch(t *testing.T) {
 		_ = sA.Stop()
 		_ = sB.Stop()
 	}()
-	for label, s := range map[string]iface.Session{"A": sA, "B": sB} {
+	for label, s := range map[string]Session{"A": sA, "B": sB} {
 		waitClosed(t, s.Handshaked(), 2*time.Second, label+": handshake did not finish")
 		err := s.HandshakeErr()
 		require.Error(t, err, label)
@@ -84,7 +83,7 @@ func TestHandshake_BoundsPreAuthFrameSize(t *testing.T) {
 	g, err := encodeGreeting("NULL", false)
 	require.NoError(t, err)
 	hdr := make([]byte, 9)
-	hdr[0] = iface.FlagCommand | zmtp.FlagLong
+	hdr[0] = zmtp.FlagCommand | zmtp.FlagLong
 	binary.BigEndian.PutUint64(hdr[1:], handshakeMaxFrame+1)
 	_, err = connB.Write(append(g, hdr...))
 	require.NoError(t, err)

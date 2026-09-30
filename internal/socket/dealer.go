@@ -1,7 +1,5 @@
 package socket
 
-import "github.com/exergy-dev/gozmq/internal/iface"
-
 // NewDealerEngine returns a new DEALER socket engine.
 //
 // DEALER is an asynchronous request/reply peer — the symmetric counterpart
@@ -21,6 +19,6 @@ import "github.com/exergy-dev/gozmq/internal/iface"
 //
 // Thread-safe: Send, Recv, AttachPipe, DetachPipe, and Close are
 // goroutine-safe via the underlying primitives.
-func NewDealerEngine() iface.SocketEngine {
+func NewDealerEngine() Engine {
 	return newQueuePairEngine()
 }

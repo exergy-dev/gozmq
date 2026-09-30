@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
-	"github.com/exergy-dev/gozmq/internal/pipeiface"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -163,10 +162,10 @@ func (it *inprocTransport) Listen(_ context.Context, endpoint string) (Listener,
 	return l, nil
 }
 
-// LookupDirectAcceptor returns the DirectPipeAcceptor for a bound inproc
+// LookupDirectAcceptor returns the DirectAcceptor for a bound inproc
 // endpoint, or nil if no listener exists. Used by Socket.Connect to bypass
 // the session layer for inproc connections.
-func (it *inprocTransport) LookupDirectAcceptor(endpoint string) pipeiface.DirectPipeAcceptor {
+func (it *inprocTransport) LookupDirectAcceptor(endpoint string) pipe.DirectAcceptor {
 	name, err := parseInprocName(endpoint)
 	if err != nil {
 		return nil
@@ -250,7 +249,7 @@ type inprocListener struct {
 	endpoint string
 
 	acceptCh     chan *inprocConn
-	directPipeCh chan *pipeiface.DirectPipeOffer
+	directPipeCh chan *pipe.DirectOffer
 
 	closeCh   chan struct{}
 	closeOnce sync.Once
@@ -265,7 +264,7 @@ func newInprocListener(t *inprocTransport, name string) *inprocListener {
 		// side is slow to Accept, additional Dials block (correct behavior
 		// for backpressure).
 		acceptCh:     make(chan *inprocConn, 16),
-		directPipeCh: make(chan *pipeiface.DirectPipeOffer, 16),
+		directPipeCh: make(chan *pipe.DirectOffer, 16),
 		closeCh:      make(chan struct{}),
 	}
 }
@@ -284,7 +283,7 @@ func (l *inprocListener) Accept(ctx context.Context) (Conn, error) {
 }
 
 // AcceptDirectPipe blocks until a direct-pipe offer arrives or ctx cancels.
-func (l *inprocListener) AcceptDirectPipe(ctx context.Context) (*pipeiface.DirectPipeOffer, error) {
+func (l *inprocListener) AcceptDirectPipe(ctx context.Context) (*pipe.DirectOffer, error) {
 	select {
 	case offer := <-l.directPipeCh:
 		return offer, nil
@@ -296,10 +295,9 @@ func (l *inprocListener) AcceptDirectPipe(ctx context.Context) (*pipeiface.Direc
 }
 
 // OfferDirectPipe pushes a direct-pipe offer to the bind side. It blocks
-// while the offer queue is full; the DirectPipeAcceptor interface carries
-// no ctx, so only Close interrupts that wait.
-func (l *inprocListener) OfferDirectPipe(offer *pipeiface.DirectPipeOffer) error {
-	return enqueue(context.Background(), l.directPipeCh, l.closeCh, offer, closeOffer)
+// while the offer queue is full, until the listener closes or ctx ends.
+func (l *inprocListener) OfferDirectPipe(ctx context.Context, offer *pipe.DirectOffer) error {
+	return enqueue(ctx, l.directPipeCh, l.closeCh, offer, closeOffer)
 }
 
 func (l *inprocListener) Close() error {
@@ -315,8 +313,8 @@ func (l *inprocListener) Close() error {
 	return nil
 }
 
-func closeInprocConn(c *inprocConn)           { _ = c.Close() }
-func closeOffer(o *pipeiface.DirectPipeOffer) { _ = o.BindPipe.Close() }
+func closeInprocConn(c *inprocConn)  { _ = c.Close() }
+func closeOffer(o *pipe.DirectOffer) { _ = o.BindPipe.Close() }
 
 // enqueue hands v to a listener queue, honoring ctx and closeCh while the
 // queue is full. Once closeCh is closed nothing receives from ch, and select
@@ -405,7 +403,7 @@ func (l *inprocListener) dialIn(ctx context.Context, name string) (Conn, error) 
 // inprocConn — Conn over a Pipe pair.
 //
 // The Conn contract is io.Reader + io.Writer. Inproc bypasses ZMTP framing
-// so there is nothing to "frame" at the transport level — but the iface
+// so there is nothing to "frame" at the transport level — but the Conn
 // nevertheless promises a byte stream. We choose the following contract:
 //
 //   - Each Write enqueues exactly one frame onto the pipe.
@@ -420,7 +418,7 @@ func (l *inprocListener) dialIn(ctx context.Context, name string) (Conn, error) 
 // unambiguous reference.
 // --------------------------------------------------------------------------
 
-// inprocConn satisfies Conn by delegating to a pipe.Pipe. Because
+// inprocConn satisfies Conn by delegating to a pipe End. Because
 // inproc bypasses ZMTP framing entirely, this adapter exists so the
 // Conn contract remains uniform across all transports.
 //
@@ -431,7 +429,7 @@ func (l *inprocListener) dialIn(ctx context.Context, name string) (Conn, error) 
 // channel, and SetXDeadline closes-and-replaces it, cancelling the parked
 // call's context so it re-evaluates the new deadline.
 type inprocConn struct {
-	p             pipeiface.Pipe
+	p             *pipe.End
 	local, remote string
 	mu            sync.Mutex
 	leftover      []byte // unread bytes from the last frame
@@ -442,7 +440,7 @@ type inprocConn struct {
 	closed        bool
 }
 
-func newInprocConn(p pipeiface.Pipe, local, remote string) *inprocConn {
+func newInprocConn(p *pipe.End, local, remote string) *inprocConn {
 	return &inprocConn{
 		p:         p,
 		local:     local,
@@ -460,45 +458,29 @@ func (c *inprocConn) RemoteEndpoint() string { return c.remote }
 // The caller loops and re-evaluates the new deadline.
 var errDeadlinePoked = errors.New("gozmq/inproc: deadline updated")
 
-// runWithDeadline executes op under a context derived from deadline,
-// additionally cancelling it when poke fires (a concurrent SetXDeadline on
-// this direction). Returns &timeoutError{} when the deadline has expired —
+// runWithDeadline executes op under a context derived from deadline. op
+// passes poke (a concurrent SetXDeadline on this direction) to the pipe as
+// its abort channel. Returns &timeoutError{} when the deadline has expired —
 // including a deadline already in the past, per the net.Conn contract —
 // and errDeadlinePoked when the call must be retried under the new
 // deadline.
-func runWithDeadline(deadline time.Time, poke <-chan struct{}, op func(context.Context) error) error {
+func runWithDeadline(deadline time.Time, poke <-chan struct{}, op func(context.Context, <-chan struct{}) error) error {
 	if !deadline.IsZero() && !time.Now().Before(deadline) {
 		return &timeoutError{}
 	}
 	ctx := context.Background()
-	var cancel context.CancelFunc
-	if deadline.IsZero() {
-		ctx, cancel = context.WithCancel(ctx)
-	} else {
+	if !deadline.IsZero() {
+		var cancel context.CancelFunc
 		ctx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
 	}
-	defer cancel()
-
-	// Watcher: translate a deadline poke into ctx cancellation; exits when
-	// op finishes (stop closed) so no goroutine outlives the call.
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		select {
-		case <-poke:
-			cancel()
-		case <-stop:
-		}
-	}()
-
-	err := op(ctx)
+	err := op(ctx, poke)
 	switch {
 	case err == nil:
 		return nil
 	case errors.Is(err, context.DeadlineExceeded):
 		return &timeoutError{}
-	case errors.Is(err, context.Canceled):
-		// The only canceller is the poke watcher above.
+	case errors.Is(err, pipe.ErrAborted):
 		return errDeadlinePoked
 	default:
 		return err
@@ -523,8 +505,8 @@ func (c *inprocConn) Read(buf []byte) (int, error) {
 		c.mu.Unlock()
 
 		var data []byte
-		err := runWithDeadline(deadline, poke, func(ctx context.Context) error {
-			m, err := c.p.Recv(ctx)
+		err := runWithDeadline(deadline, poke, func(ctx context.Context, poke <-chan struct{}) error {
+			m, _, err := c.p.RecvOr(ctx, poke)
 			if err != nil {
 				return err
 			}
@@ -569,8 +551,8 @@ func (c *inprocConn) Write(buf []byte) (int, error) {
 		poke := c.writePoke
 		c.mu.Unlock()
 
-		err := runWithDeadline(deadline, poke, func(ctx context.Context) error {
-			return c.p.Send(ctx, msg.FromBytes(body))
+		err := runWithDeadline(deadline, poke, func(ctx context.Context, poke <-chan struct{}) error {
+			return c.p.SendOr(ctx, msg.FromBytes(body), poke)
 		})
 		if errors.Is(err, errDeadlinePoked) {
 			continue // deadline replaced mid-call; re-evaluate it
@@ -643,10 +625,10 @@ func (e *timeoutError) Temporary() bool { return true }
 
 // Compile-time interface checks.
 var (
-	_ Transport                    = (*inprocTransport)(nil)
-	_ pipeiface.DirectPipeDialer   = (*inprocTransport)(nil)
-	_ Listener                     = (*inprocListener)(nil)
-	_ pipeiface.DirectPipeAcceptor = (*inprocListener)(nil)
-	_ Conn                         = (*inprocConn)(nil)
-	_ net.Error                    = (*timeoutError)(nil)
+	_ Transport           = (*inprocTransport)(nil)
+	_ pipe.DirectDialer   = (*inprocTransport)(nil)
+	_ Listener            = (*inprocListener)(nil)
+	_ pipe.DirectAcceptor = (*inprocListener)(nil)
+	_ Conn                = (*inprocConn)(nil)
+	_ net.Error           = (*timeoutError)(nil)
 )

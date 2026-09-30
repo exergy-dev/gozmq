@@ -3,11 +3,11 @@ package gozmq
 import (
 	"fmt"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/session"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
 	"github.com/exergy-dev/gozmq/security"
 	"github.com/exergy-dev/gozmq/security/curve"
+	"github.com/exergy-dev/gozmq/transport"
 )
 
 // buildSession is the factory the Reconnector (and the acceptLoop) call
@@ -15,7 +15,7 @@ import (
 // this Socket. An error means the security mechanism could not be
 // constructed (e.g. ephemeral CURVE keygen failure); the connection must
 // be torn down rather than proceeding with a weaker mechanism.
-func (s *Socket) buildSession(conn iface.Conn, role iface.Role) (iface.Session, error) {
+func (s *Socket) buildSession(conn transport.Conn, role security.Role) (session.Session, error) {
 	mech, err := s.newMechanism(role)
 	if err != nil {
 		return nil, err
@@ -65,7 +65,7 @@ func toKey(b []byte) curve.Key {
 // libzmq's ZMQ_PLAIN_SERVER / ZMQ_CURVE_SERVER: a WithPlainAuth socket is
 // the PLAIN server whether it binds or connects. Only NULL and custom
 // mechanisms see the transport role.
-func (s *Socket) newMechanism(role iface.Role) (iface.SecurityMech, error) {
+func (s *Socket) newMechanism(role security.Role) (security.Mech, error) {
 	meta := map[string]string{
 		"Socket-Type": socketTypeName(s.socketType),
 	}

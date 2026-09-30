@@ -12,7 +12,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -115,7 +114,7 @@ func (c *writevConn) WriteBuffers(bufs *net.Buffers) (int64, error) {
 // calls Recv so the pipe doesn't stall.
 // --------------------------------------------------------------------------
 
-func newWriterTestPair(t *testing.T, sendHWM, recvHWM int) (sA, sB iface.Session, ccA *countingConn) {
+func newWriterTestPair(t *testing.T, sendHWM, recvHWM int) (sA, sB Session, ccA *countingConn) {
 	t.Helper()
 	connA, connB := newFakeConnPair()
 	ccA = newCountingConn(connA)
@@ -128,7 +127,7 @@ func newWriterTestPair(t *testing.T, sendHWM, recvHWM int) (sA, sB iface.Session
 
 // newWritevTestPair is newWriterTestPair with a writev-emulating conn on
 // the A side, for tests that observe batch coalescing or gate the wire.
-func newWritevTestPair(t *testing.T, sendHWM, recvHWM int) (sA, sB iface.Session, wcA *writevConn) {
+func newWritevTestPair(t *testing.T, sendHWM, recvHWM int) (sA, sB Session, wcA *writevConn) {
 	t.Helper()
 	connA, connB := newFakeConnPair()
 	wcA = newWritevConn(connA)
@@ -180,7 +179,7 @@ func TestWriter_BatchRetainsBufferCapacityAcrossFlushes(t *testing.T) {
 	}).(*sessionImpl)
 	t.Cleanup(func() { _ = s.Stop() })
 	sp, ep := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
-	s.sessionPipe = asSessionChanPipe(sp)
+	s.sessionPipe = sp
 	_ = ep
 
 	var batch writerBatch
@@ -567,9 +566,8 @@ func TestReader_HandlesPingWhileWriterBlocked(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
-// TestWriter_LingerDrainUnboundedQueue: with SendHWM 0 the outbound
-// direction is an unbounded relay that refills the pipe's receive channel
-// one message at a time, so a TryRecv-until-empty drain stops early. The
+// TestWriter_LingerDrainUnboundedQueue: with SendHWM 0 most of a large
+// outbound backlog sits in the pipe's overflow, past its channel. The
 // linger drain must flush every queued message.
 // --------------------------------------------------------------------------
 

@@ -8,7 +8,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
@@ -32,7 +31,7 @@ func subscribeMsg(subscribe bool, prefix []byte) *msg.Msg {
 // drainPeer returns every non-subscription message available on p until
 // ctx fires. Subscription frames (synthetic) are echoed back from the
 // PUB's peer reader if we sent them; we want only the real data frames.
-func drainPeer(ctx context.Context, p iface.Pipe) []*msg.Msg {
+func drainPeer(ctx context.Context, p *pipe.End) []*msg.Msg {
 	var out []*msg.Msg
 	for {
 		recvCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
@@ -338,7 +337,7 @@ func TestPub_FanoutSharesOneMessage(t *testing.T) {
 	m := msg.FromFrames([]byte("t"), payload)
 	require.NoError(t, eng.Send(ctx, m), "fanout send")
 
-	for i, peer := range []iface.Pipe{b1, b2} {
+	for i, peer := range []*pipe.End{b1, b2} {
 		got, err := peer.Recv(ctx)
 		require.NoError(t, err, "peer%d recv", i+1)
 		require.Same(t, m, got, "peer%d must receive the fanned-out message", i+1)

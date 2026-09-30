@@ -11,11 +11,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/session"
 	"github.com/exergy-dev/gozmq/internal/socket"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
+	"github.com/exergy-dev/gozmq/security"
+	"github.com/exergy-dev/gozmq/transport"
 )
 
 // NewSocket constructs a socket of the given type on this Context.
@@ -74,11 +76,11 @@ func (c *Context) NewSocket(t SocketType, opts ...Option) (*Socket, error) {
 	return s, nil
 }
 
-// newEngineFor returns the pattern-specific SocketEngine for the
+// newEngineFor returns the pattern-specific socket.Engine for the
 // supported socket types. For SUB/XSUB the returned subHandle is non-nil;
 // the public Socket uses it to implement Subscribe/Unsubscribe. ROUTER
 // honors the configured WithRouterMandatory flag.
-func newEngineFor(t SocketType, cfg *socketConfig) (iface.SocketEngine, *socket.SubEngine, error) {
+func newEngineFor(t SocketType, cfg *socketConfig) (socket.Engine, *socket.SubEngine, error) {
 	switch t {
 	case Pair:
 		return socket.NewPairEngine(), nil, nil
@@ -128,7 +130,7 @@ type Socket struct {
 
 	socketType SocketType
 	cfg        *socketConfig
-	engine     iface.SocketEngine
+	engine     socket.Engine
 	subHandle  *socket.SubEngine // non-nil for Sub/XSub
 
 	closed atomic.Bool
@@ -137,7 +139,7 @@ type Socket struct {
 
 	mu           sync.Mutex
 	lastEndpoint string
-	listeners    []iface.Listener
+	listeners    []transport.Listener
 	reconnectors []reconnectEntry
 	// links holds every attached peer (server-accepted sessions, STREAM
 	// adapters, and direct inproc pipes) behind one teardown contract. Client
@@ -219,7 +221,7 @@ func (s *Socket) Bind(endpoint string) error {
 	// no-security dialer cannot see our config and will still offer a
 	// direct pipe, so the loop must actively REJECT (close) those offers —
 	// leaving them undrained would hang the dialer silently.
-	acceptor, direct := l.(iface.DirectPipeAcceptor)
+	acceptor, direct := l.(pipe.DirectAcceptor)
 
 	// Close may have run while Listen was in flight. Re-check under s.mu,
 	// which CloseCtx takes to snapshot s.listeners: either Close sees this
@@ -269,7 +271,7 @@ func (s *Socket) Connect(endpoint string) error {
 	}
 	if s.socketType == Stream {
 		// STREAM does not ride on ZMTP / session, so the Reconnector
-		// (which builds iface.Sessions) is not reusable here. Dial once.
+		// (which builds sessions) is not reusable here. Dial once.
 		return s.connectStream(tr, endpoint)
 	}
 	// Direct-pipe fast path: if the transport supports it (inproc within
@@ -278,18 +280,18 @@ func (s *Socket) Connect(endpoint string) error {
 	// engine pipes directly. This eliminates ZMTP greeting, handshake,
 	// codec, and reader/writer goroutines.
 	if !s.hasSecurityMech() {
-		if dpd, ok := tr.(iface.DirectPipeDialer); ok {
+		if dpd, ok := tr.(pipe.DirectDialer); ok {
 			if acceptor := dpd.LookupDirectAcceptor(endpoint); acceptor != nil {
 				return s.connectDirectPipe(acceptor, endpoint)
 			}
 		}
 	}
 	cfg := session.ReconnectConfig{
-		Dial: func(ctx context.Context) (iface.Conn, error) {
+		Dial: func(ctx context.Context) (transport.Conn, error) {
 			return tr.Dial(ctx, endpoint)
 		},
-		NewSession: func(conn iface.Conn) (iface.Session, error) {
-			sess, err := s.buildSession(conn, iface.RoleClient)
+		NewSession: func(conn transport.Conn) (session.Session, error) {
+			sess, err := s.buildSession(conn, security.RoleClient)
 			if err != nil {
 				s.emit(EventHandshakeFailedProtocol, endpoint, err.Error())
 				return nil, err
@@ -300,7 +302,7 @@ func (s *Socket) Connect(endpoint string) error {
 		InitialBackoff: s.cfg.reconnectInterval,
 		MaxBackoff:     s.cfg.reconnectIntervalMax,
 		JitterFraction: 0.2,
-		OnAttach: func(p iface.Pipe) error {
+		OnAttach: func(p *pipe.End) error {
 			// A refused pipe (PAIR already has a peer, engine closed)
 			// fails the attempt: the Reconnector stops the session and
 			// backs off instead of leaving it running unattached.
@@ -313,10 +315,9 @@ func (s *Socket) Connect(endpoint string) error {
 			s.emit(EventConnected, endpoint, "")
 			return nil
 		},
-		OnDetach: func(p iface.Pipe) {
+		OnDetach: func(p *pipe.End) {
 			_ = s.engine.DetachPipe(p)
 			s.emit(EventDisconnected, endpoint, "")
-			s.closeDetachedPipe(p)
 		},
 		OnRetry: func(attempt int, backoff time.Duration) {
 			// Convention: the first backoff after a dial/handshake
@@ -359,7 +360,7 @@ func (s *Socket) Unbind(endpoint string) error {
 	}
 
 	s.mu.Lock()
-	var matched iface.Listener
+	var matched transport.Listener
 	for i, l := range s.listeners {
 		if l.Endpoint() == endpoint {
 			matched = l
@@ -422,7 +423,7 @@ func (s *Socket) Disconnect(endpoint string) error {
 //
 // Safe to spawn freely: each goroutine exits once Handshaked closes
 // or the Socket's run context cancels.
-func (s *Socket) watchClientHandshake(sess iface.Session, endpoint string) {
+func (s *Socket) watchClientHandshake(sess session.Session, endpoint string) {
 	s.connectWG.Add(1)
 	go func() {
 		defer s.connectWG.Done()
@@ -439,7 +440,7 @@ func (s *Socket) watchClientHandshake(sess iface.Session, endpoint string) {
 	}()
 }
 
-func (s *Socket) acceptLoop(l iface.Listener) {
+func (s *Socket) acceptLoop(l transport.Listener) {
 	defer s.acceptWG.Done()
 	// Retry backoff after an Accept error: a persistent failure (EMFILE,
 	// say) must not spin, but a transient one should recover quickly.
@@ -477,7 +478,7 @@ func (s *Socket) acceptLoop(l iface.Listener) {
 			s.startStreamAdapter(conn)
 			continue
 		}
-		s.startSession(conn, iface.RoleServer)
+		s.startSession(conn, security.RoleServer)
 	}
 }
 
@@ -509,7 +510,7 @@ func (s *Socket) removeLink(l peerLink) {
 // a handshake goroutine, attaches the pipe on handshake success, detaches
 // on pipe close. The client-side (Connect) path uses Reconnector, not
 // this helper.
-func (s *Socket) startSession(conn iface.Conn, role iface.Role) {
+func (s *Socket) startSession(conn transport.Conn, role security.Role) {
 	remote := conn.RemoteEndpoint()
 	sess, err := s.buildSession(conn, role)
 	if err != nil {
@@ -544,63 +545,17 @@ func (s *Socket) startSession(conn iface.Conn, role iface.Role) {
 			return
 		}
 		s.emit(EventHandshakeSucceeded, remote, "")
+		// A pipe the engine refused or has detached needs no further
+		// cleanup: Stop closes the session's end, and a pipe holds no
+		// goroutine, so the engine's end is simply dropped.
 		if err := s.engine.AttachPipe(sess.Pipe()); err != nil {
 			_ = sess.Stop()
-			// The engine never saw this pipe, so nothing will read or
-			// close its end; close it so an HWM-0 relay can exit.
-			_ = sess.Pipe().Close()
 			return
 		}
 		<-sess.Pipe().Closed()
 		_ = s.engine.DetachPipe(sess.Pipe())
 		s.emit(EventDisconnected, remote, "")
 		_ = sess.Stop()
-		s.closeDetachedPipe(sess.Pipe())
-	}()
-}
-
-// closeDetachedPipe closes the engine-side end of a session pipe after the
-// engine has detached it. Nothing else ever closes that end, and with
-// WithRecvHWM(0) the inbound relay goroutine (and its queue) would
-// otherwise wait forever for a reader that is gone.
-//
-// It must not close too early: an engine may still be draining the
-// detached pipe to EOF (FairQueue's forwarder does), and closing the
-// receiving end of an HWM-0 direction discards the relay's unflushed
-// queue. So it closes once the pipe is Drained — every message is then
-// in the channel, which Recv still returns before EOF on a closed end,
-// and the relay has exited — or once the socket shuts down and no one
-// will read it. Channel-backed pipes are always Drained and close at
-// once; otherwise a goroutine waits, tracked by connectWG (added under
-// s.mu while not closed, so it happens before CloseCtx's Wait).
-func (s *Socket) closeDetachedPipe(p iface.Pipe) {
-	dp, ok := p.(interface{ Drained() <-chan struct{} })
-	if !ok {
-		_ = p.Close()
-		return
-	}
-	drained := dp.Drained()
-	select {
-	case <-drained:
-		_ = p.Close()
-		return
-	default:
-	}
-	s.mu.Lock()
-	if s.closed.Load() {
-		s.mu.Unlock()
-		_ = p.Close()
-		return
-	}
-	s.connectWG.Add(1)
-	s.mu.Unlock()
-	go func() {
-		defer s.connectWG.Done()
-		select {
-		case <-drained:
-		case <-s.runCtx.Done():
-		}
-		_ = p.Close()
 	}()
 }
 

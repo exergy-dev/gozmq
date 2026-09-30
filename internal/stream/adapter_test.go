@@ -12,16 +12,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/msg"
+	"github.com/exergy-dev/gozmq/transport"
 )
 
 func TestMain(m *testing.M) { testutil.VerifyTestMain(m) }
 
-// testConn wraps a net.Conn to satisfy iface.Conn. net.Pipe and
+// testConn wraps a net.Conn to satisfy transport.Conn. net.Pipe and
 // net.TCPConn both satisfy net.Conn but not the ZMQ endpoint-string
-// accessors iface.Conn requires, so we add a thin shim.
+// accessors transport.Conn requires, so we add a thin shim.
 type testConn struct {
 	net.Conn
 	local  string
@@ -31,7 +31,7 @@ type testConn struct {
 func (c *testConn) LocalEndpoint() string  { return c.local }
 func (c *testConn) RemoteEndpoint() string { return c.remote }
 
-func newFakePair() (adapterSide iface.Conn, peerSide net.Conn) {
+func newFakePair() (adapterSide transport.Conn, peerSide net.Conn) {
 	a, b := net.Pipe()
 	return &testConn{Conn: a, local: "mem://a", remote: "mem://b"}, b
 }

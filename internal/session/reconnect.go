@@ -11,7 +11,7 @@ package session
 // Socket.Connect path (and tests) can plug in different dial/session
 // implementations.
 //
-// Session end detection uses iface.Session.Done(): that channel closes
+// Session end detection uses Session.Done(): that channel closes
 // when every session goroutine has exited (reader, writer, optional
 // heartbeat, plus the run goroutine that spawns them). Because Done()
 // fires on all teardown paths — post-handshake peer disconnect,
@@ -27,7 +27,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/transport"
 )
 
 // ReconnectConfig bundles the inputs to StartReconnector. Dial and
@@ -35,13 +36,13 @@ import (
 type ReconnectConfig struct {
 	// Dial opens a new Conn to the remote endpoint. Respects ctx
 	// cancellation. Called once per reconnect attempt.
-	Dial func(ctx context.Context) (iface.Conn, error)
+	Dial func(ctx context.Context) (transport.Conn, error)
 
 	// NewSession constructs a session around the given Conn. The
 	// Reconnector calls Start on the returned session. An error closes
 	// the conn and is treated like a dial failure: the loop backs off
 	// and retries.
-	NewSession func(conn iface.Conn) (iface.Session, error)
+	NewSession func(conn transport.Conn) (Session, error)
 
 	// InitialBackoff is the base delay between reconnect attempts. Also
 	// the value the schedule resets to after a successful attach.
@@ -59,12 +60,12 @@ type ReconnectConfig struct {
 	// pipe end. The Socket engine uses it to attach the pipe. An error
 	// (the engine refused the pipe) is treated like a handshake failure:
 	// the session is stopped, the pipe closed, and the loop backs off.
-	OnAttach func(iface.Pipe) error
+	OnAttach func(*pipe.End) error
 
 	// OnDetach fires once per session end, with the pipe that OnAttach
 	// accepted. It is NOT called for sessions that never attached — the
 	// loop just backs off and redials.
-	OnDetach func(iface.Pipe)
+	OnDetach func(*pipe.End)
 
 	// OnRetry fires once per backoff cycle, immediately before the
 	// loop sleeps. attempt counts 1-based consecutive failures since
@@ -90,7 +91,7 @@ type Reconnector struct {
 	// sessMu guards currentSess so Stop can tear down whichever session
 	// is live at the time.
 	sessMu      sync.Mutex
-	currentSess iface.Session
+	currentSess Session
 
 	// quiesced is set by Quiesce to prevent loop() from dialing a new
 	// session after the current one detaches. Used by Socket.Close to
@@ -142,7 +143,7 @@ func StartReconnector(parent context.Context, cfg ReconnectConfig) *Reconnector 
 // CurrentSession returns the session currently owned by the Reconnector,
 // or nil if none is live. Used by Socket.Close to drain outbound queues
 // before tearing the reconnector down.
-func (r *Reconnector) CurrentSession() iface.Session {
+func (r *Reconnector) CurrentSession() Session {
 	r.sessMu.Lock()
 	defer r.sessMu.Unlock()
 	return r.currentSess
@@ -192,7 +193,7 @@ func (r *Reconnector) retryAfterBackoff(attempt *int, backoff *time.Duration) bo
 
 // setSession records sess as the live session, or reports false (leaving
 // it unrecorded) if the Reconnector was stopped meanwhile.
-func (r *Reconnector) setSession(sess iface.Session) bool {
+func (r *Reconnector) setSession(sess Session) bool {
 	r.sessMu.Lock()
 	defer r.sessMu.Unlock()
 	if sess != nil && r.ctx.Err() != nil {

@@ -8,9 +8,9 @@ import (
 	"net"
 	"sync"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/msg"
+	"github.com/exergy-dev/gozmq/transport"
 )
 
 // readBufSize is the max chunk pulled from conn.Read per iteration. 32 KiB
@@ -38,7 +38,7 @@ type Config struct {
 	RecvHWM int
 }
 
-// Adapter wraps an iface.Conn and exposes an iface.Pipe to the
+// Adapter wraps an transport.Conn and exposes a pipe End to the
 // streamEngine. It owns two goroutines for the lifetime of the conn:
 //
 //	reader: conn.Read → pipe.Send(Msg{chunk})
@@ -49,9 +49,9 @@ type Config struct {
 // engine.DetachPipe on shutdown — the Adapter signals that via
 // EnginePipe's Closed() channel, which fires when either goroutine exits.
 type Adapter struct {
-	conn   iface.Conn
-	engEnd iface.Pipe // handed to streamEngine via AttachPipe
-	admEnd iface.Pipe // used internally by reader/writer goroutines
+	conn   transport.Conn
+	engEnd *pipe.End // handed to streamEngine via AttachPipe
+	admEnd *pipe.End // used internally by reader/writer goroutines
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -72,7 +72,7 @@ type Adapter struct {
 //
 // conn is owned by the Adapter from this point on; the adapter closes it
 // on shutdown. Callers MUST NOT Read/Write conn directly afterwards.
-func NewAdapter(parent context.Context, conn iface.Conn, cfg Config) *Adapter {
+func NewAdapter(parent context.Context, conn transport.Conn, cfg Config) *Adapter {
 	if cfg.SendHWM <= 0 {
 		cfg.SendHWM = defaultPipeHWM
 	}
@@ -106,7 +106,7 @@ func NewAdapter(parent context.Context, conn iface.Conn, cfg Config) *Adapter {
 
 // EnginePipe returns the pipe end the caller hands to
 // streamEngine.AttachPipe. Valid immediately after NewAdapter.
-func (a *Adapter) EnginePipe() iface.Pipe { return a.engEnd }
+func (a *Adapter) EnginePipe() *pipe.End { return a.engEnd }
 
 // Close tears the adapter down: cancels the internal ctx, closes the
 // underlying conn, closes both pipe ends, and waits for the reader /

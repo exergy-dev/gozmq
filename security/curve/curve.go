@@ -897,7 +897,7 @@ func (m *curveMech) EncodeFrame(flags uint8, plain []byte) (uint8, []byte, error
 }
 
 // DecodeFrame reverses EncodeFrame. Returns ErrMalformedFrame on MAC
-// failure per the iface contract.
+// failure per the security.Mech contract.
 func (m *curveMech) DecodeFrame(flags uint8, wire []byte) (uint8, []byte, error) {
 	if m.state != stateDone {
 		return 0, nil, fmt.Errorf("gozmq/security/curve: DecodeFrame before handshake: %w", zmqerr.ErrFSMViolation)

@@ -1,10 +1,10 @@
 package gozmq
 
 import (
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/session"
 	"github.com/exergy-dev/gozmq/internal/stream"
+	"github.com/exergy-dev/gozmq/transport"
 )
 
 // startStreamAdapter is the STREAM-specific counterpart to startSession:
@@ -12,7 +12,7 @@ import (
 // the streamEngine, and spawns a watcher that DetachPipes + Closes the
 // adapter when the peer disconnects. No ZMTP handshake, no security
 // mechanism — STREAM peers are by definition non-ZMQ.
-func (s *Socket) startStreamAdapter(conn iface.Conn) {
+func (s *Socket) startStreamAdapter(conn transport.Conn) {
 	remote := conn.RemoteEndpoint()
 	ad := stream.NewAdapter(s.runCtx, conn, stream.Config{
 		SendHWM: s.cfg.sendHWM,
@@ -36,7 +36,7 @@ func (s *Socket) startStreamAdapter(conn iface.Conn) {
 // connectStream is the STREAM-specific Connect path. It dials once via
 // the transport, constructs a stream.Adapter, attaches it, and wires up
 // teardown.
-func (s *Socket) connectStream(tr iface.Transport, endpoint string) error {
+func (s *Socket) connectStream(tr transport.Transport, endpoint string) error {
 	conn, err := tr.Dial(s.runCtx, endpoint)
 	if err != nil {
 		s.emit(EventConnectFailed, endpoint, err.Error())
@@ -64,20 +64,20 @@ func (s *Socket) hasSecurityMech() bool {
 // into both engines. The dialer creates the pair, attaches one end to
 // its own engine, and offers the other end to the bind-side listener via
 // the DirectPipeAcceptor interface.
-func (s *Socket) connectDirectPipe(acceptor iface.DirectPipeAcceptor, endpoint string) error {
+func (s *Socket) connectDirectPipe(acceptor pipe.DirectAcceptor, endpoint string) error {
 	dialerPipe, binderPipe := pipe.NewPair(
 		s.cfg.sendHWM, s.cfg.recvHWM,
 		pipe.PeerInfo{},
 		pipe.PeerInfo{Identity: s.cfg.identity},
 	)
-	offer := &iface.DirectPipeOffer{
+	offer := &pipe.DirectOffer{
 		BindPipe:         binderPipe,
 		DialerSocketType: socketTypeName(s.socketType),
 		Endpoint:         endpoint,
 	}
 
 	// Push the offer to the bind side. If the listener is closed, clean up.
-	if err := acceptor.OfferDirectPipe(offer); err != nil {
+	if err := acceptor.OfferDirectPipe(s.runCtx, offer); err != nil {
 		_ = dialerPipe.Close()
 		_ = binderPipe.Close()
 		return err
@@ -90,7 +90,7 @@ func (s *Socket) connectDirectPipe(acceptor iface.DirectPipeAcceptor, endpoint s
 // trackAttachWatchPipe records p for the CloseCtx linger drain, attaches it to
 // the engine, and starts the close watcher. On attach failure it closes p and
 // returns the error. Shared by the dialer and acceptor direct-pipe paths.
-func (s *Socket) trackAttachWatchPipe(p iface.Pipe, endpoint string) error {
+func (s *Socket) trackAttachWatchPipe(p *pipe.End, endpoint string) error {
 	if !s.addLink(pipeLink{p}) {
 		_ = p.Close()
 		return ErrSocketClosed
@@ -107,7 +107,7 @@ func (s *Socket) trackAttachWatchPipe(p iface.Pipe, endpoint string) error {
 // that support direct-pipe bypass. It accepts DirectPipeOffers from
 // connecting sockets and wires them directly into the engine without
 // going through the session layer.
-func (s *Socket) acceptDirectPipeLoop(acceptor iface.DirectPipeAcceptor) {
+func (s *Socket) acceptDirectPipeLoop(acceptor pipe.DirectAcceptor) {
 	defer s.acceptWG.Done()
 	localType := socketTypeName(s.socketType)
 	for {

@@ -7,7 +7,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/internal/socket"
 	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
@@ -20,7 +21,7 @@ func testCtx(t *testing.T) context.Context {
 	return ctx
 }
 
-func mustAttach(t *testing.T, eng iface.SocketEngine, pipes ...iface.Pipe) {
+func mustAttach(t *testing.T, eng socket.Engine, pipes ...*pipe.End) {
 	t.Helper()
 	for _, p := range pipes {
 		require.NoError(t, eng.AttachPipe(p))

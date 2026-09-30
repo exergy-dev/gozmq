@@ -1,7 +1,8 @@
 package gozmq
 
 import (
-	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/internal/session"
 	"github.com/exergy-dev/gozmq/internal/stream"
 )
 
@@ -31,9 +32,9 @@ var alreadyClosed = func() chan struct{} {
 	return c
 }()
 
-// sessionLink wraps an iface.Session (server-accepted, or a reconnector's
+// sessionLink wraps an session.Session (server-accepted, or a reconnector's
 // current client session collected at close time).
-type sessionLink struct{ s iface.Session }
+type sessionLink struct{ s session.Session }
 
 func (l sessionLink) beginDrain()              { l.s.CancelWriter() }
 func (l sessionLink) drained() <-chan struct{} { return l.s.WriterFlushed() }
@@ -43,18 +44,11 @@ func (l sessionLink) stop() error              { return l.s.Stop() }
 // the peer socket has received everything we sent: the peer is usually
 // alive and would never close its end, so waiting for that held Close for
 // the full linger.
-type pipeLink struct{ p iface.Pipe }
+type pipeLink struct{ p *pipe.End }
 
-func (l pipeLink) beginDrain() {}
-func (l pipeLink) drained() <-chan struct{} {
-	// Direct pipes always come from pipe.NewPair; the fallback only keeps
-	// a foreign iface.Pipe correct (it drains when either end closes).
-	if sd, ok := l.p.(interface{ SendDrained() <-chan struct{} }); ok {
-		return sd.SendDrained()
-	}
-	return l.p.Closed()
-}
-func (l pipeLink) stop() error { _ = l.p.Close(); return nil }
+func (l pipeLink) beginDrain()              {}
+func (l pipeLink) drained() <-chan struct{} { return l.p.SendDrained() }
+func (l pipeLink) stop() error              { _ = l.p.Close(); return nil }
 
 // streamLink wraps a raw-bytes STREAM adapter. STREAM is not linger-drained
 // (its writer half-closes or exits on ctx), so drained returns immediately.

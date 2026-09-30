@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
-	"github.com/exergy-dev/gozmq/internal/pipeiface"
 )
 
 // TestInproc_OfferAfterCloseFails: an offer made after Close must fail. When
@@ -25,12 +24,12 @@ func TestInproc_OfferAfterCloseFails(t *testing.T) {
 		tr := NewInprocTransport(0)
 		l, err := tr.Listen(context.Background(), "inproc://offer-after-close")
 		require.NoError(t, err)
-		acc := tr.(pipeiface.DirectPipeDialer).LookupDirectAcceptor("inproc://offer-after-close")
+		acc := tr.(pipe.DirectDialer).LookupDirectAcceptor("inproc://offer-after-close")
 		require.NotNil(t, acc)
 		require.NoError(t, l.Close())
 
 		dialer, binder := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
-		err = acc.OfferDirectPipe(&pipeiface.DirectPipeOffer{BindPipe: binder})
+		err = acc.OfferDirectPipe(context.Background(), &pipe.DirectOffer{BindPipe: binder})
 		_ = dialer.Close()
 		require.ErrorIs(t, err, net.ErrClosed, "iter %d: offer on a closed listener succeeded", i)
 	}

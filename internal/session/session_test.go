@@ -14,7 +14,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -23,7 +22,7 @@ import (
 // fakeConn: bidirectional in-process Conn pair built from two io.Pipes.
 // --------------------------------------------------------------------------
 
-// newFakeConnPair returns two iface.Conn ends that pipe their bytes to
+// newFakeConnPair returns two transport.Conn ends that pipe their bytes to
 // each other. Closing either end EOFs subsequent reads on both — io.Pipe's
 // native behavior — which is exactly what the session reader/writer
 // goroutines need to unblock during shutdown.
@@ -195,7 +194,7 @@ func (m *fakeMech) NextHandshake(in []byte) ([]byte, bool, error) {
 // startSessionPair is the common fakeConn shorthand.
 // --------------------------------------------------------------------------
 
-func startPair(t *testing.T, cfgA, cfgB Config) (sA, sB iface.Session) {
+func startPair(t *testing.T, cfgA, cfgB Config) (sA, sB Session) {
 	t.Helper()
 	if cfgA.Codec == nil {
 		cfgA.Codec = fakeCodec{}
@@ -218,7 +217,7 @@ func startPair(t *testing.T, cfgA, cfgB Config) (sA, sB iface.Session) {
 	return sA, sB
 }
 
-func startSessionPair(t *testing.T, propsA, propsB map[string]string, hwm int) (sA, sB iface.Session, connA, connB *fakeConn) {
+func startSessionPair(t *testing.T, propsA, propsB map[string]string, hwm int) (sA, sB Session, connA, connB *fakeConn) {
 	t.Helper()
 	connA, connB = newFakeConnPair()
 	sA, sB = startPair(t,
@@ -533,13 +532,13 @@ func waitClosed(t *testing.T, ch <-chan struct{}, timeout time.Duration, msg str
 	}
 }
 
-func waitHandshake(t *testing.T, s iface.Session, label string) {
+func waitHandshake(t *testing.T, s Session, label string) {
 	t.Helper()
 	waitClosed(t, s.Handshaked(), 2*time.Second, label+": handshake did not complete within 2s")
 	require.NoError(t, s.HandshakeErr(), "%s: HandshakeErr", label)
 }
 
-func stopAsync(s iface.Session) <-chan error {
+func stopAsync(s Session) <-chan error {
 	ch := make(chan error, 1)
 	go func() { ch <- s.Stop() }()
 	return ch
@@ -773,7 +772,7 @@ func TestReader_MaxMessageSize_OverLimit(t *testing.T) {
 // startZmtpPair is startPair with the real ZMTP framing codec on both
 // ends, so the reader's scratch dst handling is exercised. The mechs
 // declare IdentityFraming so decoded frames alias the read buffer.
-func startZmtpPair(t *testing.T, hwm int) (sA, sB iface.Session) {
+func startZmtpPair(t *testing.T, hwm int) (sA, sB Session) {
 	t.Helper()
 	connA, connB := newFakeConnPair()
 	return startPair(t,

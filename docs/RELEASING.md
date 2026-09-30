@@ -1,9 +1,7 @@
 # Releasing
 
 `gozmq` follows [Semantic Versioning](https://semver.org/). After v1.0.0 the
-compatibility promise covers everything exported outside `internal/`, with
-one documented exception: the plumbing methods in the `msg` package, which
-carry an explicit "not covered by the compatibility promise" banner.
+compatibility promise covers everything exported outside `internal/`.
 
 Go modules make a tag permanent — the proxy caches it and it cannot be
 withdrawn. Work the checklist.
@@ -43,7 +41,7 @@ type. This must print nothing:
 
 ```sh
 for p in . ./msg ./transport ./typed ./typed/codecjson ./security ./security/curve; do
-  go doc -all "$p" | grep -E "^(func|type|const|var| ) .*\b(iface|pipeiface|zmqerr|zmtp|bufpool)\."
+  go doc -all "$p" | grep -E "^(func|type|const|var| ) .*\b(pipe|session|socket|zmqerr|zmtp|bufpool)\."
 done
 ```
 

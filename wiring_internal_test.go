@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/security"
 )
 
 // TestNewMechanism_PlainRoleFromOption: the PLAIN handshake role comes from
@@ -20,7 +20,7 @@ func TestNewMechanism_PlainRoleFromOption(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = cli.Close() }()
 
-	for _, role := range []iface.Role{iface.RoleClient, iface.RoleServer} {
+	for _, role := range []security.Role{security.RoleClient, security.RoleServer} {
 		m, err := srv.newMechanism(role)
 		require.NoError(t, err)
 		require.Equal(t, "PLAIN", m.Name())

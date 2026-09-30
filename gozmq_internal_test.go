@@ -9,7 +9,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/internal/session"
+	"github.com/exergy-dev/gozmq/security"
 )
 
 var closedWaitSessionCh = func() <-chan struct{} {
@@ -26,9 +28,9 @@ func (s waitStubSession) Start()                      {}
 func (s waitStubSession) Stop() error                 { return nil }
 func (s waitStubSession) Handshaked() <-chan struct{} { return closedWaitSessionCh }
 func (s waitStubSession) HandshakeErr() error         { return nil }
-func (s waitStubSession) Pipe() iface.Pipe            { return nil }
+func (s waitStubSession) Pipe() *pipe.End             { return nil }
 func (s waitStubSession) Endpoint() string            { return "" }
-func (s waitStubSession) Role() iface.Role            { return iface.RoleClient }
+func (s waitStubSession) Role() security.Role         { return security.RoleClient }
 func (s waitStubSession) Done() <-chan struct{}       { return closedWaitSessionCh }
 func (s waitStubSession) WriterFlushed() <-chan struct{} {
 	return s.flushed
@@ -39,9 +41,9 @@ func TestWaitWritersFlushed_LingerTimeoutDoesNotLeak(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	start := time.Now()
-	err := waitChannels(context.Background(), []iface.Session{
+	err := waitChannels(context.Background(), []session.Session{
 		waitStubSession{flushed: make(chan struct{})},
-	}, iface.Session.WriterFlushed, 20*time.Millisecond)
+	}, session.Session.WriterFlushed, 20*time.Millisecond)
 	require.NoError(t, err, "waitChannels on linger timeout")
 	elapsed := time.Since(start)
 	require.GreaterOrEqual(t, elapsed, 15*time.Millisecond, "returned after %v, want ~linger wait", elapsed)
@@ -53,9 +55,9 @@ func TestWaitWritersFlushed_CtxCancelDoesNotLeak(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 
-	err := waitChannels(ctx, []iface.Session{
+	err := waitChannels(ctx, []session.Session{
 		waitStubSession{flushed: make(chan struct{})},
-	}, iface.Session.WriterFlushed, -1)
+	}, session.Session.WriterFlushed, -1)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 

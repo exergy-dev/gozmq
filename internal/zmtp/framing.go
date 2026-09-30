@@ -2,7 +2,7 @@
 // Transport Protocol 3.1: the framing layer (flags + length + body), the
 // command codec, and the READY metadata codec, plus the FrameCodec /
 // FrameHeaderAppender contracts those implement (see contracts.go), which
-// internal/iface re-exports for the session layer. The greeting and
+// the session layer consumes. The greeting and
 // PING/PONG wire formats are handled inline by internal/session, which
 // deliberately does not import this package.
 package zmtp

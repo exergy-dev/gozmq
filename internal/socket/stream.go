@@ -7,12 +7,11 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
-// streamEngine implements iface.SocketEngine for the STREAM socket type.
+// streamEngine implements Engine for the STREAM socket type.
 //
 // STREAM carries raw bytes to and from non-ZMQ peers (HTTP/1.1, SMTP, any
 // line-oriented legacy protocol). Per design §9 there is "no ZMTP on the wire":
@@ -56,7 +55,7 @@ type streamEngine struct {
 //   - Each outbound pipe Msg carries one body frame: the bytes to write
 //     verbatim. An empty body means "close the conn" (STREAM half-close).
 //   - The pipe's PeerIdentity may be empty; the engine synthesizes one.
-func NewStreamEngine() iface.SocketEngine {
+func NewStreamEngine() Engine {
 	// detachCache=false: STREAM has no post-detach identity grace cache.
 	return &streamEngine{identityRouter: newIdentityRouter("stream", false)}
 }
@@ -102,11 +101,8 @@ func (e *streamEngine) Send(ctx context.Context, m *msg.Msg) error {
 // Metrics reports the STREAM counters. Dropped delegates entirely to the
 // FairQueue (ctx-cancel/close drops); STREAM never drops on Send (unknown
 // identities surface as errors).
-func (e *streamEngine) Metrics() iface.SocketMetrics {
+func (e *streamEngine) Metrics() Metrics {
 	return e.metrics(0)
 }
 
-var (
-	_ iface.SocketEngine = (*streamEngine)(nil)
-	_ Pollable           = (*streamEngine)(nil)
-)
+var _ Engine = (*streamEngine)(nil)

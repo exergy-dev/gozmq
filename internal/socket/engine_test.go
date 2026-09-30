@@ -8,7 +8,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
@@ -17,9 +16,9 @@ import (
 
 // helper: build N pipe pairs with given HWMs. Returns engine ends and
 // peer ends. The caller is responsible for Close-ing both ends.
-func makePairs(n, sendHWM, recvHWM int) (engineEnds, peerEnds []iface.Pipe) {
-	engineEnds = make([]iface.Pipe, n)
-	peerEnds = make([]iface.Pipe, n)
+func makePairs(n, sendHWM, recvHWM int) (engineEnds, peerEnds []*pipe.End) {
+	engineEnds = make([]*pipe.End, n)
+	peerEnds = make([]*pipe.End, n)
 	for i := 0; i < n; i++ {
 		a, b := pipe.NewPair(sendHWM, recvHWM, pipe.PeerInfo{}, pipe.PeerInfo{})
 		engineEnds[i] = a
@@ -28,7 +27,7 @@ func makePairs(n, sendHWM, recvHWM int) (engineEnds, peerEnds []iface.Pipe) {
 	return
 }
 
-func closePipes(ps ...iface.Pipe) {
+func closePipes(ps ...*pipe.End) {
 	for _, p := range ps {
 		_ = p.Close()
 	}

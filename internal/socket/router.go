@@ -6,12 +6,11 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
-// routerEngine implements iface.SocketEngine for the ROUTER socket type.
+// routerEngine implements Engine for the ROUTER socket type.
 //
 // ROUTER is the identity-aware counterpart to DEALER. Most of its behavior —
 // identity assignment, fair-queued recv with identity stamping, identity-keyed
@@ -28,7 +27,7 @@ import (
 // Recv is race-safe against concurrent Detach: a message enqueued by a pipe's
 // forwarder before Detach ran still resolves to that pipe's original identity
 // via the post-detach side cache (identityRouter.detachedIdOf, enabled here at
-// construction), keyed by the iface.Pipe pointer so a newer peer with a
+// construction), keyed by the *pipe.End pointer so a newer peer with a
 // colliding PeerIdentity is never confused for the departed original.
 
 type routerEngine struct {
@@ -42,7 +41,7 @@ type routerEngine struct {
 // NewRouterEngine returns a new ROUTER socket engine. If mandatory is true,
 // Send returns zmqerr.ErrRouteUnknown when the leading identity frame does not
 // match an attached peer; otherwise such sends are silently dropped.
-func NewRouterEngine(mandatory bool) iface.SocketEngine {
+func NewRouterEngine(mandatory bool) Engine {
 	return &routerEngine{
 		// detachCache=true: ROUTER keeps the post-detach identity cache so
 		// Recv can stamp messages from just-detached peers (see doc above).
@@ -97,11 +96,8 @@ func (e *routerEngine) Send(ctx context.Context, m *msg.Msg) error {
 // Metrics reports the ROUTER counters. Dropped covers silent non-mandatory
 // route-misses (including vanished peers) plus the FairQueue's
 // ctx-cancel/close drops.
-func (e *routerEngine) Metrics() iface.SocketMetrics {
+func (e *routerEngine) Metrics() Metrics {
 	return e.metrics(e.dropped.Load())
 }
 
-var (
-	_ iface.SocketEngine = (*routerEngine)(nil)
-	_ Pollable           = (*routerEngine)(nil)
-)
+var _ Engine = (*routerEngine)(nil)

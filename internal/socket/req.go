@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -29,7 +30,7 @@ const (
 	reqStateReceiving
 )
 
-// reqEngine implements iface.SocketEngine for the REQ socket type.
+// reqEngine implements Engine for the REQ socket type.
 //
 // FSM: REQ enforces strict lock-step alternation — canSend → canRecv →
 // canSend. Calling Send while the engine expects Recv (or vice versa)
@@ -76,13 +77,17 @@ type reqEngine struct {
 	ring     pipeRing
 	// sticky is the pipe picked by the most recent Send; Recv reads its
 	// reply directly. Cleared after a successful Recv (or on detach).
-	sticky chanPipe
+	sticky *pipe.End
 
 	counters
 }
 
+// reqDelimiter is the empty delimiter frame REQ prepends to each request.
+// Frames are never mutated once queued, so one shared value serves all.
+var reqDelimiter = [][]byte{{}}
+
 // NewReqEngine returns a new REQ socket engine.
-func NewReqEngine() iface.SocketEngine {
+func NewReqEngine() Engine {
 	return &reqEngine{
 		closeCh:  make(chan struct{}),
 		notifyCh: make(chan struct{}),
@@ -91,7 +96,7 @@ func NewReqEngine() iface.SocketEngine {
 	}
 }
 
-func (e *reqEngine) AttachPipe(p iface.Pipe) error {
+func (e *reqEngine) AttachPipe(p *pipe.End) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
@@ -104,7 +109,7 @@ func (e *reqEngine) AttachPipe(p iface.Pipe) error {
 	// blocking Poll wakes when the reply lands on the sticky pipe (REQ
 	// has no forwarder goroutine to do it). Arming for non-sticky pipes
 	// is a harmless spurious level-trigger wake.
-	asChanPipe(p).SetRecvReady(e.recvGate.ch)
+	p.SetRecvReady(e.recvGate.ch)
 	// Wake any Send parked waiting for a peer.
 	close(e.notifyCh)
 	e.notifyCh = make(chan struct{})
@@ -114,7 +119,7 @@ func (e *reqEngine) AttachPipe(p iface.Pipe) error {
 	return nil
 }
 
-func (e *reqEngine) DetachPipe(p iface.Pipe) error {
+func (e *reqEngine) DetachPipe(p *pipe.End) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.ring.remove(p)
@@ -123,7 +128,7 @@ func (e *reqEngine) DetachPipe(p iface.Pipe) error {
 	// peer. A Recv parked on the sticky pipe unblocks via the pipe's
 	// Closed() signal (the session closes the pipe on detach) and surfaces
 	// ErrSocketClosed. Actual libzmq drops the outstanding request here too.
-	if iface.Pipe(e.sticky) == p {
+	if e.sticky == p {
 		e.sticky = nil
 	}
 	return nil
@@ -172,16 +177,8 @@ func (s reqState) violation() string {
 // send delivers one request with the FSM reserved in reqStateSending. On
 // success it moves the FSM to canRecv; on error the caller restores canSend.
 func (e *reqEngine) send(ctx context.Context, m *msg.Msg) error {
-	// Build wire message: empty delimiter + caller's frames. The slice is
-	// built locally and handed off, so adopt it directly (no extra copy).
-	var body [][]byte
-	if m != nil {
-		body = m.Frames()
-	}
-	wireFrames := make([][]byte, 0, len(body)+1)
-	wireFrames = append(wireFrames, []byte{})
-	wireFrames = append(wireFrames, body...)
-	wire := msg.FromFramesOwned(wireFrames)
+	// Build wire message: empty delimiter + caller's frames.
+	wire := prependFrames(reqDelimiter, m)
 
 	// Pick a peer and deliver. Retry on peer churn / closed pipe.
 	for {
@@ -207,37 +204,30 @@ func (e *reqEngine) send(ctx context.Context, m *msg.Msg) error {
 		closeCh := e.closeCh
 		e.mu.Unlock()
 
-		cp := asChanPipe(p)
 		// Discard anything still buffered on the chosen pipe: it predates
 		// this request, so it can only be a stale reply from an earlier
 		// exchange the FSM already abandoned (e.g. a malformed reply or a
 		// peer-gone reset). Delivering it as this request's answer would
 		// desynchronize request/reply pairing.
 		for {
-			if _, ok := cp.TryRecv(); !ok {
+			if _, ok := p.TryRecv(); !ok {
 				break
 			}
 		}
 
-		delivered := cp.TrySend(wire)
-		if !delivered {
-			// Pipe at HWM (or closing): block, racing engine close, pipe
-			// close, and the caller's ctx — a bare pipe Send here would
-			// violate the Close-unblocks-pending-Send contract.
-			select {
-			case cp.SendCh() <- wire:
-				delivered = true
-			case <-p.Closed():
-				// Peer vanished; drop it from the set and retry below.
-			case <-closeCh:
-				return fmt.Errorf("req send: %w", zmqerr.ErrSocketClosed)
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-		if !delivered {
+		// Block at HWM, racing engine close and the caller's ctx — a bare
+		// pipe Send here would violate the Close-unblocks-pending-Send
+		// contract.
+		switch err := p.SendOr(ctx, wire, closeCh); {
+		case err == nil:
+		case errors.Is(err, io.ErrClosedPipe):
+			// Peer vanished; drop it from the set and retry.
 			_ = e.DetachPipe(p)
 			continue
+		case errors.Is(err, pipe.ErrAborted):
+			return fmt.Errorf("req send: %w", zmqerr.ErrSocketClosed)
+		default:
+			return err
 		}
 
 		e.mu.Lock()
@@ -251,7 +241,7 @@ func (e *reqEngine) send(ctx context.Context, m *msg.Msg) error {
 		e.ring.advancePast(idx, p)
 		// Transition to canRecv with p as the sticky pipe. Recv reads
 		// p's reply directly — no forwarder goroutine.
-		e.sticky = cp
+		e.sticky = p
 		e.state = reqStateCanRecv
 		e.mu.Unlock()
 		e.sent.Add(1)
@@ -322,7 +312,7 @@ func (e *reqEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 // allocates no per-call context or goroutine — the pipe's receive channel
 // is selected on inline. The returned error is already wrapped with the
 // REQ recv prefix where appropriate.
-func (e *reqEngine) recvSticky(ctx context.Context, sticky chanPipe, closeCh <-chan struct{}) (*msg.Msg, error) {
+func (e *reqEngine) recvSticky(ctx context.Context, sticky *pipe.End, closeCh <-chan struct{}) (*msg.Msg, error) {
 	if sticky == nil {
 		// Sticky peer detached between Send and Recv. Treat as peer gone.
 		select {
@@ -333,36 +323,16 @@ func (e *reqEngine) recvSticky(ctx context.Context, sticky chanPipe, closeCh <-c
 		return nil, fmt.Errorf("req recv: peer gone: %w", zmqerr.ErrSocketClosed)
 	}
 
-	recvCh := sticky.RecvCh()
-	// Non-blocking fast path: reply already buffered.
-	select {
-	case m := <-recvCh:
-		if m != nil {
-			return m, nil
-		}
-	default:
-	}
-	select {
-	case m := <-recvCh:
-		if m != nil {
-			return m, nil
-		}
-		// Channel yielded a nil (closed); fall through to peer-gone.
-		return nil, fmt.Errorf("req recv: peer gone: %w", zmqerr.ErrSocketClosed)
-	case <-sticky.Closed():
-		// Peer gone — but drain any reply that landed before close.
-		select {
-		case m := <-recvCh:
-			if m != nil {
-				return m, nil
-			}
-		default:
-		}
-		return nil, fmt.Errorf("req recv: peer gone: %w", zmqerr.ErrSocketClosed)
-	case <-closeCh:
+	switch m, _, err := sticky.RecvOr(ctx, closeCh); {
+	case err == nil:
+		return m, nil
+	case errors.Is(err, pipe.ErrAborted):
 		return nil, fmt.Errorf("req recv: %w", zmqerr.ErrSocketClosed)
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	case errors.Is(err, io.EOF):
+		// Peer gone, and any reply it sent before closing was delivered.
+		return nil, fmt.Errorf("req recv: peer gone: %w", zmqerr.ErrSocketClosed)
+	default:
+		return nil, err
 	}
 }
 
@@ -382,7 +352,7 @@ func (e *reqEngine) CanRecvNow() bool {
 	}
 	// A Recv is non-blocking-ready iff a reply is already buffered on the
 	// sticky pipe's receive channel.
-	return len(e.sticky.RecvCh()) > 0
+	return e.sticky.Pending()
 }
 
 func (e *reqEngine) CanSendNow() bool {
@@ -391,25 +361,22 @@ func (e *reqEngine) CanSendNow() bool {
 	return !e.closed && e.state == reqStateCanSend && e.ring.len() > 0
 }
 
-var _ Pollable = (*reqEngine)(nil)
-
 // stripReqDelimiter removes the leading empty delimiter frame from an
 // inbound REP reply. The wire shape is [empty, body...]; we return a
-// fresh *Msg holding just the body frames. The engine solely owns the
-// inbound *Msg, so the resliced frame header can be adopted directly
-// without a copy.
+// fresh *Msg holding just the body frames (a single body frame, the
+// common case, fits the Msg's inline slot without allocating).
 func stripReqDelimiter(m *msg.Msg) (*msg.Msg, error) {
 	frames := m.Frames()
 	if len(frames) < 1 || len(frames[0]) != 0 {
 		return nil, fmt.Errorf("req recv: missing empty delimiter: %w", zmqerr.ErrMalformedFrame)
 	}
-	return msg.FromFramesOwned(frames[1:]), nil
+	return msg.FromFrames(frames[1:]...), nil
 }
 
 // Metrics reports the REQ engine's counters. REQ has no fair-queue;
 // inbound replies are read directly off the sticky pipe, so QueueDepth is
 // always zero.
-func (e *reqEngine) Metrics() iface.SocketMetrics {
+func (e *reqEngine) Metrics() Metrics {
 	return e.snapshot(0, 0)
 }
 

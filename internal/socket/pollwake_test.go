@@ -74,14 +74,12 @@ func TestPair_ReadyRecvWakesOnDelivery(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	pe, ok := eng.(socket.Pollable)
-	require.True(t, ok, "pair engine must be Pollable")
-	woke := parkOnGate(pe.ReadyRecv())
+	woke := parkOnGate(eng.ReadyRecv())
 	requireNoWake(t, woke)
 
 	require.NoError(t, b.Send(testCtx(t), msg.FromBytes([]byte("x"))), "peer send")
 	requireWake(t, woke, "pair engine")
-	require.True(t, pe.CanRecvNow())
+	require.True(t, eng.CanRecvNow())
 }
 
 func TestReq_ReadyRecvWakesOnReply(t *testing.T) {
@@ -98,12 +96,10 @@ func TestReq_ReadyRecvWakesOnReply(t *testing.T) {
 	_, err := b.Recv(ctx)
 	require.NoError(t, err, "drain request")
 
-	pe, ok := eng.(socket.Pollable)
-	require.True(t, ok, "req engine must be Pollable")
-	woke := parkOnGate(pe.ReadyRecv())
+	woke := parkOnGate(eng.ReadyRecv())
 	requireNoWake(t, woke)
 
 	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("reply"))), "peer reply")
 	requireWake(t, woke, "req sticky pipe")
-	require.True(t, pe.CanRecvNow())
+	require.True(t, eng.CanRecvNow())
 }

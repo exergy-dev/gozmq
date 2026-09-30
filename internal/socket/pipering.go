@@ -3,7 +3,7 @@ package socket
 import (
 	"slices"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/pipe"
 )
 
 // pipeRing is a round-robin set of pipes with a persistent cursor, shared by
@@ -18,7 +18,7 @@ import (
 // rules that were previously duplicated, and easy to get subtly wrong,
 // across the load-balancing engines.
 type pipeRing struct {
-	pipes  []iface.Pipe
+	pipes  []*pipe.End
 	cursor int
 }
 
@@ -27,7 +27,7 @@ func (r *pipeRing) len() int { return len(r.pipes) }
 
 // add appends p unless it is already present. Returns true if p was added,
 // false if it was a duplicate (no-op).
-func (r *pipeRing) add(p iface.Pipe) bool {
+func (r *pipeRing) add(p *pipe.End) bool {
 	if slices.Contains(r.pipes, p) {
 		return false
 	}
@@ -39,7 +39,7 @@ func (r *pipeRing) add(p iface.Pipe) bool {
 // is preserved: if an element before the cursor was removed the cursor shifts
 // left, and it is wrapped back into range (or reset to 0 when the ring
 // empties). Returns true if p was present.
-func (r *pipeRing) remove(p iface.Pipe) bool {
+func (r *pipeRing) remove(p *pipe.End) bool {
 	for i, existing := range r.pipes {
 		if existing == p {
 			r.pipes = slices.Delete(r.pipes, i, i+1)
@@ -59,7 +59,7 @@ func (r *pipeRing) remove(p iface.Pipe) bool {
 
 // current returns the index and pipe the cursor points at. Callers must
 // ensure len() > 0.
-func (r *pipeRing) current() (int, iface.Pipe) {
+func (r *pipeRing) current() (int, *pipe.End) {
 	idx := r.cursor % len(r.pipes)
 	return idx, r.pipes[idx]
 }
@@ -67,7 +67,7 @@ func (r *pipeRing) current() (int, iface.Pipe) {
 // advancePast steps the cursor to the peer after idx, but only if the pipe
 // at idx is still p — guarding against a concurrent remove that already
 // shifted the set while the caller had the lock released.
-func (r *pipeRing) advancePast(idx int, p iface.Pipe) {
+func (r *pipeRing) advancePast(idx int, p *pipe.End) {
 	if idx < len(r.pipes) && r.pipes[idx] == p {
 		r.cursor = (idx + 1) % len(r.pipes)
 	}

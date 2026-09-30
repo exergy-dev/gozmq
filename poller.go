@@ -4,8 +4,6 @@ import (
 	"context"
 	"reflect"
 	"sync"
-
-	"github.com/exergy-dev/gozmq/internal/socket"
 )
 
 // PollEvents is a bitmask of interest sets passed to Poller.Add / Modify
@@ -221,10 +219,7 @@ func (p *Poller) refresh(snap *pollSnapshot) {
 	// stay correct until the next registration change or socket close.
 	snap.cases = snap.cases[:0]
 	for _, r := range snap.regs {
-		eng, ok := r.sock.engine.(pollable)
-		if !ok {
-			continue
-		}
+		eng := r.sock.engine
 		if r.mask&PollIn != 0 {
 			if ch := eng.ReadyRecv(); ch != nil {
 				snap.cases = append(snap.cases, reflect.SelectCase{
@@ -253,12 +248,6 @@ type pollerReg struct {
 	mask PollEvents
 }
 
-// pollable mirrors the internal/socket.Pollable optional interface so
-// the public package can type-assert without exposing the internal
-// type. Engines implement Pollable in the internal/socket package;
-// this private alias keeps the surface clean.
-type pollable = socket.Pollable
-
 // scanReady performs a non-blocking pass across the registration set,
 // returning the subset whose engine reports ready right now. The
 // returned events are the intersection of each entry's mask with the
@@ -267,10 +256,7 @@ type pollable = socket.Pollable
 func scanReady(regs []pollerReg) []PollEvent {
 	var out []PollEvent
 	for _, r := range regs {
-		eng, ok := r.sock.engine.(pollable)
-		if !ok {
-			continue
-		}
+		eng := r.sock.engine
 		var ev PollEvents
 		if r.mask&PollIn != 0 && eng.CanRecvNow() {
 			ev |= PollIn
@@ -294,8 +280,7 @@ func scanReady(regs []pollerReg) []PollEvent {
 // A stale token left behind costs a later Poll one spurious wakeup.
 func rearm(ready []PollEvent) {
 	for _, ev := range ready {
-		// scanReady only reports pollable engines.
-		eng := ev.Socket.engine.(pollable) //nolint:errcheck // invariant, see above
+		eng := ev.Socket.engine
 		if ev.Events&PollIn != 0 {
 			eng.ReadyRecv()
 		}

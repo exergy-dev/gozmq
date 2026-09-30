@@ -1,7 +1,17 @@
-// Package pipe provides the reference implementation of pipeiface.Pipe — a
-// bidirectional in-memory message queue between a socket engine and a
-// session. Positive HWM directions are channel-backed with HWM expressed as
-// channel capacity; HWM 0 directions use an unbounded FIFO queue.
+// Package pipe provides End, one side of the bidirectional in-memory message
+// queue that connects a socket engine to a session, a STREAM adapter, or
+// (for inproc direct pipes) another socket's engine.
+//
+// Each direction has its own high-water mark. A positive HWM is the capacity
+// of a plain buffered channel. HWM 0 means unlimited: the direction is a
+// channel of unboundedChanCap plus a mutex-guarded overflow slice that the
+// receiving End refills the channel from after every receive. No goroutine
+// is involved either way, so an End that is never closed leaks nothing but
+// memory the GC reclaims.
+//
+// All I/O goes through End methods (there is no raw channel access). That is
+// what keeps the overflow refill, the Poller recv-ready arm and the
+// SendDrained signal impossible to skip.
 package pipe
 
 import (
@@ -10,14 +20,16 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
-	"time"
 
-	"github.com/exergy-dev/gozmq/internal/pipeiface"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
 // ErrNilMessage is returned by Send when the caller supplies a nil *Msg.
 var ErrNilMessage = errors.New("gozmq/pipe: nil message")
+
+// ErrAborted is returned by SendOr and RecvOr when their abort channel
+// fires before the operation completes.
+var ErrAborted = errors.New("gozmq/pipe: aborted")
 
 // PeerInfo carries the metadata a session advertises to its engine. Zero
 // value = unknown; fields are set at pipe construction and may not change.
@@ -25,216 +37,246 @@ type PeerInfo struct {
 	Identity []byte
 }
 
-// NewPair returns two Pipe ends bound to one another. aToB is the maximum
+// unboundedChanCap is the channel capacity of an HWM-0 direction. Messages
+// beyond it wait in the overflow slice; a larger channel only means fewer
+// trips through the overflow lock under a burst.
+const unboundedChanCap = 1024
+
+// NewPair returns two Ends bound to one another. aToB is the maximum
 // number of messages buffered in the A→B direction; bToA is the B→A
 // maximum. A HWM of 0 disables the limit for that direction; negative values
 // are rejected with a panic (programmer error).
 //
 // aInfo describes the peer visible to the A end (i.e. B's endpoint/identity);
 // bInfo describes what A looks like from B's side.
-func NewPair(aToB, bToA int, aInfo, bInfo PeerInfo) (a, b pipeiface.Pipe) {
+func NewPair(aToB, bToA int, aInfo, bInfo PeerInfo) (a, b *End) {
 	if aToB < 0 || bToA < 0 {
 		panic("gozmq/pipe: negative HWM")
 	}
-	s := newShared()
-	aToBq := newDirection(aToB)
-	bToAq := newDirection(bToA)
-	endA := &end{
-		shared:  s,
-		sendCh:  aToBq.in,  // A writes → B reads
-		recvCh:  bToAq.out, // A reads ← B writes
-		sendDir: aToBq,
-		recvDir: bToAq,
-		peer:    aInfo,
-		myCh:    s.aClosed,
-		peerCh:  s.bClosed,
-	}
-	endB := &end{
-		shared:  s,
-		sendCh:  bToAq.in,
-		recvCh:  aToBq.out,
-		sendDir: bToAq,
-		recvDir: aToBq,
-		peer:    bInfo,
-		myCh:    s.bClosed,
-		peerCh:  s.aClosed,
-	}
-	endA.peerEnd = endB
-	endB.peerEnd = endA
-	// Wire each relay (HWM-0 directions only) to the receiving end's
-	// recv-ready gate, then start it. The hooks must be in place before the
-	// relay goroutine runs so no out-enqueue can miss an arm.
-	aToBq.armOut = endB.armRecvReady
-	bToAq.armOut = endA.armRecvReady
-	aToBq.start()
-	bToAq.start()
-	return endA, endB
+	s := &shared{either: make(chan struct{})}
+	ab := newDirection(aToB)
+	ba := newDirection(bToA)
+	a = &End{shared: s, send: ab, recv: ba, peerInfo: aInfo}
+	b = &End{shared: s, send: ba, recv: ab, peerInfo: bInfo}
+	a.peer, b.peer = b, a
+	return a, b
 }
 
+// shared is the close state common to both ends: closing either end closes
+// the pair for sending, and wakes everything parked on it.
 type shared struct {
-	aClosed    chan struct{}
-	bClosed    chan struct{}
+	closed     atomic.Bool
 	either     chan struct{}
 	eitherOnce sync.Once
 }
 
-func newShared() *shared {
-	return &shared{
-		aClosed: make(chan struct{}),
-		bClosed: make(chan struct{}),
-		either:  make(chan struct{}),
-	}
+// direction is one half of the pipe.
+//
+// Unbounded (HWM 0) invariant: while overflow is non-empty the channel is
+// full or about to be refilled, so a receiver parked on an empty channel is
+// never stranded. Both sides keep it: a sender that appends to overflow
+// sets slowOverflow before trying to move messages into the channel, and a
+// receiver loads flags after taking from the channel and refills if the bit
+// is set. Under Go's sequentially consistent synchronization one of the two
+// always sees the other.
+type direction struct {
+	ch        chan *msg.Msg
+	unbounded bool
+
+	// flags holds the slow* bits. It is written only under mu but read
+	// without it, so the hot paths cost one atomic load when all are
+	// clear: the sender checks slowOverflow, the receiver checks all.
+	flags atomic.Uint32
+
+	mu       sync.Mutex
+	overflow []*msg.Msg // unbounded only; overflow[head:] is queued, FIFO after ch
+	head     int
+
+	// subs holds queued messages sent with SendSubscription: genuine ZMTP
+	// SUBSCRIBE/CANCEL commands surfaced by the session reader, as opposed
+	// to ordinary data that merely begins with 0x01/0x00. Only SUB/XSUB
+	// look at the flag. Keeping it beside the queue rather than in it keeps
+	// the channel element a single pointer.
+	subs map[*msg.Msg]struct{}
+
+	drainCh   chan struct{} // closed once empty after SendDrained, or on close
+	drainDone bool
 }
 
-// direction is one half of the pipe. HWM > 0 directions are a single
-// buffered channel (in == out, HWM == capacity). HWM-0 (unbounded)
-// directions keep an unbounded FIFO inside a relay goroutine that pumps
-// in → q → out, so engines can still select on the out channel; see the
-// CAUTION in run for the close/drain ordering.
-type direction struct {
-	in       chan *msg.Msg
-	out      chan *msg.Msg
-	stopIn   chan struct{}
-	done     chan struct{}
-	drained  chan struct{} // relay closed this after flushing q post-stopIn
-	armOut   func()        // arms the receiving end's recv-ready gate; set in NewPair
-	stopOnce sync.Once
-	doneOnce sync.Once
-}
+// Bits of direction.flags.
+const (
+	slowOverflow uint32 = 1 << iota // overflow holds messages
+	slowSubs                        // subs is non-empty
+	slowDraining                    // SendDrained is waiting for the direction to empty
+)
 
 func newDirection(hwm int) *direction {
 	if hwm > 0 {
-		ch := make(chan *msg.Msg, hwm)
-		return &direction{in: ch, out: ch}
+		return &direction{ch: make(chan *msg.Msg, hwm)}
 	}
-	return &direction{
-		in:      make(chan *msg.Msg, 1024),
-		out:     make(chan *msg.Msg, 1),
-		stopIn:  make(chan struct{}),
-		done:    make(chan struct{}),
-		drained: make(chan struct{}),
-	}
+	return &direction{ch: make(chan *msg.Msg, unboundedChanCap), unbounded: true}
 }
 
-// start launches the relay goroutine for HWM-0 directions. Called by
-// NewPair once armOut has been wired; a no-op for channel-backed
-// directions.
-func (d *direction) start() {
-	if d.stopIn != nil {
-		go d.run()
+// setFlagLocked sets or clears bit. Caller holds d.mu, which serializes
+// every writer of flags.
+func (d *direction) setFlagLocked(bit uint32, on bool) {
+	f := d.flags.Load()
+	if on {
+		f |= bit
+	} else {
+		f &^= bit
 	}
+	d.flags.Store(f)
 }
 
-// run is the HWM-0 relay: it pumps in → q → out until the sending end
-// closes (stopIn), at which point it drains in, flushes q to out, and
-// closes drained so the receiving end's Recv can distinguish "queue
-// flushed, EOF now" from "messages still in flight". If the receiving
-// end closes (done) the relay exits immediately, dropping q.
-//
-// Leak caveat: after the sender closes, the relay parks pushing q into
-// out until the receiver consumes or closes. A receiver that neither
-// reads nor closes keeps the relay (and q) alive — the same lifetime
-// rule as any unclosed pipe end. The socket layer therefore closes a
-// detached session pipe's engine end once it is Drained or the socket
-// closes.
-func (d *direction) run() {
-	var q []*msg.Msg
-	for {
-		var out chan *msg.Msg
-		var next *msg.Msg
-		if len(q) > 0 {
-			out = d.out
-			next = q[0]
-		}
+// trySend enqueues m without blocking. Bounded directions fail when the
+// channel is full; unbounded ones always succeed, spilling into overflow
+// (and staying there while anything older is) to keep FIFO order.
+func (d *direction) trySend(m *msg.Msg) bool {
+	if d.flags.Load()&slowOverflow == 0 {
 		select {
-		case m := <-d.in:
-			q = append(q, m)
-		case out <- next:
-			q[0] = nil
-			q = q[1:]
-			d.armOut()
-		case <-d.stopIn:
-			for {
-				select {
-				case m := <-d.in:
-					q = append(q, m)
-				default:
-					goto drain
-				}
-			}
-		drain:
-			for len(q) > 0 {
-				select {
-				case d.out <- q[0]:
-					q[0] = nil
-					q = q[1:]
-					d.armOut()
-				case <-d.done:
-					return
-				}
-			}
-			close(d.drained)
-			return
-		case <-d.done:
-			return
+		case d.ch <- m:
+			return true
+		default:
 		}
 	}
-}
-
-// closedChan is a shared pre-closed channel; drainedCh returns it for
-// channel-backed (HWM > 0) directions, where every in-flight message is
-// already visible in the out channel and there is nothing left to flush.
-var closedChan = func() chan struct{} {
-	ch := make(chan struct{})
-	close(ch)
-	return ch
-}()
-
-// drainedCh returns a channel that is closed once every message this
-// direction will ever deliver is observable on the out channel.
-func (d *direction) drainedCh() <-chan struct{} {
-	if d.drained == nil {
-		return closedChan
+	if !d.unbounded {
+		return false
 	}
-	return d.drained
+	d.mu.Lock()
+	d.overflow = append(d.overflow, m)
+	d.setFlagLocked(slowOverflow, true)
+	d.refillLocked()
+	d.mu.Unlock()
+	return true
 }
 
-func (d *direction) closeInput() {
-	if d.stopIn == nil {
+// refillLocked moves overflow into the channel, oldest first, until the
+// channel is full or overflow is empty. Caller holds d.mu.
+func (d *direction) refillLocked() {
+	for d.head < len(d.overflow) {
+		select {
+		case d.ch <- d.overflow[d.head]:
+			d.overflow[d.head] = nil
+			d.head++
+			continue
+		default:
+		}
+		break
+	}
+	switch {
+	case d.head == len(d.overflow):
+		d.overflow, d.head = d.overflow[:0], 0
+	case d.head > len(d.overflow)/2:
+		// Compact so a long-lived backlog does not pin a growing prefix.
+		n := copy(d.overflow, d.overflow[d.head:])
+		clear(d.overflow[n:])
+		d.overflow, d.head = d.overflow[:n], 0
+	}
+	d.setFlagLocked(slowOverflow, len(d.overflow) > 0)
+}
+
+// received runs after every successful receive of m: it refills the
+// channel from overflow, fires the SendDrained signal once the direction is
+// empty, and reports whether m was sent with SendSubscription. All of that
+// is one atomic load when there is nothing to do.
+func (d *direction) received(m *msg.Msg) bool {
+	if d.flags.Load() == 0 {
+		return false
+	}
+	return d.receivedSlow(m)
+}
+
+func (d *direction) receivedSlow(m *msg.Msg) (sub bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	f := d.flags.Load()
+	if f&slowSubs != 0 {
+		if _, sub = d.subs[m]; sub {
+			delete(d.subs, m)
+			d.setFlagLocked(slowSubs, len(d.subs) > 0)
+		}
+	}
+	if f&slowOverflow != 0 {
+		d.refillLocked()
+	}
+	if f&slowDraining != 0 && len(d.ch) == 0 && d.flags.Load()&slowOverflow == 0 {
+		d.fireDrainLocked()
+	}
+	return sub
+}
+
+// markSub records m as a subscription command before it is queued.
+func (d *direction) markSub(m *msg.Msg) {
+	d.mu.Lock()
+	if d.subs == nil {
+		d.subs = make(map[*msg.Msg]struct{})
+	}
+	d.subs[m] = struct{}{}
+	d.setFlagLocked(slowSubs, true)
+	d.mu.Unlock()
+}
+
+// unmarkSub undoes markSub for a message that was never queued.
+func (d *direction) unmarkSub(m *msg.Msg) {
+	d.mu.Lock()
+	delete(d.subs, m)
+	d.setFlagLocked(slowSubs, len(d.subs) > 0)
+	d.mu.Unlock()
+}
+
+// tryRecv takes the next queued message without blocking.
+func (d *direction) tryRecv() (m *msg.Msg, sub, ok bool) {
+	for {
+		select {
+		case m := <-d.ch:
+			return m, d.received(m), true
+		default:
+		}
+		// The channel is empty. A sender may be between setting
+		// slowOverflow and moving its message in; do the move ourselves.
+		if d.flags.Load()&slowOverflow == 0 {
+			return nil, false, false
+		}
+		d.mu.Lock()
+		d.refillLocked()
+		d.mu.Unlock()
+	}
+}
+
+// pending reports whether a message is ready to receive.
+func (d *direction) pending() bool {
+	return len(d.ch) > 0 || d.flags.Load()&slowOverflow != 0
+}
+
+// fireDrainLocked closes drainCh (creating it pre-closed if SendDrained has
+// not asked yet) exactly once. Caller holds d.mu.
+func (d *direction) fireDrainLocked() {
+	if d.drainDone {
 		return
 	}
-	d.stopOnce.Do(func() { close(d.stopIn) })
-}
-
-func (d *direction) close() {
-	if d.done == nil {
-		return
+	d.drainDone = true
+	d.setFlagLocked(slowDraining, false)
+	if d.drainCh != nil {
+		close(d.drainCh)
 	}
-	d.doneOnce.Do(func() { close(d.done) })
 }
 
-type end struct {
-	shared *shared
-
-	sendCh  chan *msg.Msg
-	recvCh  chan *msg.Msg
-	sendDir *direction
-	recvDir *direction
-
-	peer PeerInfo
+// End is one side of a pipe pair. All methods are safe for concurrent use.
+type End struct {
+	shared   *shared
+	send     *direction // this end writes, the peer reads
+	recv     *direction // the peer writes, this end reads
+	peer     *End
+	peerInfo PeerInfo
 
 	closeOnce sync.Once
 
-	myCh     chan struct{} // cached closed channel for this end
-	peerCh   chan struct{} // cached closed channel for peer end
-	peerEnd  *end          // peer end for atomic flag check
-	isClosed atomic.Bool   // set in Close()
-
 	// recvReady, when registered via SetRecvReady, is armed (non-blocking
-	// send into a cap-1 channel) every time a message becomes available to
-	// this end's Recv, and when either end closes. Socket engines hand
-	// their Poller-facing readiness gate to the pipe so a blocking
-	// Poller.Poll wakes on data arrival without a forwarder goroutine.
+	// send into a cap-1 channel) every time a message is sent towards this
+	// end, and when either end closes. Socket engines hand their
+	// Poller-facing readiness gate to the pipe so a blocking Poller.Poll
+	// wakes on data arrival without a forwarder goroutine.
 	recvReady atomic.Pointer[recvReadyGate]
 }
 
@@ -246,16 +288,16 @@ type recvReadyGate struct{ ch chan<- struct{} }
 // recvReady field doc). If messages are already buffered the gate is
 // armed immediately, preserving the level-trigger property across
 // late registration.
-func (e *end) SetRecvReady(gate chan<- struct{}) {
+func (e *End) SetRecvReady(gate chan<- struct{}) {
 	e.recvReady.Store(&recvReadyGate{ch: gate})
-	if len(e.recvCh) > 0 {
+	if e.recv.pending() {
 		e.armRecvReady()
 	}
 }
 
 // armRecvReady performs the non-blocking arm of the registered gate.
 // Safe to call from any goroutine; a cap-1 gate coalesces bursts.
-func (e *end) armRecvReady() {
+func (e *End) armRecvReady() {
 	g := e.recvReady.Load()
 	if g == nil {
 		return
@@ -266,196 +308,174 @@ func (e *end) armRecvReady() {
 	}
 }
 
-func (e *end) Send(ctx context.Context, m *msg.Msg) error {
+// TrySend enqueues m for the peer without blocking. It returns false when
+// m is nil, either end is closed, or a bounded direction is full. An
+// unbounded (HWM 0) direction never refuses an open pipe.
+func (e *End) TrySend(m *msg.Msg) bool {
+	if m == nil || e.shared.closed.Load() {
+		return false
+	}
+	if !e.send.trySend(m) {
+		return false
+	}
+	e.peer.armRecvReady()
+	return true
+}
+
+// Send enqueues m for the peer, blocking while a bounded direction is full.
+// It returns io.ErrClosedPipe once either end is closed and ctx.Err() if
+// ctx ends first.
+func (e *End) Send(ctx context.Context, m *msg.Msg) error {
+	return e.enqueue(ctx, m, nil)
+}
+
+// SendOr is Send that also gives up with ErrAborted when abort fires, so an
+// engine can race a blocked send against its own close or peer-set change
+// without allocating a context.
+func (e *End) SendOr(ctx context.Context, m *msg.Msg, abort <-chan struct{}) error {
+	return e.enqueue(ctx, m, abort)
+}
+
+// SendSubscription is Send for a ZMTP SUBSCRIBE/CANCEL command the session
+// reader surfaces as a 0x01/0x00-prefixed message; the receiver's RecvOr
+// reports it as such, so SUB/XSUB can tell it apart from ordinary data.
+// m must be a fresh message, not queued anywhere else.
+func (e *End) SendSubscription(ctx context.Context, m *msg.Msg) error {
 	if m == nil {
 		return ErrNilMessage
 	}
-	if e.isClosed.Load() || e.peerEnd.isClosed.Load() {
+	e.send.markSub(m)
+	err := e.enqueue(ctx, m, nil)
+	if err != nil {
+		e.send.unmarkSub(m)
+	}
+	return err
+}
+
+func (e *End) enqueue(ctx context.Context, m *msg.Msg, abort <-chan struct{}) error {
+	if m == nil {
+		return ErrNilMessage
+	}
+	if e.shared.closed.Load() {
 		return io.ErrClosedPipe
 	}
-	select {
-	case e.sendCh <- m:
-		e.peerEnd.armRecvReady()
+	if e.send.trySend(m) {
+		e.peer.armRecvReady()
 		return nil
-	default:
 	}
 	select {
-	case e.sendCh <- m:
-		e.peerEnd.armRecvReady()
+	case e.send.ch <- m:
+		e.peer.armRecvReady()
 		return nil
-	case <-e.myCh:
-		return io.ErrClosedPipe
-	case <-e.peerCh:
+	case <-abort:
+		return ErrAborted
+	case <-e.shared.either:
 		return io.ErrClosedPipe
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 }
 
-// TrySend attempts an immediate send without blocking. It preserves the same
-// close checks as Send and returns false when the pipe is full or closed.
-func (e *end) TrySend(m *msg.Msg) bool {
-	if m == nil {
-		return false
-	}
-	if e.isClosed.Load() || e.peerEnd.isClosed.Load() {
-		return false
-	}
-	select {
-	case e.sendCh <- m:
-		e.peerEnd.armRecvReady()
-		return true
-	default:
-		return false
-	}
+// TryRecv returns the next queued message without blocking. Messages sent
+// before a close stay receivable, so on a closed pipe a false result means
+// the queue is exhausted.
+func (e *End) TryRecv() (*msg.Msg, bool) {
+	m, _, ok := e.recv.tryRecv()
+	return m, ok
 }
 
-func (e *end) Recv(ctx context.Context) (*msg.Msg, error) {
+// Recv returns the next message from the peer, blocking until one arrives.
+// Once either end is closed it hands out whatever is still queued and then
+// returns io.EOF; it returns ctx.Err() if ctx ends first.
+func (e *End) Recv(ctx context.Context) (*msg.Msg, error) {
+	m, _, err := e.RecvOr(ctx, nil)
+	return m, err
+}
+
+// RecvOr is Recv that also gives up with ErrAborted when abort fires. sub
+// reports that m is a subscription command sent with SendSubscription.
+func (e *End) RecvOr(ctx context.Context, abort <-chan struct{}) (m *msg.Msg, sub bool, err error) {
+	d := e.recv
 	select {
-	case m := <-e.recvCh:
-		return m, nil
+	case m := <-d.ch:
+		return m, d.received(m), nil
 	default:
 	}
+	return e.recvSlow(ctx, abort)
+}
+
+// recvSlow is RecvOr once the channel was found empty: it refills from
+// overflow if a sender left something there, then blocks.
+func (e *End) recvSlow(ctx context.Context, abort <-chan struct{}) (*msg.Msg, bool, error) {
+	d := e.recv
+	if m, sub, ok := d.tryRecv(); ok {
+		return m, sub, nil
+	}
 	select {
-	case m := <-e.recvCh:
-		return m, nil
-	case <-e.myCh:
-		return nil, io.EOF
-	case <-e.peerCh:
-		// Peer closed: hand out whatever is still owed, then EOF.
-		return e.DrainRecv(ctx)
+	case m := <-d.ch:
+		return m, d.received(m), nil
+	case <-abort:
+		return nil, false, ErrAborted
+	case <-e.shared.either:
+		if m, sub, ok := d.tryRecv(); ok {
+			return m, sub, nil
+		}
+		return nil, false, io.EOF
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, false, ctx.Err()
 	}
 }
 
-// SealRecv declares that the peer will send nothing more towards this
-// end, without closing either end. An HWM-0 direction's relay then
-// flushes its queue and closes drained, which is what lets DrainRecv tell
-// "empty for good" from "relay still refilling the channel". A message
-// the peer sends after SealRecv may never be delivered, so call it only
-// once the peer has stopped sending (the session writer's linger drain
-// runs after engine.Close). A no-op for channel-backed directions.
-func (e *end) SealRecv() { e.recvDir.closeInput() }
+// Pending reports whether a message is queued for this end right now.
+func (e *End) Pending() bool { return e.recv.pending() }
 
-// DrainRecv returns the next message still owed to this end once no more
-// input can arrive: the peer closed, or SealRecv was called. For an HWM-0
-// direction it blocks while the relay is still flushing its queue, so a
-// momentarily empty channel is not mistaken for the end; for
-// channel-backed directions it is a non-blocking receive. It returns
-// io.EOF once everything has been delivered or this end is closed, and
-// ctx.Err() if ctx ends first. Called before either signal, it just
-// waits for a message or ctx.
-func (e *end) DrainRecv(ctx context.Context) (*msg.Msg, error) {
-	select {
-	case m := <-e.recvCh:
-		return m, nil
-	case <-e.myCh:
-		// Our own end closed; the relay exits without flushing, so
-		// don't wait on drainedCh.
-		return nil, io.EOF
-	case <-e.recvDir.drainedCh():
-		// Every remaining message is already in recvCh.
-		select {
-		case m := <-e.recvCh:
-			return m, nil
-		default:
-			return nil, io.EOF
+// SendDrained returns a channel closed once the peer has received every
+// message this end sent, or either end closed. It is the linger-drain
+// signal for an inproc direct pipe, whose peer is another live socket that
+// may never close its end. Call it only once this end will send nothing
+// more (after engine.Close).
+func (e *End) SendDrained() <-chan struct{} {
+	d := e.send
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.drainCh == nil {
+		d.drainCh = make(chan struct{})
+		if d.drainDone {
+			close(d.drainCh)
 		}
-	case <-ctx.Done():
-		return nil, ctx.Err()
 	}
-}
-
-// Drained returns a channel closed once every message the peer sent
-// towards this end is observable on RecvCh: for an HWM-0 direction, after
-// the peer closed (or SealRecv, or the peer's SendDrained) and the relay
-// flushed its queue and exited; for channel-backed directions it is
-// always closed. From then on closing this end loses nothing — Recv
-// returns buffered messages before EOF — and no relay goroutine is left
-// to leak.
-func (e *end) Drained() <-chan struct{} { return e.recvDir.drainedCh() }
-
-// SendDrained seals this end's send direction and returns a channel
-// closed once the peer has received every message this end sent, or
-// either end closed. It is the linger-drain signal for a pipe whose peer
-// is another live socket (inproc direct pipes), which may never close its
-// end. Call it only once this end will send nothing more (after
-// engine.Close): like SealRecv, a later Send may never be delivered.
-//
-// Engines consume through RecvCh with no hook to observe, so after the
-// HWM-0 relay (if any) has flushed its queue this polls the delivery
-// channel until it is empty, backing off to 10ms between checks.
-func (e *end) SendDrained() <-chan struct{} {
-	d := e.sendDir
-	d.closeInput()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		select {
-		case <-d.drainedCh():
-		case <-e.shared.either:
-			return
+	if !d.drainDone {
+		d.setFlagLocked(slowDraining, true)
+		if len(d.ch) == 0 && d.flags.Load()&slowOverflow == 0 {
+			d.fireDrainLocked()
 		}
-		for wait := 50 * time.Microsecond; len(d.out) > 0; wait = min(2*wait, 10*time.Millisecond) {
-			t := time.NewTimer(wait)
-			select {
-			case <-t.C:
-			case <-e.shared.either:
-				t.Stop()
-				return
-			}
-		}
-	}()
-	return done
+	}
+	return d.drainCh
 }
 
-// TryRecv returns one buffered message if available without blocking.
-// It is intentionally not part of pipeiface.Pipe; the session writer uses
-// it to top up a write batch. An empty result does not mean the queue is
-// finished (an HWM-0 relay may be about to refill the channel); use
-// DrainRecv for that.
-func (e *end) TryRecv() (*msg.Msg, bool) {
-	if e.isClosed.Load() {
-		return nil, false
-	}
-	select {
-	case m := <-e.recvCh:
-		return m, true
-	default:
-		return nil, false
-	}
-}
-
-func (e *end) Close() error {
+// Close closes the pipe for sending in both directions and wakes every
+// blocked Send and Recv. Messages already queued stay receivable from
+// either end. Idempotent.
+func (e *End) Close() error {
 	e.closeOnce.Do(func() {
-		e.isClosed.Store(true)
-		close(e.myCh)
+		e.shared.closed.Store(true)
 		e.shared.eitherOnce.Do(func() { close(e.shared.either) })
-		e.sendDir.closeInput()
-		e.recvDir.close()
+		for _, d := range [...]*direction{e.send, e.recv} {
+			d.mu.Lock()
+			d.fireDrainLocked()
+			d.mu.Unlock()
+		}
 		// Wake any Poller parked on either end's recv-ready gate so it
 		// re-checks and observes the close.
 		e.armRecvReady()
-		e.peerEnd.armRecvReady()
+		e.peer.armRecvReady()
 	})
 	return nil
 }
 
-func (e *end) Closed() <-chan struct{} { return e.shared.either }
+// Closed returns a channel that is closed once either end has been closed.
+func (e *End) Closed() <-chan struct{} { return e.shared.either }
 
-func (e *end) PeerIdentity() []byte { return e.peer.Identity }
-
-// RecvCh exposes the internal receive channel for direct use in select
-// statements. This allows callers to avoid context.WithCancel overhead
-// when multiplexing a pipe recv with other signals. The caller is
-// responsible for handling pipe-closed semantics (via Closed()).
-func (e *end) RecvCh() <-chan *msg.Msg { return e.recvCh }
-
-// SendCh exposes the internal send channel for direct use in select
-// statements. This mirrors RecvCh and allows the LoadBalancer to inline
-// a channel send into its own select, eliminating a per-Send goroutine.
-func (e *end) SendCh() chan<- *msg.Msg { return e.sendCh }
-
-// Compile-time check.
-var _ pipeiface.Pipe = (*end)(nil)
+// PeerIdentity returns the ZMTP Identity advertised by the peer in its
+// READY metadata. Empty when the peer did not set one.
+func (e *End) PeerIdentity() []byte { return e.peerInfo.Identity }

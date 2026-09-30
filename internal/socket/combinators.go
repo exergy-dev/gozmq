@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -18,12 +18,12 @@ type sendOnlyEngine struct {
 	lb   *LoadBalancer
 }
 
-func newSendOnlyEngine(name string) iface.SocketEngine {
+func newSendOnlyEngine(name string) Engine {
 	return &sendOnlyEngine{name: name, lb: NewLoadBalancer()}
 }
 
-func (e *sendOnlyEngine) AttachPipe(p iface.Pipe) error { return e.lb.Attach(p) }
-func (e *sendOnlyEngine) DetachPipe(p iface.Pipe) error { return e.lb.Detach(p) }
+func (e *sendOnlyEngine) AttachPipe(p *pipe.End) error { return e.lb.Attach(p) }
+func (e *sendOnlyEngine) DetachPipe(p *pipe.End) error { return e.lb.Detach(p) }
 func (e *sendOnlyEngine) Send(ctx context.Context, m *msg.Msg) error {
 	return e.lb.Send(ctx, m)
 }
@@ -35,8 +35,8 @@ func (e *sendOnlyEngine) ReadyRecv() <-chan struct{}  { return nil }
 func (e *sendOnlyEngine) ReadyWrite() <-chan struct{} { return e.lb.ReadyWrite() }
 func (e *sendOnlyEngine) CanRecvNow() bool            { return false }
 func (e *sendOnlyEngine) CanSendNow() bool            { return e.lb.HasPeers() }
-func (e *sendOnlyEngine) Metrics() iface.SocketMetrics {
-	return iface.SocketMetrics{Sent: e.lb.Sent()}
+func (e *sendOnlyEngine) Metrics() Metrics {
+	return Metrics{Sent: e.lb.Sent()}
 }
 
 type recvOnlyEngine struct {
@@ -44,12 +44,12 @@ type recvOnlyEngine struct {
 	fq   *FairQueue
 }
 
-func newRecvOnlyEngine(name string) iface.SocketEngine {
+func newRecvOnlyEngine(name string) Engine {
 	return &recvOnlyEngine{name: name, fq: NewFairQueue()}
 }
 
-func (e *recvOnlyEngine) AttachPipe(p iface.Pipe) error { return e.fq.Attach(p) }
-func (e *recvOnlyEngine) DetachPipe(p iface.Pipe) error { return e.fq.Detach(p) }
+func (e *recvOnlyEngine) AttachPipe(p *pipe.End) error { return e.fq.Attach(p) }
+func (e *recvOnlyEngine) DetachPipe(p *pipe.End) error { return e.fq.Detach(p) }
 func (e *recvOnlyEngine) Send(context.Context, *msg.Msg) error {
 	return fmt.Errorf("%s send: %w", e.name, zmqerr.ErrFSMViolation)
 }
@@ -61,8 +61,8 @@ func (e *recvOnlyEngine) ReadyRecv() <-chan struct{}  { return e.fq.ReadyRecv() 
 func (e *recvOnlyEngine) ReadyWrite() <-chan struct{} { return nil }
 func (e *recvOnlyEngine) CanRecvNow() bool            { return e.fq.HasPending() }
 func (e *recvOnlyEngine) CanSendNow() bool            { return false }
-func (e *recvOnlyEngine) Metrics() iface.SocketMetrics {
-	return iface.SocketMetrics{
+func (e *recvOnlyEngine) Metrics() Metrics {
+	return Metrics{
 		Recv:       e.fq.Recvd(),
 		Dropped:    e.fq.Dropped(),
 		QueueDepth: e.fq.QueueDepth(),
@@ -74,11 +74,11 @@ type queuePairEngine struct {
 	fq *FairQueue
 }
 
-func newQueuePairEngine() iface.SocketEngine {
+func newQueuePairEngine() Engine {
 	return &queuePairEngine{lb: NewLoadBalancer(), fq: NewFairQueue()}
 }
 
-func (e *queuePairEngine) AttachPipe(p iface.Pipe) error {
+func (e *queuePairEngine) AttachPipe(p *pipe.End) error {
 	if err := e.lb.Attach(p); err != nil {
 		return err
 	}
@@ -89,7 +89,7 @@ func (e *queuePairEngine) AttachPipe(p iface.Pipe) error {
 	return nil
 }
 
-func (e *queuePairEngine) DetachPipe(p iface.Pipe) error {
+func (e *queuePairEngine) DetachPipe(p *pipe.End) error {
 	_ = e.lb.Detach(p)
 	_ = e.fq.Detach(p)
 	return nil
@@ -113,8 +113,8 @@ func (e *queuePairEngine) ReadyRecv() <-chan struct{}  { return e.fq.ReadyRecv()
 func (e *queuePairEngine) ReadyWrite() <-chan struct{} { return e.lb.ReadyWrite() }
 func (e *queuePairEngine) CanRecvNow() bool            { return e.fq.HasPending() }
 func (e *queuePairEngine) CanSendNow() bool            { return e.lb.HasPeers() }
-func (e *queuePairEngine) Metrics() iface.SocketMetrics {
-	return iface.SocketMetrics{
+func (e *queuePairEngine) Metrics() Metrics {
+	return Metrics{
 		Sent:       e.lb.Sent(),
 		Recv:       e.fq.Recvd(),
 		Dropped:    e.fq.Dropped(),

@@ -8,8 +8,8 @@ import (
 	"io"
 	"net"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/zmtp"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -63,7 +63,7 @@ func (s *sessionImpl) runReader() {
 			return
 		}
 
-		if plainFlags&iface.FlagCommand != 0 {
+		if plainFlags&zmtp.FlagCommand != 0 {
 			s.lastInboundUnix.Store(s.cfg.Now())
 			if cmdErr := s.handleCommand(decoded); cmdErr != nil {
 				s.cfg.Logger.Warn("gozmq/session: command handling failed", "err", cmdErr)
@@ -97,12 +97,12 @@ func (s *sessionImpl) runReader() {
 		}
 		current.AppendFrame(frame)
 
-		if plainFlags&iface.FlagMore != 0 {
+		if plainFlags&zmtp.FlagMore != 0 {
 			continue
 		}
 
 		// Last frame in the logical message — publish.
-		if err := s.publishInbound(current); err != nil {
+		if err := s.publishInbound(current, false); err != nil {
 			if !isShutdownErr(err) {
 				s.cfg.Logger.Debug("gozmq/session: publish inbound", "err", err)
 			}
@@ -113,20 +113,26 @@ func (s *sessionImpl) runReader() {
 }
 
 // publishInbound enqueues a fully-assembled message on the session-side
-// pipe, honoring backpressure (HWM) by blocking until either the engine
-// drains a slot or the session is cancelled. While blocked it raises
+// pipe (sub marks a SUBSCRIBE/CANCEL command, see handleCommand), honoring
+// backpressure (HWM) by blocking until either the engine drains a slot or
+// the session is cancelled. While blocked it raises
 // readerParked so the heartbeat timeout doesn't mistake local engine
 // backpressure (no inbound stamps while we're parked here) for a dead
 // link, and re-stamps the inbound clock on resume so the idle window
 // restarts from the unpark, not from the last pre-park frame.
-func (s *sessionImpl) publishInbound(m *msg.Msg) error {
+func (s *sessionImpl) publishInbound(m *msg.Msg, sub bool) error {
 	// Non-blocking fast path keeps the readerParked bookkeeping (and the
 	// extra inbound stamp) off the common no-backpressure case.
-	if s.sessionPipe.TrySend(m) {
+	if !sub && s.sessionPipe.TrySend(m) {
 		return nil
 	}
 	s.readerParked.Store(true)
-	err := s.sessionPipe.Send(s.ctx, m)
+	var err error
+	if sub {
+		err = s.sessionPipe.SendSubscription(s.ctx, m)
+	} else {
+		err = s.sessionPipe.Send(s.ctx, m)
+	}
 	s.lastInboundUnix.Store(s.cfg.Now())
 	s.readerParked.Store(false)
 	if err != nil {
@@ -186,14 +192,11 @@ func (s *sessionImpl) handleCommand(body []byte) error {
 		body := make([]byte, 1+len(rest))
 		body[0] = flag
 		copy(body[1:], rest)
-		synth := msg.New()
-		synth.AppendFrame(body)
 		// Flag this as a genuine subscription command so a SUB/XSUB
 		// receiver distinguishes it from ordinary data that merely
 		// begins with 0x01/0x00. PUB/XPUB still classify by content
 		// (legacy peers send subscriptions as plain data frames).
-		synth.MarkSubscription()
-		if err := s.publishInbound(synth); err != nil {
+		if err := s.publishInbound(msg.FromBytes(body), true); err != nil {
 			if !isShutdownErr(err) {
 				return fmt.Errorf("gozmq/session: publish subscription: %w", err)
 			}

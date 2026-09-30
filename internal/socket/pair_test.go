@@ -8,7 +8,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
@@ -119,7 +118,7 @@ func TestPair_CloseUnblocksRecv(t *testing.T) {
 
 // recvAsync starts eng.Recv in a goroutine and returns channels for its
 // result.
-func recvAsync(ctx context.Context, eng iface.SocketEngine) (<-chan *msg.Msg, <-chan error) {
+func recvAsync(ctx context.Context, eng socket.Engine) (<-chan *msg.Msg, <-chan error) {
 	mc := make(chan *msg.Msg, 1)
 	ec := make(chan error, 1)
 	go func() {

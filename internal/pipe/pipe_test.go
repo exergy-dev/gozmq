@@ -175,10 +175,8 @@ func TestTrySend_FastPath(t *testing.T) {
 	defer a.Close()
 	defer b.Close()
 
-	endA, ok := a.(*end)
-	require.True(t, ok, "pipe end type = %T, want *end", a)
-	require.True(t, endA.TrySend(msg.FromBytes([]byte("one"))), "TrySend on empty pipe should succeed")
-	assert.False(t, endA.TrySend(msg.FromBytes([]byte("two"))), "TrySend on full pipe should fail")
+	require.True(t, a.TrySend(msg.FromBytes([]byte("one"))), "TrySend on empty pipe should succeed")
+	assert.False(t, a.TrySend(msg.FromBytes([]byte("two"))), "TrySend on full pipe should fail")
 	got, err := b.Recv(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "one", string(got.Bytes()))
@@ -312,15 +310,15 @@ func TestProperty_Bounded_Unblock(t *testing.T) {
 }
 
 // TestHWMZero_CloseDrainsThenEOF is the HWM-0 counterpart of
-// TestClose_Drains_Then_EOF: messages parked inside the unbounded relay's
-// queue (not yet visible on the out channel) must still be delivered after
-// the sender closes, with EOF only after the relay's flush completes.
+// TestClose_Drains_Then_EOF: messages spilled into the overflow slice (more
+// than the channel holds) are still delivered, in order, after the sender
+// closes, and EOF comes only after the last one.
 func TestHWMZero_CloseDrainsThenEOF(t *testing.T) {
 	a, b := NewPair(0, 0, PeerInfo{}, PeerInfo{})
 	defer b.Close()
 
 	ctx := context.Background()
-	const n = 200
+	const n = 3*unboundedChanCap + 7
 	for i := 0; i < n; i++ {
 		require.NoError(t, a.Send(ctx, msg.FromBytes([]byte{byte(i)})), "a.Send[%d]", i)
 	}
@@ -332,12 +330,12 @@ func TestHWMZero_CloseDrainsThenEOF(t *testing.T) {
 		require.Equal(t, byte(i), m.Bytes()[0], "Recv[%d]", i)
 	}
 	_, err := b.Recv(ctx)
-	require.ErrorIs(t, err, io.EOF, "expected io.EOF after relay drain")
+	require.ErrorIs(t, err, io.EOF, "expected io.EOF after the queue drained")
 }
 
 // TestSetRecvReady_ArmsOnSendAndClose verifies the recv-ready gate is
 // armed from the data path (every enqueue) and on close, including for
-// HWM-0 relay-backed directions — the level-trigger contract the Poller
+// HWM-0 directions — the level-trigger contract the Poller
 // readiness fix relies on.
 func TestSetRecvReady_ArmsOnSendAndClose(t *testing.T) {
 	for _, hwm := range []int{4, 0} {
@@ -347,7 +345,7 @@ func TestSetRecvReady_ArmsOnSendAndClose(t *testing.T) {
 			defer b.Close()
 
 			gate := make(chan struct{}, 1)
-			b.(*end).SetRecvReady(gate)
+			b.SetRecvReady(gate)
 			select {
 			case <-gate:
 				require.Fail(t, "gate armed with no data")
@@ -365,12 +363,6 @@ func TestSetRecvReady_ArmsOnSendAndClose(t *testing.T) {
 			// parked poller wakes and observes the close.
 			_, err := b.Recv(context.Background())
 			require.NoError(t, err)
-			select {
-			case <-gate:
-				// A relay-backed direction may have re-armed during its
-				// in→out hop; drain and continue to the close check.
-			default:
-			}
 			require.NoError(t, a.Close())
 			select {
 			case <-gate:
@@ -390,7 +382,7 @@ func TestSetRecvReady_LateRegistrationArmsIfPending(t *testing.T) {
 
 	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("x"))))
 	gate := make(chan struct{}, 1)
-	b.(*end).SetRecvReady(gate)
+	b.SetRecvReady(gate)
 	select {
 	case <-gate:
 	case <-time.After(time.Second):
@@ -398,72 +390,151 @@ func TestSetRecvReady_LateRegistrationArmsIfPending(t *testing.T) {
 	}
 }
 
-// TestSealRecv_DrainRecvDeliversWholeQueue: after SealRecv (peer still
-// open), DrainRecv hands out every queued message in order and only then
-// reports EOF — for HWM-0 it must wait out the relay rather than stop at
-// the first momentarily empty channel.
-func TestSealRecv_DrainRecvDeliversWholeQueue(t *testing.T) {
+// TestTryRecv_DrainsWholeQueueAfterClose: TryRecv on either end of a
+// closed pipe hands out every queued message in order — including HWM-0
+// overflow — and only then reports empty. The session writer's linger
+// drain and PAIR's retired-pipe drain rely on this.
+func TestTryRecv_DrainsWholeQueueAfterClose(t *testing.T) {
 	for _, hwm := range []int{0, 500} {
+		for _, closer := range []string{"sender", "receiver"} {
+			a, b := NewPair(hwm, hwm, PeerInfo{}, PeerInfo{})
+			ctx := context.Background()
+			n := 500
+			if hwm == 0 {
+				n = 2*unboundedChanCap + 3
+			}
+			for i := 0; i < n; i++ {
+				require.NoError(t, a.Send(ctx, msg.FromBytes([]byte{byte(i)})), "hwm=%d Send[%d]", hwm, i)
+			}
+			if closer == "sender" {
+				_ = a.Close()
+			} else {
+				_ = b.Close()
+			}
+			for i := 0; i < n; i++ {
+				m, ok := b.TryRecv()
+				require.True(t, ok, "hwm=%d %s closed: TryRecv[%d]", hwm, closer, i)
+				require.Equal(t, byte(i), m.Bytes()[0], "hwm=%d TryRecv[%d]", hwm, i)
+			}
+			_, ok := b.TryRecv()
+			require.False(t, ok, "hwm=%d: empty once drained", hwm)
+			_ = a.Close()
+		}
+	}
+}
+
+// TestRecvOr_Abort: RecvOr and SendOr give up with ErrAborted when their
+// abort channel fires, leaving the pipe usable.
+func TestRecvOr_Abort(t *testing.T) {
+	a, b := NewPair(1, 1, PeerInfo{}, PeerInfo{})
+	defer a.Close()
+	defer b.Close()
+	ctx := context.Background()
+	abort := make(chan struct{})
+	close(abort)
+
+	_, _, err := b.RecvOr(ctx, abort)
+	require.ErrorIs(t, err, ErrAborted)
+
+	require.NoError(t, a.SendOr(ctx, msg.FromBytes([]byte("x")), abort), "room: abort not consulted")
+	require.ErrorIs(t, a.SendOr(ctx, msg.FromBytes([]byte("y")), abort), ErrAborted)
+
+	m, _, err := b.RecvOr(ctx, abort)
+	require.NoError(t, err, "buffered message wins over abort")
+	require.Equal(t, "x", string(m.Bytes()))
+}
+
+// TestSendSubscription_Flag: RecvOr reports a message sent with
+// SendSubscription as a subscription command, and ordinary data (even
+// data that looks like one) as not, across the HWM-0 overflow too.
+func TestSendSubscription_Flag(t *testing.T) {
+	for _, hwm := range []int{0, 4} {
 		a, b := NewPair(hwm, hwm, PeerInfo{}, PeerInfo{})
 		ctx := context.Background()
-		const n = 500
-		for i := 0; i < n; i++ {
-			require.NoError(t, a.Send(ctx, msg.FromBytes([]byte{byte(i)})), "hwm=%d Send[%d]", hwm, i)
+		n := 4
+		if hwm == 0 {
+			n = unboundedChanCap + 10
 		}
-		be := b.(*end)
-		be.SealRecv()
 		for i := 0; i < n; i++ {
-			m, err := be.DrainRecv(ctx)
-			require.NoError(t, err, "hwm=%d DrainRecv[%d]", hwm, i)
-			require.Equal(t, byte(i), m.Bytes()[0], "hwm=%d DrainRecv[%d]", hwm, i)
+			m := msg.FromBytes([]byte{0x01, byte(i)})
+			if i%2 == 0 {
+				require.NoError(t, a.SendSubscription(ctx, m))
+			} else {
+				require.NoError(t, a.Send(ctx, m))
+			}
+			if hwm > 0 {
+				_, sub, err := b.RecvOr(ctx, nil)
+				require.NoError(t, err)
+				require.Equal(t, i%2 == 0, sub, "hwm=%d msg %d", hwm, i)
+			}
 		}
-		_, err := be.DrainRecv(ctx)
-		require.ErrorIs(t, err, io.EOF, "hwm=%d: EOF once drained", hwm)
-		select {
-		case <-be.Drained():
-		default:
-			require.Fail(t, "Drained not closed after the relay flushed", "hwm=%d", hwm)
+		if hwm == 0 {
+			for i := 0; i < n; i++ {
+				m, sub, err := b.RecvOr(ctx, nil)
+				require.NoError(t, err)
+				require.Equal(t, byte(i), m.Frames()[0][1])
+				require.Equal(t, i%2 == 0, sub, "hwm=0 msg %d", i)
+			}
 		}
 		_ = a.Close()
 		_ = b.Close()
 	}
 }
 
-// TestDrained_CloseAfterDrainKeepsBufferedMessage: once Drained fires, the
-// receiving end may be closed without losing the message still sitting in
-// its channel, and the relay has already exited.
-func TestDrained_CloseAfterDrainKeepsBufferedMessage(t *testing.T) {
+// TestHWMZero_ConcurrentOverflow stresses the overflow refill: several
+// senders race a receiver on an HWM-0 direction with far more messages than
+// the channel holds. Everything must arrive, in per-sender order, and a
+// blocking Recv must never be stranded on an empty channel while overflow
+// holds messages.
+func TestHWMZero_ConcurrentOverflow(t *testing.T) {
 	a, b := NewPair(0, 0, PeerInfo{}, PeerInfo{})
-	ctx := context.Background()
-	require.NoError(t, a.Send(ctx, msg.FromBytes([]byte("last"))))
-	require.NoError(t, a.Close())
-	be := b.(*end)
-	select {
-	case <-be.Drained():
-	case <-time.After(time.Second):
-		require.FailNow(t, "Drained not closed after sender close")
+	defer a.Close()
+	defer b.Close()
+	const senders, per = 4, 5 * unboundedChanCap
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	for s := 0; s < senders; s++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < per; i++ {
+				if !a.TrySend(msg.FromFrames([]byte{byte(s)}, []byte{byte(i >> 16), byte(i >> 8), byte(i)})) {
+					assert.Fail(t, "HWM-0 TrySend refused")
+					return
+				}
+			}
+		}()
 	}
-	require.NoError(t, b.Close())
-	m, err := b.Recv(ctx)
-	require.NoError(t, err)
-	require.Equal(t, "last", string(m.Bytes()))
-	_, err = b.Recv(ctx)
-	require.ErrorIs(t, err, io.EOF)
+	next := make([]int, senders)
+	for got := 0; got < senders*per; got++ {
+		m, err := b.Recv(ctx)
+		require.NoError(t, err, "Recv %d stranded", got)
+		f := m.Frames()
+		s, seq := int(f[0][0]), int(f[1][0])<<16|int(f[1][1])<<8|int(f[1][2])
+		require.Equal(t, next[s], seq, "sender %d out of order", s)
+		next[s]++
+	}
+	wg.Wait()
+	require.False(t, b.Pending())
 }
 
 // TestSendDrained_FiresWhenPeerConsumed: with both ends open, SendDrained
-// stays pending while anything we sent is unread (including an HWM-0
-// relay's queue), fires once the peer has received it all, and fires when
+// stays pending while anything we sent is unread (including HWM-0
+// overflow), fires once the peer has received it all, and fires when
 // either end closes.
 func TestSendDrained_FiresWhenPeerConsumed(t *testing.T) {
 	ctx := context.Background()
 	for _, hwm := range []int{0, 500} {
 		a, b := NewPair(hwm, hwm, PeerInfo{}, PeerInfo{})
-		const n = 100
+		n := 100
+		if hwm == 0 {
+			n = unboundedChanCap + 100
+		}
 		for i := 0; i < n; i++ {
 			require.NoError(t, a.Send(ctx, msg.FromBytes([]byte{byte(i)})), "hwm=%d Send[%d]", hwm, i)
 		}
-		drained := a.(*end).SendDrained()
+		drained := a.SendDrained()
 		for i := 0; i < n; i++ {
 			select {
 			case <-drained:
@@ -485,7 +556,7 @@ func TestSendDrained_FiresWhenPeerConsumed(t *testing.T) {
 		// Nothing consumed, but the peer closes: fires too.
 		a, b = NewPair(hwm, hwm, PeerInfo{}, PeerInfo{})
 		require.NoError(t, a.Send(ctx, msg.FromBytes([]byte("x"))))
-		drained = a.(*end).SendDrained()
+		drained = a.SendDrained()
 		_ = b.Close()
 		select {
 		case <-drained:

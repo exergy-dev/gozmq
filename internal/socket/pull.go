@@ -1,7 +1,5 @@
 package socket
 
-import "github.com/exergy-dev/gozmq/internal/iface"
-
 // NewPullEngine returns a new PULL socket engine.
 //
 // PULL is recv-only. Inbound messages are fair-queued across the attached
@@ -10,6 +8,6 @@ import "github.com/exergy-dev/gozmq/internal/iface"
 // next message from whichever peer produced one first. Recv blocks until
 // some peer has a message, ctx cancels, or the engine closes. Send always
 // returns zmqerr.ErrFSMViolation (wrapped); PULL has no outbound path.
-func NewPullEngine() iface.SocketEngine {
+func NewPullEngine() Engine {
 	return newRecvOnlyEngine("pull")
 }

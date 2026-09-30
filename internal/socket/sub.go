@@ -8,12 +8,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
-// SubEngine implements iface.SocketEngine for the SUB socket type and
+// SubEngine implements Engine for the SUB socket type and
 // also exposes subscription control to the public gozmq layer.
 //
 // SUB fair-queues inbound messages across all attached peer pipes using
@@ -35,12 +35,12 @@ import (
 // (see xsub.go) overrides Send to treat the message as a subscription
 // command from the application.
 //
-// NewSubEngine returns both the opaque iface.SocketEngine (plumbed into
+// NewSubEngine returns both the opaque Engine (plumbed into
 // the Socket layer) and a *SubEngine handle the public gozmq package
 // uses to implement WithSubscribe/WithUnsubscribe and dynamic
 // Subscribe/Unsubscribe calls. Internally the two returned values point
 // to the same object — the split keeps subscription controls out of the
-// frozen iface.SocketEngine interface.
+// frozen Engine interface.
 type SubEngine struct {
 	mu     sync.Mutex
 	closed bool
@@ -49,7 +49,7 @@ type SubEngine struct {
 	// them so new subscriptions can be forwarded to every existing peer,
 	// and so new peers (AttachPipe) can be replayed every pre-existing
 	// subscription.
-	peers map[iface.Pipe]struct{}
+	peers map[*pipe.End]struct{}
 
 	// subs tracks the local subscriptions plus refcount (duplicate
 	// Subscribe calls are legal in libzmq and must each have a matching
@@ -65,6 +65,9 @@ type SubEngine struct {
 	// dropped by Recv and we go around again.
 	fq      *FairQueue
 	surface bool // XSUB surfaces subscription commands sent by the app; SUB does not
+	// sendGate is XSUB's write-ready gate; XSUB can always take a
+	// subscription command, so it is armed whenever the engine is open.
+	sendGate readyGate
 
 	// recv counts messages SUB/XSUB returned to the caller (matches the
 	// local subscription filter). Filter-mismatch drops are NOT counted
@@ -77,25 +80,49 @@ type SubEngine struct {
 
 // NewSubEngine returns a new SUB socket engine and a handle for driving
 // subscriptions.
-func NewSubEngine() (iface.SocketEngine, *SubEngine) {
+func NewSubEngine() (Engine, *SubEngine) {
 	e := newSubEngineBase(false)
 	return e, e
 }
 
 func newSubEngineBase(surface bool) *SubEngine {
 	return &SubEngine{
-		peers:   make(map[iface.Pipe]struct{}),
-		tree:    NewSubTree(),
-		subs:    make(map[string]int),
-		fq:      NewFairQueue(),
-		surface: surface,
+		peers:    make(map[*pipe.End]struct{}),
+		tree:     NewSubTree(),
+		subs:     make(map[string]int),
+		fq:       NewFairQueue(),
+		surface:  surface,
+		sendGate: newReadyGate(),
 	}
+}
+
+// ReadyRecv is the FairQueue's gate. A queued message the filter then
+// drops is at worst a spurious wake (PUB peers filter upstream, so it is
+// rare).
+func (e *SubEngine) ReadyRecv() <-chan struct{} { return e.fq.ReadyRecv() }
+
+func (e *SubEngine) CanRecvNow() bool { return e.fq.HasPending() }
+
+// ReadyWrite is nil for SUB, which cannot send.
+func (e *SubEngine) ReadyWrite() <-chan struct{} {
+	if !e.surface {
+		return nil
+	}
+	return e.sendGate.signal(e.CanSendNow())
+}
+
+// CanSendNow reports whether XSUB can take a subscription command; SUB
+// never can.
+func (e *SubEngine) CanSendNow() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.surface && !e.closed
 }
 
 // AttachPipe registers p. Every current subscription is replayed to the
 // new peer as a synthetic SUBSCRIBE message so the peer's PUB engine
 // (or XPUB) sees the same filter state an existing peer does.
-func (e *SubEngine) AttachPipe(p iface.Pipe) error {
+func (e *SubEngine) AttachPipe(p *pipe.End) error {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
@@ -127,7 +154,7 @@ func (e *SubEngine) AttachPipe(p iface.Pipe) error {
 	return nil
 }
 
-func (e *SubEngine) DetachPipe(p iface.Pipe) error {
+func (e *SubEngine) DetachPipe(p *pipe.End) error {
 	e.mu.Lock()
 	delete(e.peers, p)
 	e.mu.Unlock()
@@ -145,7 +172,7 @@ func (e *SubEngine) Subscribe(prefix []byte) error {
 		return fmt.Errorf("sub subscribe: %w", zmqerr.ErrSocketClosed)
 	}
 	shouldForward := e.applySubLocked(prefix, true)
-	peers := make([]iface.Pipe, 0, len(e.peers))
+	peers := make([]*pipe.End, 0, len(e.peers))
 	for p := range e.peers {
 		peers = append(peers, p)
 	}
@@ -169,7 +196,7 @@ func (e *SubEngine) Unsubscribe(prefix []byte) error {
 		return fmt.Errorf("sub unsubscribe: %w", zmqerr.ErrSocketClosed)
 	}
 	shouldForward := e.applySubLocked(prefix, false)
-	peers := make([]iface.Pipe, 0, len(e.peers))
+	peers := make([]*pipe.End, 0, len(e.peers))
 	for p := range e.peers {
 		peers = append(peers, p)
 	}
@@ -235,7 +262,7 @@ func (e *SubEngine) removeSubFromList(key string) {
 // The deadline is layered onto the caller's ctx, so the effective
 // deadline is min(ctx deadline, subForwardTimeout) and an
 // already-cancelled caller does not wait out the internal budget.
-func (e *SubEngine) forwardSubscription(ctx context.Context, p iface.Pipe, subscribe bool, prefix []byte) {
+func (e *SubEngine) forwardSubscription(ctx context.Context, p *pipe.End, subscribe bool, prefix []byte) {
 	sendCtx, cancel := context.WithTimeout(ctx, subForwardTimeout)
 	defer cancel()
 	_ = p.Send(sendCtx, msg.FromBytes(subscriptionFrame(subscribe, prefix)))
@@ -276,7 +303,7 @@ func (e *SubEngine) xsubSend(ctx context.Context, m *msg.Msg) error {
 	// subscription), so the shouldForward result is intentionally ignored
 	// here — unlike Subscribe/Unsubscribe which dedup forwarding.
 	e.applySubLocked(prefix, subscribe)
-	peers := make([]iface.Pipe, 0, len(e.peers))
+	peers := make([]*pipe.End, 0, len(e.peers))
 	for p := range e.peers {
 		peers = append(peers, p)
 	}
@@ -299,11 +326,12 @@ func (e *SubEngine) xsubSend(ctx context.Context, m *msg.Msg) error {
 // the application.
 func (e *SubEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 	for {
-		m, err := e.fq.Recv(ctx)
+		it, err := e.fq.recvItem(ctx)
 		if err != nil {
 			return nil, err
 		}
-		if m.IsSubscription() {
+		m := it.m
+		if it.sub {
 			// A genuine SUBSCRIBE/CANCEL command surfaced by the session
 			// reader from a peer (flagged out-of-band, NOT sniffed from
 			// the payload — so ordinary data beginning with 0x00/0x01 is
@@ -332,7 +360,7 @@ func (e *SubEngine) matches(topic []byte) bool {
 // visible Recv returns (filter-matched messages); dropped piggybacks on
 // the FairQueue's drop counter so ctx-cancel/close drops during fanout
 // are observable. QueueDepth samples the FairQueue's inbound channel.
-func (e *SubEngine) Metrics() iface.SocketMetrics {
+func (e *SubEngine) Metrics() Metrics {
 	return e.snapshot(e.fq.Dropped(), e.fq.QueueDepth())
 }
 

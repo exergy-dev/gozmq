@@ -1,11 +1,11 @@
-// Package socket holds the per-pattern SocketEngine implementations that
+// Package socket holds the per-pattern Engine implementations that
 // back the public gozmq Socket types. Each ZMTP 3.1 socket pattern — PAIR,
 // PUSH, PULL, PUB, SUB, XPUB, XSUB, REQ, REP, DEALER, ROUTER, STREAM — is
 // realised by its own engine in this package.
 //
-// # SocketEngine contract
+// # Engine contract
 //
-// The per-pattern engines implement iface.SocketEngine. That interface
+// The per-pattern engines implement Engine. That interface
 // binds a narrow lifecycle (AttachPipe, DetachPipe, Close) to a two-method
 // dispatch surface (Send, Recv). Pipes are handed to the engine by the
 // session layer post-handshake; the engine owns all routing, subscription,
@@ -31,7 +31,7 @@
 //     attached pipe into a single shared channel. Used by PULL, DEALER,
 //     REP, ROUTER, SUB, and XSUB.
 //
-// Both depend only on iface.Pipe so engine-specific logic (identity
+// Both depend only on *pipe.End so engine-specific logic (identity
 // prefixing, subscription filtering, FSM state, sticky peer selection)
 // stays in the per-engine files rather than leaking into the primitive.
 //
@@ -64,14 +64,15 @@
 package socket
 
 import (
+	"context"
 	"sync/atomic"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
-// This file holds the shared engine plumbing: the metric counters struct,
-// the readiness gate, and the Pollable interface. The two large reusable
+// This file holds the Engine contract and the shared engine plumbing: the
+// metric counters struct and the readiness gate. The two large reusable
 // primitives live in sibling files in this package: LoadBalancer in
 // loadbalancer.go, FairQueue in fairqueue.go. The simple combinator engines
 // (PUSH/PULL/DEALER) are in combinators.go.
@@ -82,7 +83,7 @@ import (
 
 // counters holds the standard per-engine metric counters. Engines embed it so
 // the promoted sent/recv/dropped fields work in place (e.counters.sent ==
-// e.sent), and snapshot builds the iface.SocketMetrics. dropped and queueDepth
+// e.sent), and snapshot builds the Metrics. dropped and queueDepth
 // are passed explicitly because they usually combine an engine-local counter
 // with a FairQueue gauge.
 type counters struct {
@@ -91,13 +92,26 @@ type counters struct {
 	dropped atomic.Uint64
 }
 
-func (c *counters) snapshot(dropped, queueDepth uint64) iface.SocketMetrics {
-	return iface.SocketMetrics{
+func (c *counters) snapshot(dropped, queueDepth uint64) Metrics {
+	return Metrics{
 		Sent:       c.sent.Load(),
 		Recv:       c.recv.Load(),
 		Dropped:    dropped,
 		QueueDepth: queueDepth,
 	}
+}
+
+// prependFrames returns a new Msg holding head followed by body's frames
+// (body may be nil). The frame list is assembled in a stack buffer, so for
+// envelopes of typical depth msg.FromFrames' copy is the only allocation of
+// a frame slice.
+func prependFrames(head [][]byte, body *msg.Msg) *msg.Msg {
+	var buf [8][]byte
+	frames := append(buf[:0], head...)
+	if body != nil {
+		frames = append(frames, body.Frames()...)
+	}
+	return msg.FromFrames(frames...)
 }
 
 // readyGate is a level-triggered, single-slot readiness signal for the Poller.
@@ -122,26 +136,60 @@ func (g readyGate) signal(ready bool) <-chan struct{} {
 	return g.ch
 }
 
-// Pollable is the optional interface a SocketEngine implements to expose
-// non-consuming readiness signals to the public Poller API. The two
-// channels are level-armed: a chan with a buffered value (or that is
-// closed) means "ready right now"; a chan that blocks means "not ready".
-// Either channel may be nil — Poller skips nil channels. Engines that
-// have no recv direction (PUSH) return nil from ReadyRecv; engines with
-// no send direction (PULL, SUB, XSUB) return nil from ReadyWrite.
-type Pollable interface {
+// Engine encapsulates the per-type policy (REQ lock-step, PUB fanout,
+// DEALER round-robin, etc.) on top of a set of pipes. One engine per
+// Socket; the public gozmq.Socket is a thin front for an Engine.
+type Engine interface {
+	// AttachPipe registers a new peer pipe (post-handshake). Engines with
+	// subscription state (SUB, XPUB) may push pending SUBSCRIBE commands
+	// into the pipe at attach time.
+	AttachPipe(p *pipe.End) error
+
+	// DetachPipe is called by the socket layer when a peer disconnects.
+	// Engines must stop dispatching to p; any in-flight state (e.g. a
+	// ROUTER's outstanding reply envelope) is resolved per pattern policy.
+	DetachPipe(p *pipe.End) error
+
+	// Send is the engine-level SendMsg entry. Pattern-specific:
+	//   PUSH:    load-balance
+	//   PUB:     fanout filtered by subscription
+	//   ROUTER:  route by leading identity frame
+	//   REQ:     fail with ErrFSMViolation unless Recv was the last call
+	Send(ctx context.Context, m *msg.Msg) error
+
+	// Recv is the engine-level RecvMsg entry. Pattern-specific:
+	//   PULL:    fair-queue across pipes
+	//   SUB:     fair-queue with subscription filter
+	//   ROUTER:  prepend peer identity frame
+	//   REP:     fail with ErrFSMViolation unless Send was the last call
+	Recv(ctx context.Context) (*msg.Msg, error)
+
+	// Close releases engine state, unblocks pending Send/Recv with
+	// ErrSocketClosed, and detaches all pipes.
+	Close() error
+
+	// Metrics returns a point-in-time snapshot of the engine's counters
+	// and the current inbound queue-depth gauge. Safe to call from any
+	// goroutine, including concurrently with Send/Recv.
+	Metrics() Metrics
+
+	// The readiness methods below back the public Poller. The two
+	// channels are level-armed: a chan with a buffered value (or that is
+	// closed) means "ready right now"; a chan that blocks means "not
+	// ready". Either may be nil — the Poller skips nil channels. Engines
+	// with no recv direction (PUSH) return nil from ReadyRecv; engines
+	// with no send direction (PULL, SUB, XSUB) return nil from ReadyWrite.
+
 	// ReadyRecv returns a channel that is armed when at least one
 	// message is buffered and immediately available to Recv. Reads
 	// from the channel do not consume the message; the engine
-	// re-arms the signal as long as data remains. Returns nil for
-	// send-only engines.
+	// re-arms the signal as long as data remains.
 	ReadyRecv() <-chan struct{}
 	// ReadyWrite returns a channel that is armed when at least one
 	// peer is attached and a Send would not block on the peer-set
 	// being empty. (HWM-induced blocking is not surfaced; this
 	// mirrors libzmq's poll semantics where POLLOUT means "a peer
 	// exists," not "the next byte is guaranteed to land instantly.")
-	// Returns nil for recv-only engines.
 	ReadyWrite() <-chan struct{}
 	// CanRecvNow is a non-consuming level check: true iff a Recv
 	// would not block on inbound queue emptiness right now. Always
@@ -153,32 +201,19 @@ type Pollable interface {
 	CanSendNow() bool
 }
 
-// chanPipe is the channel-level surface of a pipe end: the iface.Pipe
-// contract plus the direct channel accessors and non-blocking helpers
-// engines use to inline pipe I/O into their own selects (no per-call
-// goroutine or context). Every iface.Pipe in the tree is *pipe.end
-// (constructed via pipe.NewPair — see internal/session, internal/stream,
-// and the root direct-pipe path), which implements all of these.
-type chanPipe interface {
-	iface.Pipe
-	// RecvCh exposes the inbound channel for use in selects. Callers
-	// handle pipe-closed semantics themselves (via Closed()).
-	RecvCh() <-chan *msg.Msg
-	// SendCh exposes the outbound channel for use in selects.
-	SendCh() chan<- *msg.Msg
-	// TrySend is a non-blocking Send; false when full or closed.
-	TrySend(*msg.Msg) bool
-	// TryRecv is a non-blocking Recv; false when empty or closed.
-	TryRecv() (*msg.Msg, bool)
-	// SetRecvReady registers a level-trigger gate armed whenever a
-	// message becomes available to Recv (and on close). Engines hand
-	// their Poller-facing readyGate channel to the pipe so blocking
-	// Poll wakes on data arrival.
-	SetRecvReady(gate chan<- struct{})
+// Metrics is a point-in-time snapshot of per-engine counters and gauges;
+// the root package copies it into the public SocketMetrics. Counters
+// (Sent, Recv, Dropped) are monotonically increasing; QueueDepth is the
+// number of messages buffered in the engine's inbound handoff when
+// sampled (zero for send-only patterns).
+//
+// Dropped covers messages the engine refuses to deliver after the
+// caller's Send returned successfully (PUB fanout at HWM, a FairQueue
+// forwarder cancelled by Detach or Close mid-handoff); send-side errors
+// returned to the caller are not counted.
+type Metrics struct {
+	Sent       uint64
+	Recv       uint64
+	Dropped    uint64
+	QueueDepth uint64
 }
-
-// asChanPipe converts p to its channel-level surface. The conversion is
-// a structural invariant (*pipe.end is the sole iface.Pipe
-// implementation); failure means a new pipe type was introduced without
-// the channel accessors and is a programmer error worth the panic.
-func asChanPipe(p iface.Pipe) chanPipe { return p.(chanPipe) } //nolint:errcheck // deliberate panic, see above

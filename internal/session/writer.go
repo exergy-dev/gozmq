@@ -6,7 +6,8 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/internal/zmtp"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -53,10 +54,9 @@ func (s *sessionImpl) runWriter() {
 
 	// Reusable batch buffers; recycled each loop iteration.
 	var batch writerBatch
-	recvCh := s.sessionPipe.RecvCh()
 
 	for {
-		m, err := s.writerNext(recvCh)
+		m, err := s.writerNext()
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				// writerCtx was cancelled by the socket-level linger path.
@@ -92,26 +92,25 @@ func (s *sessionImpl) runWriter() {
 
 // writerNext blocks until the writer has work: a queued user message
 // (returned), a pending PING/PONG from cmdCh (written inline; returns
-// nil, nil), writer cancellation, or pipe closure. All traffic-phase
-// wire writes funnel through the writer goroutine — see the cmdCh field
-// doc for why the reader/heartbeat goroutines never write directly.
-func (s *sessionImpl) writerNext(recvCh <-chan *msg.Msg) (*msg.Msg, error) {
+// nil, nil), writer cancellation, or pipe closure (queued messages first,
+// then io.EOF). All traffic-phase wire writes funnel through the writer
+// goroutine — see the cmdCh field doc for why the reader/heartbeat
+// goroutines never write directly.
+//
+// cmdCh is polled before every receive: RecvOr prefers queued data over
+// its abort channel (cmdWake), so under sustained traffic this check is
+// what keeps PING/PONG flowing.
+func (s *sessionImpl) writerNext() (*msg.Msg, error) {
 	select {
 	case buf := <-s.cmdCh:
-		if err := s.writeFrame(iface.FlagCommand, buf); err != nil {
-			return nil, err
-		}
-		return nil, nil
-	case m := <-recvCh:
-		return m, nil
-	case <-s.sessionPipe.Closed():
-		// Hand out everything still queued before reporting EOF. A single
-		// TryRecv would stop at the first empty channel, while an HWM-0
-		// relay may still be flushing the rest of its queue into it.
-		return s.sessionPipe.DrainRecv(s.writerCtx)
-	case <-s.writerCtx.Done():
-		return nil, s.writerCtx.Err()
+		return nil, s.writeFrame(zmtp.FlagCommand, buf)
+	default:
 	}
+	m, _, err := s.sessionPipe.RecvOr(s.writerCtx, s.cmdWake)
+	if errors.Is(err, pipe.ErrAborted) {
+		return nil, nil // a command was queued; the next call writes it
+	}
+	return m, err
 }
 
 // writeBatchFrom encodes first plus any immediately-queued messages
@@ -225,7 +224,7 @@ func (b *writerBatch) appendMessage(s *sessionImpl, m *msg.Msg, sizeSoFar int) (
 	for i, body := range frames {
 		var flags uint8
 		if i < last {
-			flags |= iface.FlagMore
+			flags |= zmtp.FlagMore
 		}
 		var err error
 		sizeSoFar, err = b.appendFrame(s, flags, body, sizeSoFar)
@@ -310,22 +309,16 @@ func (s *sessionImpl) flushBatch(buffers *net.Buffers) error {
 }
 
 // drainSessionPipe flushes every remaining queued message via the shared
-// batching path. Returns when the queue is exhausted, the session stops,
-// or a write error occurs (writeBatchFrom logs and shuts the session down
-// on genuine errors). Called after writerCtx cancellation to flush the
-// outbound queue before the writer goroutine exits.
-//
-// CancelWriter runs after engine.Close, so nothing more will be sent:
-// sealing the direction makes an HWM-0 relay flush and signal drained,
-// letting DrainRecv wait for the true end of the queue instead of
-// stopping at the first momentarily empty channel. s.ctx (cancelled by
-// Stop when the linger expires) bounds the wait.
+// batching path. Returns when the queue is exhausted or a write error
+// occurs (writeBatchFrom logs and shuts the session down on genuine
+// errors; Stop closing the conn when the linger expires is one). Called
+// after writerCtx cancellation, which follows engine.Close, so nothing
+// more is queued and an empty TryRecv is the true end of the queue.
 func (s *sessionImpl) drainSessionPipe() {
-	s.sessionPipe.SealRecv()
 	var batch writerBatch
 	for {
-		m, err := s.sessionPipe.DrainRecv(s.ctx)
-		if err != nil {
+		m, ok := s.sessionPipe.TryRecv()
+		if !ok {
 			return
 		}
 		if err := s.writeBatchFrom(&batch, m); err != nil {

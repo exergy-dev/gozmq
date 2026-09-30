@@ -309,8 +309,7 @@ func TestXPub_DetachBeforeRecvSettlesRefcounts(t *testing.T) {
 	defer closePipes(a1, b1)
 	mustAttach(t, eng, a1)
 	require.NoError(t, b1.Send(ctx, subscribeMsg(true, []byte("A"))))
-	poll := eng.(socket.Pollable)
-	require.Eventually(t, poll.CanRecvNow, 2*time.Second, time.Millisecond, "SUBSCRIBE queued")
+	require.Eventually(t, eng.CanRecvNow, 2*time.Second, time.Millisecond, "SUBSCRIBE queued")
 	require.NoError(t, eng.DetachPipe(a1))
 
 	requireXPubEvent(ctx, t, eng, true, "A")

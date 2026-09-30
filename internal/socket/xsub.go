@@ -1,9 +1,5 @@
 package socket
 
-import (
-	"github.com/exergy-dev/gozmq/internal/iface"
-)
-
 // NewXSubEngine returns a new XSUB socket engine.
 //
 // XSUB behaves like SUB on the inbound path (fair-queue across all
@@ -22,7 +18,7 @@ import (
 // message as a subscription command. Subscribe/Unsubscribe remain
 // callable on the returned *SubEngine for tests that want to drive the
 // filter via the API path rather than through synthetic wire messages.
-func NewXSubEngine() (iface.SocketEngine, *SubEngine) {
+func NewXSubEngine() (Engine, *SubEngine) {
 	e := newSubEngineBase(true)
 	return e, e
 }

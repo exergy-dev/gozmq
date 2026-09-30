@@ -2,17 +2,19 @@ package socket
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"sync/atomic"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
 // LoadBalancer is a round-robin outbound dispatcher across a dynamic set of
-// iface.Pipe values. It is goroutine-safe: Attach, Detach, Send, and Close
+// *pipe.End values. It is goroutine-safe: Attach, Detach, Send, and Close
 // may be called concurrently from any goroutine.
 //
 // Send tries the peer at the round-robin cursor first and advances the
@@ -30,13 +32,13 @@ type LoadBalancer struct {
 	mu   sync.Mutex
 	ring pipeRing
 	// notifyCh is a generation channel: it is closed (broadcast) and
-	// replaced with a fresh one whenever the peer set changes, so every
-	// Send parked on the old generation wakes and re-reads the set. A
+	// replaced with a fresh one whenever the peer set changes and on
+	// Close, so every Send parked on the old generation wakes and re-reads
+	// the set (or sees closed). A
 	// cap-1 token channel was tried first and lost wakeups: a mid-loop
 	// drain could swallow the token destined for another parked sender.
 	notifyCh chan struct{}
 	readyW   readyGate // level-armed while ring.len() > 0; Poller-facing
-	closeCh  chan struct{}
 	closed   bool
 
 	// single is an atomically-swapped snapshot of the sole attached peer.
@@ -62,7 +64,7 @@ type LoadBalancer struct {
 // peer-set change closes it, invalidating the snapshot for parked
 // senders.
 type singleSnapshot struct {
-	pipe   chanPipe
+	pipe   *pipe.End
 	notify <-chan struct{}
 }
 
@@ -75,7 +77,6 @@ func NewLoadBalancer() *LoadBalancer {
 	return &LoadBalancer{
 		notifyCh: make(chan struct{}),
 		readyW:   newReadyGate(),
-		closeCh:  make(chan struct{}),
 	}
 }
 
@@ -110,7 +111,7 @@ func (lb *LoadBalancer) refreshSingleLocked() {
 		return
 	}
 	lb.single.Store(&singleSnapshot{
-		pipe:   asChanPipe(lb.ring.pipes[0]),
+		pipe:   lb.ring.pipes[0],
 		notify: lb.notifyCh,
 	})
 }
@@ -126,7 +127,7 @@ func (lb *LoadBalancer) signalReadyWriteLocked() {
 // Attach registers p with the dispatcher. Idempotent: re-attaching an
 // already-tracked pipe is a no-op. Returns zmqerr.ErrSocketClosed (wrapped)
 // after Close.
-func (lb *LoadBalancer) Attach(p iface.Pipe) error {
+func (lb *LoadBalancer) Attach(p *pipe.End) error {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
 	if lb.closed {
@@ -143,7 +144,7 @@ func (lb *LoadBalancer) Attach(p iface.Pipe) error {
 
 // Detach removes p from the dispatcher. No-op if p was never attached.
 // Adjusts the cursor so round-robin continues sensibly.
-func (lb *LoadBalancer) Detach(p iface.Pipe) error {
+func (lb *LoadBalancer) Detach(p *pipe.End) error {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
 	if lb.ring.remove(p) {
@@ -163,31 +164,20 @@ func (lb *LoadBalancer) Detach(p iface.Pipe) error {
 // cancellation, or the underlying Pipe.Send error.
 func (lb *LoadBalancer) Send(ctx context.Context, m *msg.Msg) error {
 	// Single-peer fast path: when exactly one peer is attached we read it
-	// from an atomic snapshot and inline the blocking select, skipping BOTH
-	// the peer-pick lock and the cursor-advance lock. The closeCh arm
-	// preserves the Close-unblocks-a-blocked-Send guarantee; the notify arm
-	// wakes us if the peer set changes (Attach/Detach) so we re-read the
-	// current set via the locked path rather than blocking on a stale pipe.
+	// from an atomic snapshot and send without taking the lock. The
+	// blocking send aborts on the notify generation, which a peer-set
+	// change (Attach/Detach) and Close both close; the locked path below
+	// then re-reads the current set, or reports the close.
 	if s := lb.single.Load(); s != nil {
-		// Try the non-blocking fast send first to avoid arming a select at
-		// all when the pipe has room.
-		if s.pipe.TrySend(m) {
+		err := s.pipe.SendOr(ctx, m, s.notify)
+		if err == nil {
 			lb.sent.Add(1)
 			return nil
 		}
-		select {
-		case s.pipe.SendCh() <- m:
-			lb.sent.Add(1)
-			return nil
-		case <-lb.closeCh:
-			return fmt.Errorf("loadbalancer send: %w", zmqerr.ErrSocketClosed)
-		case <-s.notify:
-			// Peer set changed. notify is closed (broadcast), so every
-			// parked sender wakes; fall through to the locked round-robin
-			// path which re-reads the current peer set under the mutex.
-		case <-ctx.Done():
-			return ctx.Err()
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		}
+		// ErrAborted or a closed pipe: fall through to the locked path.
 	}
 
 	for {
@@ -198,12 +188,9 @@ func (lb *LoadBalancer) Send(ctx context.Context, m *msg.Msg) error {
 		}
 		if lb.ring.len() == 0 {
 			notify := lb.notifyCh
-			closeCh := lb.closeCh
 			lb.mu.Unlock()
 			select {
-			case <-notify:
-			case <-closeCh:
-				return fmt.Errorf("loadbalancer send: %w", zmqerr.ErrSocketClosed)
+			case <-notify: // attach or Close; re-check under the lock
 			case <-ctx.Done():
 				return ctx.Err()
 			}
@@ -218,7 +205,7 @@ func (lb *LoadBalancer) Send(ctx context.Context, m *msg.Msg) error {
 		for i := lb.ring.len(); i > 0; i-- {
 			idx, p := lb.ring.current()
 			lb.ring.advancePast(idx, p)
-			if asChanPipe(p).TrySend(m) {
+			if p.TrySend(m) {
 				lb.mu.Unlock()
 				lb.sent.Add(1)
 				return nil
@@ -231,29 +218,26 @@ func (lb *LoadBalancer) Send(ctx context.Context, m *msg.Msg) error {
 		// until ANY pipe reactivates; blocking on one peer is a close
 		// approximation since a drain elsewhere usually accompanies
 		// peer-set churn or further Sends re-rotating.
+		// notify is closed by a peer-set change and by Close; either way
+		// the loop re-checks under the lock.
 		idx, p := lb.ring.current()
 		notify := lb.notifyCh
-		closeCh := lb.closeCh
 		lb.mu.Unlock()
 
-		select {
-		case asChanPipe(p).SendCh() <- m:
+		switch err := p.SendOr(ctx, m, notify); {
+		case err == nil:
 			lb.mu.Lock()
 			lb.ring.advancePast(idx, p)
 			lb.mu.Unlock()
 			lb.sent.Add(1)
 			return nil
-		case <-p.Closed():
+		case errors.Is(err, io.ErrClosedPipe):
 			// Peer pipe closed mid-send — drop it and retry.
 			_ = lb.Detach(p)
-			continue
-		case <-closeCh:
-			return fmt.Errorf("loadbalancer send: %w", zmqerr.ErrSocketClosed)
-		case <-notify:
-			// Peer set changed; re-rotate over the new set.
-			continue
-		case <-ctx.Done():
-			return ctx.Err()
+		case errors.Is(err, pipe.ErrAborted):
+			// Peer set changed or Close; re-rotate over the new set.
+		default:
+			return err
 		}
 	}
 }
@@ -278,7 +262,6 @@ func (lb *LoadBalancer) Close() error {
 	}
 	lb.closed = true
 	lb.single.Store(nil)
-	close(lb.closeCh)
 	lb.signalLocked()
 	return nil
 }

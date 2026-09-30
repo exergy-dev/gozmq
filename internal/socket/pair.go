@@ -7,12 +7,12 @@ import (
 	"io"
 	"sync"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
-// pairEngine implements iface.SocketEngine for the PAIR socket type.
+// pairEngine implements Engine for the PAIR socket type.
 //
 // PAIR is exclusive 1:1: at most one peer pipe may be attached at a time.
 // Send forwards on that pipe; Recv reads from it. Send and Recv block
@@ -29,11 +29,11 @@ import (
 // close retries on the next peer.
 type pairEngine struct {
 	mu   sync.Mutex
-	pipe chanPipe
+	pipe *pipe.End
 	// retired holds detached pipes that may still have inbound messages
 	// buffered, oldest first. Recv drains them before the current pipe so
 	// a reconnect never reorders or loses what the old peer already sent.
-	retired  []chanPipe
+	retired  []*pipe.End
 	closed   bool
 	closeCh  chan struct{}
 	notifyCh chan struct{} // closed on attach; a fresh one is made if the pipe detaches
@@ -44,7 +44,7 @@ type pairEngine struct {
 }
 
 // NewPairEngine returns a new PAIR socket engine.
-func NewPairEngine() iface.SocketEngine {
+func NewPairEngine() Engine {
 	return &pairEngine{
 		closeCh:  make(chan struct{}),
 		notifyCh: make(chan struct{}),
@@ -53,7 +53,7 @@ func NewPairEngine() iface.SocketEngine {
 	}
 }
 
-func (e *pairEngine) AttachPipe(p iface.Pipe) error {
+func (e *pairEngine) AttachPipe(p *pipe.End) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
@@ -70,7 +70,7 @@ func (e *pairEngine) AttachPipe(p iface.Pipe) error {
 			return fmt.Errorf("pair attach: already bound to a peer: %w", zmqerr.ErrFSMViolation)
 		}
 	}
-	e.pipe = asChanPipe(p)
+	e.pipe = p
 	// Arm the Poller's recv gate straight from the pipe's data path so a
 	// blocking Poll wakes when a message arrives (no forwarder goroutine
 	// exists to do it).
@@ -84,10 +84,10 @@ func (e *pairEngine) AttachPipe(p iface.Pipe) error {
 	return nil
 }
 
-func (e *pairEngine) DetachPipe(p iface.Pipe) error {
+func (e *pairEngine) DetachPipe(p *pipe.End) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.pipe != nil && iface.Pipe(e.pipe) == p {
+	if e.pipe != nil && e.pipe == p {
 		e.retireLocked(e.pipe)
 	}
 	return nil
@@ -98,14 +98,14 @@ func (e *pairEngine) DetachPipe(p iface.Pipe) error {
 // close can race in either order) and queues p for Recv to drain. Retired
 // pipes with nothing left buffered are dropped so a PAIR that never calls
 // Recv does not accumulate them across reconnects.
-func (e *pairEngine) retireLocked(p chanPipe) {
+func (e *pairEngine) retireLocked(p *pipe.End) {
 	if e.pipe != p {
 		return
 	}
 	e.pipe = nil
 	kept := e.retired[:0]
 	for _, r := range e.retired {
-		if len(r.RecvCh()) > 0 {
+		if r.Pending() {
 			kept = append(kept, r)
 		}
 	}
@@ -114,7 +114,7 @@ func (e *pairEngine) retireLocked(p chanPipe) {
 }
 
 // dropRetired removes a fully drained pipe from the retired queue.
-func (e *pairEngine) dropRetired(p chanPipe) {
+func (e *pairEngine) dropRetired(p *pipe.End) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for i, r := range e.retired {
@@ -148,26 +148,18 @@ func (e *pairEngine) Send(ctx context.Context, m *msg.Msg) error {
 				return ctx.Err()
 			}
 		}
-		// A closed pipe may still have send capacity; check first so the
-		// message waits for the next peer instead of vanishing into it.
-		select {
-		case <-p.Closed():
-			e.retire(p)
-			continue
-		default:
-		}
-		// Inline the channel send instead of spawning a per-Send goroutine,
-		// racing it against engine close, peer loss, and ctx.
-		select {
-		case p.SendCh() <- m:
+		// SendOr refuses a closed pipe even if it has room, so the message
+		// waits for the next peer instead of vanishing into it.
+		switch err := p.SendOr(ctx, m, closeCh); {
+		case err == nil:
 			e.sent.Add(1)
 			return nil
-		case <-closeCh:
+		case errors.Is(err, pipe.ErrAborted):
 			return fmt.Errorf("pair send: %w", zmqerr.ErrSocketClosed)
-		case <-p.Closed():
+		case errors.Is(err, io.ErrClosedPipe):
 			e.retire(p)
-		case <-ctx.Done():
-			return ctx.Err()
+		default:
+			return err
 		}
 	}
 }
@@ -179,7 +171,7 @@ func (e *pairEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 			e.mu.Unlock()
 			return nil, fmt.Errorf("pair recv: %w", zmqerr.ErrSocketClosed)
 		}
-		var old chanPipe
+		var old *pipe.End
 		if len(e.retired) > 0 {
 			old = e.retired[0]
 		}
@@ -189,11 +181,9 @@ func (e *pairEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		e.mu.Unlock()
 
 		if old != nil {
-			rm, err := takeRetired(ctx, old)
-			if err != nil {
-				return nil, err
-			}
-			if rm != nil {
+			// A retired pipe is closed or detached: only what is already
+			// queued counts, and TryRecv hands all of it out.
+			if rm, ok := old.TryRecv(); ok {
 				e.recv.Add(1)
 				return rm, nil
 			}
@@ -210,56 +200,31 @@ func (e *pairEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 				return nil, ctx.Err()
 			}
 		}
-		// Inline the channel read instead of spawning a per-Recv goroutine.
-		// On peer loss the pipe is retired; the next iteration drains it.
-		select {
-		case rm := <-p.RecvCh():
+		// On peer loss (EOF: closed and empty) the pipe is retired.
+		switch rm, _, err := p.RecvOr(ctx, closeCh); {
+		case err == nil:
 			e.recv.Add(1)
 			return rm, nil
-		case <-closeCh:
+		case errors.Is(err, pipe.ErrAborted):
 			return nil, fmt.Errorf("pair recv: %w", zmqerr.ErrSocketClosed)
-		case <-p.Closed():
+		case errors.Is(err, io.EOF):
 			e.retire(p)
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		default:
+			return nil, err
 		}
 	}
 }
 
-func (e *pairEngine) retire(p chanPipe) {
+func (e *pairEngine) retire(p *pipe.End) {
 	e.mu.Lock()
 	e.retireLocked(p)
 	e.mu.Unlock()
 }
 
-// takeRetired returns the next message left on a retired pipe, or
-// (nil, nil) once it has nothing more to deliver.
-func takeRetired(ctx context.Context, p chanPipe) (*msg.Msg, error) {
-	select {
-	case m := <-p.RecvCh():
-		return m, nil
-	default:
-	}
-	select {
-	case <-p.Closed():
-	default:
-		// Detached while still open (socket shutdown): only what was
-		// already buffered counts.
-		return nil, nil
-	}
-	// The pipe's own Recv waits for an unbounded (HWM 0) direction to
-	// finish flushing before reporting io.EOF, so nothing is left behind.
-	m, err := p.Recv(ctx)
-	if errors.Is(err, io.EOF) {
-		return nil, nil
-	}
-	return m, err
-}
-
 // Metrics reports the PAIR engine's counters. PAIR has no internal
 // inbound queue (it reads directly from the attached pipe), so
 // QueueDepth is always zero.
-func (e *pairEngine) Metrics() iface.SocketMetrics {
+func (e *pairEngine) Metrics() Metrics {
 	return e.snapshot(0, 0)
 }
 
@@ -291,11 +256,11 @@ func (e *pairEngine) CanRecvNow() bool {
 		return false
 	}
 	for _, r := range e.retired {
-		if len(r.RecvCh()) > 0 {
+		if r.Pending() {
 			return true
 		}
 	}
-	return e.pipe != nil && len(e.pipe.RecvCh()) > 0
+	return e.pipe != nil && e.pipe.Pending()
 }
 
 func (e *pairEngine) CanSendNow() bool {
@@ -303,5 +268,3 @@ func (e *pairEngine) CanSendNow() bool {
 	defer e.mu.Unlock()
 	return !e.closed && e.pipe != nil
 }
-
-var _ Pollable = (*pairEngine)(nil)

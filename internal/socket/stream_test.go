@@ -13,12 +13,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
 	"github.com/exergy-dev/gozmq/internal/stream"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
+	"github.com/exergy-dev/gozmq/transport"
 )
 
 // --------------------------------------------------------------------------
@@ -242,9 +242,9 @@ func TestStream_CloseUnblocksRecv(t *testing.T) {
 
 // streamPeer is the test-side stand-in for one STREAM peer's TCP conn.
 type streamPeer struct {
-	id       []byte     // identity the engine stamps on messages from this peer
-	peer     iface.Pipe // peer-side end of the simulated wire
-	engine   iface.Pipe // engine-side end, registered via AttachPipe
+	id       []byte    // identity the engine stamps on messages from this peer
+	peer     *pipe.End // peer-side end of the simulated wire
+	engine   *pipe.End // engine-side end, registered via AttachPipe
 	received bytes.Buffer
 }
 
@@ -268,7 +268,7 @@ func (p *streamPeer) recv(ctx context.Context) ([]byte, error) {
 
 // newStreamPeer wires a new simulated peer onto the engine. The caller
 // is responsible for closing both pipe ends.
-func newStreamPeer(t *testing.T, eng iface.SocketEngine, id []byte) *streamPeer {
+func newStreamPeer(t *testing.T, eng socket.Engine, id []byte) *streamPeer {
 	t.Helper()
 	engEnd, peerEnd := pipe.NewPair(8, 8, pipe.PeerInfo{Identity: id}, pipe.PeerInfo{})
 	if err := eng.AttachPipe(engEnd); err != nil {
@@ -499,7 +499,7 @@ func TestStream_PeerCloseDrainsInFlight(t *testing.T) {
 	require.NoError(t, p.send(ctx, []byte("inflight-b")), "send b")
 	_ = p.peer.Close()
 
-	// Engine must still drain the queued-up bytes (order-preserving).
+	// socket.Engine must still drain the queued-up bytes (order-preserving).
 	seen := make([]string, 0, 2)
 	for i := 0; i < 2; i++ {
 		m, err := eng.Recv(ctx)
@@ -524,7 +524,7 @@ func TestStream_PeerCloseDrainsInFlight(t *testing.T) {
 // an application sees through gozmq.Socket(Stream).
 // --------------------------------------------------------------------------
 
-// tcpConn wraps *net.TCPConn to satisfy iface.Conn (net.Conn does not
+// tcpConn wraps *net.TCPConn to satisfy transport.Conn (net.Conn does not
 // expose the ZMQ endpoint-string accessors the adapter requires).
 type tcpConn struct {
 	net.Conn
@@ -534,9 +534,9 @@ func (c *tcpConn) LocalEndpoint() string  { return "tcp://" + c.Conn.LocalAddr()
 func (c *tcpConn) RemoteEndpoint() string { return "tcp://" + c.Conn.RemoteAddr().String() }
 
 // tcpPair spins up a 127.0.0.1 listener, accepts one connection, and
-// returns (serverSide, clientSide) wrapped as iface.Conn. Closing either
+// returns (serverSide, clientSide) wrapped as transport.Conn. Closing either
 // side is the caller's responsibility.
-func tcpPair(t *testing.T) (srv, cli iface.Conn, close func()) {
+func tcpPair(t *testing.T) (srv, cli transport.Conn, close func()) {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err, "listen")

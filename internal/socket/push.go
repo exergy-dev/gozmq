@@ -1,7 +1,5 @@
 package socket
 
-import "github.com/exergy-dev/gozmq/internal/iface"
-
 // NewPushEngine returns a new PUSH socket engine.
 //
 // PUSH is send-only. Outbound messages are dispatched round-robin across
@@ -10,6 +8,6 @@ import "github.com/exergy-dev/gozmq/internal/iface"
 // attached peer is full — until one drains, ctx cancels, or the engine
 // closes. Recv always returns zmqerr.ErrFSMViolation (wrapped); PUSH has
 // no inbound path.
-func NewPushEngine() iface.SocketEngine {
+func NewPushEngine() Engine {
 	return newSendOnlyEngine("push")
 }

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/pipe"
 )
 
 // Close tears the socket down. Idempotent: repeated calls return nil,
@@ -214,7 +214,7 @@ func waitChannels[T any](ctx context.Context, items []T, ch func(T) <-chan struc
 // socket's run context to cancel), then detaches p, runs cleanup, and
 // emits EventDisconnected. Used by startStreamAdapter, connectDirectPipe,
 // and acceptDirectPipeLoop.
-func (s *Socket) watchPipeClose(p iface.Pipe, endpoint string, cleanup func()) {
+func (s *Socket) watchPipeClose(p *pipe.End, endpoint string, cleanup func()) {
 	s.connectWG.Add(1)
 	go func() {
 		defer s.connectWG.Done()

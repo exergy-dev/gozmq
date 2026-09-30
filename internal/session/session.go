@@ -1,11 +1,11 @@
 // Package session implements the ZMTP per-peer state machine. Each Session
-// wraps a single iface.Conn, drives greeting + security handshake, then
+// wraps a single transport.Conn, drives greeting + security handshake, then
 // runs two traffic-phase goroutines (reader: wire->pipe, writer: pipe->wire)
 // plus an optional heartbeat scheduler.
 //
-// The session layer never imports the concrete framing/security/transport
-// packages — it consumes the iface contracts (FrameCodec, SecurityMech,
-// Conn) so it can be developed and tested in isolation.
+// The session consumes its collaborators through their contracts
+// (zmtp.FrameCodec, security.Mech, transport.Conn), so it can be tested
+// with fakes for each.
 package session
 
 import (
@@ -20,10 +20,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
-	"github.com/exergy-dev/gozmq/msg"
+	"github.com/exergy-dev/gozmq/security"
+	"github.com/exergy-dev/gozmq/transport"
 )
 
 // Config bundles the inputs to New. Conn, Mech, and Codec are
@@ -32,9 +32,9 @@ import (
 // heartbeats, no inbound size cap). New applies no defaults to them —
 // the socket layer is responsible for supplying production values.
 type Config struct {
-	Conn              iface.Conn
-	Mech              iface.SecurityMech
-	Codec             iface.FrameCodec
+	Conn              transport.Conn
+	Mech              security.Mech
+	Codec             zmtp.FrameCodec
 	HeartbeatInterval time.Duration
 	HeartbeatTimeout  time.Duration
 	HandshakeTimeout  time.Duration
@@ -68,7 +68,7 @@ type Config struct {
 // The returned Session owns cfg.Conn: Stop closes it. The caller retains
 // ownership of cfg.Mech and cfg.Codec, which are assumed to be safe for
 // the (single) session's use until Stop returns.
-func New(cfg Config) iface.Session {
+func New(cfg Config) Session {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -89,9 +89,9 @@ func New(cfg Config) iface.Session {
 	// body bytes) and the codec implements FrameHeaderAppender, the
 	// writer appends wire headers into a caller-owned scratch buffer
 	// with zero per-frame allocations.
-	var directHeader iface.FrameHeaderAppender
+	var directHeader zmtp.FrameHeaderAppender
 	if identityMech {
-		if h, ok := cfg.Codec.(iface.FrameHeaderAppender); ok {
+		if h, ok := cfg.Codec.(zmtp.FrameHeaderAppender); ok {
 			directHeader = h
 		}
 	}
@@ -109,11 +109,53 @@ func New(cfg Config) iface.Session {
 		stopped:      make(chan struct{}),
 		writerExited: make(chan struct{}),
 		cmdCh:        make(chan []byte, sessionCmdBacklog),
+		cmdWake:      make(chan struct{}, 1),
 	}
 	return s
 }
 
-// sessionImpl is the iface.Session implementation. The two traffic-phase
+// Session owns the ZMTP state machine for a single peer connection: it
+// drives greeting, handshake, heartbeats, and the traffic phase. It sits
+// between a transport.Conn (bytes) and a pipe (messages). New returns the
+// production implementation; the interface exists so the Reconnector can
+// be tested with a stub.
+type Session interface {
+	// Start launches the session's reader/writer goroutines. Returns
+	// immediately; handshake progress is observable via Handshaked.
+	Start()
+
+	// Stop terminates the session, closes the underlying Conn, and blocks
+	// until internal goroutines exit.
+	Stop() error
+
+	// Handshaked returns a channel closed when the handshake completes
+	// (success or failure).
+	Handshaked() <-chan struct{}
+
+	// HandshakeErr returns a non-nil error if the handshake failed. Read
+	// after Handshaked closes.
+	HandshakeErr() error
+
+	// Pipe returns the engine-facing end of the session's pipe. Valid only
+	// after Handshaked closes without error.
+	Pipe() *pipe.End
+
+	// Done returns a channel that closes when every session goroutine
+	// (reader, writer, optional heartbeat) has exited.
+	Done() <-chan struct{}
+
+	// WriterFlushed returns a channel that closes when the writer goroutine
+	// has exited — all outbound messages have been flushed to conn.
+	WriterFlushed() <-chan struct{}
+
+	// CancelWriter makes the writer flush the messages still queued and
+	// exit, without closing the conn, so in-flight writes complete. Call
+	// engine.Close first so nothing new is queued, then wait on
+	// WriterFlushed, then call Stop.
+	CancelWriter()
+}
+
+// sessionImpl is the Session implementation. The two traffic-phase
 // goroutines (reader, writer) plus the optional heartbeat goroutine
 // communicate via channels; mutable state shared between them
 // (lastInboundUnix, handshake error) uses sync/atomic to keep -race
@@ -127,7 +169,7 @@ type sessionImpl struct {
 	encode frameEncoder
 	decode frameDecoder
 	// directHeader enables the writer's header-only fast path (see New).
-	directHeader iface.FrameHeaderAppender
+	directHeader zmtp.FrameHeaderAppender
 
 	// startOnce guards Start; stopOnce guards Stop.
 	startOnce sync.Once
@@ -160,6 +202,10 @@ type sessionImpl struct {
 	// stop reading and two saturated peers deadlock permanently. The
 	// channel is small and lossy by design — see enqueueCommand.
 	cmdCh chan []byte
+	// cmdWake (cap 1) is armed with every queued command. It is the
+	// writer's abort channel for its blocking pipe receive; the command
+	// itself is read from cmdCh.
+	cmdWake chan struct{}
 
 	// writerCtx / writerCancel are a separate context for the writer's
 	// blocking Recv call. Cancelling writerCtx causes the writer to drain
@@ -175,15 +221,15 @@ type sessionImpl struct {
 	// cmdCh, only the writer goroutine performs traffic-phase writes, so
 	// the mutex is uncontended in practice; it is kept as a guard against
 	// future callers writing off the writer goroutine. (The underlying
-	// iface.Conn does not promise concurrent-safe Write.)
+	// transport.Conn does not promise concurrent-safe Write.)
 	writeMu sync.Mutex
 
 	// enginePipe is the engine-facing end of the pair. sessionPipe is the
 	// session-facing end (we hold it; reader pushes to it, writer pulls
 	// from it). Created lazily during the handshake phase once we know
 	// the post-handshake HWMs are honored.
-	enginePipe  iface.Pipe
-	sessionPipe sessionChanPipe
+	enginePipe  *pipe.End
+	sessionPipe *pipe.End
 
 	// peerHeartbeats reports whether the peer's greeting indicated ZMTP
 	// 3.1+ (true) — heartbeats are only emitted when both ends agreed.
@@ -245,43 +291,11 @@ type identityFramer interface {
 // must declare that via identityFramer: keying on Name() would silently
 // bypass the frame transform of any custom mechanism that happens to be
 // called "NULL" or "PLAIN".
-func sessionFramePaths(mech iface.SecurityMech) (frameEncoder, frameDecoder, bool) {
+func sessionFramePaths(mech security.Mech) (frameEncoder, frameDecoder, bool) {
 	if f, ok := mech.(identityFramer); ok && f.IdentityFraming() {
 		return identityEncodeFrame, identityDecodeFrame, true
 	}
 	return mech.EncodeFrame, mech.DecodeFrame, false
-}
-
-// sessionChanPipe is the channel-level surface the session requires of
-// its own pipe end: the iface.Pipe contract plus the non-blocking and
-// select-able accessors the reader/writer hot paths use. *pipe.end (the
-// sole iface.Pipe implementation, produced by pipe.NewPair in run())
-// implements it; asSessionChanPipe panics on anything else, mirroring
-// internal/socket's asChanPipe contract.
-type sessionChanPipe interface {
-	iface.Pipe
-	// RecvCh exposes the inbound channel so the writer can multiplex
-	// user messages with cmdCh and shutdown in a single select.
-	RecvCh() <-chan *msg.Msg
-	// TryRecv is a non-blocking Recv; false when empty or closed.
-	TryRecv() (*msg.Msg, bool)
-	// TrySend is a non-blocking Send; false when full or closed.
-	TrySend(*msg.Msg) bool
-	// SealRecv and DrainRecv let the writer flush the whole outbound
-	// queue at linger/close time; see pipe.end for the semantics.
-	SealRecv()
-	DrainRecv(ctx context.Context) (*msg.Msg, error)
-}
-
-// asSessionChanPipe asserts the channel-level surface once, where the
-// pipe pair is created. Failure means a new pipe type was introduced
-// without the channel accessors — a programmer error worth the panic.
-func asSessionChanPipe(p iface.Pipe) sessionChanPipe {
-	cp, ok := p.(sessionChanPipe)
-	if !ok {
-		panic(fmt.Sprintf("gozmq/session: pipe %T lacks the channel-level accessors (RecvCh/TryRecv/TrySend/SealRecv/DrainRecv); *pipe.end is the only supported pipe implementation", p))
-	}
-	return cp
 }
 
 func identityEncodeFrame(flags uint8, body []byte) (uint8, []byte, error) {
@@ -298,7 +312,7 @@ func identityDecodeFrame(flags uint8, body []byte) (uint8, []byte, error) {
 // conns benefit from userspace read buffering; sniffing endpoint URL
 // prefixes here couples the session to endpoint syntax. Behavior is
 // kept as-is for now.
-func sessionReader(conn iface.Conn) io.Reader {
+func sessionReader(conn transport.Conn) io.Reader {
 	ep := conn.RemoteEndpoint()
 	if ep == "" {
 		ep = conn.LocalEndpoint()
@@ -396,7 +410,7 @@ func (s *sessionImpl) HandshakeErr() error {
 
 // Pipe returns the engine-facing end of the session's pipe. Valid only
 // after Handshaked closes without error.
-func (s *sessionImpl) Pipe() iface.Pipe { return s.enginePipe }
+func (s *sessionImpl) Pipe() *pipe.End { return s.enginePipe }
 
 // Done returns a channel closed when every goroutine spawned by this
 // session has exited.
@@ -441,7 +455,7 @@ func (s *sessionImpl) run() {
 		Identity: identityFromMetadata(s.cfg.Mech),
 	}
 	sp, ep := pipe.NewPair(s.cfg.RecvHWM, s.cfg.SendHWM, pipe.PeerInfo{}, peerInfo)
-	s.sessionPipe, s.enginePipe = asSessionChanPipe(sp), ep
+	s.sessionPipe, s.enginePipe = sp, ep
 	s.handshakedOnce.Do(func() { close(s.handshaked) })
 
 	// Seed the last-inbound clock so a heartbeat fired immediately
@@ -468,7 +482,7 @@ func (s *sessionImpl) run() {
 // on AttachPipe for routing. It is only called after finalizePeerMetadata
 // has succeeded, so peerMetadataFromMechanism cannot fail here in
 // practice; a probe failure just means no identity.
-func identityFromMetadata(m iface.SecurityMech) []byte {
+func identityFromMetadata(m security.Mech) []byte {
 	props, err := peerMetadataFromMechanism(m)
 	if err != nil {
 		return nil
@@ -509,6 +523,10 @@ func (s *sessionImpl) enqueueCommand(name string, body []byte) {
 	buf = append(buf, body...)
 	select {
 	case s.cmdCh <- buf:
+		select {
+		case s.cmdWake <- struct{}{}:
+		default:
+		}
 	default:
 		s.cfg.Logger.Debug("gozmq/session: command channel full; dropping", "name", name)
 	}
@@ -527,4 +545,4 @@ func (s *sessionImpl) shutdown() {
 }
 
 // Compile-time check.
-var _ iface.Session = (*sessionImpl)(nil)
+var _ Session = (*sessionImpl)(nil)

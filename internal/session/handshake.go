@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
+	"github.com/exergy-dev/gozmq/security"
 )
 
 // Greeting layout constants, mirroring zmtp/greeting.go. The byte layout
@@ -163,7 +163,7 @@ func (s *sessionImpl) runSecurityHandshake() error {
 			// instead of seeing an abrupt close. Best-effort: the session
 			// is being torn down either way.
 			if len(out) > 0 {
-				_ = s.cfg.Codec.WriteFrame(s.cfg.Conn, iface.FlagCommand, out)
+				_ = s.cfg.Codec.WriteFrame(s.cfg.Conn, zmtp.FlagCommand, out)
 			}
 			return fmt.Errorf("gozmq/session: security handshake: %w", err)
 		}
@@ -177,7 +177,7 @@ func (s *sessionImpl) runSecurityHandshake() error {
 		writeErrCh := make(chan error, 1)
 		if len(out) > 0 {
 			go func() {
-				werr := s.cfg.Codec.WriteFrame(s.cfg.Conn, iface.FlagCommand, out)
+				werr := s.cfg.Codec.WriteFrame(s.cfg.Conn, zmtp.FlagCommand, out)
 				writeErrCh <- werr
 			}()
 		} else {
@@ -201,7 +201,7 @@ func (s *sessionImpl) runSecurityHandshake() error {
 		if rerr != nil {
 			return fmt.Errorf("gozmq/session: read handshake frame: %w", rerr)
 		}
-		if flags&iface.FlagCommand == 0 {
+		if flags&zmtp.FlagCommand == 0 {
 			return fmt.Errorf("%w: expected COMMAND frame in handshake, flags=0x%02x", zmqerr.ErrMalformedFrame, flags)
 		}
 		// Do NOT route through Mech.DecodeFrame here: that method is the
@@ -221,7 +221,7 @@ func (s *sessionImpl) finalizePeerMetadata() error {
 	return validateSocketTypeCompatibility(s.cfg.Mech.Metadata(), props)
 }
 
-func peerMetadataFromMechanism(m iface.SecurityMech) (map[string]string, error) {
+func peerMetadataFromMechanism(m security.Mech) (map[string]string, error) {
 	props := m.PeerMetadata()
 	if props == nil {
 		return nil, fmt.Errorf("gozmq/session: mechanism %q finished handshake without peer metadata", m.Name())

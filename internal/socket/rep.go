@@ -2,11 +2,13 @@ package socket
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"sync"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -24,7 +26,7 @@ const (
 	repStateReceiving
 )
 
-// repEngine implements iface.SocketEngine for the REP socket type.
+// repEngine implements Engine for the REP socket type.
 //
 // FSM: the inverse of REQ — canRecv → canSend → canRecv. Recv first,
 // then Send once. Calling the wrong direction returns
@@ -59,26 +61,51 @@ type repEngine struct {
 	state  repState
 	// currentPeer is the pipe that delivered the most recent request;
 	// Send routes the reply to it. Nil unless state == canSend.
-	currentPeer iface.Pipe
+	currentPeer *pipe.End
 	// envelope is the identity stack (frames up to and including the
 	// empty delimiter) captured from the current request. Valid only in
 	// canSend. Stored as a fresh slice independent of any caller *Msg.
 	envelope [][]byte
 	// closeCh is closed by Close so a Send parked at HWM unblocks.
 	closeCh chan struct{}
+	// sendGate is the Poller's write-ready gate, armed when a Recv moves
+	// the FSM to canSend. Recv readiness is the FairQueue's.
+	sendGate readyGate
 
 	counters
 }
 
 // NewRepEngine returns a new REP socket engine.
-func NewRepEngine() iface.SocketEngine {
+func NewRepEngine() Engine {
 	return &repEngine{
-		fq:      NewFairQueue(),
-		closeCh: make(chan struct{}),
+		fq:       NewFairQueue(),
+		closeCh:  make(chan struct{}),
+		sendGate: newReadyGate(),
 	}
 }
 
-func (e *repEngine) AttachPipe(p iface.Pipe) error {
+// ReadyRecv is the FairQueue's gate; CanRecvNow filters out the canSend
+// state, so a request arriving mid-exchange is at worst a spurious wake.
+func (e *repEngine) ReadyRecv() <-chan struct{} { return e.fq.ReadyRecv() }
+
+func (e *repEngine) ReadyWrite() <-chan struct{} { return e.sendGate.signal(e.CanSendNow()) }
+
+func (e *repEngine) CanRecvNow() bool {
+	e.mu.Lock()
+	ok := !e.closed && e.state == repStateCanRecv
+	e.mu.Unlock()
+	return ok && e.fq.HasPending()
+}
+
+// CanSendNow reports whether a reply is owed. A reply to a peer that has
+// since detached is dropped without blocking, so it counts as ready too.
+func (e *repEngine) CanSendNow() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return !e.closed && e.state == repStateCanSend
+}
+
+func (e *repEngine) AttachPipe(p *pipe.End) error {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
@@ -88,7 +115,7 @@ func (e *repEngine) AttachPipe(p iface.Pipe) error {
 	return e.fq.Attach(p)
 }
 
-func (e *repEngine) DetachPipe(p iface.Pipe) error {
+func (e *repEngine) DetachPipe(p *pipe.End) error {
 	e.mu.Lock()
 	// If the detaching pipe was our current reply target, clear the
 	// envelope. Subsequent Send will drop the reply silently.
@@ -143,6 +170,7 @@ func (e *repEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		e.currentPeer = src
 		e.envelope = envelope
 		e.state = repStateCanSend
+		e.sendGate.arm()
 		e.mu.Unlock()
 		e.recv.Add(1)
 		return body, nil
@@ -175,41 +203,21 @@ func (e *repEngine) Send(ctx context.Context, m *msg.Msg) error {
 		return nil
 	}
 
-	var body [][]byte
-	if m != nil {
-		body = m.Frames()
+	wire := prependFrames(envelope, m)
+	// Block at HWM, racing engine close and the caller's ctx. A requester
+	// that vanished before its detach landed gets the reply dropped
+	// silently, as for a detached peer above.
+	switch err := peer.SendOr(ctx, wire, e.closeCh); {
+	case err == nil:
+		e.sent.Add(1)
+		return nil
+	case errors.Is(err, io.ErrClosedPipe):
+		return nil
+	case errors.Is(err, pipe.ErrAborted):
+		return fmt.Errorf("rep send: %w", zmqerr.ErrSocketClosed)
+	default:
+		return err
 	}
-	wireFrames := make([][]byte, 0, len(envelope)+len(body))
-	wireFrames = append(wireFrames, envelope...)
-	wireFrames = append(wireFrames, body...)
-	// wireFrames is built locally and handed off; FromFramesOwned adopts it
-	// without the extra copy FromFrames would make.
-	wire := msg.FromFramesOwned(wireFrames)
-	cp := asChanPipe(peer)
-	if !cp.TrySend(wire) {
-		// Pipe closed or at HWM. A requester that vanished before its
-		// detach landed gets the reply dropped silently, as for a
-		// detached peer above; check that first, since the select below
-		// would pick randomly while SendCh still has room.
-		select {
-		case <-peer.Closed():
-			return nil
-		default:
-		}
-		// At HWM: block, racing pipe close, engine close, and the
-		// caller's ctx — a bare pipe Send here would ignore Close.
-		select {
-		case cp.SendCh() <- wire:
-		case <-peer.Closed():
-			return nil
-		case <-e.closeCh:
-			return fmt.Errorf("rep send: %w", zmqerr.ErrSocketClosed)
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	e.sent.Add(1)
-	return nil
 }
 
 // splitRepEnvelope separates a REQ-shaped inbound frame into envelope
@@ -226,9 +234,8 @@ func splitRepEnvelope(m *msg.Msg) (envelope [][]byte, body *msg.Msg, ok bool) {
 	for i, f := range frames {
 		if len(f) == 0 {
 			// The envelope (including the delimiter) outlives m in
-			// e.envelope, so it gets its own slice header; the body *Msg
-			// adopts the rest of m's header, which the engine solely owns.
-			return slices.Clone(frames[:i+1]), msg.FromFramesOwned(frames[i+1:]), true
+			// e.envelope, so it gets its own slice header.
+			return slices.Clone(frames[:i+1]), msg.FromFrames(frames[i+1:]...), true
 		}
 	}
 	return nil, nil, false
@@ -237,7 +244,7 @@ func splitRepEnvelope(m *msg.Msg) (envelope [][]byte, body *msg.Msg, ok bool) {
 // Metrics reports the REP engine's counters. recv is incremented on
 // each user-visible Recv (after envelope split); dropped delegates to
 // the underlying FairQueue. QueueDepth samples the FairQueue.
-func (e *repEngine) Metrics() iface.SocketMetrics {
+func (e *repEngine) Metrics() Metrics {
 	return e.snapshot(e.fq.Dropped(), e.fq.QueueDepth())
 }
 

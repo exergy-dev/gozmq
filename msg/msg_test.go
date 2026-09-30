@@ -50,12 +50,3 @@ func TestMsgRetainReleaseAreNoops(t *testing.T) {
 	require.Equal(t, "hello", string(m.Frames()[0]))
 	require.Equal(t, "world", string(m.Frames()[1]))
 }
-
-// TestFromFramesOwnedAdoptsSlice verifies FromFramesOwned adopts the frame
-// slice header without copying it.
-func TestFromFramesOwnedAdoptsSlice(t *testing.T) {
-	frames := [][]byte{[]byte("a"), []byte("bb")}
-	m := FromFramesOwned(frames)
-	require.Equal(t, 2, m.NumFrames())
-	require.Same(t, &frames[0], &m.Frames()[0], "frame slice header was copied")
-}

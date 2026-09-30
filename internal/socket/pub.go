@@ -6,7 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -17,7 +17,7 @@ import (
 // libzmq XPUB surfaces to its application and the same shape XSUB
 // accepts from its application; we reuse it internally to carry
 // subscription commands between the session reader and the PUB/XPUB
-// engine without extending iface.Pipe.
+// engine without extending *pipe.End.
 //
 // See internal/session/reader.go (handleCommand) for how incoming ZMTP
 // SUBSCRIBE/CANCEL commands are converted to synthetic messages on the
@@ -31,9 +31,9 @@ const (
 // message (single frame, first byte 0x00 or 0x01). The second return is
 // the parsed (subscribe, prefix) pair when the first is true.
 //
-// This content-sniffing classifier coexists with msg.IsSubscription (the
-// out-of-band flag the session reader sets on genuine SUBSCRIBE/CANCEL
-// commands). They serve different sides: the PUB/XPUB receive path (and
+// This content-sniffing classifier coexists with the out-of-band flag the
+// session reader attaches to genuine SUBSCRIBE/CANCEL commands on the pipe
+// (pipe.End.SendSubscription). They serve different sides: the PUB/XPUB receive path (and
 // XSUB's app-send path) must use content sniffing because legacy ZMTP 3.0
 // peers send subscriptions as plain 0x00/0x01 data frames that never carry
 // the flag; the SUB/XSUB receive path uses the flag instead, so ordinary
@@ -58,7 +58,7 @@ func isSubscriptionMsg(m *msg.Msg) (bool, bool, []byte) {
 // pubPeer bundles a pipe with its SubTree and the goroutine reading
 // subscription commands from that peer.
 type pubPeer struct {
-	pipe iface.Pipe
+	pipe *pipe.End
 	tree *SubTree
 
 	stop     chan struct{}
@@ -66,7 +66,7 @@ type pubPeer struct {
 	done     chan struct{}
 }
 
-// pubEngine implements iface.SocketEngine for the PUB socket type.
+// pubEngine implements Engine for the PUB socket type.
 //
 // PUB is a fan-out publisher. Every successful Send is replicated to each
 // attached peer whose per-peer SubTree has at least one prefix matching
@@ -87,7 +87,7 @@ type pubPeer struct {
 // subscription events.
 type pubEngine struct {
 	mu     sync.Mutex
-	peers  map[iface.Pipe]*pubPeer
+	peers  map[*pipe.End]*pubPeer
 	closed bool
 	// snap is a copy-on-write snapshot of the attached peers. It is
 	// rebuilt under mu whenever peer membership changes (AttachPipe /
@@ -102,7 +102,7 @@ type pubEngine struct {
 	// right after it has been applied to p's SubTree. It runs on p's
 	// reader goroutine, never after DetachPipe(p) or Close returns. XPUB
 	// installs it to maintain its refcounts and event queue; nil for PUB.
-	onSub    func(p iface.Pipe, subscribe bool, prefix []byte, m *msg.Msg)
+	onSub    func(p *pipe.End, subscribe bool, prefix []byte, m *msg.Msg)
 	closeCh  chan struct{}
 	sendGate readyGate
 
@@ -131,15 +131,15 @@ func subscriptionFrame(subscribe bool, prefix []byte) []byte {
 }
 
 // NewPubEngine returns a new PUB socket engine.
-func NewPubEngine() iface.SocketEngine {
+func NewPubEngine() Engine {
 	return newPubEngineBase(nil)
 }
 
 // newPubEngineBase is the shared constructor used by PUB (onSub nil) and
 // XPUB.
-func newPubEngineBase(onSub func(iface.Pipe, bool, []byte, *msg.Msg)) *pubEngine {
+func newPubEngineBase(onSub func(*pipe.End, bool, []byte, *msg.Msg)) *pubEngine {
 	e := &pubEngine{
-		peers:    make(map[iface.Pipe]*pubPeer),
+		peers:    make(map[*pipe.End]*pubPeer),
 		onSub:    onSub,
 		closeCh:  make(chan struct{}),
 		sendGate: newReadyGate(),
@@ -159,7 +159,7 @@ func (e *pubEngine) rebuildSnapLocked() {
 	e.snap.Store(&s)
 }
 
-func (e *pubEngine) AttachPipe(p iface.Pipe) error {
+func (e *pubEngine) AttachPipe(p *pipe.End) error {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
@@ -184,7 +184,7 @@ func (e *pubEngine) AttachPipe(p iface.Pipe) error {
 	return nil
 }
 
-func (e *pubEngine) DetachPipe(p iface.Pipe) error {
+func (e *pubEngine) DetachPipe(p *pipe.End) error {
 	e.mu.Lock()
 	peer, ok := e.peers[p]
 	if !ok {
@@ -207,26 +207,20 @@ func (e *pubEngine) DetachPipe(p iface.Pipe) error {
 // every SUBSCRIBE its DetachPipe will later CANCEL.
 func (e *pubEngine) runPeerReader(peer *pubPeer) {
 	defer close(peer.done)
-	cp := asChanPipe(peer.pipe)
-	recvCh := cp.RecvCh()
+	// peer.stop is closed by DetachPipe and by Close. A closed pipe yields
+	// what is still queued, then EOF. RecvOr prefers queued data over
+	// abort, so stop is re-checked per message: a peer flooding commands
+	// must not keep DetachPipe waiting.
 	for {
+		m, _, err := peer.pipe.RecvOr(context.Background(), peer.stop)
+		if err != nil {
+			return
+		}
+		e.applyPeerMsg(peer, m)
 		select {
-		case m := <-recvCh:
-			e.applyPeerMsg(peer, m)
-		case <-cp.Closed():
-			// Draining a closed pipe is finite: Recv returns what is
-			// buffered, then EOF.
-			for {
-				m, err := peer.pipe.Recv(context.Background())
-				if err != nil {
-					return
-				}
-				e.applyPeerMsg(peer, m)
-			}
 		case <-peer.stop:
 			return
-		case <-e.closeCh:
-			return
+		default:
 		}
 	}
 }
@@ -264,8 +258,6 @@ func (e *pubEngine) CanSendNow() bool {
 	return !e.closed && len(e.peers) > 0
 }
 
-var _ Pollable = (*pubEngine)(nil)
-
 // Send fans out m to every attached peer whose SubTree matches the first
 // frame of m. Per libzmq, the first frame is the topic; multipart
 // messages match only on that first frame, and the entire multipart
@@ -301,7 +293,7 @@ func (e *pubEngine) Send(ctx context.Context, m *msg.Msg) error {
 	// immediately (libzmq parity — no grace deadline, so one slow
 	// subscriber never delays delivery to the others).
 	for _, peer := range *snap {
-		if peer.tree.Match(topic) && !asChanPipe(peer.pipe).TrySend(m) {
+		if peer.tree.Match(topic) && !peer.pipe.TrySend(m) {
 			e.dropped.Add(1)
 		}
 	}
@@ -311,7 +303,7 @@ func (e *pubEngine) Send(ctx context.Context, m *msg.Msg) error {
 
 // Metrics reports the PUB engine's counters. PUB has no inbound queue,
 // so QueueDepth is always zero.
-func (e *pubEngine) Metrics() iface.SocketMetrics {
+func (e *pubEngine) Metrics() Metrics {
 	return e.snapshot(e.dropped.Load(), 0)
 }
 

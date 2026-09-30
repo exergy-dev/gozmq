@@ -9,7 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/zmtp"
 )
 
 // --------------------------------------------------------------------------
@@ -53,7 +53,7 @@ type peerFrame struct {
 // command returns the ZMTP command name and remainder if the frame is a
 // COMMAND frame, else ("", nil).
 func (f peerFrame) command() (string, []byte) {
-	if f.flags&iface.FlagCommand == 0 || len(f.body) < 1 {
+	if f.flags&zmtp.FlagCommand == 0 || len(f.body) < 1 {
 		return "", nil
 	}
 	nameLen := int(f.body[0])
@@ -84,9 +84,9 @@ func newManualPeer(t *testing.T, conn *fakeConn, props map[string]string) *manua
 	// Security handshake: one round of fake props, mirroring fakeMech.
 	flags, _, err := fakeCodec{}.ReadFrame(conn, nil)
 	require.NoError(t, err, "manual peer: read handshake frame")
-	require.NotZero(t, flags&iface.FlagCommand, "manual peer: expected COMMAND handshake frame")
+	require.NotZero(t, flags&zmtp.FlagCommand, "manual peer: expected COMMAND handshake frame")
 	require.NoError(t,
-		fakeCodec{}.WriteFrame(conn, iface.FlagCommand, encodeFakeProps(copyOrEmpty(props))),
+		fakeCodec{}.WriteFrame(conn, zmtp.FlagCommand, encodeFakeProps(copyOrEmpty(props))),
 		"manual peer: write handshake frame")
 	return p
 }
@@ -130,7 +130,7 @@ func (p *manualPeer) sendPing(ttl uint16, ctxBytes []byte) {
 	binary.BigEndian.PutUint16(t2[:], ttl)
 	body = append(body, t2[:]...)
 	body = append(body, ctxBytes...)
-	require.NoError(p.t, fakeCodec{}.WriteFrame(p.conn, iface.FlagCommand, body), "manual peer: write PING")
+	require.NoError(p.t, fakeCodec{}.WriteFrame(p.conn, zmtp.FlagCommand, body), "manual peer: write PING")
 }
 
 // sendData writes a (possibly multipart) user message.
@@ -139,7 +139,7 @@ func (p *manualPeer) sendData(frames ...[]byte) {
 	for i, f := range frames {
 		var flags uint8
 		if i < len(frames)-1 {
-			flags = iface.FlagMore
+			flags = zmtp.FlagMore
 		}
 		require.NoError(p.t, fakeCodec{}.WriteFrame(p.conn, flags, f), "manual peer: write data frame")
 	}
@@ -164,7 +164,7 @@ func waitCommand(t *testing.T, frames <-chan peerFrame, name string, timeout tim
 
 // newHeartbeatSession builds a session against a manualPeer with the
 // given heartbeat settings and fake clock, and waits for the handshake.
-func newHeartbeatSession(t *testing.T, clk *fakeClock, interval, timeout time.Duration, recvHWM int) (iface.Session, *manualPeer) {
+func newHeartbeatSession(t *testing.T, clk *fakeClock, interval, timeout time.Duration, recvHWM int) (Session, *manualPeer) {
 	t.Helper()
 	connA, connB := newFakeConnPair()
 	s := New(Config{
@@ -186,7 +186,7 @@ func newHeartbeatSession(t *testing.T, clk *fakeClock, interval, timeout time.Du
 
 // requireAlive asserts the session has not torn down after a real-time
 // grace period covering several heartbeat ticks.
-func requireAlive(t *testing.T, s iface.Session, wait time.Duration, msg string) {
+func requireAlive(t *testing.T, s Session, wait time.Duration, msg string) {
 	t.Helper()
 	select {
 	case <-s.Done():

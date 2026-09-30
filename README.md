@@ -116,10 +116,7 @@ place behaviour differs from libzmq — see
 ## Stability
 
 `gozmq` follows semantic versioning. From v1.0.0, everything exported outside
-`internal/` is covered by the compatibility promise, with one documented
-exception: the methods in the [`msg`](msg) package marked *"Internal plumbing
-— NOT covered by the compatibility promise"*, which are exported only so
-gozmq's own packages can reach them across a boundary.
+`internal/` is covered by the compatibility promise.
 
 Breaking changes wait for a major version. Additions may land in any minor.
 `CHANGELOG.md` records everything user-visible.

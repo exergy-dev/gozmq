@@ -5,15 +5,6 @@
 // set is documented in one place and so the internal engine layers can
 // reference it without an import cycle through the root package.
 //
-// # Compatibility
-//
-// The methods in the "Supported API" section of this package are covered by
-// the module's compatibility promise. The methods marked "Internal plumbing"
-// are exported only because gozmq's own internal packages must call them
-// across a package boundary; they are NOT covered by the compatibility
-// promise and may change or disappear in any release. Applications must not
-// call them.
-//
 // # Frame ownership
 //
 // Frames are ordinary Go memory. A *Msg returned by Socket.RecvMsg owns
@@ -32,16 +23,6 @@ package msg
 type Msg struct {
 	frames       [][]byte
 	inlineFrames [1][]byte
-	// subscription marks this *Msg as a genuine ZMTP SUBSCRIBE/CANCEL
-	// command surfaced by the session reader (handleCommand), as opposed
-	// to ordinary data that merely happens to begin with 0x01/0x00. It is
-	// a process-local hint that never crosses the wire: the receiving SUB
-	// (drop) / XSUB (surface) Recv path checks it instead of sniffing the
-	// payload, so data frames starting with 0x00/0x01 are delivered
-	// intact. The PUB/XPUB receive side still classifies by content
-	// because legacy peers send subscriptions as plain 0x00/0x01 data
-	// frames (ZMTP 3.0) which never carry this flag.
-	subscription bool
 }
 
 // New returns an empty Msg.
@@ -59,9 +40,9 @@ func FromBytes(b []byte) *Msg {
 	return m
 }
 
-// FromFrames returns a Msg whose frames are a COPY of the provided slices, in
-// order. Use FromFramesOwned when the caller built the slice locally and can
-// hand off ownership without the copy.
+// FromFrames returns a Msg holding the provided frames, in order. The frame
+// list is copied, so the caller may reuse the slice passed in; the frames
+// themselves are retained by reference.
 func FromFrames(frames ...[]byte) *Msg {
 	out := &Msg{}
 	if len(frames) <= len(out.inlineFrames) {
@@ -73,32 +54,6 @@ func FromFrames(frames ...[]byte) *Msg {
 	}
 	return out
 }
-
-// Internal plumbing — NOT covered by the compatibility promise; do not
-// call from application code.
-//
-// FromFramesOwned returns a Msg that adopts the frames slice header directly,
-// without copying it. The caller must not retain or mutate frames afterward.
-// This avoids the redundant [][]byte allocation FromFrames makes for
-// multi-frame messages built locally and immediately handed off (the common
-// envelope-prepend/strip case in REQ/REP/ROUTER).
-func FromFramesOwned(frames [][]byte) *Msg {
-	return &Msg{frames: frames}
-}
-
-// Internal plumbing — NOT covered by the compatibility promise; do not
-// call from application code.
-//
-// MarkSubscription flags m as a genuine subscription command (see the
-// subscription field). Set by the session reader when it converts a
-// wire SUBSCRIBE/CANCEL command into a synthetic single-frame message.
-func (m *Msg) MarkSubscription() { m.subscription = true }
-
-// IsSubscription reports whether m was flagged as a genuine subscription
-// command via MarkSubscription. The SUB/XSUB Recv path uses this instead
-// of payload sniffing so ordinary data starting with 0x00/0x01 is not
-// mistaken for a subscription.
-func (m *Msg) IsSubscription() bool { return m.subscription }
 
 // Frames returns the backing frame slice.
 func (m *Msg) Frames() [][]byte { return m.frames }

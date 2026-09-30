@@ -6,8 +6,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/exergy-dev/gozmq/internal/iface"
 )
 
 func TestValidateSocketTypeCompatibility(t *testing.T) {
@@ -127,7 +125,7 @@ func TestSession_HandshakeRejectsIncompatibleSocketTypes(t *testing.T) {
 	require.Nil(t, sB.Pipe(), "B Pipe() = non-nil after handshake rejection, want nil")
 }
 
-func waitHandshakeFailure(t *testing.T, s iface.Session, label string) {
+func waitHandshakeFailure(t *testing.T, s Session, label string) {
 	t.Helper()
 	waitClosed(t, s.Handshaked(), 2*time.Second, label+": handshake did not complete within 2s")
 	err := s.HandshakeErr()

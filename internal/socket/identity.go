@@ -9,7 +9,7 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
+	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -31,7 +31,7 @@ type identityRouter struct {
 	closed bool
 	// idOf maps an attached pipe to its routing identity (peer-advertised
 	// PeerIdentity, or a synthesized 5-byte identity for anonymous peers).
-	idOf map[iface.Pipe][]byte
+	idOf map[*pipe.End][]byte
 	// pipeOf maps a routing identity (string key) back to the pipe.
 	// Last-writer-wins on collision: a peer claiming an identity that is
 	// already attached displaces the stale entry.
@@ -43,7 +43,7 @@ type identityRouter struct {
 	// the common case behind a NAT or load balancer. gozmq always hands
 	// over; there is no option to get the rejecting behaviour. See
 	// docs/COMPATIBILITY.md.
-	pipeOf map[string]iface.Pipe
+	pipeOf map[string]*pipe.End
 	// nextID is the counter behind synthesized identities. It starts at a
 	// random value, as in libzmq: routing always hands an identity over to
 	// the newest claimant, so predictable identities would let a peer
@@ -61,20 +61,20 @@ type identityRouter struct {
 	// Bounded to routerDetachCacheCap, FIFO eviction via detachedOrder.
 	// nil when the cache is disabled (STREAM): all lookups miss and the
 	// remember/remove helpers no-op.
-	detachedIdOf  map[iface.Pipe][]byte
-	detachedOrder []iface.Pipe
+	detachedIdOf  map[*pipe.End][]byte
+	detachedOrder []*pipe.End
 }
 
 func newIdentityRouter(name string, detachCache bool) identityRouter {
-	var detached map[iface.Pipe][]byte
+	var detached map[*pipe.End][]byte
 	if detachCache {
-		detached = make(map[iface.Pipe][]byte)
+		detached = make(map[*pipe.End][]byte)
 	}
 	return identityRouter{
 		fq:           NewFairQueue(),
 		name:         name,
-		idOf:         make(map[iface.Pipe][]byte),
-		pipeOf:       make(map[string]iface.Pipe),
+		idOf:         make(map[*pipe.End][]byte),
+		pipeOf:       make(map[string]*pipe.End),
 		nextID:       rand.Uint32(),
 		sendGate:     newReadyGate(),
 		detachedIdOf: detached,
@@ -93,7 +93,7 @@ const routerDetachCacheCap = 1024
 // rememberDetachedLocked stores (pipe -> identity) in the post-detach side
 // cache, evicting the oldest entry if full. No-op when the cache is disabled
 // (nil map). Caller must hold e.mu.
-func (e *identityRouter) rememberDetachedLocked(p iface.Pipe, id []byte) {
+func (e *identityRouter) rememberDetachedLocked(p *pipe.End, id []byte) {
 	if e.detachedIdOf == nil {
 		return
 	}
@@ -114,7 +114,7 @@ func (e *identityRouter) rememberDetachedLocked(p iface.Pipe, id []byte) {
 // removeDetachedLocked drops any cached detach entry for p, called from Attach
 // so re-attaching a reused pipe value doesn't leave a stale entry. Caller must
 // hold e.mu.
-func (e *identityRouter) removeDetachedLocked(p iface.Pipe) {
+func (e *identityRouter) removeDetachedLocked(p *pipe.End) {
 	if _, ok := e.detachedIdOf[p]; !ok {
 		return
 	}
@@ -154,7 +154,7 @@ func (e *identityRouter) signalReadyWriteLocked() {
 // AttachPipe registers p, assigning it a routing identity (its PeerIdentity
 // or a synthesized one) and starting fair-queued inbound delivery. Re-attaching
 // the same pipe is a no-op. Returns ErrSocketClosed after Close.
-func (e *identityRouter) AttachPipe(p iface.Pipe) error {
+func (e *identityRouter) AttachPipe(p *pipe.End) error {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
@@ -182,7 +182,7 @@ func (e *identityRouter) AttachPipe(p iface.Pipe) error {
 // DetachPipe removes p from the routing table and the fair queue. The
 // identity→pipe index is cleared only if it still points at p, preserving a
 // newer peer that reused the same identity.
-func (e *identityRouter) DetachPipe(p iface.Pipe) error {
+func (e *identityRouter) DetachPipe(p *pipe.End) error {
 	e.mu.Lock()
 	if id, ok := e.idOf[p]; ok {
 		delete(e.idOf, p)
@@ -217,14 +217,9 @@ func (e *identityRouter) Recv(ctx context.Context) (*msg.Msg, error) {
 	// Prepend the identity in a fresh frame slice. id is already the
 	// defensive clone made once at AttachPipe (or the post-detach cache /
 	// PeerIdentity fallback) and is never mutated afterward, so prepend it
-	// directly without re-cloning per Recv. The out slice is built locally
-	// and handed off, so FromFramesOwned adopts it without a second copy.
-	orig := m.Frames()
-	out := make([][]byte, 0, len(orig)+1)
-	out = append(out, id)
-	out = append(out, orig...)
+	// directly without re-cloning per Recv.
 	e.recv.Add(1)
-	return msg.FromFramesOwned(out), nil
+	return prependFrames([][]byte{id}, m), nil
 }
 
 // Close releases engine state, unblocks pending Recv with ErrSocketClosed, and
@@ -247,7 +242,7 @@ func (e *identityRouter) Close() error {
 
 // metrics builds the engine's counters; extraDropped is folded into the
 // FairQueue's own drop count (ROUTER adds its route-miss drops; STREAM adds 0).
-func (e *identityRouter) metrics(extraDropped uint64) iface.SocketMetrics {
+func (e *identityRouter) metrics(extraDropped uint64) Metrics {
 	return e.snapshot(extraDropped+e.fq.Dropped(), e.fq.QueueDepth())
 }
 

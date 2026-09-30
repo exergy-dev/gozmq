@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/transport"
 )
 
 // --------------------------------------------------------------------------
@@ -23,15 +23,15 @@ import (
 // exercise reconnection end-to-end against a real peer.
 // --------------------------------------------------------------------------
 
-// stubSession is an iface.Session stub whose lifecycle is driven by test
+// stubSession is an Session stub whose lifecycle is driven by test
 // code rather than a real ZMTP FSM.
 type stubSession struct {
 	handshaked chan struct{}
 	done       chan struct{}
 	doneOnce   sync.Once
 	hsErr      error
-	enginePipe iface.Pipe
-	sessionEnd iface.Pipe // pipe end we close to simulate peer EOF
+	enginePipe *pipe.End
+	sessionEnd *pipe.End // pipe end we close to simulate peer EOF
 	stopOnce   sync.Once
 }
 
@@ -84,12 +84,12 @@ func (s *stubSession) Stop() error {
 }
 func (s *stubSession) Handshaked() <-chan struct{}    { return s.handshaked }
 func (s *stubSession) HandshakeErr() error            { return s.hsErr }
-func (s *stubSession) Pipe() iface.Pipe               { return s.enginePipe }
+func (s *stubSession) Pipe() *pipe.End                { return s.enginePipe }
 func (s *stubSession) Done() <-chan struct{}          { return s.done }
 func (s *stubSession) WriterFlushed() <-chan struct{} { return s.done } // stub: same as Done
 func (s *stubSession) CancelWriter()                  {}                // stub: no-op
 
-// stubConn is a no-op iface.Conn: Reconnector never touches its data
+// stubConn is a no-op transport.Conn: Reconnector never touches its data
 // methods; it just passes the value to NewSession.
 type stubConn struct{}
 
@@ -122,13 +122,13 @@ func TestReconnector_DialRetriesThenSucceeds(t *testing.T) {
 	var sessions []*stubSession
 
 	var attaches, detaches atomic.Int32
-	attached := make(chan iface.Pipe, 4)
+	attached := make(chan *pipe.End, 4)
 
 	cfg := ReconnectConfig{
 		InitialBackoff: 5 * time.Millisecond,
 		MaxBackoff:     50 * time.Millisecond,
 		JitterFraction: 0, // deterministic for backoff timing assertions
-		Dial: func(ctx context.Context) (iface.Conn, error) {
+		Dial: func(ctx context.Context) (transport.Conn, error) {
 			dialMu.Lock()
 			dialTimes = append(dialTimes, time.Now())
 			dialMu.Unlock()
@@ -138,14 +138,14 @@ func TestReconnector_DialRetriesThenSucceeds(t *testing.T) {
 			}
 			return stubConn{}, nil
 		},
-		NewSession: func(c iface.Conn) (iface.Session, error) {
+		NewSession: func(c transport.Conn) (Session, error) {
 			s := newStubSession(nil)
 			sessMu.Lock()
 			sessions = append(sessions, s)
 			sessMu.Unlock()
 			return s, nil
 		},
-		OnAttach: func(p iface.Pipe) error {
+		OnAttach: func(p *pipe.End) error {
 			attaches.Add(1)
 			select {
 			case attached <- p:
@@ -153,7 +153,7 @@ func TestReconnector_DialRetriesThenSucceeds(t *testing.T) {
 			}
 			return nil
 		},
-		OnDetach: func(p iface.Pipe) {
+		OnDetach: func(p *pipe.End) {
 			detaches.Add(1)
 		},
 	}
@@ -207,7 +207,7 @@ func TestReconnector_ContextCancellationStopsLoop(t *testing.T) {
 	cfg := ReconnectConfig{
 		InitialBackoff: time.Millisecond,
 		JitterFraction: 0,
-		Dial: func(ctx context.Context) (iface.Conn, error) {
+		Dial: func(ctx context.Context) (transport.Conn, error) {
 			dialCh <- struct{}{}
 			// Respect ctx so a cancelled Reconnector doesn't block here.
 			select {
@@ -217,7 +217,7 @@ func TestReconnector_ContextCancellationStopsLoop(t *testing.T) {
 				return nil, errors.New("still refused")
 			}
 		},
-		NewSession: func(c iface.Conn) (iface.Session, error) { return newStubSession(nil), nil },
+		NewSession: func(c transport.Conn) (Session, error) { return newStubSession(nil), nil },
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -249,10 +249,10 @@ func TestReconnector_StopWakesSleepingBackoff(t *testing.T) {
 	cfg := ReconnectConfig{
 		InitialBackoff: 10 * time.Second, // huge — Stop must wake this
 		JitterFraction: 0,
-		Dial: func(ctx context.Context) (iface.Conn, error) {
+		Dial: func(ctx context.Context) (transport.Conn, error) {
 			return nil, errors.New("always refused")
 		},
-		NewSession: func(c iface.Conn) (iface.Session, error) { return newStubSession(nil), nil },
+		NewSession: func(c transport.Conn) (Session, error) { return newStubSession(nil), nil },
 	}
 
 	r := StartReconnector(context.Background(), cfg)
@@ -281,7 +281,7 @@ func TestReconnector_HandshakeFailureTriggersBackoff(t *testing.T) {
 		InitialBackoff: 5 * time.Millisecond,
 		MaxBackoff:     20 * time.Millisecond,
 		JitterFraction: 0,
-		Dial: func(ctx context.Context) (iface.Conn, error) {
+		Dial: func(ctx context.Context) (transport.Conn, error) {
 			n := attempts.Add(1)
 			if n >= 4 {
 				doneOnce.Do(func() { close(done) })
@@ -293,8 +293,8 @@ func TestReconnector_HandshakeFailureTriggersBackoff(t *testing.T) {
 			}
 			return stubConn{}, nil
 		},
-		NewSession: func(c iface.Conn) (iface.Session, error) { return newStubSession(hsErr), nil },
-		OnAttach: func(_ iface.Pipe) error {
+		NewSession: func(c transport.Conn) (Session, error) { return newStubSession(hsErr), nil },
+		OnAttach: func(_ *pipe.End) error {
 			assert.Fail(t, "OnAttach should not fire on handshake failure")
 			return nil
 		},
@@ -319,8 +319,8 @@ func TestReconnector_AttachFailureStopsSession(t *testing.T) {
 	retries := make(chan int, 16)
 	cfg := ReconnectConfig{
 		InitialBackoff: time.Millisecond,
-		Dial:           func(ctx context.Context) (iface.Conn, error) { return stubConn{}, nil },
-		NewSession: func(c iface.Conn) (iface.Session, error) {
+		Dial:           func(ctx context.Context) (transport.Conn, error) { return stubConn{}, nil },
+		NewSession: func(c transport.Conn) (Session, error) {
 			s := newStubSession(nil)
 			select {
 			case sessions <- s:
@@ -328,8 +328,8 @@ func TestReconnector_AttachFailureStopsSession(t *testing.T) {
 			}
 			return s, nil
 		},
-		OnAttach: func(iface.Pipe) error { return errors.New("refused") },
-		OnDetach: func(iface.Pipe) { assert.Fail(t, "OnDetach after a refused attach") },
+		OnAttach: func(*pipe.End) error { return errors.New("refused") },
+		OnDetach: func(*pipe.End) { assert.Fail(t, "OnDetach after a refused attach") },
 		OnRetry: func(attempt int, _ time.Duration) {
 			select {
 			case retries <- attempt:
@@ -361,7 +361,7 @@ func TestReconnector_QuiesceDuringDialBackoff(t *testing.T) {
 	cfg := ReconnectConfig{
 		InitialBackoff: 20 * time.Millisecond,
 		JitterFraction: 0,
-		Dial: func(ctx context.Context) (iface.Conn, error) {
+		Dial: func(ctx context.Context) (transport.Conn, error) {
 			dials.Add(1)
 			select {
 			case dialed <- struct{}{}:
@@ -369,8 +369,8 @@ func TestReconnector_QuiesceDuringDialBackoff(t *testing.T) {
 			}
 			return nil, errors.New("refused")
 		},
-		NewSession: func(c iface.Conn) (iface.Session, error) { return newStubSession(nil), nil },
-		OnAttach: func(_ iface.Pipe) error {
+		NewSession: func(c transport.Conn) (Session, error) { return newStubSession(nil), nil },
+		OnAttach: func(_ *pipe.End) error {
 			assert.Fail(t, "OnAttach must not fire after Quiesce")
 			return nil
 		},

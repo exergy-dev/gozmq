@@ -60,8 +60,7 @@ differently from libzmq in any observable way, add a row to
 behaviour is the better one.
 
 **Public API changes.** The v1 compatibility promise covers everything
-exported outside `internal/`, with the documented exception of the plumbing
-methods in the `msg` package. Additions are fine in a minor release;
+exported outside `internal/`. Additions are fine in a minor release;
 anything breaking has to wait for v2. No exported signature may name a type
 from `internal/` — the contracts live in `transport`, `security`, and `msg`
 precisely so this stays true.
