@@ -546,6 +546,9 @@ func (s *Socket) startSession(conn iface.Conn, role iface.Role) {
 		s.emit(EventHandshakeSucceeded, remote, "")
 		if err := s.engine.AttachPipe(sess.Pipe()); err != nil {
 			_ = sess.Stop()
+			// The engine never saw this pipe, so nothing will read or
+			// close its end; close it so an HWM-0 relay can exit.
+			_ = sess.Pipe().Close()
 			return
 		}
 		<-sess.Pipe().Closed()
