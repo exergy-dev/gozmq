@@ -42,5 +42,7 @@ Most examples bind to `tcp://127.0.0.1:0` by default and use
 over `inproc://`.
 
 Frames returned by `Socket.RecvMsg` are ordinary Go memory owned by the
-caller; nothing needs releasing. `Socket.RecvBytes` (see `monitor_events`) is
-the single-frame shortcut.
+caller; nothing needs releasing. (The exception is a socket created with
+`WithRecvBufferPool(true)`, which none of these demos use; see its
+documentation.) `Socket.RecvBytes` (see `monitor_events`) is the
+single-frame shortcut.

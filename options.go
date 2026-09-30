@@ -92,9 +92,10 @@ func newOption(fn func(*socketConfig) error) Option {
 // WithIdentity sets the ROUTER/DEALER identity advertised during the ZMTP
 // handshake. The identity is the peer-visible name by which a ROUTER
 // addresses this DEALER (or by which a ROUTER peer appears in the leading
-// frame of a routed message). Identity bytes must be either empty (library
-// assigns a random identity, default) or 1..255 bytes long with a non-zero
-// leading byte; longer or zero-prefixed identities are rejected by ZMTP.
+// frame of a routed message). Identity bytes must be either empty (the
+// default: a ROUTER peer then synthesizes a 5-byte identity with a zero
+// leading byte) or 1..255 bytes long with a non-zero leading byte; longer
+// or zero-prefixed identities are rejected by NewSocket.
 // The slice is copied defensively.
 func WithIdentity(id []byte) Option {
 	return newOption(func(c *socketConfig) error {
@@ -128,8 +129,8 @@ func WithRecvHWM(n int) Option {
 // discards any queued messages immediately on Close. A negative duration
 // blocks Close indefinitely until every peer has drained, matching
 // libzmq's infinite-linger behavior — this can deadlock Close if a peer
-// never drains or reconnects, so pair it with a parallel shutdown
-// watchdog if you need it.
+// never drains or reconnects, so pair it with [Socket.CloseCtx], whose
+// context bounds the wait.
 func WithLinger(d time.Duration) Option {
 	return newOption(func(c *socketConfig) error { c.linger = d; return nil })
 }
@@ -373,10 +374,11 @@ func WithSecurityMech(newMech func(role security.Role, meta map[string]string) (
 
 // WithHandshakeTimeout caps the total duration of the ZMTP handshake,
 // covering the greeting exchange plus the security mechanism handshake
-// (NULL, PLAIN, or CURVE) and the READY metadata exchange. Default is 30
-// seconds. On timeout the session is torn down with [ErrHandshakeTimeout]
-// and, on a client socket, the reconnector retries with the configured
-// backoff.
+// (NULL, PLAIN, or CURVE) and the READY metadata exchange; on tls+tcp it
+// also bounds the TLS handshake, which runs lazily inside it. Default is 30
+// seconds; 0 disables the limit. On timeout the session is torn down with
+// [ErrHandshakeTimeout] and, on a client socket, the reconnector retries
+// with the configured backoff.
 func WithHandshakeTimeout(d time.Duration) Option {
 	return newOption(func(c *socketConfig) error {
 		c.handshakeTimeout = d

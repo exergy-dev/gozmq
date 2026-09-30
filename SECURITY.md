@@ -85,5 +85,8 @@ For deployments on untrusted networks:
   ceiling and lets a hostile sender force unbounded allocation.
 - Keep heartbeats enabled on long-lived connections; they are the only
   reliable way to detect a half-open TCP connection.
+- Keep `WithSendHWM` / `WithRecvHWM` non-zero. 0 means unbounded, so a peer
+  that floods (or stops reading) can grow the queue without limit.
 - Set `WithHandshakeTimeout` to something tight if you are exposed to the
-  open internet, so half-finished handshakes cannot pin resources.
+  open internet, so half-finished handshakes cannot pin resources. It also
+  bounds the TLS handshake on `tls+tcp://`; 0 disables it.

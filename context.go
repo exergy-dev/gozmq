@@ -12,9 +12,10 @@ import (
 	"github.com/exergy-dev/gozmq/transport"
 )
 
-// Context is the top-level resource owner. A Context holds the transport
-// registry (including the inproc name table shared by all inproc sockets
-// on this Context) and the defaults sockets inherit.
+// Context is the top-level resource owner. A Context holds the scheme to
+// transport table (including the inproc name table shared by all inproc
+// sockets on this Context) and the optional ZAP handler. Contexts share
+// nothing with each other.
 //
 // The zero value is NOT usable; construct via NewContext.
 type Context struct {

@@ -53,7 +53,9 @@ const (
 	// sends.
 	Pull
 	// Pair is an exclusive 1:1 bidirectional link with no routing or
-	// load-balancing; exactly one peer at a time.
+	// load-balancing; exactly one peer at a time. A peer disconnect is not
+	// reported: Recv delivers what the old peer left buffered, then Send
+	// and Recv wait for the next peer to attach.
 	Pair
 	// Stream exchanges raw TCP bytes with non-ZMQ peers: no ZMTP
 	// handshake, framing, or security. Messages are [identity, payload]

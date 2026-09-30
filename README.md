@@ -38,6 +38,11 @@ your workload is tiny messages at millions per second, measure before you
 switch. Full methodology and the complete matrix are in
 [`perf/REPORT.md`](perf/REPORT.md).
 
+These figures are from the report's 2026-06-10 run, when received frames
+over 4 KiB were pooled by default. Pooling is now opt-in
+(`WithRecvBufferPool`), so the 8 KB and 64 KB rows may not match the default
+configuration until the comparison is re-run.
+
 ## Install
 
 Requires Go 1.22 or newer.
@@ -137,9 +142,18 @@ own `Release`, and releasing too often panics. Forwarding is safe:
 `Msg.Derive`, not by rewrapping the frames. A forgotten `Release` is safe;
 the buffer is left to the garbage collector.
 
+`RecvBytes` returns a copy of a single-frame payload and needs no
+bookkeeping in either mode.
+
 **Security defaults.** The default mechanism is NULL: no authentication, no
 encryption, matching libzmq. That is fine for `inproc`, `ipc`, and trusted
 network segments. For anything else use CURVE, or PLAIN under `tls+tcp://`.
+As in libzmq, the PLAIN and CURVE server/client role comes from the option
+(`WithPlainAuth` / `WithPlainClient`, `WithCurveServer` / `WithCurveClient`),
+not from which side binds. To decide which peers are allowed, install a
+`security.ZAPHandler` on the Context with `gozmq.WithZAPHandler` and name
+the socket's domain with `WithZAPDomain`; it vets PLAIN and CURVE servers,
+and NULL sockets that set a domain.
 
 ## Documentation
 

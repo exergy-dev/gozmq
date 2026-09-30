@@ -36,11 +36,18 @@ golangci-lint run
 
 ```sh
 go build ./... && CGO_ENABLED=0 go build ./...   # cgo-free is the point
-go vet ./...
-golangci-lint run
+gofmt -l $(git ls-files '*.go')                  # must print nothing
+go vet ./... && go vet -tags interop,soak ./...
+golangci-lint run                                # also builds the interop and soak tags
+deadcode -test ./...                             # must print nothing
 go test -race -count=1 ./...
 go test -tags interop -race ./interop/...        # if you touched the wire
 ```
+
+`deadcode` is `go install golang.org/x/tools/cmd/deadcode@latest`. CI also
+runs the tests on Go 1.22 (the `go.mod` minimum), enforces an 80% coverage
+floor on the library packages, cross-builds with `CGO_ENABLED=0`, and runs
+every fuzz target briefly; see `.github/workflows/ci.yml`.
 
 ## Things worth knowing
 

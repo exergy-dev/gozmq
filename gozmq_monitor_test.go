@@ -154,7 +154,7 @@ func TestMonitor_BindFailed(t *testing.T) {
 	evts := make(chan gozmq.Event, 16)
 	_, s := newTestSocket(t, gozmq.Pair, gozmq.WithMonitor(evts, gozmq.EventAll))
 
-	// Unknown scheme — Registry.Lookup returns ErrTransportUnknown.
+	// Unknown scheme — the Context has no transport for it (ErrTransportUnknown).
 	if err := s.Bind("bogus://nothing"); err == nil {
 		t.Fatal("expected bind error for bogus scheme")
 	}

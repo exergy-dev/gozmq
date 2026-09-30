@@ -65,13 +65,21 @@
 //
 //   - [WithPlainAuth] / [WithPlainClient] — username/password authentication.
 //     Credentials travel in cleartext unless the underlying transport is
-//     wrapped in tls+tcp://. Server-side PLAIN and CURVE authorization can
-//     also be delegated to an RFC 27 handler via [WithZAPHandler] plus the
-//     per-socket [WithZAPDomain].
+//     wrapped in tls+tcp://.
 //   - [WithCurveServer] / [WithCurveClient] — CurveZMQ mutual authentication
 //     with forward-secret encryption using long-term Curve25519 keys.
 //
-// For untrusted networks prefer CURVE, or layer PLAIN under tls+tcp://.
+// For untrusted networks prefer CURVE, or layer PLAIN under tls+tcp://. As
+// in libzmq, the server/client role comes from the option, not from which
+// side binds: a WithPlainAuth socket is the PLAIN server even when it
+// connects. A socket takes at most one mechanism; NewSocket rejects
+// combinations.
+//
+// Authorization can be delegated to an RFC 27 policy: install a
+// [security.ZAPHandler] on the Context with [WithZAPHandler] and set the
+// socket's domain with [WithZAPDomain]. The handler is called directly from
+// the server side of every PLAIN and CURVE handshake, and from the accepting
+// side of NULL handshakes on sockets that set a domain.
 //
 // Note that inproc connections between NULL-mechanism sockets in the same
 // Context use a direct-pipe bypass that skips the session layer entirely —
@@ -91,8 +99,8 @@
 //	recvHWM              1000         (inbound  high-water mark, messages)
 //	linger               1s           (Close drain grace period)
 //	heartbeatInterval    30s          (ZMTP 3.1 PING cadence)
-//	heartbeatTimeout     90s          (peer-unresponsive deadline)
-//	handshakeTimeout     30s          (greeting + security handshake cap)
+//	heartbeatTimeout     90s          (peer-unresponsive deadline; 0 = 3× interval)
+//	handshakeTimeout     30s          (greeting + security + TLS handshake cap; 0 = none)
 //	maxMessageSize       64 MiB       (per-message ceiling; oversize tears session)
 //	reconnectInterval    100ms        (base backoff; exponential with 20% jitter)
 //	reconnectIntervalMax 30s          (backoff cap; 0 = no cap, diverges from libzmq)
@@ -133,8 +141,9 @@
 //
 // # Concurrency model
 //
-// Socket.Send and Socket.Recv are safe for concurrent use across goroutines;
-// the engine serializes them internally. However, the idiomatic usage — and
+// [Socket.SendMsg] and [Socket.RecvMsg] are safe for concurrent use across
+// goroutines; the engine serializes them internally (REQ and REP reject a
+// concurrent call that would break lock-step with [ErrFSMViolation]). However, the idiomatic usage — and
 // the pattern the library is optimised for — is one goroutine per socket.
 // Sharing a socket across many concurrent senders works but buys you nothing
 // over a dedicated fan-in goroutine and makes flow-control reasoning harder.
@@ -193,14 +202,18 @@
 // # ROUTER identity handover
 //
 // When a peer attaches to a ROUTER claiming an identity that is already in
-// use, gozmq hands the identity over: the new pipe takes it and the stale
-// one is displaced. This is libzmq's ZMQ_ROUTER_HANDOVER=1 behaviour rather
-// than its default, which rejects the new peer and keeps the old pipe
-// bound. Handover is the better default in practice — a client reconnecting
+// use, gozmq hands the identity over: replies addressed to it go to the new
+// peer from then on. The old connection is not closed; it stays attached
+// until it disconnects, and messages it still sends arrive under the same
+// identity. This is libzmq's ZMQ_ROUTER_HANDOVER=1 behaviour rather than its
+// default, which rejects the new peer and keeps the old pipe bound. Handover is the better default in practice — a client reconnecting
 // before the server's TCP stack has noticed the old connection died would
 // otherwise be stranded until the stale pipe times out — but it does mean
 // two clients that pick the same [WithIdentity] value will silently evict
 // each other rather than one failing loudly. Identities must be unique.
+// Peers that advertise no identity get a synthesized 5-byte one (a zero
+// byte, then a per-socket counter with a random start), never one that is
+// already in use.
 //
 // # Subscription refcount
 //

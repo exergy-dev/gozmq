@@ -48,10 +48,12 @@ const (
 	// handshake begins. Event.Endpoint is the peer's remote endpoint.
 	EventAccepted
 
-	// EventAcceptFailed fires for each non-terminal accept error (a
-	// failed TLS handshake, EMFILE, ...); the accept loop keeps running
-	// and retries with capped backoff. Event.Endpoint is the bound
-	// endpoint; Event.Reason carries the underlying error.
+	// EventAcceptFailed fires for each non-terminal accept error (EMFILE,
+	// an out-of-tree transport's per-connection error, ...); the accept
+	// loop keeps running and retries with capped backoff. A failed TLS
+	// handshake is not an accept error: it runs inside the ZMTP handshake
+	// and surfaces as EventHandshakeFailedProtocol. Event.Endpoint is the
+	// bound endpoint; Event.Reason carries the underlying error.
 	EventAcceptFailed
 
 	// EventClosed fires once Socket.Close has completed its teardown

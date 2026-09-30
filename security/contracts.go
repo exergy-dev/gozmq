@@ -35,6 +35,15 @@ const (
 // 25/26 for CURVE, 27 for ZAP), and test against libzmq. Prefer the shipped
 // mechanisms — NULL, PLAIN, CURVE — plus a [ZAPHandler] for authorization
 // policy, which is the extension point most applications actually want.
+//
+// A mechanism whose EncodeFrame and DecodeFrame leave bodies and flags
+// unchanged (as NULL and PLAIN do) may also implement
+//
+//	IdentityFraming() bool
+//
+// returning true; the session then skips both calls and uses its
+// zero-copy framing path. Without it, EncodeFrame and DecodeFrame run on
+// every traffic-phase frame.
 type Mech interface {
 	// Name is the greeting mechanism token (e.g. "NULL", "PLAIN", "CURVE"),
 	// unpadded; the greeting encoder pads to 20 bytes.
@@ -49,9 +58,9 @@ type Mech interface {
 	NextHandshake(in []byte) (out []byte, done bool, err error)
 
 	// EncodeFrame rewrites a plaintext frame body and its ZMTP flags into
-	// their wire form. NULL/PLAIN preserve both body and flags. CURVE moves
-	// multipart state into the encrypted MESSAGE inner flags byte while
-	// preserving outer flags such as COMMAND.
+	// their wire form. NULL/PLAIN preserve both body and flags. CURVE, as
+	// libzmq does, moves MORE and COMMAND into the encrypted MESSAGE inner
+	// flags byte and clears them from the wire flags.
 	EncodeFrame(flags uint8, plain []byte) (wireFlags uint8, wire []byte, err error)
 
 	// DecodeFrame reverses EncodeFrame. The returned flags are the logical

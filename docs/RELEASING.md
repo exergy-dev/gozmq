@@ -13,9 +13,10 @@ Everything green on the release commit:
 ```sh
 go mod tidy && git diff --exit-code go.mod go.sum
 go build ./... && CGO_ENABLED=0 go build ./...
-go vet ./...
-golangci-lint run
-gofmt -l .                                        # must print nothing
+gofmt -l $(git ls-files '*.go')                   # must print nothing
+go vet ./... && go vet -tags interop,soak ./...
+golangci-lint run                                 # also builds the interop and soak tags
+deadcode -test ./...                              # golang.org/x/tools/cmd/deadcode; must print nothing
 go test -race -count=1 ./...
 go test -tags interop -race ./interop/...         # needs libzmq3-dev
 GOZMQ_SOAK_DURATION=10m go test -tags soak -run TestSoak ./soak/...
@@ -41,7 +42,7 @@ type. This must print nothing:
 
 ```sh
 for p in . ./msg ./transport ./typed ./typed/codecjson ./security ./security/curve; do
-  go doc -all "$p" | grep -E "^(func|type|const|var| ) .*\b(pipe|session|socket|zmqerr|zmtp|bufpool)\."
+  go doc -all "$p" | grep -E "^(func|type|const|var| ) .*\b(pipe|session|socket|stream|zmqerr|zmtp|bufpool|testutil)\."
 done
 ```
 
@@ -49,10 +50,15 @@ Then read the diff of the public surface against the previous tag and
 confirm it matches the intended version bump:
 
 ```sh
-go doc -all ./... > /tmp/api-new.txt
-git stash && go doc -all ./... > /tmp/api-old.txt && git stash pop
-diff /tmp/api-old.txt /tmp/api-new.txt
+git worktree add /tmp/gozmq-prev vPREVIOUS
+for p in . ./msg ./transport ./typed ./typed/codecjson ./security ./security/curve; do
+  diff <(cd /tmp/gozmq-prev && go doc -all "$p") <(go doc -all "$p")
+done
+git worktree remove /tmp/gozmq-prev
 ```
+
+(`apidiff` from `golang.org/x/exp/cmd/apidiff` gives the same answer with a
+compatible/incompatible verdict per change.)
 
 Anything removed or changed in place is a **major** bump. Additions are a
 **minor**. Nothing but fixes is a **patch**.
@@ -61,7 +67,8 @@ Anything removed or changed in place is a **major** bump. Additions are a
 
 - Roll `CHANGELOG.md`: rename `[Unreleased]` to `[X.Y.Z] - YYYY-MM-DD` and
   open a fresh empty `[Unreleased]`.
-- Every breaking change listed, with before/after.
+- Every breaking change listed, with before/after, and summarised at the
+  top of the section.
 - `docs/COMPATIBILITY.md` matches shipped behaviour, including any new
   divergence.
 - `README.md` version references and performance numbers are current.

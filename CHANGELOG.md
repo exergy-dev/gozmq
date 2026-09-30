@@ -4,25 +4,77 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
 
 ## [Unreleased]
 
+**Breaking changes**, detailed in the sections below. No `v1.0.0` tag has
+been published yet; if 1.0.0 is tagged first, the API removals need a major
+version under the compatibility promise.
+
+API:
+
+- `WithZapHandler(*security.ZapHandler)` → `WithZAPHandler(security.ZAPHandler)`,
+  `WithZapDomain` → `WithZAPDomain`. Turn a `ZapPolicy`/`ZAPAuthorizer` into a
+  plain function of type `security.ZAPHandler`.
+- `security.ZAPAuthorizer`, `ZapPolicy`, the `ZapHandler` struct,
+  `NewZapHandler` and `ZapConfigurable` are removed; use
+  `security.ZAPHandler` (its `ServeRequest` method serves RFC 27 wire
+  requests).
+- ZAP codec renames: `ZapRequest`/`ZapResponse` → `ZAPRequest`/`ZAPResponse`,
+  `Encode`/`DecodeZap*` → `Encode`/`DecodeZAP*`, `ZapStatus*` → `ZAPStatus*`,
+  `ErrZapTemporary` → `ErrZAPTemporary`. Search and replace.
+- `security.Mech` requires `PeerMetadata() map[string]string`, and
+  `SetPeerMetadata` is gone from the interface and `MechBase`. Custom
+  mechanisms that embed `MechBase` should call `MergePeerMetadata` with the
+  peer's properties; `MechBase.ConfigureZAP` takes a `security.ZAPHandler`.
+- `transport.TLSTransport.HandshakeTimeout` is removed; `WithHandshakeTimeout`
+  on the socket now bounds the TLS handshake.
+- `transport.Registry`, `NewRegistry` and `New` are removed; use
+  `(*gozmq.Context).RegisterTransport`.
+- `msg.Recycle`, `(*Msg).IsPooled`, `AppendPooledFrame`, `TransferPool`,
+  `Reset`, `msg.FromFramesOwned`, `MarkSubscription` and `IsSubscription` are
+  removed (all but `IsSubscription` were excluded from the 1.0.0
+  compatibility promise). Drop the calls; use `msg.FromFrames`, and
+  `(*Msg).Derive` to re-envelope a lent message.
+
+Behaviour:
+
+- `NewSocket` rejects `WithPlainAuth` + `WithPlainClient`, and PLAIN options
+  combined with CURVE options (CURVE used to win silently). Configure one
+  mechanism per socket.
+- The PLAIN role now follows the option rather than Bind/Connect, so a
+  connecting `WithPlainAuth` socket (or a binding `WithPlainClient` one) runs
+  PLAIN instead of silently falling back to NULL. Check that both ends agree
+  on who is the PLAIN server.
+- A NULL socket consults the ZAP handler only when it sets `WithZAPDomain`
+  (libzmq behaviour). Set a domain on NULL sockets that ZAP must vet.
+- `transport.TCPTransport` buffer sizes default to 0 (OS autotuning) instead of
+  8 MiB. Set `ReadBufferSize`/`WriteBufferSize` to `8 << 20` and re-register the
+  transport to get the old sizes back.
+- PAIR no longer returns `io.EOF`/`io.ErrClosedPipe` when the peer goes away;
+  `Send`/`Recv` wait for the next peer. Use a context deadline or monitor
+  events to notice a lost peer.
+- CURVE traffic-phase commands use the libzmq encoding, which older gozmq
+  releases reject. Upgrade both ends of a gozmq↔gozmq CURVE link together.
+
 ### Security
 
 - PLAIN: a `WithPlainAuth` socket that connected, or a `WithPlainClient`
   socket that bound, silently used NULL and authenticated nobody. The PLAIN
   role now follows the option; setting both is an error.
-- ZAP now also vets PLAIN/CURVE servers that connect rather than bind.
 - inproc: `WithSecurityMech` sockets took the direct-pipe bypass and ran no
   handshake at all.
-- Handshake frames are capped at 64 KiB; an unauthenticated peer could make
-  the server allocate up to `MaxMessageSize` (64 MiB) per connection with a
-  9-byte header.
 - CURVE: low-order public keys with bit 255 set were accepted, letting a
   client forge the INITIATE vouch without a secret key. All low-order keys
   are now rejected.
-- A ZAP policy returning an over-long metadata name no longer panics inside
-  the handshake; it yields a 500 response.
+- ZAP now also vets PLAIN/CURVE servers that connect rather than bind.
+- Handshake frames are capped at 64 KiB; an unauthenticated peer could make
+  the server allocate up to `MaxMessageSize` (64 MiB) per connection with a
+  9-byte header.
+- The greeting rejects a peer announcing a different security mechanism, as
+  ZMTP and libzmq require.
 - ZAP metadata can no longer override the peer's ZMTP `Identity` or
   `Socket-Type`; it only adds properties the peer did not send. The ZAP
   user-id is surfaced as the `User-Id` peer property, as in libzmq.
+- A ZAP policy returning an over-long metadata name no longer panics inside
+  the handshake; it yields a 500 response.
 - **Breaking:** `NewSocket` rejects `WithPlainAuth` combined with
   `WithPlainClient`, and PLAIN options combined with CURVE options
   (previously CURVE silently won).
@@ -31,38 +83,51 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
 
 ### Added
 
+- `WithRecvBufferPool(enabled)`: frames over 4 KiB on NULL/PLAIN sessions are
+  received into a size-tiered buffer pool, as lent messages. The receiver
+  must `Release`; frames are valid until the last reference is released;
+  `SendMsg` holds its own reference, so forward-then-`Release` is safe;
+  over-release panics; there is no finalizer, and a forgotten `Release` is
+  safe (the GC collects the buffer). Rejected on STREAM sockets.
+- `msg.NewWithRelease`, `(*Msg).Lent` and `(*Msg).Derive`, the building
+  blocks of lent messages.
 - `security.DecodeError` for recognising a peer's ERROR command in custom
   mechanisms.
-- `WithRecvBufferPool(enabled)`: frames over 4 KiB on NULL/PLAIN sessions are
-  received into a size-tiered buffer pool. The receiver must `Release`;
-  frames are valid until the last reference is released; `SendMsg` holds its
-  own reference, so forward-then-`Release` is safe; over-release panics;
-  there is no finalizer, and a forgotten `Release` is safe (the GC collects
-  the buffer). Rejected on STREAM sockets.
-- `msg.NewWithRelease`, `(*Msg).Lent`, `(*Msg).Derive`.
+- A custom mechanism may implement `IdentityFraming() bool` to opt into the
+  zero-copy framing path (see Fixed).
+- `tcp://host:*` binds an ephemeral port.
 
 ### Changed
 
+- Received frames are ordinary Go memory owned by the caller, with no pool
+  and no finalizer behind them. `(*Msg).Release` and `Retain` are no-ops on
+  such plain messages, so existing calls are harmless and new code need not
+  make them; they are reference operations only on lent messages (see
+  `WithRecvBufferPool`). `Msg` grew from 48 to 64 bytes.
 - **Behaviour change — PAIR:** a peer disconnect is no longer surfaced to
   the application. `RecvMsg` delivers any messages the old peer left
   buffered, then blocks until the next peer attaches (libzmq semantics)
   instead of returning `io.EOF`; a `SendMsg` racing the disconnect waits
   for the next peer instead of returning `io.ErrClosedPipe`.
-- `typed.Receiver.Recv` and `typed.Subscriber.Recv` decode errors now wrap
-  `typed.ErrDecode` (still `ErrFrameCount` where applicable); message text
-  changed from "typed: unmarshal: …" to "typed: decode failed: …".
-- XPUB subscription processing never blocks on the application; pending
-  events are queued without a fixed bound (previously a 16-slot buffer).
 - ROUTER/STREAM `Send` to a peer that just disconnected: ROUTER without
   `WithRouterMandatory` silently drops (counted in `Metrics.Dropped`); ROUTER
   with it and STREAM return an error wrapping `ErrRouteUnknown` instead of a
   raw `io.ErrClosedPipe`.
+- NULL consults the ZAP handler only when a ZAP domain is set, matching
+  libzmq (previously every accepting NULL socket was vetted once a handler
+  was installed).
 - **Breaking:** `transport.TCPTransport` read/write buffer sizes default to 0
-  (OS autotuning) instead of 8 MiB.
-- tcp/tls/ipc `Accept` blocks instead of polling every 5ms.
-  `transport.Listener.Accept` documents its terminal errors (`net.ErrClosed`,
-  ctx errors); closed-listener errors match `net.ErrClosed`.
-- `tcp://host:*` binds an ephemeral port; TCP socket options are best-effort.
+  (OS autotuning, as libzmq does) instead of 8 MiB. TCP socket options are
+  applied best-effort.
+- tcp/tls/ipc `Accept` blocks instead of polling every 5ms, and `Listen`
+  honours its context. `transport.Listener.Accept` documents its terminal
+  errors (`net.ErrClosed`, ctx errors); closed-listener errors match
+  `net.ErrClosed`.
+- XPUB subscription processing never blocks on the application; pending
+  events are queued without a fixed bound (previously a 16-slot buffer).
+- `typed.Receiver.Recv` and `typed.Subscriber.Recv` decode errors now wrap
+  `typed.ErrDecode` (still `ErrFrameCount` where applicable); message text
+  changed from "typed: unmarshal: …" to "typed: decode failed: …".
 - `EventConnectDelayed`/`EventConnectRetried` are no longer emitted while a
   socket is closing.
 - **Breaking:** `security.Mech` now requires `PeerMetadata() map[string]string`;
@@ -75,15 +140,14 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
   `Encode/DecodeZapRequest/Response` → `Encode/DecodeZAPRequest/Response`;
   `ZapStatus*` → `ZAPStatus*`; `ErrZapTemporary` → `ErrZAPTemporary`;
   `MechBase.ConfigureZAP` takes a `security.ZAPHandler`.
-- Received frames are ordinary Go memory owned by the caller.
-  `(*Msg).Release` and `(*Msg).Retain` are now no-ops kept for
-  compatibility; calling them is unnecessary.
 - `WithSendHWM(0)`/`WithRecvHWM(0)` (unlimited) no longer run a relay
-  goroutine per pipe direction; inproc linger completes on a signal instead
-  of polling.
-- inproc Conn deadlines no longer start a goroutine per Read/Write.
-- `(*Msg).Release`/`Retain` are reference operations on lent (pooled)
-  messages and remain no-ops on plain ones. `Msg` grew from 48 to 64 bytes.
+  goroutine per pipe direction; an unbounded direction is a channel plus an
+  overflow slice. inproc linger completes on a signal instead of polling.
+- PUB no longer runs a watcher goroutine per subscriber, and inproc Conn
+  deadlines no longer start a goroutine per Read/Write.
+- CURVE no longer wipes its per-connection copy of the long-term secret key
+  after the handshake: the socket keeps the key for later connections, so
+  the wipe protected nothing. Ephemeral and cookie keys are still wiped.
 
 ### Removed
 
@@ -96,11 +160,14 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
   `security.ZapConfigurable`, replaced by the single func type
   `security.ZAPHandler` (whose `ServeRequest` method serves RFC 27 wire
   requests).
-- **Breaking (internal plumbing):** `msg.Recycle`, `(*Msg).IsPooled`,
-  `(*Msg).AppendPooledFrame`, `(*Msg).TransferPool` and `(*Msg).Reset` are
-  gone, along with `internal/bufpool` and the `*Msg` finalizer.
-- **Breaking:** `msg.FromFramesOwned`, `Msg.MarkSubscription`,
-  `Msg.IsSubscription`. Use `msg.FromFrames`; subscription commands are
+- **Breaking:** `msg.Recycle`, `(*Msg).IsPooled`, `(*Msg).AppendPooledFrame`,
+  `(*Msg).TransferPool` and `(*Msg).Reset` (marked "internal plumbing" and
+  excluded from the compatibility promise in 1.0.0), along with the default
+  frame pool and the `*Msg` finalizer. The opt-in pool behind
+  `WithRecvBufferPool` is internal.
+- **Breaking:** `msg.FromFramesOwned`, `Msg.MarkSubscription` (both excluded
+  from the compatibility promise in 1.0.0) and `Msg.IsSubscription`. Use
+  `msg.FromFrames`; subscription commands are
   flagged on the internal pipe instead of the message.
 - **Breaking:** `transport.Registry`, `transport.NewRegistry`, `transport.New`.
   Use `(*gozmq.Context).RegisterTransport`; every Context still preloads
@@ -108,75 +175,12 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
 
 ### Fixed
 
-- `Socket.Close` with a positive linger now flushes the entire outbound queue
-  when `WithSendHWM(0)` is set; previously only a few hundred messages of a
-  large backlog were sent.
-- `WithRecvHWM(0)` sockets no longer leak a goroutine (and its queued
-  messages) per disconnected peer after `Close`.
-- Session teardown no longer sets `SO_LINGER(2)` on TCP connections, which
-  made `Close` block up to 2s per connection and reset it on expiry.
-- A custom security mechanism named "NULL" or "PLAIN" no longer has its
-  `EncodeFrame`/`DecodeFrame` skipped; the zero-copy framing path is opt-in
-  via an `IdentityFraming() bool` method.
-- `WithHeartbeat` timeout 0 now means 3× the interval, as documented
-  (previously 2×).
-- REQ/REP: concurrent `SendMsg`/`RecvMsg` calls could both pass the
-  state-machine check (two requests in flight, or an overwritten REP
-  envelope); the loser now gets `ErrFSMViolation`.
-- REP: a reply to a requester that has just disconnected is dropped
-  silently instead of returning a raw `io.ErrClosedPipe`.
-- PAIR: a reconnecting peer is no longer rejected when it attaches before
-  the previous peer's pipe has been detached.
-- `Proxy` now returns promptly after ctx cancellation even when the capture
-  socket blocks (e.g. a PUSH/DEALER with no peer); taps queued or in flight
-  at shutdown may be dropped.
-- `Poller`: two Pollers, or concurrent `Poll` calls, waiting on the same
-  socket no longer lose a wakeup; the second waiter used to sleep until its
-  context expired while the message stayed queued.
-- `typed.TopicMux`: a concurrent `Run` now returns `ErrTopicMuxRunning`
-  instead of running alongside the first; fixed a data race between
-  `Register`/`Unregister` and a starting `Run`.
-- STREAM sockets no longer pin a 32 KiB buffer per received chunk (small
-  segments at the HWM could hold tens of MiB per peer).
-- PULL/DEALER/ROUTER/REP (fair-queued sockets): messages already received from
-  a peer that disconnects are no longer discarded when it was the only peer.
-- ROUTER/STREAM: auto-generated peer identities can no longer collide (and
-  misroute replies); they are now a per-socket counter with a random start.
-- XPUB: a subscriber that disconnects before the application reads its
-  SUBSCRIBE now yields the matching CANCEL and no longer suppresses later
-  SUBSCRIBEs for that prefix; a peer can no longer CANCEL a prefix it never
-  subscribed to.
-- The greeting rejects a peer announcing a different security mechanism, as
-  ZMTP and libzmq require.
-- NULL and CURVE clients report a server ERROR (e.g. ZAP denial) as
-  `ErrAuthFailed` with the reason, not `ErrMalformedFrame`.
-- NULL consults the ZAP handler only when a ZAP domain is set, matching
-  libzmq.
-- A per-connection accept error (failed TLS handshake, EMFILE, socket-option
-  failure) no longer stops a bound socket from accepting; it is reported as
-  `EventAcceptFailed` and retried with capped backoff.
-- Silent or non-TLS clients no longer stall a tls+tcp listener; a non-TLS
-  server no longer parks the TLS reconnector.
-- `Bind` racing `Close` no longer leaks the listener.
-- inproc: a connect racing listener close can no longer be stranded; `Dial`
-  honours ctx when the accept queue is full.
-- ipc: a stale socket file left by a crashed process no longer blocks `Bind`;
-  `Close` no longer unlinks a path another listener may have re-bound.
-- `Socket.Close` on an inproc (direct-pipe) connection no longer waits the
-  full linger while the peer socket is alive; it returns as soon as the peer
-  has received everything sent.
-- A client connection whose pipe the engine refuses (e.g. a PAIR that already
-  has a peer) is now torn down and retried with backoff instead of staying
-  open unattached; `EventConnected` is emitted only after a successful attach.
-- `RecvBytes`' multipart-message error now wraps `ErrFSMViolation`.
 - Forwarding a received message (`RecvMsg` → `SendMsg` → `Release`) no longer
   corrupts large frames in flight.
 - Frame slices kept after dropping their `*Msg` are no longer recycled by a
   finalizer.
 - ROUTER `Send` no longer mutates the caller's message (data race with
   `Proxy` capture).
-- A REP `Send` blocked at HWM now returns `ErrSocketClosed` when the socket
-  closes.
 - CURVE: traffic-phase commands (heartbeat PING/PONG) are now carried in the
   encrypted MESSAGE flags byte (command bit 0x02) with no outer COMMAND flag,
   matching libzmq. Previously, with heartbeats enabled (the default), libzmq
@@ -185,9 +189,68 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
   older gozmq peers (outer COMMAND flag) are still accepted, but older gozmq
   releases reject the new encoding: upgrade both ends of gozmq↔gozmq CURVE
   links together.
+- A per-connection accept error (EMFILE, an out-of-tree transport's
+  per-connection error) no longer stops a bound socket from accepting; it is
+  reported as `EventAcceptFailed` and retried with capped backoff.
+- Silent or non-TLS clients no longer stall a tls+tcp listener; a non-TLS
+  server no longer parks the TLS reconnector.
+- A custom security mechanism named "NULL" or "PLAIN" no longer has its
+  `EncodeFrame`/`DecodeFrame` skipped; the zero-copy framing path is opt-in
+  via an `IdentityFraming() bool` method.
+- REQ/REP: concurrent `SendMsg`/`RecvMsg` calls could both pass the
+  state-machine check (two requests in flight, or an overwritten REP
+  envelope); the loser now gets `ErrFSMViolation`.
+- REQ with HWM 0 could pair a stale reply with the next request.
+- ROUTER/STREAM: auto-generated peer identities can no longer collide (and
+  misroute replies); they are now a per-socket counter with a random start.
+- PULL/DEALER/ROUTER/REP (fair-queued sockets): messages already received from
+  a peer that disconnects are no longer discarded when it was the only peer.
+- XPUB: a subscriber that disconnects before the application reads its
+  SUBSCRIBE now yields the matching CANCEL and no longer suppresses later
+  SUBSCRIBEs for that prefix; a peer can no longer CANCEL a prefix it never
+  subscribed to.
+- PAIR: a reconnecting peer is no longer rejected when it attaches before
+  the previous peer's pipe has been detached.
+- A client connection whose pipe the engine refuses (e.g. a PAIR that already
+  has a peer) is now torn down and retried with backoff instead of staying
+  open unattached; `EventConnected` is emitted only after a successful attach.
+- REP: a reply to a requester that has just disconnected is dropped
+  silently instead of returning a raw `io.ErrClosedPipe`.
+- A REP `Send` blocked at HWM now returns `ErrSocketClosed` when the socket
+  closes.
+- `Socket.Close` with a positive linger now flushes the entire outbound queue
+  when `WithSendHWM(0)` is set; previously only a few hundred messages of a
+  large backlog were sent.
+- `WithRecvHWM(0)` sockets no longer leak a goroutine (and its queued
+  messages) per disconnected peer after `Close`.
+- Session teardown no longer sets `SO_LINGER(2)` on TCP connections, which
+  made `Close` block up to 2s per connection and reset it on expiry.
+- `Socket.Close` on an inproc (direct-pipe) connection no longer waits the
+  full linger while the peer socket is alive; it returns as soon as the peer
+  has received everything sent.
+- `WithHeartbeat` timeout 0 now means 3× the interval, as documented
+  (previously 2×).
+- NULL and CURVE clients report a server ERROR (e.g. ZAP denial) as
+  `ErrAuthFailed` with the reason, not `ErrMalformedFrame`.
+- `Poller`: two Pollers, or concurrent `Poll` calls, waiting on the same
+  socket no longer lose a wakeup; the second waiter used to sleep until its
+  context expired while the message stayed queued.
 - A `Poller` never woke for messages sent by an inproc PAIR peer.
 - A `Poller` never reported REP, SUB or XSUB sockets as ready.
-- REQ with HWM 0 could pair a stale reply with the next request.
+- `Proxy` now returns promptly after ctx cancellation even when the capture
+  socket blocks (e.g. a PUSH/DEALER with no peer); taps queued or in flight
+  at shutdown may be dropped.
+- `Bind` racing `Close` no longer leaks the listener.
+- inproc: a connect racing listener close can no longer be stranded; `Dial`
+  honours ctx when the accept queue is full.
+- ipc: a stale socket file left by a crashed process no longer blocks `Bind`;
+  `Close` no longer unlinks a path another listener may have re-bound.
+- `typed.TopicMux`: a concurrent `Run` now returns `ErrTopicMuxRunning`
+  instead of running alongside the first; fixed a data race between
+  `Register`/`Unregister` and a starting `Run`.
+- STREAM sockets no longer pin a 32 KiB buffer per received chunk (small
+  segments at the HWM could hold tens of MiB per peer).
+- `RecvBytes`' multipart-message error now wraps `ErrFSMViolation`.
 
 ## [1.0.0] - 2026-08-10
 

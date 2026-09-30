@@ -15,11 +15,11 @@ absent, and where behaviour differs from libzmq even when both work.
 | Type | Supported | Notes |
 | --- | :---: | --- |
 | `REQ` / `REP` | ✅ | Strict lock-step alternation, enforced with `ErrFSMViolation`. |
-| `DEALER` / `ROUTER` | ✅ | See the handover divergence below. |
+| `DEALER` / `ROUTER` | ✅ | Synthesized identities as in libzmq; see the handover divergence below. |
 | `PUB` / `SUB` | ✅ | Refcounted subscriptions; slow subscribers dropped at HWM. |
-| `XPUB` / `XSUB` | ✅ | Subscriptions surface as messages; `WithXPubVerbose` for per-peer. |
+| `XPUB` / `XSUB` | ✅ | Subscriptions surface as messages; `WithXPubVerbose` for per-peer. Pending subscription events are queued without a bound, as in libzmq. |
 | `PUSH` / `PULL` | ✅ | Round-robin out, fair-queue in. |
-| `PAIR` | ✅ | Exclusive 1:1. |
+| `PAIR` | ✅ | Exclusive 1:1. On disconnect, waits for the next peer (libzmq semantics). |
 | `STREAM` | ✅ | Raw TCP bridge; several divergences, see below. |
 | `CLIENT` / `SERVER` | ❌ | Draft (RFC 41/42). Not implemented. |
 | `RADIO` / `DISH` | ❌ | Draft. Not implemented. |
@@ -56,9 +56,9 @@ working example.
 | --- | :---: | --- |
 | `NULL` | ✅ | Default. |
 | `PLAIN` | ✅ | RFC 24. Cleartext credentials — pair with `tls+tcp://`. |
-| `CURVE` | ✅ | RFC 25/26, mutual auth + forward secrecy. No rekey (see below). |
+| `CURVE` | ✅ | RFC 25/26, mutual auth + forward secrecy. Traffic-phase commands travel in the `MESSAGE` inner flags, as in libzmq (see below). No rekey. |
 | `GSSAPI` | ❌ | RFC 38. Not implemented. |
-| ZAP (RFC 27) | ✅ | `WithZAPHandler` + `WithZAPDomain`: PLAIN and CURVE servers (bound or connected), and accepting NULL sockets with a ZAP domain. Called in-process, not over `inproc://zeromq.zap.01`; `ZAPHandler.ServeRequest` serves that socket for libzmq peers. The user-id surfaces as the `User-Id` peer property; ZAP metadata never overrides `Identity` or `Socket-Type`. |
+| ZAP (RFC 27) | ✅ | `WithZAPHandler` + `WithZAPDomain`: PLAIN and CURVE servers (bound or connected), and accepting NULL sockets only when they set a ZAP domain (as in libzmq). Called in-process, not over `inproc://zeromq.zap.01`; `ZAPHandler.ServeRequest` serves that socket for libzmq peers. The user-id surfaces as the `User-Id` peer property; ZAP metadata never overrides `Identity` or `Socket-Type`. |
 
 Custom mechanisms are possible via `security.Mech` and `WithSecurityMech`,
 but are almost never the right answer — see the
@@ -72,8 +72,8 @@ but are almost never the right answer — see the
 
 | libzmq option | gozmq equivalent |
 | --- | --- |
-| `ZMQ_SNDHWM` | `WithSendHWM` |
-| `ZMQ_RCVHWM` | `WithRecvHWM` |
+| `ZMQ_SNDHWM` | `WithSendHWM` (0 = unbounded, as in libzmq) |
+| `ZMQ_RCVHWM` | `WithRecvHWM` (0 = unbounded, as in libzmq) |
 | `ZMQ_LINGER` | `WithLinger` (different default, see below) |
 | `ZMQ_IDENTITY` / `ZMQ_ROUTING_ID` | `WithIdentity` |
 | `ZMQ_SUBSCRIBE` | `WithSubscribe`, `Socket.Subscribe` |
@@ -84,13 +84,13 @@ but are almost never the right answer — see the
 | `ZMQ_ROUTER_MANDATORY` | `WithRouterMandatory` |
 | `ZMQ_XPUB_VERBOSE` | `WithXPubVerbose` |
 | `ZMQ_HEARTBEAT_IVL` / `ZMQ_HEARTBEAT_TIMEOUT` | `WithHeartbeat` |
-| `ZMQ_HANDSHAKE_IVL` | `WithHandshakeTimeout` |
-| `ZMQ_PLAIN_SERVER` / `ZMQ_PLAIN_USERNAME` / `ZMQ_PLAIN_PASSWORD` | `WithPlainAuth`, `WithPlainClient` |
-| `ZMQ_CURVE_SERVER` / `ZMQ_CURVE_*KEY` | `WithCurveServer`, `WithCurveClient` |
+| `ZMQ_HANDSHAKE_IVL` | `WithHandshakeTimeout` (also bounds the `tls+tcp` TLS handshake) |
+| `ZMQ_PLAIN_SERVER` / `ZMQ_PLAIN_USERNAME` / `ZMQ_PLAIN_PASSWORD` | `WithPlainAuth`, `WithPlainClient` (role independent of Bind/Connect, as in libzmq) |
+| `ZMQ_CURVE_SERVER` / `ZMQ_CURVE_*KEY` | `WithCurveServer`, `WithCurveClient` (likewise) |
 | `ZMQ_ZAP_DOMAIN` | `WithZAPDomain` |
 | `ZMQ_LAST_ENDPOINT` | `Socket.LastEndpoint` |
 | `ZMQ_TCP_KEEPALIVE` / `_IDLE` | `transport.TCPTransport.KeepAlive` / `.KeepAlivePeriod` † |
-| `ZMQ_SNDBUF` / `ZMQ_RCVBUF` | `transport.TCPTransport.WriteBufferSize` / `.ReadBufferSize` † |
+| `ZMQ_SNDBUF` / `ZMQ_RCVBUF` | `transport.TCPTransport.WriteBufferSize` / `.ReadBufferSize` † (default 0: OS autotuning, as in libzmq) |
 | `ZMQ_TCP_NODELAY` (implicit in libzmq) | `transport.TCPTransport.NoDelay` † |
 
 † These are transport-level rather than socket-level. Configure and register
@@ -105,8 +105,9 @@ ctx := gozmq.NewContext()
 ctx.RegisterTransport(tcp) // replaces the default tcp:// entry
 ```
 
-`transport.IPCTransport.FilePerm` and `transport.TLSTransport.HandshakeTimeout`
-work the same way.
+`transport.IPCTransport.FilePerm` works the same way. The TLS handshake has
+no separate timeout: it runs lazily inside the ZMTP handshake and is bounded
+by `WithHandshakeTimeout`.
 
 ### Not applicable in Go
 
@@ -133,7 +134,7 @@ internals and none is needed for the common patterns.
 | `ZMQ_REQ_RELAXED` / `ZMQ_REQ_CORRELATE` | Relaxed REQ that can re-send without a reply. | Use `DEALER`, which has no FSM to relax. |
 | `ZMQ_PROBE_ROUTER` | Auto-probe message on connect so a ROUTER learns a peer early. | Send an application-level hello. |
 | `ZMQ_IMMEDIATE` | Queueing only to completed connections. | gozmq attaches pipes only after the handshake completes, so it already behaves as `IMMEDIATE=1`. Not configurable. |
-| `ZMQ_HEARTBEAT_TTL` | Setting the TTL advertised in PING. | gozmq advertises its own `WithHeartbeat` timeout as the TTL, per the spec's SHOULD. |
+| `ZMQ_HEARTBEAT_TTL` | Setting the TTL advertised in PING; honouring the TTL a peer advertises. | gozmq advertises its own `WithHeartbeat` timeout as the TTL, per the spec's SHOULD, and ignores the peer's TTL: only the local timeout decides when a silent peer is dropped. |
 | `ZMQ_BACKLOG` | Tuning the listen backlog. | OS default. |
 | `ZMQ_TOS` | Setting IP type-of-service. | — |
 | `ZMQ_STREAM_NOTIFY` | Synthetic connect/disconnect messages on STREAM. | Use a monitor channel; see below. |
@@ -146,20 +147,38 @@ internals and none is needed for the common patterns.
 ## Behavioural divergences
 
 These apply where both libzmq and gozmq implement a feature but behave
-differently. Each is intentional.
+differently. Each is intentional. A few parity notes are included where
+gozmq's own behaviour changed to match libzmq and the change is visible.
 
 ### ROUTER identity handover
 
-gozmq always hands over: a peer claiming an identity already in use
-displaces the existing pipe. libzmq's **default** (`ZMQ_ROUTER_HANDOVER=0`)
-is the opposite — it rejects the new peer and keeps the stale pipe bound.
+gozmq always hands over: when a peer attaches claiming an identity already
+in use, the new peer takes over outbound routing for it. libzmq's
+**default** (`ZMQ_ROUTER_HANDOVER=0`) is the opposite — it rejects the new
+peer and keeps the stale pipe bound.
+
+This is also not quite libzmq's `ZMQ_ROUTER_HANDOVER=1`, which terminates the
+old pipe. gozmq leaves the old connection attached until it disconnects on
+its own; messages it still sends arrive under the same identity, and replies
+go to the new peer.
 
 Handover is the better default in practice: a client that reconnects before
 the server's TCP stack has noticed the old connection died is otherwise
 stranded until the stale pipe times out, which is the common case behind a
 NAT or load balancer. The cost is that two clients sharing a `WithIdentity`
-value silently evict each other instead of one failing loudly. **Identities
-must be unique.**
+value silently take each other's replies instead of one failing loudly.
+**Identities must be unique.**
+
+Peers that advertise no identity get one synthesized as libzmq does: five
+bytes, a leading `0` then a per-socket 32-bit counter that starts at a random
+value and skips identities in use. (Earlier gozmq versions used four random
+bytes, which could collide and misroute replies.)
+
+### `HWM 0` means unbounded
+
+As in libzmq, `WithSendHWM(0)` / `WithRecvHWM(0)` remove the limit for that
+pipe direction: messages queue in memory without bound and senders never
+block. Do not use it with untrusted peers.
 
 ### `LINGER` defaults to 1s, not infinite
 
@@ -190,9 +209,9 @@ context deadline.
   returned synchronously and a later disconnect is final. Reconnect
   supervision is the application's job.
 - ZMTP-layer options (security, heartbeat, identity, handshake timeout, ZAP
-  domain) are **rejected** by `NewSocket` rather than silently ignored —
-  accepting `WithPlainAuth` on a raw-TCP listener that authenticates nobody
-  would be a security hazard.
+  domain) and `WithRecvBufferPool` are **rejected** by `NewSocket` rather
+  than silently ignored — accepting `WithPlainAuth` on a raw-TCP listener
+  that authenticates nobody would be a security hazard.
 
 ### inproc bypasses ZAP
 
@@ -203,6 +222,20 @@ does mean a Context-level ZAP handler never sees inproc peers.
 
 Sockets with PLAIN, CURVE, or a `WithSecurityMech` mechanism never take the
 direct pipe: every inproc connection runs the full handshake.
+
+### CURVE commands in the `MESSAGE` flags
+
+This matches libzmq and is noted because earlier gozmq releases did not. Once
+the CURVE handshake is done, libzmq boxes every frame, commands included, in a
+`MESSAGE` sent with outer flags `0x00`; `MORE` (`0x01`) and `COMMAND` (`0x02`)
+travel only in the encrypted inner flags byte. gozmq now does the same, which
+is what makes heartbeats (on by default) work over CURVE against libzmq.
+
+gozmq still accepts commands sent the old way (outer `COMMAND` flag), so a
+new gozmq understands an old one, but **an older gozmq rejects the new
+encoding** and tears the session down at the first PING. Upgrade both ends of
+a gozmq↔gozmq CURVE link together, or disable heartbeats
+(`WithHeartbeat(0, 0)`) on both until you can.
 
 ### CURVE nonce exhaustion
 
@@ -232,11 +265,13 @@ gozmq itself always emits well-formed ERROR commands.
 
 ### Message ownership
 
-By default `RecvMsg` returns frames in ordinary Go memory; nothing needs
-releasing. With the opt-in `WithRecvBufferPool(true)`, frames over 4 KiB are
-backed by pooled buffers and must be given back with `Release` (frames valid
-until then). This has no libzmq analogue (`zmq_msg_close` is closest) and is
-a performance concession; `RecvBytes` avoids the bookkeeping entirely for
+By default `RecvMsg` returns frames in ordinary Go memory owned by the caller;
+nothing needs releasing, so there is no counterpart to `zmq_msg_close`. With
+the opt-in `WithRecvBufferPool(true)`, frames over 4 KiB on NULL/PLAIN
+sessions are received into pooled buffers and the message is lent: the
+receiver calls `Release` when done, and the frames are valid until the last
+reference is released. `SendMsg` holds its own reference, so forwarding and
+then releasing is safe. `RecvBytes` avoids the bookkeeping entirely for
 single-frame payloads.
 
 ---
