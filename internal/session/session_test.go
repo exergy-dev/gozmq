@@ -471,9 +471,10 @@ func TestSession_FramePathsIgnoreMechName(t *testing.T) {
 			connA, connB := newFakeConnPair()
 			sA, sB := startPair(t,
 				Config{Conn: connA, Mech: xorMech{newFakeMech(name, false, nil)}, SendHWM: 4, RecvHWM: 4},
-				// B decodes with the identity transform, so it sees the
-				// raw wire bytes A produced.
-				Config{Conn: connB, Mech: newFakeMech("NULL", true, nil), SendHWM: 4, RecvHWM: 4},
+				// B advertises the same name (the greeting rejects a
+				// mismatch) but its fake mech frames as the identity
+				// transform, so it sees the raw wire bytes A produced.
+				Config{Conn: connB, Mech: newFakeMech(name, true, nil), SendHWM: 4, RecvHWM: 4},
 			)
 			require.False(t, sA.(*sessionImpl).identityMech, "name alone must not select identity framing")
 			ctx := testCtx(t, 2*time.Second)
