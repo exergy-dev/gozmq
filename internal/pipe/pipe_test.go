@@ -3,7 +3,9 @@ package pipe
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -333,60 +335,156 @@ func TestHWMZero_CloseDrainsThenEOF(t *testing.T) {
 	require.ErrorIs(t, err, io.EOF, "expected io.EOF after the queue drained")
 }
 
-// TestSetRecvReady_ArmsOnSendAndClose verifies the recv-ready gate is
-// armed from the data path (every enqueue) and on close, including for
-// HWM-0 directions — the level-trigger contract the Poller
-// readiness fix relies on.
-func TestSetRecvReady_ArmsOnSendAndClose(t *testing.T) {
+// notifyGate registers a notification on e that arms the returned cap-1
+// gate, as the socket engines do.
+func notifyGate(e *End) chan struct{} {
+	gate := make(chan struct{}, 1)
+	e.SetNotify(func() {
+		select {
+		case gate <- struct{}{}:
+		default:
+		}
+	})
+	return gate
+}
+
+func requireArmed(t *testing.T, gate chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-gate:
+	case <-time.After(time.Second):
+		require.Fail(t, "notification did not run", what)
+	}
+}
+
+func requireNotArmed(t *testing.T, gate chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-gate:
+		require.Fail(t, "unexpected notification", what)
+	default:
+	}
+}
+
+// TestNotify_OnlyWhenIdle pins the idle protocol: a send notifies only
+// after the receiver went idle, and only once; a queued message keeps
+// MarkIdle from idling; a close notifies an idle receiver. HWM 0 included.
+func TestNotify_OnlyWhenIdle(t *testing.T) {
 	for _, hwm := range []int{4, 0} {
 		t.Run(map[int]string{4: "hwm4", 0: "hwm0"}[hwm], func(t *testing.T) {
 			a, b := NewPair(hwm, hwm, PeerInfo{}, PeerInfo{})
 			defer a.Close()
 			defer b.Close()
+			ctx := context.Background()
+			gate := notifyGate(b)
 
-			gate := make(chan struct{}, 1)
-			b.SetRecvReady(gate)
-			select {
-			case <-gate:
-				require.Fail(t, "gate armed with no data")
-			case <-time.After(20 * time.Millisecond):
+			require.NoError(t, a.Send(ctx, msg.FromBytes([]byte("1"))))
+			requireNotArmed(t, gate, "send to a receiver that is not idle")
+			require.True(t, b.MarkIdle(), "queued message")
+			require.NoError(t, a.Send(ctx, msg.FromBytes([]byte("2"))))
+			requireNotArmed(t, gate, "MarkIdle with a message queued")
+			require.Equal(t, 2, b.Len())
+
+			for _, want := range []string{"1", "2"} {
+				m, ok := b.RecvOrIdle()
+				require.True(t, ok)
+				require.Equal(t, want, string(m.Bytes()))
 			}
+			_, ok := b.RecvOrIdle()
+			require.False(t, ok, "empty")
+			require.NoError(t, a.Send(ctx, msg.FromBytes([]byte("3"))))
+			requireArmed(t, gate, "send to an idle receiver")
+			require.True(t, a.TrySend(msg.FromBytes([]byte("4"))))
+			requireNotArmed(t, gate, "second send before the receiver looked again")
 
-			require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("x"))))
-			select {
-			case <-gate:
-			case <-time.After(time.Second):
-				require.Fail(t, "gate not armed by enqueue")
+			for range 2 {
+				_, err := b.Recv(ctx)
+				require.NoError(t, err)
 			}
-
-			// Drain the message, then close: the gate must arm again so a
-			// parked poller wakes and observes the close.
-			_, err := b.Recv(context.Background())
-			require.NoError(t, err)
+			require.False(t, b.MarkIdle(), "empty")
 			require.NoError(t, a.Close())
-			select {
-			case <-gate:
-			case <-time.After(time.Second):
-				require.Fail(t, "gate not armed by close")
-			}
+			requireArmed(t, gate, "close of an idle receiver")
+			require.True(t, b.IsClosed())
 		})
 	}
 }
 
-// TestSetRecvReady_LateRegistrationArmsIfPending verifies a gate registered
-// after data already arrived is armed immediately (level trigger).
-func TestSetRecvReady_LateRegistrationArmsIfPending(t *testing.T) {
-	a, b := NewPair(4, 4, PeerInfo{}, PeerInfo{})
-	defer a.Close()
-	defer b.Close()
+// TestIdleNotify_NoLostWakeup races senders against a receiver that goes
+// idle whenever it finds the pipe empty and then waits for the
+// notification alone. A lost wakeup shows up as a timeout. It covers a
+// single message (and a close) per fresh pipe, the tightest race, and a
+// stream through blocking sends at HWM and the HWM-0 overflow.
+func TestIdleNotify_NoLostWakeup(t *testing.T) {
+	const iters = 10000
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
 
-	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("x"))))
-	gate := make(chan struct{}, 1)
-	b.SetRecvReady(gate)
-	select {
-	case <-gate:
-	case <-time.After(time.Second):
-		require.Fail(t, "late-registered gate not armed despite buffered data")
+	// drain receives n messages (and, with closed, waits for the close),
+	// sleeping only on the notification.
+	drain := func(b *End, gate chan struct{}, n int, closed bool) error {
+		for got := 0; ; {
+			if _, ok := b.RecvOrIdle(); ok {
+				got++
+				continue
+			}
+			if got == n && (!closed || b.IsClosed()) {
+				return nil
+			}
+			select {
+			case <-gate:
+			case <-time.After(5 * time.Second):
+				return fmt.Errorf("lost wakeup after %d of %d messages", got, n)
+			}
+		}
+	}
+
+	for _, hwm := range []int{1, 0} {
+		t.Run(fmt.Sprintf("single/hwm%d", hwm), func(t *testing.T) {
+			for i := range iters {
+				a, b := NewPair(hwm, hwm, PeerInfo{}, PeerInfo{})
+				gate := notifyGate(b)
+				closeToo := i%2 == 1
+				// Both sides spin on go so they collide within nanoseconds.
+				var ready, start atomic.Bool
+				go func() {
+					ready.Store(true)
+					for !start.Load() {
+					}
+					_ = a.Send(ctx, msg.FromBytes([]byte("x")))
+					if closeToo {
+						_ = a.Close()
+					}
+				}()
+				for !ready.Load() {
+					runtime.Gosched()
+				}
+				start.Store(true)
+				require.NoError(t, drain(b, gate, 1, closeToo), "iteration %d", i)
+				_ = a.Close()
+			}
+		})
+	}
+
+	for _, hwm := range []int{4, 0} {
+		t.Run(fmt.Sprintf("stream/hwm%d", hwm), func(t *testing.T) {
+			a, b := NewPair(hwm, hwm, PeerInfo{}, PeerInfo{})
+			defer a.Close()
+			gate := notifyGate(b)
+			go func() {
+				// Bursts of varying size push HWM 0 in and out of overflow.
+				for sent := 0; sent < iters; {
+					burst := min(1+sent%(3*unboundedChanCap), iters-sent)
+					for range burst {
+						if a.Send(ctx, msg.FromBytes([]byte("x"))) != nil {
+							return
+						}
+					}
+					sent += burst
+					runtime.Gosched()
+				}
+			}()
+			require.NoError(t, drain(b, gate, iters, false))
+		})
 	}
 }
 

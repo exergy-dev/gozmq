@@ -14,8 +14,8 @@ import (
 // socket including its session on both ends. Tighten these as engine and
 // session goroutines are removed; never raise them.
 const (
-	maxGoroutinesPerTCPConn    = 11
-	maxGoroutinesPerInprocLink = 3
+	maxGoroutinesPerTCPConn    = 10
+	maxGoroutinesPerInprocLink = 2
 )
 
 const goroutineTestLinks = 16

@@ -2,11 +2,9 @@ package socket_test
 
 import (
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -65,82 +63,27 @@ func TestFairQueue_RecvCounter(t *testing.T) {
 	require.Equal(t, uint64(n), fq.Recvd(), "Recvd")
 }
 
-// TestFairQueue_QueueDepthGauge verifies that QueueDepth reflects the
-// transient inbound channel occupancy. With one pending message in the
-// channel-1 inbound buffer and no consumer, depth should be 1.
-// Two pipes are attached so the FairQueue uses forwarder-backed mode
-// (the single-pipe direct path bypasses the inbound channel entirely).
+// TestFairQueue_QueueDepthGauge verifies that QueueDepth counts the
+// messages queued in the attached pipes, on the single-pipe fast path and
+// with several pipes, including HWM-0 overflow.
 func TestFairQueue_QueueDepthGauge(t *testing.T) {
 	t.Parallel()
-	fq := socket.NewFairQueue()
-	defer fq.Close()
-
-	// Attach two pipes to force forwarder-backed mode.
-	engineEnd, peerEnd := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
-	defer closePipes(engineEnd, peerEnd)
-	engineEnd2, peerEnd2 := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
-	defer closePipes(engineEnd2, peerEnd2)
-	require.NoError(t, fq.Attach(engineEnd), "attach")
-	require.NoError(t, fq.Attach(engineEnd2), "attach2")
-
-	ctx := testCtx(t)
-	// Send only on the first peer.
-	require.NoError(t, peerEnd.Send(ctx, msg.FromBytes([]byte("hi"))), "peer send")
-	_ = peerEnd2 // second peer is idle; forces forwarder mode
-
-	// Wait for the forwarder to hand the message into the inbound
-	// channel — that's when QueueDepth flips to 1.
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if fq.QueueDepth() == 1 {
-			break
+	for _, n := range []int{1, 2} {
+		fq := socket.NewFairQueue()
+		engineEnds, peerEnds := makePairs(n, 0, 0)
+		for _, p := range engineEnds {
+			require.NoError(t, fq.Attach(p), "attach")
 		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	require.Equal(t, uint64(1), fq.QueueDepth(), "QueueDepth before drain")
-
-	_, err := fq.Recv(ctx)
-	require.NoError(t, err, "recv")
-	require.Equal(t, uint64(0), fq.QueueDepth(), "QueueDepth after drain")
-}
-
-// TestFairQueue_DroppedOnDetach verifies that messages pulled by a
-// forwarder but stuck mid-handoff when Detach cancels the forwarder are
-// accounted as drops, not as recvs.
-func TestFairQueue_DroppedOnDetach(t *testing.T) {
-	t.Parallel()
-	fq := socket.NewFairQueue()
-	defer fq.Close()
-
-	// HWM 2 so the peer can push two messages without blocking; the
-	// forwarder will eat one into the inbound channel (capacity 1) and
-	// then block trying to hand off the second. Detach then cancels.
-	engineEnd, peerEnd := pipe.NewPair(2, 2, pipe.PeerInfo{}, pipe.PeerInfo{})
-	defer closePipes(engineEnd, peerEnd)
-	require.NoError(t, fq.Attach(engineEnd), "attach")
-
-	ctx := testCtx(t)
-	for i := 0; i < 2; i++ {
-		require.NoError(t, peerEnd.Send(ctx, msg.FromBytes([]byte{byte(i)})), "peer send %d", i)
-	}
-
-	// Give the forwarder time to pull the second message and park on
-	// the inbound handoff.
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if fq.QueueDepth() == 1 {
-			break
+		ctx := testCtx(t)
+		const depth = 1500 // past the HWM-0 channel, into overflow
+		for i := 0; i < depth; i++ {
+			require.NoError(t, peerEnds[i%n].Send(ctx, msg.FromBytes([]byte("hi"))), "peer send")
 		}
-		time.Sleep(2 * time.Millisecond)
+		require.Equal(t, uint64(depth), fq.QueueDepth(), "pipes=%d: before drain", n)
+		_, err := fq.Recv(ctx)
+		require.NoError(t, err, "recv")
+		require.Equal(t, uint64(depth-1), fq.QueueDepth(), "pipes=%d: after one Recv", n)
+		require.NoError(t, fq.Close())
+		closePipes(append(engineEnds, peerEnds...)...)
 	}
-
-	// Detach mid-handoff. The forwarder's ctx cancels; the message it
-	// was about to hand off is dropped.
-	require.NoError(t, fq.Detach(engineEnd), "detach")
-
-	// Wait for the forwarder to actually observe the cancel. (Forwarder
-	// might also have managed to enqueue before cancel won the race —
-	// in that case nothing drops. So we tolerate either 0 or 1.)
-	time.Sleep(50 * time.Millisecond)
-	require.LessOrEqual(t, fq.Dropped(), uint64(1), "Dropped")
 }

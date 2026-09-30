@@ -105,11 +105,9 @@ func (e *reqEngine) AttachPipe(p *pipe.End) error {
 	if !e.ring.add(p) {
 		return nil
 	}
-	// Arm the Poller's recv gate straight from the pipe's data path so a
-	// blocking Poll wakes when the reply lands on the sticky pipe (REQ
-	// has no forwarder goroutine to do it). Arming for non-sticky pipes
-	// is a harmless spurious level-trigger wake.
-	p.SetRecvReady(e.recvGate.ch)
+	// The pipe arms the Poller's recv gate itself once marked idle (see
+	// send and CanRecvNow), so a blocking Poll wakes when the reply lands.
+	p.SetNotify(e.recvGate.arm)
 	// Wake any Send parked waiting for a peer.
 	close(e.notifyCh)
 	e.notifyCh = make(chan struct{})
@@ -250,9 +248,14 @@ func (e *reqEngine) send(ctx context.Context, m *msg.Msg) error {
 		// Advance cursor past p if it's still at idx.
 		e.ring.advancePast(idx, p)
 		// Transition to canRecv with p as the sticky pipe. Recv reads
-		// p's reply directly — no forwarder goroutine.
+		// p's reply directly.
 		e.sticky = p
 		e.state = reqStateCanRecv
+		// A Poller may have parked before this request, when REQ could
+		// not receive: mark the sticky pipe idle so the reply wakes it.
+		if p.MarkIdle() {
+			e.recvGate.arm()
+		}
 		e.mu.Unlock()
 		m.Release()
 		e.sent.Add(1)
@@ -363,8 +366,8 @@ func (e *reqEngine) CanRecvNow() bool {
 		return false
 	}
 	// A Recv is non-blocking-ready iff a reply is already buffered on the
-	// sticky pipe's receive channel.
-	return e.sticky.Pending()
+	// sticky pipe; if not, MarkIdle has the reply arm the gate.
+	return e.sticky.MarkIdle()
 }
 
 func (e *reqEngine) CanSendNow() bool {
@@ -385,11 +388,16 @@ func stripReqDelimiter(m *msg.Msg) (*msg.Msg, error) {
 	return m.Derive(frames[1:]...), nil
 }
 
-// Metrics reports the REQ engine's counters. REQ has no fair-queue;
-// inbound replies are read directly off the sticky pipe, so QueueDepth is
-// always zero.
+// Metrics reports the REQ engine's counters; QueueDepth counts the
+// messages queued in the attached pipes.
 func (e *reqEngine) Metrics() Metrics {
-	return e.snapshot(0, 0)
+	e.mu.Lock()
+	var depth int
+	for _, p := range e.ring.pipes {
+		depth += p.Len()
+	}
+	e.mu.Unlock()
+	return e.snapshot(0, uint64(depth))
 }
 
 func (e *reqEngine) Close() error {

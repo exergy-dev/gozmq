@@ -60,9 +60,9 @@ type SubEngine struct {
 	subs    map[string]int
 	subList [][]byte
 
-	// fq fans Recv across all attached pipes. Matching is done AFTER
-	// FairQueue returns — messages whose topic frame doesn't match are
-	// dropped by Recv and we go around again.
+	// fq fair-queues Recv across all attached pipes. Matching is done
+	// AFTER FairQueue returns — messages whose topic frame doesn't match
+	// are dropped by Recv and we go around again.
 	fq      *FairQueue
 	surface bool // XSUB surfaces subscription commands sent by the app; SUB does not
 	// sendGate is XSUB's write-ready gate; XSUB can always take a
@@ -101,7 +101,7 @@ func newSubEngineBase(surface bool) *SubEngine {
 // rare).
 func (e *SubEngine) ReadyRecv() <-chan struct{} { return e.fq.ReadyRecv() }
 
-func (e *SubEngine) CanRecvNow() bool { return e.fq.HasPending() }
+func (e *SubEngine) CanRecvNow() bool { return e.fq.CanRecv() }
 
 // ReadyWrite is nil for SUB, which cannot send.
 func (e *SubEngine) ReadyWrite() <-chan struct{} {
@@ -343,11 +343,10 @@ func (e *SubEngine) matches(topic []byte) bool {
 }
 
 // Metrics reports the SUB/XSUB engine's counters. recv counts user-
-// visible Recv returns (filter-matched messages); dropped piggybacks on
-// the FairQueue's drop counter so ctx-cancel/close drops during fanout
-// are observable. QueueDepth samples the FairQueue's inbound channel.
+// visible Recv returns (filter-matched messages). QueueDepth samples the
+// FairQueue.
 func (e *SubEngine) Metrics() Metrics {
-	return e.snapshot(e.fq.Dropped(), e.fq.QueueDepth())
+	return e.snapshot(0, e.fq.QueueDepth())
 }
 
 func (e *SubEngine) Close() error {

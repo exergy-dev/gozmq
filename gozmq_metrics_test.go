@@ -80,15 +80,12 @@ func TestSocketMetrics_PubDropsOnSlowSubscriber(t *testing.T) {
 }
 
 // TestSocketMetrics_QueueDepthGauge confirms that QueueDepth flips to 1
-// once a message is sitting in the puller's FairQueue inbound channel
-// (capacity 1) and returns to 0 once Recv drains it.
-// Two PUSH peers are connected so the puller's FairQueue uses
-// forwarder-backed mode (the single-pipe direct path bypasses the
-// inbound channel entirely, making QueueDepth always 0).
+// once a message is queued in one of the puller's inbound pipes and
+// returns to 0 once Recv drains it, with two PUSH peers connected.
 func TestSocketMetrics_QueueDepthGauge(t *testing.T) {
 	ctxZmq, puller, pusher := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "inproc://metrics-depth", nil, nil)
 
-	// Attach a second pusher to force forwarder-backed mode.
+	// Attach a second pusher: the FairQueue walks several pipes.
 	pusher2, err := ctxZmq.NewSocket(gozmq.Push)
 	if err != nil {
 		t.Fatalf("new push2: %v", err)
@@ -103,8 +100,7 @@ func TestSocketMetrics_QueueDepthGauge(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 
-	// Wait for the forwarder to land the message into the
-	// inbound channel.
+	// Wait for the message to reach the puller's pipe.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if puller.Metrics().QueueDepth == 1 {

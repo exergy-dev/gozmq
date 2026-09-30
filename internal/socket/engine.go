@@ -27,9 +27,9 @@
 //     peer is full. Used by PUSH and DEALER. (REQ does its own
 //     round-robin with sticky-peer semantics via the shared pipeRing
 //     helper, not LoadBalancer.)
-//   - FairQueue — fair-queued inbound multiplexer that pumps every
-//     attached pipe into a single shared channel. Used by PULL, DEALER,
-//     REP, ROUTER, SUB, and XSUB.
+//   - FairQueue — fair-queued inbound multiplexer that receivers read
+//     round-robin across the attached pipes, with no goroutines. Used by
+//     PULL, DEALER, REP, ROUTER, STREAM, SUB, and XSUB.
 //
 // Both depend only on *pipe.End so engine-specific logic (identity
 // prefixing, subscription filtering, FSM state, sticky peer selection)
@@ -48,7 +48,7 @@
 // AttachPipe/DetachPipe from its own goroutines. Every engine therefore
 // guards its own state — with its mutex, atomics, or by delegating to
 // the goroutine-safe primitives — including against the internal
-// goroutines it spawns (FairQueue forwarders, pub/xpub per-peer readers).
+// goroutines it spawns (pub/xpub per-peer readers).
 //
 // LoadBalancer, FairQueue, and SubTree are themselves goroutine-safe so
 // tests and future patterns can use them directly.
@@ -218,13 +218,12 @@ type Engine interface {
 // Metrics is a point-in-time snapshot of per-engine counters and gauges;
 // the root package copies it into the public SocketMetrics. Counters
 // (Sent, Recv, Dropped) are monotonically increasing; QueueDepth is the
-// number of messages buffered in the engine's inbound handoff when
-// sampled (zero for send-only patterns).
+// number of messages queued in the engine's inbound pipes when sampled
+// (zero for send-only patterns).
 //
 // Dropped covers messages the engine refuses to deliver after the
-// caller's Send returned successfully (PUB fanout at HWM, a FairQueue
-// forwarder cancelled by Detach or Close mid-handoff); send-side errors
-// returned to the caller are not counted.
+// caller's Send returned successfully (PUB fanout at HWM, a ROUTER route
+// miss); send-side errors returned to the caller are not counted.
 type Metrics struct {
 	Sent       uint64
 	Recv       uint64

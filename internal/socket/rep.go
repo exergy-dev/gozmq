@@ -95,7 +95,7 @@ func (e *repEngine) CanRecvNow() bool {
 	e.mu.Lock()
 	ok := !e.closed && e.state == repStateCanRecv
 	e.mu.Unlock()
-	return ok && e.fq.HasPending()
+	return ok && e.fq.CanRecv()
 }
 
 // CanSendNow reports whether a reply is owed. A reply to a peer that has
@@ -261,10 +261,10 @@ func splitRepEnvelope(m *msg.Msg) (envelope [][]byte, body *msg.Msg, ok bool) {
 }
 
 // Metrics reports the REP engine's counters. recv is incremented on
-// each user-visible Recv (after envelope split); dropped delegates to
-// the underlying FairQueue. QueueDepth samples the FairQueue.
+// each user-visible Recv (after envelope split). QueueDepth samples the
+// FairQueue.
 func (e *repEngine) Metrics() Metrics {
-	return e.snapshot(e.fq.Dropped(), e.fq.QueueDepth())
+	return e.snapshot(0, e.fq.QueueDepth())
 }
 
 func (e *repEngine) Close() error {

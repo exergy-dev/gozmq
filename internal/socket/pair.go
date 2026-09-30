@@ -71,10 +71,13 @@ func (e *pairEngine) AttachPipe(p *pipe.End) error {
 		}
 	}
 	e.pipe = p
-	// Arm the Poller's recv gate straight from the pipe's data path so a
-	// blocking Poll wakes when a message arrives (no forwarder goroutine
-	// exists to do it).
-	e.pipe.SetRecvReady(e.recvGate.ch)
+	// The pipe arms the Poller's recv gate itself: CanRecvNow marks it
+	// idle when it finds nothing, and the next message runs this. Start
+	// idle, so a Poller that parked while no peer was attached wakes too.
+	p.SetNotify(e.recvGate.arm)
+	if p.MarkIdle() {
+		e.recvGate.arm()
+	}
 	// Wake any Send/Recv goroutines parked waiting for a peer. Swap the
 	// notify channel for a fresh one so a future detach/reattach cycle
 	// can wake new waiters.
@@ -221,11 +224,19 @@ func (e *pairEngine) retire(p *pipe.End) {
 	e.mu.Unlock()
 }
 
-// Metrics reports the PAIR engine's counters. PAIR has no internal
-// inbound queue (it reads directly from the attached pipe), so
-// QueueDepth is always zero.
+// Metrics reports the PAIR engine's counters; QueueDepth counts the
+// messages queued in the attached and retired pipes.
 func (e *pairEngine) Metrics() Metrics {
-	return e.snapshot(0, 0)
+	e.mu.Lock()
+	var depth int
+	if e.pipe != nil {
+		depth = e.pipe.Len()
+	}
+	for _, r := range e.retired {
+		depth += r.Len()
+	}
+	e.mu.Unlock()
+	return e.snapshot(0, uint64(depth))
 }
 
 func (e *pairEngine) Close() error {
@@ -260,7 +271,8 @@ func (e *pairEngine) CanRecvNow() bool {
 			return true
 		}
 	}
-	return e.pipe != nil && e.pipe.Pending()
+	// MarkIdle registers the wake-up a Poller needs when this is false.
+	return e.pipe != nil && e.pipe.MarkIdle()
 }
 
 func (e *pairEngine) CanSendNow() bool {

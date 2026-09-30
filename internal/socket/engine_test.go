@@ -256,7 +256,8 @@ func TestFairQueue_RecvWakesOnAttach(t *testing.T) {
 	}
 }
 
-func TestFairQueue_DetachCancelsBlockedForwarder(t *testing.T) {
+// TestFairQueue_DetachThenClose: Close returns promptly after a Detach.
+func TestFairQueue_DetachThenClose(t *testing.T) {
 	t.Parallel()
 	fq := socket.NewFairQueue()
 
@@ -273,7 +274,7 @@ func TestFairQueue_DetachCancelsBlockedForwarder(t *testing.T) {
 	case err := <-done:
 		require.NoError(t, err, "close")
 	case <-time.After(time.Second):
-		require.Fail(t, "Close did not return after Detach canceled forwarder")
+		require.Fail(t, "Close did not return after Detach")
 	}
 }
 
@@ -297,7 +298,9 @@ func TestFairQueue_CloseUnblocksRecv(t *testing.T) {
 	}
 }
 
-func TestFairQueue_CloseStopsForwarders(t *testing.T) {
+// TestFairQueue_CloseWithAttachedPipes: Close with pipes still attached
+// leaves nothing running (goleak) and the pipes usable by their owners.
+func TestFairQueue_CloseWithAttachedPipes(t *testing.T) {
 	t.Parallel()
 	fq := socket.NewFairQueue()
 
@@ -310,24 +313,33 @@ func TestFairQueue_CloseStopsForwarders(t *testing.T) {
 	}
 
 	require.NoError(t, fq.Close(), "close")
-	// Now close the engine ends explicitly (no-op cleanup; forwarders
-	// already exited in fq.Close).
+	// A send after Close must not reach back into the closed queue.
+	require.NoError(t, peerEnds[0].Send(testCtx(t), msg.FromBytes([]byte("x"))))
 	closePipes(engineEnds...)
 }
 
-func TestFairQueue_DetachStopsForwarderOnPipeClose(t *testing.T) {
+// TestFairQueue_DetachedPipeNoLongerNotifies: a pipe detached while idle
+// no longer reaches the queue: its traffic neither wakes a parked Recv nor
+// is received.
+func TestFairQueue_DetachedPipeNoLongerNotifies(t *testing.T) {
 	t.Parallel()
 	fq := socket.NewFairQueue()
 	defer fq.Close()
 
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
-	require.NoError(t, fq.Attach(a), "attach")
-	require.NoError(t, fq.Detach(a), "detach")
-	// Close the pipe so the forwarder (which may still be in Pipe.Recv)
-	// exits via EOF on the next iteration. fq.Close in the deferred call
-	// also drives this, but doing it here exercises the "pipe close
-	// frees a parked forwarder" path.
-	closePipes(a, b)
+	engineEnds, peerEnds := makePairs(2, 4, 4)
+	defer closePipes(append(engineEnds, peerEnds...)...)
+	for _, p := range engineEnds {
+		require.NoError(t, fq.Attach(p), "attach")
+	}
+	require.False(t, fq.CanRecv(), "both pipes idle")
+	require.NoError(t, fq.Detach(engineEnds[0]), "detach")
+	require.NoError(t, peerEnds[0].Send(testCtx(t), msg.FromBytes([]byte("gone"))))
+	require.False(t, fq.Pending(), "a detached pipe must not activate")
+
+	require.NoError(t, peerEnds[1].Send(testCtx(t), msg.FromBytes([]byte("kept"))))
+	m, err := fq.Recv(testCtx(t))
+	require.NoError(t, err)
+	require.Equal(t, "kept", string(m.Bytes()))
 }
 
 // TestFairQueue_DetachClosedDirectPipeDrains: detaching the sole (direct
@@ -371,11 +383,10 @@ func TestFairQueue_DetachClosedDirectPipeDrains(t *testing.T) {
 	require.Equal(t, []byte{0, 1, 2, 3, 4}, fromA, "drained messages in order")
 }
 
-// TestFairQueue_DirectRecvWaitsOutClosedPipe: a direct-mode receiver that
-// drains the sole pipe after its peer closed stays parked (no error, no
-// spurious message) until the owner detaches the pipe, then receives from
-// the replacement.
-func TestFairQueue_DirectRecvWaitsOutClosedPipe(t *testing.T) {
+// TestFairQueue_SingleRecvWaitsOutClosedPipe: a receiver that drains the
+// sole pipe after its peer closed stays parked (no error, no spurious
+// message) until a replacement attaches, then receives from it.
+func TestFairQueue_SingleRecvWaitsOutClosedPipe(t *testing.T) {
 	t.Parallel()
 	fq := socket.NewFairQueue()
 	defer fq.Close()
@@ -440,7 +451,7 @@ func TestLoadBalancer_DetachAdvancesCursor(t *testing.T) {
 	// Detach peer 0 (cursor should now point at what was index 1).
 	_ = lb.Detach(engineEnds[0])
 
-	// Drain the message peer 0 already received so its forwarder doesn't leak it.
+	// Drain the message peer 0 already received.
 	_, err := peerEnds[0].Recv(ctx)
 	require.NoError(t, err, "drain peer 0")
 
@@ -529,10 +540,10 @@ func TestLoadBalancer_RotatesPastFullPeer(t *testing.T) {
 	require.Equal(t, "x", string(got.Bytes()), "message must have rotated to the free peer")
 }
 
-// TestFairQueue_PromotionPreservesPerPeerFIFO stresses the 1→2 promotion
-// window: messages from the original (direct-mode) pipe must stay in
-// order even while a second pipe attaches mid-stream and the first is
-// handed from the direct path to a forwarder.
+// TestFairQueue_PromotionPreservesPerPeerFIFO stresses the 1→2 transition:
+// messages from the original pipe must stay in order even while a second
+// pipe attaches mid-stream and receivers move from the single-pipe fast
+// path to the multi-pipe walk.
 func TestFairQueue_PromotionPreservesPerPeerFIFO(t *testing.T) {
 	t.Parallel()
 	fq := socket.NewFairQueue()
@@ -541,7 +552,7 @@ func TestFairQueue_PromotionPreservesPerPeerFIFO(t *testing.T) {
 	a, aPeer := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
 	c, cPeer := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, aPeer, c, cPeer)
-	require.NoError(t, fq.Attach(a), "attach a (direct)")
+	require.NoError(t, fq.Attach(a), "attach a (single)")
 
 	ctx := testCtx(t)
 	const n = 500
@@ -554,7 +565,7 @@ func TestFairQueue_PromotionPreservesPerPeerFIFO(t *testing.T) {
 	}()
 	go func() {
 		time.Sleep(time.Millisecond) // land mid-stream
-		_ = fq.Attach(c)             // 1→2 promotion while recvs are in flight
+		_ = fq.Attach(c)             // 1→2 while recvs are in flight
 	}()
 
 	next := 0

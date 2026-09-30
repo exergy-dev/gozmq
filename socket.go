@@ -643,17 +643,14 @@ func (s *Socket) RecvBytes(ctx context.Context) ([]byte, error) {
 //
 // Sent, Recv, and Dropped are monotonic uint64 counters read atomically.
 // QueueDepth is a gauge sampled at the moment Metrics is called and
-// reflects the number of messages buffered in the engine's inbound
-// handoff at that instant (zero for send-only patterns and for engines
-// that read directly from a single pipe).
+// reflects the number of messages queued in the socket's inbound pipes at
+// that instant (zero for send-only patterns).
 //
 // Drop semantics:
 //   - PUB increments Dropped once per (message, peer) pair when the
 //     peer's pipe is at HWM during fan-out (slow-subscriber drop).
 //   - ROUTER (non-mandatory) increments Dropped on a Send whose leading
 //     identity matches no attached peer.
-//   - Every pattern that uses the shared FairQueue inbound multiplexer
-//     also surfaces FairQueue ctx-cancel/close drops here.
 //
 // Send-side errors returned to the caller do NOT count as drops — the
 // caller already observed the failure and can decide what to do.
@@ -666,8 +663,8 @@ type SocketMetrics struct {
 	// caller's Send already returned successfully (see the drop
 	// semantics above).
 	Dropped uint64
-	// QueueDepth gauges the messages buffered in the engine's inbound
-	// handoff at the instant Metrics was called.
+	// QueueDepth gauges the messages queued in the socket's inbound
+	// pipes at the instant Metrics was called.
 	QueueDepth uint64
 }
 

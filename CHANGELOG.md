@@ -155,6 +155,23 @@ Behaviour:
 - PUSH/DEALER send: removed the lock-free single-peer fast path (measured at
   under 9% on inproc PUSH/PULL, nothing elsewhere). FairQueue's single-peer
   receive path is kept (1.3×–12× on the perf suite).
+- **XSUB no longer surfaces upstream SUBSCRIBE/CANCEL commands** (libzmq
+  never does; conforming peers never send them to a subscriber). The
+  session now turns ZMTP SUBSCRIBE/CANCEL commands into 0x01/0x00-prefixed
+  messages only for PUB/XPUB and drops them for every other socket type.
+  SUB/XSUB treat inbound data beginning with 0x00/0x01 as ordinary data.
+- **Inbound fair-queueing runs no goroutines.** PULL, DEALER, REP, ROUTER,
+  STREAM, SUB and XSUB read their peers' pipes directly, round-robin over
+  the peers that have data (libzmq `fq_t`), instead of one forwarder
+  goroutine per peer. An idle TCP connection costs one goroutine less on
+  the receiving side, an inproc link one less; receive cost no longer
+  grows with idle peers.
+- `SocketMetrics.QueueDepth` now counts the messages queued in the
+  socket's inbound pipes (PAIR and REQ included); it used to count only a
+  one-slot internal handoff and was 0 with a single peer.
+- `SocketMetrics.Dropped` no longer includes FairQueue handoff drops,
+  which cannot happen any more: a message is only taken from a pipe by
+  the receiver that returns it.
 
 ### Removed
 

@@ -20,9 +20,9 @@ import (
 // engines differ only in their own Send framing and Metrics.
 //
 // The identity assigned at attach is also stored on the pipe itself
-// (pipe.End.SetRoutingID), and Recv stamps from there. A message that a
-// forwarder hands over after DetachPipe, or that a closed pipe drains
-// afterwards, therefore still carries its sender's identity, and nothing
+// (pipe.End.SetRoutingID), and Recv stamps from there. A message received
+// after DetachPipe, which a closed pipe drains afterwards, therefore still
+// carries its sender's identity, and nothing
 // needs to outlive the detach: the engine keeps no reference to a departed
 // pipe. Nor is it ever looked up by identity bytes, so a newer peer
 // claiming the same identity can't be confused with the departed one.
@@ -77,7 +77,7 @@ func newIdentityRouter(name string) identityRouter {
 func (e *identityRouter) ReadyRecv() <-chan struct{} { return e.fq.ReadyRecv() }
 
 // CanRecvNow exposes the FairQueue's pending-data level check.
-func (e *identityRouter) CanRecvNow() bool { return e.fq.HasPending() }
+func (e *identityRouter) CanRecvNow() bool { return e.fq.CanRecv() }
 
 // CanSendNow reports whether at least one peer is currently attached.
 func (e *identityRouter) CanSendNow() bool {
@@ -177,10 +177,10 @@ func (e *identityRouter) Close() error {
 	return e.fq.Close()
 }
 
-// metrics builds the engine's counters; extraDropped is folded into the
-// FairQueue's own drop count (ROUTER adds its route-miss drops; STREAM adds 0).
-func (e *identityRouter) metrics(extraDropped uint64) Metrics {
-	return e.snapshot(extraDropped+e.fq.Dropped(), e.fq.QueueDepth())
+// metrics builds the engine's counters with the given drop count (ROUTER
+// passes its route-miss drops; STREAM passes 0).
+func (e *identityRouter) metrics(dropped uint64) Metrics {
+	return e.snapshot(dropped, e.fq.QueueDepth())
 }
 
 // synthesizeIdentityLocked returns a fresh 5-byte routing identity for an

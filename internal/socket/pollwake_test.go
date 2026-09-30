@@ -62,7 +62,7 @@ func TestFairQueue_ReadyRecvWakesOnDirectDelivery(t *testing.T) {
 
 	require.NoError(t, b.Send(testCtx(t), msg.FromBytes([]byte("x"))), "peer send")
 	requireWake(t, woke, "fairqueue direct mode")
-	require.True(t, fq.HasPending(), "message must still be pending (non-consuming signal)")
+	require.True(t, fq.CanRecv(), "message must still be pending (non-consuming signal)")
 }
 
 func TestPair_ReadyRecvWakesOnDelivery(t *testing.T) {

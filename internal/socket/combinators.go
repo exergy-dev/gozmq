@@ -59,12 +59,11 @@ func (e *recvOnlyEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 func (e *recvOnlyEngine) Close() error                { return e.fq.Close() }
 func (e *recvOnlyEngine) ReadyRecv() <-chan struct{}  { return e.fq.ReadyRecv() }
 func (e *recvOnlyEngine) ReadyWrite() <-chan struct{} { return nil }
-func (e *recvOnlyEngine) CanRecvNow() bool            { return e.fq.HasPending() }
+func (e *recvOnlyEngine) CanRecvNow() bool            { return e.fq.CanRecv() }
 func (e *recvOnlyEngine) CanSendNow() bool            { return false }
 func (e *recvOnlyEngine) Metrics() Metrics {
 	return Metrics{
 		Recv:       e.fq.Recvd(),
-		Dropped:    e.fq.Dropped(),
 		QueueDepth: e.fq.QueueDepth(),
 	}
 }
@@ -111,13 +110,12 @@ func (e *queuePairEngine) Close() error {
 
 func (e *queuePairEngine) ReadyRecv() <-chan struct{}  { return e.fq.ReadyRecv() }
 func (e *queuePairEngine) ReadyWrite() <-chan struct{} { return e.lb.ReadyWrite() }
-func (e *queuePairEngine) CanRecvNow() bool            { return e.fq.HasPending() }
+func (e *queuePairEngine) CanRecvNow() bool            { return e.fq.CanRecv() }
 func (e *queuePairEngine) CanSendNow() bool            { return e.lb.HasPeers() }
 func (e *queuePairEngine) Metrics() Metrics {
 	return Metrics{
 		Sent:       e.lb.Sent(),
 		Recv:       e.fq.Recvd(),
-		Dropped:    e.fq.Dropped(),
 		QueueDepth: e.fq.QueueDepth(),
 	}
 }

@@ -42,7 +42,7 @@ type LoadBalancer struct {
 	closed   bool
 
 	// There is deliberately no lock-free single-peer fast path (unlike
-	// FairQueue's direct mode): measured against this locked path it was
+	// FairQueue's): measured against this locked path it was
 	// worth under 9% on inproc PUSH/PULL throughput and nothing on the
 	// other perf/ benchmarks, which does not pay for a second send path.
 

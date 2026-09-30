@@ -36,13 +36,13 @@ func sendBacklog(t *testing.T, p *pipe.End, src, n int) {
 	}
 }
 
-func TestHWM0_FairQueueDirect(t *testing.T) {
+func TestHWM0_FairQueueSingle(t *testing.T) {
 	t.Parallel()
 	fq := socket.NewFairQueue()
 	defer fq.Close()
 	a, b := pipe.NewPair(0, 0, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	require.NoError(t, fq.Attach(a)) // single pipe: direct mode
+	require.NoError(t, fq.Attach(a)) // one pipe: single-pipe fast path
 
 	sendBacklog(t, b, 0, hwm0Backlog)
 	for i := 0; i < hwm0Backlog; i++ {
@@ -51,22 +51,22 @@ func TestHWM0_FairQueueDirect(t *testing.T) {
 		_, got := seqOf(m)
 		require.Equal(t, i, got)
 	}
-	require.False(t, fq.HasPending())
+	require.False(t, fq.CanRecv())
 }
 
-func TestHWM0_FairQueueForwarder(t *testing.T) {
+func TestHWM0_FairQueueMulti(t *testing.T) {
 	t.Parallel()
 	fq := socket.NewFairQueue()
 	defer fq.Close()
 	eng, peers := makePairs(2, 0, 0)
 	defer closePipes(append(eng, peers...)...)
 	for _, p := range eng {
-		require.NoError(t, fq.Attach(p)) // two pipes: forwarder mode
+		require.NoError(t, fq.Attach(p)) // two pipes: round-robin walk
 	}
 	for src, p := range peers {
 		sendBacklog(t, p, src, hwm0Backlog)
 	}
-	// The second peer leaves before anything is read: its forwarder must
+	// The second peer leaves before anything is read: the queue must
 	// still drain the whole backlog.
 	require.NoError(t, peers[1].Close())
 	require.NoError(t, fq.Detach(eng[1]))

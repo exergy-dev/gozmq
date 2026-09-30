@@ -18,8 +18,9 @@ import (
 // TestRouter_DetachReleasesPipes: once a peer is detached and its messages
 // consumed, the ROUTER holds no reference to its pipe. A retained pipe pins
 // its channel buffers, which under peer churn added up to tens of MB when
-// detached pipes were cached for identity lookup. Covers direct mode (sole
-// peer), forwarder mode, and pipes closed before or after the detach.
+// detached pipes were cached for identity lookup. Covers the single-pipe
+// fast path (sole peer), the multi-pipe walk, and pipes closed before or
+// after the detach.
 func TestRouter_DetachReleasesPipes(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewRouterEngine(false)
@@ -43,14 +44,14 @@ func TestRouter_DetachReleasesPipes(t *testing.T) {
 			ends = append(ends, weak.Make(a), weak.Make(b))
 		}
 	}
-	churn() // each peer is the sole one: direct mode
+	churn() // each peer is the sole one: single-pipe fast path
 
 	anchor, anchorPeer := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(anchor, anchorPeer)
 	require.NoError(t, eng.AttachPipe(anchor))
-	churn() // forwarder mode
+	churn() // multi-pipe walk
 
-	// Forwarders exit asynchronously after Detach; give them a moment.
+	// Weak pointers may need a few GC cycles to clear.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		runtime.GC()

@@ -10,8 +10,8 @@
 // memory the GC reclaims.
 //
 // All I/O goes through End methods (there is no raw channel access). That is
-// what keeps the overflow refill, the Poller recv-ready arm and the
-// SendDrained signal impossible to skip.
+// what keeps the overflow refill, the idle notification and the SendDrained
+// signal impossible to skip.
 package pipe
 
 import (
@@ -209,9 +209,11 @@ func (d *direction) tryRecv() (*msg.Msg, bool) {
 	}
 }
 
-// pending reports whether a message is ready to receive.
+// pending reports whether a message is ready to receive. flags is loaded
+// first: that atomic load orders the plain len read after whatever atomic
+// the caller did before (see End.MarkIdle).
 func (d *direction) pending() bool {
-	return len(d.ch) > 0 || d.flags.Load()&slowOverflow != 0
+	return d.flags.Load()&slowOverflow != 0 || len(d.ch) > 0
 }
 
 // fireDrainLocked closes drainCh (creating it pre-closed if SendDrained has
@@ -237,12 +239,32 @@ type End struct {
 
 	closeOnce sync.Once
 
-	// recvReady, when registered via SetRecvReady, is armed (non-blocking
-	// send into a cap-1 channel) every time a message is sent towards this
-	// end, and when either end closes. Socket engines hand their
-	// Poller-facing readiness gate to the pipe so a blocking Poller.Poll
-	// wakes on data arrival without a forwarder goroutine.
-	recvReady atomic.Pointer[recvReadyGate]
+	// idle and notify let a receiver that multiplexes many pipes (or a
+	// Poller) stop looking at this end until something arrives, with no
+	// goroutine per pipe. The receiver sets idle when it finds the end
+	// empty (RecvOrIdle, MarkIdle); the first enqueue or close after that
+	// clears it and runs notify on the sending goroutine. While idle is
+	// clear a send costs one extra atomic load.
+	//
+	// No wakeup is lost. The receiver sets idle with an atomic Swap and
+	// only then looks at the queue again; the sender publishes its message
+	// and only then loads idle. Both idle operations are sequentially
+	// consistent, the enqueue is published by the channel lock release (a
+	// full barrier in the runtime) or, for an HWM-0 spill, by the
+	// slowOverflow flag store, and the receiver's re-check reads the
+	// channel count and flags with atomic loads. So as in Dekker's
+	// algorithm at least one side sees the other: the receiver finds the
+	// message, or the sender finds idle set and notifies. When both happen
+	// the receiver clears idle again with a CAS and notify may run once
+	// for nothing. Close pairs a closed-flag store with the same idle
+	// load, and a receiver checks IsClosed after setting idle.
+	//
+	// The re-check must not be a bare len(ch): that plain load could be
+	// satisfied before the Swap's store on weakly ordered CPUs. RecvOrIdle
+	// re-checks with a channel receive; MarkIdle, which must not consume,
+	// loads flags atomically before len (direction.pending).
+	idle   atomic.Bool
+	notify atomic.Pointer[func()]
 
 	// routingID is the identity a ROUTER or STREAM engine assigned this end
 	// on attach. It travels with the pipe, so a message received after the
@@ -251,32 +273,74 @@ type End struct {
 	routingID atomic.Pointer[[]byte]
 }
 
-// recvReadyGate wraps the registered gate channel so it can sit behind an
-// atomic.Pointer (SetRecvReady may race in-flight sends).
-type recvReadyGate struct{ ch chan<- struct{} }
+// SetNotify registers fn as this end's idle notification (see the idle
+// field doc); nil removes it. fn runs on the goroutine that sends to or
+// closes the pipe, possibly with that goroutine's locks held, so it must be
+// quick and must not send on or close this pipe.
+func (e *End) SetNotify(fn func()) {
+	if fn == nil {
+		e.notify.Store(nil)
+		return
+	}
+	e.notify.Store(&fn)
+}
 
-// SetRecvReady registers gate as this end's recv-ready signal (see the
-// recvReady field doc). If messages are already buffered the gate is
-// armed immediately, preserving the level-trigger property across
-// late registration.
-func (e *End) SetRecvReady(gate chan<- struct{}) {
-	e.recvReady.Store(&recvReadyGate{ch: gate})
-	if e.recv.pending() {
-		e.armRecvReady()
+// woken is the sender side of the idle protocol: it runs the notification
+// if the receiver went idle. Callers check idle first so the common case
+// stays one inlined atomic load.
+func (e *End) woken() {
+	if !e.idle.CompareAndSwap(true, false) {
+		return
+	}
+	if fn := e.notify.Load(); fn != nil {
+		(*fn)()
 	}
 }
 
-// armRecvReady performs the non-blocking arm of the registered gate.
-// Safe to call from any goroutine; a cap-1 gate coalesces bursts.
-func (e *End) armRecvReady() {
-	g := e.recvReady.Load()
-	if g == nil {
-		return
+// RecvOrIdle takes the next queued message without blocking. When there is
+// none it marks this end idle, so the next message sent here (or a close)
+// runs the notification, and reports false.
+func (e *End) RecvOrIdle() (*msg.Msg, bool) {
+	d := e.recv
+	if m, ok := d.tryRecv(); ok {
+		return m, true
 	}
-	select {
-	case g.ch <- struct{}{}:
-	default:
+	e.idle.Swap(true)
+	if m, ok := d.tryRecv(); ok {
+		// Raced a sender. If it already cleared idle its notification is
+		// merely early; otherwise nothing will notify for m.
+		e.idle.CompareAndSwap(true, false)
+		return m, true
 	}
+	return nil, false
+}
+
+// MarkIdle is RecvOrIdle without the receive, for readiness checks: it
+// reports whether a message is queued and, if not, marks this end idle.
+func (e *End) MarkIdle() bool {
+	d := e.recv
+	if d.pending() {
+		return true
+	}
+	e.idle.Swap(true)
+	if d.pending() {
+		e.idle.CompareAndSwap(true, false)
+		return true
+	}
+	return false
+}
+
+// Len reports how many messages are queued for this end. It is a gauge for
+// metrics, not a readiness signal.
+func (e *End) Len() int {
+	d := e.recv
+	n := len(d.ch)
+	if d.flags.Load()&slowOverflow != 0 {
+		d.mu.Lock()
+		n += len(d.overflow) - d.head
+		d.mu.Unlock()
+	}
+	return n
 }
 
 // TrySend enqueues m for the peer without blocking. It returns false when
@@ -289,7 +353,9 @@ func (e *End) TrySend(m *msg.Msg) bool {
 	if !e.send.trySend(m) {
 		return false
 	}
-	e.peer.armRecvReady()
+	if e.peer.idle.Load() {
+		e.peer.woken()
+	}
 	return true
 }
 
@@ -315,12 +381,16 @@ func (e *End) enqueue(ctx context.Context, m *msg.Msg, abort <-chan struct{}) er
 		return io.ErrClosedPipe
 	}
 	if e.send.trySend(m) {
-		e.peer.armRecvReady()
+		if e.peer.idle.Load() {
+			e.peer.woken()
+		}
 		return nil
 	}
 	select {
 	case e.send.ch <- m:
-		e.peer.armRecvReady()
+		if e.peer.idle.Load() {
+			e.peer.woken()
+		}
 		return nil
 	case <-abort:
 		return ErrAborted
@@ -419,16 +489,18 @@ func (e *End) Close() error {
 			d.fireDrainLocked()
 			d.mu.Unlock()
 		}
-		// Wake any Poller parked on either end's recv-ready gate so it
-		// re-checks and observes the close.
-		e.armRecvReady()
-		e.peer.armRecvReady()
+		// Notify idle receivers on either end so they observe the close.
+		e.woken()
+		e.peer.woken()
 	})
 	return nil
 }
 
 // Closed returns a channel that is closed once either end has been closed.
 func (e *End) Closed() <-chan struct{} { return e.shared.either }
+
+// IsClosed reports whether either end has been closed.
+func (e *End) IsClosed() bool { return e.shared.closed.Load() }
 
 // SetRoutingID records id as this end's routing identity (see the routingID
 // field doc). The engine sets it before attaching the end, so every message

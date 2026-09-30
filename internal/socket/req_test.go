@@ -48,7 +48,7 @@ func TestReq_StripsEmptyDelimiterOnRecv(t *testing.T) {
 
 	ctx := testCtx(t)
 
-	// First send so the FSM moves to canRecv and a sticky forwarder launches.
+	// First send so the FSM moves to canRecv with a sticky pipe.
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))), "send")
 	// Drain the request from the peer side so we keep pipe clean.
 	_, err := b.Recv(ctx)
