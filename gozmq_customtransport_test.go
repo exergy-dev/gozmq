@@ -203,3 +203,36 @@ func TestRegisterTransportOverridesBuiltin(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "payload", string(got))
 }
+
+// TestContextTransportLookup covers the Context's scheme table: the
+// preregistered schemes resolve, a malformed endpoint and an unknown
+// scheme fail with their sentinels, and RegisterTransport may race Bind.
+func TestContextTransportLookup(t *testing.T) {
+	zctx := gozmq.NewContext()
+	defer zctx.Close()
+	s, err := zctx.NewSocket(gozmq.Pull)
+	require.NoError(t, err)
+	defer s.Close()
+
+	for _, ep := range []string{"", "no-scheme-here", "://missing"} {
+		require.ErrorIs(t, s.Bind(ep), gozmq.ErrEndpointInvalid, "Bind(%q)", ep)
+	}
+	require.ErrorIs(t, s.Bind("frob://x"), gozmq.ErrTransportUnknown)
+	for _, ep := range []string{"inproc://lookup", "tcp://127.0.0.1:0", "tcp6://[::1]:0"} {
+		if err := s.Bind(ep); err != nil {
+			require.NotErrorIs(t, err, gozmq.ErrTransportUnknown, "Bind(%q)", ep)
+		}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			zctx.RegisterTransport(transport.NewTCPTransport())
+		}
+	}()
+	for i := 0; i < 100; i++ {
+		require.NoError(t, s.Bind("tcp://127.0.0.1:0"))
+	}
+	<-done
+}

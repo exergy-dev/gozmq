@@ -2,7 +2,9 @@ package gozmq
 
 import (
 	"context"
+	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -20,7 +22,8 @@ type Context struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	registry   *transport.Registry
+	trMu       sync.RWMutex
+	transports map[string]transport.Transport // by Scheme()
 	zapHandler security.ZAPHandler
 
 	mu      sync.Mutex
@@ -49,9 +52,20 @@ func WithZAPHandler(handler security.ZAPHandler) ContextOption {
 func NewContext(opts ...ContextOption) *Context {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Context{
-		ctx:      ctx,
-		cancel:   cancel,
-		registry: transport.New(),
+		ctx:        ctx,
+		cancel:     cancel,
+		transports: make(map[string]transport.Transport),
+	}
+	// TLS (tls+tcp) is deliberately not preregistered: there is no
+	// reasonable default *tls.Config. A zero inproc window means the
+	// default connect-before-bind wait.
+	for _, t := range []transport.Transport{
+		transport.NewTCPTransport(),
+		transport.NewTCP6Transport(),
+		transport.NewInprocTransport(0),
+		transport.NewIPCTransport(),
+	} {
+		c.transports[t.Scheme()] = t
 	}
 	for _, o := range opts {
 		o.applyContext(c)
@@ -102,7 +116,24 @@ func (c *Context) Ctx() context.Context { return c.ctx }
 // RegisterTransport sees the updated scheme set as long as its Bind /
 // Connect call races after Register.
 func (c *Context) RegisterTransport(t transport.Transport) {
-	c.registry.Register(t)
+	c.trMu.Lock()
+	defer c.trMu.Unlock()
+	c.transports[t.Scheme()] = t
+}
+
+// lookupTransport returns the transport registered for endpoint's scheme.
+func (c *Context) lookupTransport(endpoint string) (transport.Transport, error) {
+	scheme, _, ok := strings.Cut(endpoint, "://")
+	if !ok || scheme == "" {
+		return nil, fmt.Errorf("%w: %q (missing scheme://)", ErrEndpointInvalid, endpoint)
+	}
+	c.trMu.RLock()
+	t, ok := c.transports[scheme]
+	c.trMu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("%w: %q", ErrTransportUnknown, scheme)
+	}
+	return t, nil
 }
 
 // removeSocket drops c's reference to a socket that has finished closing,

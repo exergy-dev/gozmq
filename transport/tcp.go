@@ -9,7 +9,7 @@ import (
 // Defaults that match design §7.1 and the socketConfig defaults in
 // options.go. Higher layers may override on a per-Transport basis by
 // constructing TCPTransport directly and toggling the exported fields
-// before installing into a Registry.
+// before registering it on a Context.
 const (
 	defaultTCPKeepAlive     = true
 	defaultTCPKeepAliveIdle = 30 * time.Second
@@ -18,7 +18,7 @@ const (
 
 // TCPTransport implements Transport over the standard library's
 // net.Dial / net.Listen. The exported fields are configuration knobs the
-// higher layers may flip before installing the transport into a Registry;
+// higher layers may flip before registering the transport on a Context;
 // they take effect for every subsequent Dial / Accept on this transport.
 //
 // Concurrency: Dial / Listen are safe for concurrent use; the configuration

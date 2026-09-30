@@ -26,8 +26,8 @@ const tlsScheme = "tls+tcp"
 // Scheme: "tls+tcp". Endpoints look like "tls+tcp://host:port"; wildcards
 // and ephemeral-port semantics follow TCP.
 //
-// Registration: the default transport registry (transport.New) does NOT
-// register a TLSTransport — there is no reasonable default tls.Config.
+// Registration: a new gozmq.Context does NOT preregister
+// a TLSTransport — there is no reasonable default tls.Config.
 // Callers install via (*gozmq.Context).RegisterTransport(
 // transport.NewTLSTransport(cfg)).
 //

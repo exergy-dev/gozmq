@@ -31,7 +31,7 @@ const DefaultInprocQueueWindow = 500 * time.Millisecond
 //
 // Important scope note: the registry of bound names is kept on the
 // inprocTransport instance itself. The public Context wires one
-// inprocTransport into each registry, so two Contexts have independent
+// inprocTransport into each Context, so two Contexts have independent
 // inproc namespaces.
 //
 // Concurrency: all methods are safe for concurrent use.

@@ -71,6 +71,10 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
 - Received frames are ordinary Go memory owned by the caller.
   `(*Msg).Release` and `(*Msg).Retain` are now no-ops kept for
   compatibility; calling them is unnecessary.
+- `WithSendHWM(0)`/`WithRecvHWM(0)` (unlimited) no longer run a relay
+  goroutine per pipe direction; inproc linger completes on a signal instead
+  of polling.
+- inproc Conn deadlines no longer start a goroutine per Read/Write.
 
 ### Removed
 
@@ -86,6 +90,12 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
 - **Breaking (internal plumbing):** `msg.Recycle`, `(*Msg).IsPooled`,
   `(*Msg).AppendPooledFrame`, `(*Msg).TransferPool` and `(*Msg).Reset` are
   gone, along with `internal/bufpool` and the `*Msg` finalizer.
+- **Breaking:** `msg.FromFramesOwned`, `Msg.MarkSubscription`,
+  `Msg.IsSubscription`. Use `msg.FromFrames`; subscription commands are
+  flagged on the internal pipe instead of the message.
+- **Breaking:** `transport.Registry`, `transport.NewRegistry`, `transport.New`.
+  Use `(*gozmq.Context).RegisterTransport`; every Context still preloads
+  tcp, tcp6, ipc and inproc.
 
 ### Fixed
 
@@ -166,6 +176,9 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
   older gozmq peers (outer COMMAND flag) are still accepted, but older gozmq
   releases reject the new encoding: upgrade both ends of gozmq↔gozmq CURVE
   links together.
+- A `Poller` never woke for messages sent by an inproc PAIR peer.
+- A `Poller` never reported REP, SUB or XSUB sockets as ready.
+- REQ with HWM 0 could pair a stale reply with the next request.
 
 ## [1.0.0] - 2026-08-10
 

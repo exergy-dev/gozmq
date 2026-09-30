@@ -195,7 +195,7 @@ func (s *Socket) Bind(endpoint string) error {
 	if s.closed.Load() {
 		return ErrSocketClosed
 	}
-	tr, err := s.ctx.registry.Lookup(endpoint)
+	tr, err := s.ctx.lookupTransport(endpoint)
 	if err != nil {
 		s.emit(EventBindFailed, endpoint, err.Error())
 		return err
@@ -264,7 +264,7 @@ func (s *Socket) Connect(endpoint string) error {
 	if s.closed.Load() {
 		return ErrSocketClosed
 	}
-	tr, err := s.ctx.registry.Lookup(endpoint)
+	tr, err := s.ctx.lookupTransport(endpoint)
 	if err != nil {
 		s.emit(EventConnectFailed, endpoint, err.Error())
 		return err
