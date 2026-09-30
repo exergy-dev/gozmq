@@ -16,9 +16,9 @@ import (
 // device topologies work:
 //
 //	XSUB → XPUB   a pub/sub forwarder. Subscriptions travel upstream on
-//	              their own because XSUB surfaces SUBSCRIBE and CANCEL as
-//	              ordinary messages and XPUB re-emits them; no special
-//	              casing here.
+//	              their own because XPUB surfaces its subscribers'
+//	              SUBSCRIBE and CANCEL as ordinary messages and XSUB
+//	              forwards them upstream; no special casing here.
 //	ROUTER → DEALER   a request/reply broker. The ROUTER-prepended identity
 //	              frame rides along, so replies find their way back.
 //	PULL → PUSH   a pipeline forwarder.
