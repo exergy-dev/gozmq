@@ -319,32 +319,15 @@ func (e *SubEngine) xsubSend(ctx context.Context, m *msg.Msg) error {
 
 // Recv fair-queues across attached pipes and applies the local
 // subscription filter. Messages whose topic frame (first frame) is not
-// matched by any local subscription are discarded and Recv loops.
-//
-// Incoming synthetic subscription messages (e.g. if the session reader
-// surfaces a subscribe from a peer, which would only happen for XPUB-style
-// reverse flow) are discarded for SUB; XSUB handles them by surfacing to
-// the application.
+// matched by any local subscription are discarded and Recv loops. The
+// payload is never sniffed: data beginning with 0x00/0x01 is ordinary data
+// (the session drops upstream SUBSCRIBE/CANCEL commands for SUB/XSUB, as
+// libzmq does).
 func (e *SubEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 	for {
-		it, err := e.fq.recvItem(ctx)
+		m, err := e.fq.Recv(ctx)
 		if err != nil {
 			return nil, err
-		}
-		m := it.m
-		if it.sub {
-			// A genuine SUBSCRIBE/CANCEL command surfaced by the session
-			// reader from a peer (flagged out-of-band, NOT sniffed from
-			// the payload — so ordinary data beginning with 0x00/0x01 is
-			// never misclassified). SUB: drop. XSUB: surface as-is
-			// (matches libzmq XSUB behavior — the app sees SUBSCRIBE
-			// events coming from its peers).
-			if e.surface {
-				e.recv.Add(1)
-				return m, nil
-			}
-			m.Release()
-			continue
 		}
 		if m.NumFrames() == 0 || !e.matches(m.Frames()[0]) {
 			m.Release()

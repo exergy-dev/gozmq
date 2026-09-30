@@ -506,7 +506,7 @@ func (c *inprocConn) Read(buf []byte) (int, error) {
 
 		var data []byte
 		err := runWithDeadline(deadline, poke, func(ctx context.Context, poke <-chan struct{}) error {
-			m, _, err := c.p.RecvOr(ctx, poke)
+			m, err := c.p.RecvOr(ctx, poke)
 			if err != nil {
 				return err
 			}

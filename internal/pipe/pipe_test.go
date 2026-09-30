@@ -433,52 +433,15 @@ func TestRecvOr_Abort(t *testing.T) {
 	abort := make(chan struct{})
 	close(abort)
 
-	_, _, err := b.RecvOr(ctx, abort)
+	_, err := b.RecvOr(ctx, abort)
 	require.ErrorIs(t, err, ErrAborted)
 
 	require.NoError(t, a.SendOr(ctx, msg.FromBytes([]byte("x")), abort), "room: abort not consulted")
 	require.ErrorIs(t, a.SendOr(ctx, msg.FromBytes([]byte("y")), abort), ErrAborted)
 
-	m, _, err := b.RecvOr(ctx, abort)
+	m, err := b.RecvOr(ctx, abort)
 	require.NoError(t, err, "buffered message wins over abort")
 	require.Equal(t, "x", string(m.Bytes()))
-}
-
-// TestSendSubscription_Flag: RecvOr reports a message sent with
-// SendSubscription as a subscription command, and ordinary data (even
-// data that looks like one) as not, across the HWM-0 overflow too.
-func TestSendSubscription_Flag(t *testing.T) {
-	for _, hwm := range []int{0, 4} {
-		a, b := NewPair(hwm, hwm, PeerInfo{}, PeerInfo{})
-		ctx := context.Background()
-		n := 4
-		if hwm == 0 {
-			n = unboundedChanCap + 10
-		}
-		for i := 0; i < n; i++ {
-			m := msg.FromBytes([]byte{0x01, byte(i)})
-			if i%2 == 0 {
-				require.NoError(t, a.SendSubscription(ctx, m))
-			} else {
-				require.NoError(t, a.Send(ctx, m))
-			}
-			if hwm > 0 {
-				_, sub, err := b.RecvOr(ctx, nil)
-				require.NoError(t, err)
-				require.Equal(t, i%2 == 0, sub, "hwm=%d msg %d", hwm, i)
-			}
-		}
-		if hwm == 0 {
-			for i := 0; i < n; i++ {
-				m, sub, err := b.RecvOr(ctx, nil)
-				require.NoError(t, err)
-				require.Equal(t, byte(i), m.Frames()[0][1])
-				require.Equal(t, i%2 == 0, sub, "hwm=0 msg %d", i)
-			}
-		}
-		_ = a.Close()
-		_ = b.Close()
-	}
 }
 
 // TestHWMZero_ConcurrentOverflow stresses the overflow refill: several

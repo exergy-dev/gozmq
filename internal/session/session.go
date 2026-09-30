@@ -58,6 +58,11 @@ type Config struct {
 	// decoded frame is the buffer itself.
 	RecvBufferPool bool
 
+	// SubscriptionCommands turns inbound ZMTP SUBSCRIBE/CANCEL commands
+	// into 0x01/0x00-prefixed messages on the pipe. Set it only for
+	// PUB/XPUB; every other socket type drops the commands.
+	SubscriptionCommands bool
+
 	// Logger is the destination for non-fatal diagnostics (heartbeat
 	// timeout reasons, malformed-frame events). When nil, slog.Default()
 	// is used.

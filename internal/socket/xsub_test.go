@@ -106,12 +106,11 @@ func TestXSub_RecvFiltersByLocalSubscription(t *testing.T) {
 	require.Equal(t, "okay", string(m.Frames()[0]))
 }
 
-// TestSubXSub_WireSubscriptionFlag: a subscription command the session
-// reader surfaces (pipe SendSubscription) is dropped by SUB and delivered by
-// XSUB, while data that merely starts with the same 0x01 byte is ordinary
-// data for both — in FairQueue direct mode (one peer) and forwarder mode
-// (two peers).
-func TestSubXSub_WireSubscriptionFlag(t *testing.T) {
+// TestSubXSub_SubscriptionShapedData: data that begins with the 0x01
+// subscribe byte is ordinary data for SUB and XSUB alike — it goes through
+// the local filter like any other message — with one peer (FairQueue single
+// mode) and two.
+func TestSubXSub_SubscriptionShapedData(t *testing.T) {
 	t.Parallel()
 	for _, peers := range []int{1, 2} {
 		for _, xsub := range []bool{false, true} {
@@ -125,19 +124,14 @@ func TestSubXSub_WireSubscriptionFlag(t *testing.T) {
 			ctx := testCtx(t)
 			ends, peerEnds := makePairs(peers, 16, 16)
 			mustAttach(t, eng, ends...)
-			require.NoError(t, sub.Subscribe(nil)) // match all data
+			require.NoError(t, sub.Subscribe([]byte("\x01d")))
 			p := peerEnds[0]
-			require.NoError(t, p.SendSubscription(ctx, subscribeMsg(true, []byte("cmd"))))
+			require.NoError(t, p.Send(ctx, subscribeMsg(true, []byte("cmd"))))
 			require.NoError(t, p.Send(ctx, subscribeMsg(true, []byte("data"))))
 
 			m, err := eng.Recv(ctx)
 			require.NoError(t, err)
-			if xsub {
-				require.Equal(t, "\x01cmd", string(m.Bytes()), "peers=%d: XSUB surfaces the command", peers)
-				m, err = eng.Recv(ctx)
-				require.NoError(t, err)
-			}
-			require.Equal(t, "\x01data", string(m.Bytes()), "peers=%d xsub=%v: data delivered", peers, xsub)
+			require.Equal(t, "\x01data", string(m.Bytes()), "peers=%d xsub=%v: filtered like data", peers, xsub)
 			require.NoError(t, eng.Close())
 			closePipes(append(ends, peerEnds...)...)
 		}

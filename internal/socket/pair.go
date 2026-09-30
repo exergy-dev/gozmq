@@ -201,7 +201,7 @@ func (e *pairEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 			}
 		}
 		// On peer loss (EOF: closed and empty) the pipe is retired.
-		switch rm, _, err := p.RecvOr(ctx, closeCh); {
+		switch rm, err := p.RecvOr(ctx, closeCh); {
 		case err == nil:
 			e.recv.Add(1)
 			return rm, nil

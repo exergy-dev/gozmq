@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -838,5 +839,44 @@ func TestReader_SmallFrameBurstIndependentPayloads(t *testing.T) {
 	want := []string{"frame-a", "frame-b", "frame-c"}
 	for j, f := range mp.Frames() {
 		require.Equal(t, want[j], string(f), "multipart frame[%d]", j)
+	}
+}
+
+// TestReader_SubscriptionCommands: inbound SUBSCRIBE/CANCEL commands reach
+// the engine as 0x01/0x00-prefixed messages only with SubscriptionCommands
+// (PUB/XPUB); any other session drops them. The commands are queued before
+// data1 is sent, so the writer puts them on the wire before data2.
+func TestReader_SubscriptionCommands(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		connA, connB := newFakeConnPair()
+		sA, sB := startPair(t,
+			Config{Conn: connA, Mech: newFakeMech("NULL", false, nil), SendHWM: 8, RecvHWM: 8},
+			Config{Conn: connB, Mech: newFakeMech("NULL", true, nil), SendHWM: 8, RecvHWM: 8,
+				SubscriptionCommands: enabled},
+		)
+		ctx := testCtx(t, 2*time.Second)
+		a := sA.(*sessionImpl)
+		a.enqueueCommand("SUBSCRIBE", []byte("topic"))
+		a.enqueueCommand("CANCEL", []byte("topic"))
+		require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("data1"))))
+		require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("data2"))))
+
+		var got []string
+		for {
+			m, err := sB.Pipe().Recv(ctx)
+			require.NoError(t, err, "enabled=%v", enabled)
+			if string(m.Bytes()) == "data2" {
+				break
+			}
+			got = append(got, string(m.Bytes()))
+		}
+		want := []string{"data1"}
+		if enabled {
+			want = []string{"\x01topic", "\x00topic", "data1"}
+		}
+		require.ElementsMatch(t, want, got, "enabled=%v", enabled)
+		if enabled {
+			require.Less(t, slices.Index(got, "\x01topic"), slices.Index(got, "\x00topic"), "command order")
+		}
 	}
 }

@@ -124,7 +124,7 @@ func (s *sessionImpl) runReader() {
 		}
 		clear(frames) // the message has its own copy of the list
 		frames = frames[:0]
-		if err := s.publishInbound(m, false); err != nil {
+		if err := s.publishInbound(m); err != nil {
 			m.Release() // never queued: the buffers can go back now
 			if !isShutdownErr(err) {
 				s.cfg.Logger.Debug("gozmq/session: publish inbound", "err", err)
@@ -150,26 +150,20 @@ func lendFrames(frames, bufs [][]byte) *msg.Msg {
 }
 
 // publishInbound enqueues a fully-assembled message on the session-side
-// pipe (sub marks a SUBSCRIBE/CANCEL command, see handleCommand), honoring
-// backpressure (HWM) by blocking until either the engine drains a slot or
+// pipe, honoring backpressure (HWM) by blocking until either the engine drains a slot or
 // the session is cancelled. While blocked it raises
 // readerParked so the heartbeat timeout doesn't mistake local engine
 // backpressure (no inbound stamps while we're parked here) for a dead
 // link, and re-stamps the inbound clock on resume so the idle window
 // restarts from the unpark, not from the last pre-park frame.
-func (s *sessionImpl) publishInbound(m *msg.Msg, sub bool) error {
+func (s *sessionImpl) publishInbound(m *msg.Msg) error {
 	// Non-blocking fast path keeps the readerParked bookkeeping (and the
 	// extra inbound stamp) off the common no-backpressure case.
-	if !sub && s.sessionPipe.TrySend(m) {
+	if s.sessionPipe.TrySend(m) {
 		return nil
 	}
 	s.readerParked.Store(true)
-	var err error
-	if sub {
-		err = s.sessionPipe.SendSubscription(s.ctx, m)
-	} else {
-		err = s.sessionPipe.Send(s.ctx, m)
-	}
+	err := s.sessionPipe.Send(s.ctx, m)
 	s.lastInboundUnix.Store(s.cfg.Now())
 	s.readerParked.Store(false)
 	if err != nil {
@@ -216,12 +210,15 @@ func (s *sessionImpl) handleCommand(body []byte) error {
 		// The lastInbound stamp already records this; nothing else to do.
 		return nil
 	case "SUBSCRIBE", "CANCEL":
-		// Surface subscription commands to the engine as a synthetic
-		// single-frame in-band message where the first byte is 0x01
-		// (SUBSCRIBE) or 0x00 (CANCEL) followed by the prefix bytes. This
-		// mirrors the exact shape libzmq's XPUB surfaces subscription
-		// events to its application, so PUB/XPUB engines can reuse one
-		// intercept path for both wire-origin and test-origin events.
+		// Only a publisher's peers subscribe. For PUB/XPUB the command
+		// becomes the synthetic single-frame message the engine already
+		// takes from legacy peers, which send subscriptions as data: 0x01
+		// (SUBSCRIBE) or 0x00 (CANCEL) followed by the prefix. Any other
+		// socket type drops it, as libzmq does.
+		if !s.cfg.SubscriptionCommands {
+			s.cfg.Logger.Debug("gozmq/session: ignoring subscription command", "name", name)
+			return nil
+		}
 		var flag byte = 0x01
 		if name == "CANCEL" {
 			flag = 0x00
@@ -229,11 +226,7 @@ func (s *sessionImpl) handleCommand(body []byte) error {
 		body := make([]byte, 1+len(rest))
 		body[0] = flag
 		copy(body[1:], rest)
-		// Flag this as a genuine subscription command so a SUB/XSUB
-		// receiver distinguishes it from ordinary data that merely
-		// begins with 0x01/0x00. PUB/XPUB still classify by content
-		// (legacy peers send subscriptions as plain data frames).
-		if err := s.publishInbound(msg.FromBytes(body), true); err != nil {
+		if err := s.publishInbound(msg.FromBytes(body)); err != nil {
 			if !isShutdownErr(err) {
 				return fmt.Errorf("gozmq/session: publish subscription: %w", err)
 			}

@@ -106,7 +106,7 @@ func (s *sessionImpl) writerNext() (*msg.Msg, error) {
 		return nil, s.writeFrame(zmtp.FlagCommand, buf)
 	default:
 	}
-	m, _, err := s.sessionPipe.RecvOr(s.writerCtx, s.cmdWake)
+	m, err := s.sessionPipe.RecvOr(s.writerCtx, s.cmdWake)
 	if errors.Is(err, pipe.ErrAborted) {
 		return nil, nil // a command was queued; the next call writes it
 	}

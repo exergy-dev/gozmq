@@ -56,10 +56,8 @@ func inprocName(b *testing.B, tag string) string {
 // numbers vs. real traffic.
 //
 // The first byte is forced to 'A' (0x41) purely to keep payloads stable
-// across historical runs. A leading 0x00/0x01 is now delivered intact:
-// the SUB receive path classifies subscriptions by an out-of-band flag
-// the pipe carries only for genuine wire SUBSCRIBE/CANCEL commands, not by
-// sniffing the payload (see internal/socket/sub.go).
+// across historical runs. A leading 0x00/0x01 is delivered intact: the
+// SUB receive path never sniffs the payload (see internal/socket/sub.go).
 func newPayload(n int) []byte {
 	b := make([]byte, n)
 	if n > 0 {

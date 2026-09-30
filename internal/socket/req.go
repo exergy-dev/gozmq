@@ -335,7 +335,7 @@ func (e *reqEngine) recvSticky(ctx context.Context, sticky *pipe.End, closeCh <-
 		return nil, fmt.Errorf("req recv: peer gone: %w", zmqerr.ErrSocketClosed)
 	}
 
-	switch m, _, err := sticky.RecvOr(ctx, closeCh); {
+	switch m, err := sticky.RecvOr(ctx, closeCh); {
 	case err == nil:
 		return m, nil
 	case errors.Is(err, pipe.ErrAborted):

@@ -92,13 +92,6 @@ type direction struct {
 	overflow []*msg.Msg // unbounded only; overflow[head:] is queued, FIFO after ch
 	head     int
 
-	// subs holds queued messages sent with SendSubscription: genuine ZMTP
-	// SUBSCRIBE/CANCEL commands surfaced by the session reader, as opposed
-	// to ordinary data that merely begins with 0x01/0x00. Only SUB/XSUB
-	// look at the flag. Keeping it beside the queue rather than in it keeps
-	// the channel element a single pointer.
-	subs map[*msg.Msg]struct{}
-
 	drainCh   chan struct{} // closed once empty after SendDrained, or on close
 	drainDone bool
 }
@@ -106,7 +99,6 @@ type direction struct {
 // Bits of direction.flags.
 const (
 	slowOverflow uint32 = 1 << iota // overflow holds messages
-	slowSubs                        // subs is non-empty
 	slowDraining                    // SendDrained is waiting for the direction to empty
 )
 
@@ -176,67 +168,40 @@ func (d *direction) refillLocked() {
 	d.setFlagLocked(slowOverflow, len(d.overflow) > 0)
 }
 
-// received runs after every successful receive of m: it refills the
-// channel from overflow, fires the SendDrained signal once the direction is
-// empty, and reports whether m was sent with SendSubscription. All of that
-// is one atomic load when there is nothing to do.
-func (d *direction) received(m *msg.Msg) bool {
-	if d.flags.Load() == 0 {
-		return false
+// received runs after every successful receive: it refills the channel
+// from overflow and fires the SendDrained signal once the direction is
+// empty. Both cost one atomic load when there is nothing to do.
+func (d *direction) received() {
+	if d.flags.Load() != 0 {
+		d.receivedSlow()
 	}
-	return d.receivedSlow(m)
 }
 
-func (d *direction) receivedSlow(m *msg.Msg) (sub bool) {
+func (d *direction) receivedSlow() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	f := d.flags.Load()
-	if f&slowSubs != 0 {
-		if _, sub = d.subs[m]; sub {
-			delete(d.subs, m)
-			d.setFlagLocked(slowSubs, len(d.subs) > 0)
-		}
-	}
 	if f&slowOverflow != 0 {
 		d.refillLocked()
 	}
 	if f&slowDraining != 0 && len(d.ch) == 0 && d.flags.Load()&slowOverflow == 0 {
 		d.fireDrainLocked()
 	}
-	return sub
-}
-
-// markSub records m as a subscription command before it is queued.
-func (d *direction) markSub(m *msg.Msg) {
-	d.mu.Lock()
-	if d.subs == nil {
-		d.subs = make(map[*msg.Msg]struct{})
-	}
-	d.subs[m] = struct{}{}
-	d.setFlagLocked(slowSubs, true)
-	d.mu.Unlock()
-}
-
-// unmarkSub undoes markSub for a message that was never queued.
-func (d *direction) unmarkSub(m *msg.Msg) {
-	d.mu.Lock()
-	delete(d.subs, m)
-	d.setFlagLocked(slowSubs, len(d.subs) > 0)
-	d.mu.Unlock()
 }
 
 // tryRecv takes the next queued message without blocking.
-func (d *direction) tryRecv() (m *msg.Msg, sub, ok bool) {
+func (d *direction) tryRecv() (*msg.Msg, bool) {
 	for {
 		select {
 		case m := <-d.ch:
-			return m, d.received(m), true
+			d.received()
+			return m, true
 		default:
 		}
 		// The channel is empty. A sender may be between setting
 		// slowOverflow and moving its message in; do the move ourselves.
 		if d.flags.Load()&slowOverflow == 0 {
-			return nil, false, false
+			return nil, false
 		}
 		d.mu.Lock()
 		d.refillLocked()
@@ -342,22 +307,6 @@ func (e *End) SendOr(ctx context.Context, m *msg.Msg, abort <-chan struct{}) err
 	return e.enqueue(ctx, m, abort)
 }
 
-// SendSubscription is Send for a ZMTP SUBSCRIBE/CANCEL command the session
-// reader surfaces as a 0x01/0x00-prefixed message; the receiver's RecvOr
-// reports it as such, so SUB/XSUB can tell it apart from ordinary data.
-// m must be a fresh message, not queued anywhere else.
-func (e *End) SendSubscription(ctx context.Context, m *msg.Msg) error {
-	if m == nil {
-		return ErrNilMessage
-	}
-	e.send.markSub(m)
-	err := e.enqueue(ctx, m, nil)
-	if err != nil {
-		e.send.unmarkSub(m)
-	}
-	return err
-}
-
 func (e *End) enqueue(ctx context.Context, m *msg.Msg, abort <-chan struct{}) error {
 	if m == nil {
 		return ErrNilMessage
@@ -386,25 +335,23 @@ func (e *End) enqueue(ctx context.Context, m *msg.Msg, abort <-chan struct{}) er
 // before a close stay receivable, so on a closed pipe a false result means
 // the queue is exhausted.
 func (e *End) TryRecv() (*msg.Msg, bool) {
-	m, _, ok := e.recv.tryRecv()
-	return m, ok
+	return e.recv.tryRecv()
 }
 
 // Recv returns the next message from the peer, blocking until one arrives.
 // Once either end is closed it hands out whatever is still queued and then
 // returns io.EOF; it returns ctx.Err() if ctx ends first.
 func (e *End) Recv(ctx context.Context) (*msg.Msg, error) {
-	m, _, err := e.RecvOr(ctx, nil)
-	return m, err
+	return e.RecvOr(ctx, nil)
 }
 
-// RecvOr is Recv that also gives up with ErrAborted when abort fires. sub
-// reports that m is a subscription command sent with SendSubscription.
-func (e *End) RecvOr(ctx context.Context, abort <-chan struct{}) (m *msg.Msg, sub bool, err error) {
+// RecvOr is Recv that also gives up with ErrAborted when abort fires.
+func (e *End) RecvOr(ctx context.Context, abort <-chan struct{}) (*msg.Msg, error) {
 	d := e.recv
 	select {
 	case m := <-d.ch:
-		return m, d.received(m), nil
+		d.received()
+		return m, nil
 	default:
 	}
 	return e.recvSlow(ctx, abort)
@@ -412,23 +359,24 @@ func (e *End) RecvOr(ctx context.Context, abort <-chan struct{}) (m *msg.Msg, su
 
 // recvSlow is RecvOr once the channel was found empty: it refills from
 // overflow if a sender left something there, then blocks.
-func (e *End) recvSlow(ctx context.Context, abort <-chan struct{}) (*msg.Msg, bool, error) {
+func (e *End) recvSlow(ctx context.Context, abort <-chan struct{}) (*msg.Msg, error) {
 	d := e.recv
-	if m, sub, ok := d.tryRecv(); ok {
-		return m, sub, nil
+	if m, ok := d.tryRecv(); ok {
+		return m, nil
 	}
 	select {
 	case m := <-d.ch:
-		return m, d.received(m), nil
+		d.received()
+		return m, nil
 	case <-abort:
-		return nil, false, ErrAborted
+		return nil, ErrAborted
 	case <-e.shared.either:
-		if m, sub, ok := d.tryRecv(); ok {
-			return m, sub, nil
+		if m, ok := d.tryRecv(); ok {
+			return m, nil
 		}
-		return nil, false, io.EOF
+		return nil, io.EOF
 	case <-ctx.Done():
-		return nil, false, ctx.Err()
+		return nil, ctx.Err()
 	}
 }
 

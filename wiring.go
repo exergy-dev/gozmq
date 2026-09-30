@@ -39,7 +39,9 @@ func (s *Socket) buildSession(conn transport.Conn, role security.Role) (session.
 		RecvHWM:           s.cfg.recvHWM,
 		MaxMessageSize:    s.cfg.maxMessageSize,
 		RecvBufferPool:    s.cfg.recvBufferPool,
-		Logger:            s.cfg.logger,
+		// Only a publisher consumes its peers' subscriptions.
+		SubscriptionCommands: s.socketType == Pub || s.socketType == XPub,
+		Logger:               s.cfg.logger,
 	}), nil
 }
 

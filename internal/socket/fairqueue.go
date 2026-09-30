@@ -104,13 +104,10 @@ type fairForwarder struct {
 // fairItem pairs an inbound message with the pipe that produced it. ROUTER
 // and REP need the source pipe to prepend the peer identity envelope; PULL
 // and DEALER only want the message, so FairQueue exposes both shapes
-// (Recv returns the message only; RecvWithSource returns both). sub marks a
-// genuine subscription command from the session reader, which only SUB and
-// XSUB look at (see SubEngine.Recv).
+// (Recv returns the message only; RecvWithSource returns both).
 type fairItem struct {
-	m   *msg.Msg
-	p   *pipe.End
-	sub bool
+	m *msg.Msg
+	p *pipe.End
 }
 
 // NewFairQueue returns an empty FairQueue.
@@ -366,11 +363,11 @@ func (fq *FairQueue) recvDirect(ctx context.Context, ds *directSnapshot) (fairIt
 	if fq.direct.Load() != ds {
 		return fairItem{}, true, nil
 	}
-	m, sub, err := ds.pipe.RecvOr(ctx, ds.wake)
+	m, err := ds.pipe.RecvOr(ctx, ds.wake)
 	switch {
 	case err == nil:
 		fq.recv.Add(1)
-		return fairItem{m: m, p: ds.pipe, sub: sub}, false, nil
+		return fairItem{m: m, p: ds.pipe}, false, nil
 	case errors.Is(err, pipe.ErrAborted):
 		return fairItem{}, true, nil
 	case errors.Is(err, io.EOF):
@@ -428,7 +425,7 @@ func (fq *FairQueue) forward(p *pipe.End, fwd *fairForwarder) {
 		fq.mu.Unlock()
 	}()
 	for {
-		m, sub, err := p.RecvOr(fwd.ctx, nil)
+		m, err := p.RecvOr(fwd.ctx, nil)
 		if err != nil {
 			// ctx cancelled, pipe EOF, or other terminal error —
 			// forwarder is done.
@@ -437,7 +434,7 @@ func (fq *FairQueue) forward(p *pipe.End, fwd *fairForwarder) {
 		// Hand off the message; race against stop and close so we never
 		// block forever holding a message no one will consume.
 		select {
-		case fq.inbound <- fairItem{m: m, p: p, sub: sub}:
+		case fq.inbound <- fairItem{m: m, p: p}:
 			fq.recv.Add(1)
 			// Re-arm the Poller-facing read-ready gate now that the item
 			// is actually consumable from fq.inbound.

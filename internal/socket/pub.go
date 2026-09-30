@@ -31,13 +31,10 @@ const (
 // message (single frame, first byte 0x00 or 0x01). The second return is
 // the parsed (subscribe, prefix) pair when the first is true.
 //
-// This content-sniffing classifier coexists with the out-of-band flag the
-// session reader attaches to genuine SUBSCRIBE/CANCEL commands on the pipe
-// (pipe.End.SendSubscription). They serve different sides: the PUB/XPUB receive path (and
-// XSUB's app-send path) must use content sniffing because legacy ZMTP 3.0
-// peers send subscriptions as plain 0x00/0x01 data frames that never carry
-// the flag; the SUB/XSUB receive path uses the flag instead, so ordinary
-// data beginning with 0x00/0x01 is never misclassified as a subscription.
+// Only the PUB/XPUB receive path and XSUB's app-send path classify by
+// content: legacy ZMTP 3.0 peers send subscriptions as plain 0x00/0x01 data
+// frames, and the session turns ZMTP 3.1 SUBSCRIBE/CANCEL commands into the
+// same shape for PUB/XPUB only. SUB/XSUB never sniff their inbound data.
 func isSubscriptionMsg(m *msg.Msg) (bool, bool, []byte) {
 	if m == nil || m.NumFrames() != 1 {
 		return false, false, nil
@@ -213,7 +210,7 @@ func (e *pubEngine) runPeerReader(peer *pubPeer) {
 	// abort, so stop is re-checked per message: a peer flooding commands
 	// must not keep DetachPipe waiting.
 	for {
-		m, _, err := peer.pipe.RecvOr(context.Background(), peer.stop)
+		m, err := peer.pipe.RecvOr(context.Background(), peer.stop)
 		if err != nil {
 			return
 		}
