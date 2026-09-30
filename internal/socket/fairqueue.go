@@ -206,43 +206,64 @@ func (fq *FairQueue) Attach(p iface.Pipe) error {
 	// Transitioning 1→N: promote the existing directPipe to a
 	// forwarder-backed entry before adding the new one.
 	if ds != nil {
-		fq.direct.Store(nil)
-		close(ds.wake)
-		// Quiesce in-flight direct receivers before starting the promoted
-		// pipe's forwarder: a receiver that loaded the old snapshot just
-		// before the swap could otherwise race the forwarder on the
-		// pipe's recv channel and invert per-peer FIFO order. wake is
-		// closed above, so parked receivers exit promptly; recvDirect
-		// re-checks the snapshot after publishing its activity, so no
-		// new read can start with the stale snapshot.
-		for fq.directActive.Load() != 0 {
-			runtime.Gosched()
-		}
-		old := iface.Pipe(ds.pipe)
-		ctx, cancel := context.WithCancel(context.Background())
-		fwd := &fairForwarder{ctx: ctx, cancel: cancel}
-		fq.pipes[old] = fwd
-		fq.wg.Add(1)
-		go fq.forward(old, fwd)
+		fq.demoteDirectLocked(ds)
+		fq.startForwarderLocked(iface.Pipe(ds.pipe))
 	}
+	fq.startForwarderLocked(p)
+	return nil
+}
 
-	// Start a forwarder for the new pipe.
+// demoteDirectLocked leaves direct mode: it swaps the snapshot out, wakes
+// parked direct receivers, and waits for in-flight ones to finish. The
+// quiesce matters whenever a forwarder is about to take over ds.pipe: a
+// receiver that loaded the old snapshot just before the swap could
+// otherwise race the forwarder on the pipe's recv channel and invert
+// per-peer FIFO order. recvDirect re-checks the snapshot after publishing
+// its activity, so no new read can start with the stale snapshot. Caller
+// must hold fq.mu.
+func (fq *FairQueue) demoteDirectLocked(ds *directSnapshot) {
+	fq.direct.Store(nil)
+	close(ds.wake)
+	for fq.directActive.Load() != 0 {
+		runtime.Gosched()
+	}
+}
+
+// startForwarderLocked registers p in fq.pipes and starts its forwarder.
+// Caller must hold fq.mu.
+func (fq *FairQueue) startForwarderLocked(p iface.Pipe) {
 	ctx, cancel := context.WithCancel(context.Background())
 	fwd := &fairForwarder{ctx: ctx, cancel: cancel}
 	fq.pipes[p] = fwd
 	fq.wg.Add(1)
 	go fq.forward(p, fwd)
-	return nil
 }
 
-// Detach removes p and signals its forwarder to stop promptly.
+// Detach removes p and signals its forwarder to stop promptly. A pipe
+// that has already closed is instead left to drain its buffered messages
+// to EOF: the peer delivered them before leaving, and libzmq keeps them
+// receivable. The draining forwarder stays registered in fq.pipes until it
+// exits, which keeps a pipe attached meanwhile out of direct mode (direct
+// receivers never read fq.inbound, so they would strand the drained
+// messages).
 func (fq *FairQueue) Detach(p iface.Pipe) error {
 	fq.mu.Lock()
+	defer fq.mu.Unlock()
+	closed := false
+	select {
+	case <-p.Closed():
+		closed = true
+	default:
+	}
 	ds := fq.direct.Load()
 	if ds != nil && iface.Pipe(ds.pipe) == p {
-		fq.direct.Store(nil)
-		fq.mu.Unlock()
-		close(ds.wake)
+		if closed {
+			fq.demoteDirectLocked(ds)
+			fq.startForwarderLocked(p)
+		} else {
+			fq.direct.Store(nil)
+			close(ds.wake)
+		}
 		select {
 		case fq.recvNotify <- struct{}{}:
 		default:
@@ -250,18 +271,10 @@ func (fq *FairQueue) Detach(p iface.Pipe) error {
 		return nil
 	}
 	fwd, ok := fq.pipes[p]
-	if !ok {
-		fq.mu.Unlock()
+	if !ok || closed {
 		return nil
 	}
 	delete(fq.pipes, p)
-	fq.mu.Unlock()
-	select {
-	case <-p.Closed():
-		// Let a closed pipe drain any already-buffered messages to EOF.
-		return nil
-	default:
-	}
 	fwd.cancel()
 	return nil
 }

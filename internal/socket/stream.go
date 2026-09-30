@@ -3,7 +3,9 @@ package socket
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 
 	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
@@ -61,7 +63,8 @@ func NewStreamEngine() iface.SocketEngine {
 
 // Send routes by the leading identity frame and writes the concatenation of the
 // remaining frames as a single raw-bytes frame to the peer pipe. STREAM is
-// always mandatory: an empty or unknown identity returns ErrRouteUnknown.
+// always mandatory: an empty or unknown identity, or a peer whose pipe closed
+// before it was detached, returns ErrRouteUnknown.
 func (e *streamEngine) Send(ctx context.Context, m *msg.Msg) error {
 	if m == nil || m.NumFrames() == 0 {
 		return fmt.Errorf("stream send: missing identity frame: %w", zmqerr.ErrRouteUnknown)
@@ -87,6 +90,9 @@ func (e *streamEngine) Send(ctx context.Context, m *msg.Msg) error {
 	// still handed down as a well-formed Msg for the writer to act on.
 	out := msg.FromBytes(bytes.Join(body, nil))
 	if err := p.Send(ctx, out); err != nil {
+		if errors.Is(err, io.ErrClosedPipe) {
+			return fmt.Errorf("stream send: identity %q: peer disconnected: %w", id, zmqerr.ErrRouteUnknown)
+		}
 		return err
 	}
 	e.sent.Add(1)

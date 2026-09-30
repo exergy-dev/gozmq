@@ -14,6 +14,12 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
 - `typed.Receiver.Recv` and `typed.Subscriber.Recv` decode errors now wrap
   `typed.ErrDecode` (still `ErrFrameCount` where applicable); message text
   changed from "typed: unmarshal: …" to "typed: decode failed: …".
+- XPUB subscription processing never blocks on the application; pending
+  events are queued without a fixed bound (previously a 16-slot buffer).
+- ROUTER/STREAM `Send` to a peer that just disconnected: ROUTER without
+  `WithRouterMandatory` silently drops (counted in `Metrics.Dropped`); ROUTER
+  with it and STREAM return an error wrapping `ErrRouteUnknown` instead of a
+  raw `io.ErrClosedPipe`.
 
 ### Fixed
 
@@ -47,6 +53,14 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
   `Register`/`Unregister` and a starting `Run`.
 - STREAM sockets no longer pin a 32 KiB buffer per received chunk (small
   segments at the HWM could hold tens of MiB per peer).
+- PULL/DEALER/ROUTER/REP (fair-queued sockets): messages already received from
+  a peer that disconnects are no longer discarded when it was the only peer.
+- ROUTER/STREAM: auto-generated peer identities can no longer collide (and
+  misroute replies); they are now a per-socket counter with a random start.
+- XPUB: a subscriber that disconnects before the application reads its
+  SUBSCRIBE now yields the matching CANCEL and no longer suppresses later
+  SUBSCRIBEs for that prefix; a peer can no longer CANCEL a prefix it never
+  subscribed to.
 
 ## [1.0.0] - 2026-08-10
 

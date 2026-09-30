@@ -77,7 +77,7 @@ type pubPeer struct {
 // and a small reader goroutine per peer feeds those commands into that
 // peer's SubTree. PUB silently drops all other inbound traffic (peers
 // have no data to send to a PUB); XPUB (see xpub.go) additionally
-// surfaces subscription events to the application via Recv.
+// surfaces subscription events to the application via its onSub hook.
 //
 // Send is non-blocking per-peer best-effort: if a peer's pipe is at HWM
 // the message is dropped for that peer and fan-out continues to others.
@@ -98,15 +98,14 @@ type pubEngine struct {
 	// snapshot is always safe to iterate. nil after Close — Send uses
 	// that as its closed check.
 	snap atomic.Pointer[[]*pubPeer]
-	// surfaceSubs controls whether subscription commands are surfaced to
-	// the application via Recv. PUB=false, XPUB=true. XPUB embeds a PUB
-	// engine via newPubEngineBase so we share the fanout + subscription
-	// bookkeeping.
-	surfaceSubs bool
-	subInbound  chan subInboundItem // XPUB-only; nil for PUB
-	closeCh     chan struct{}
-	recvGate    readyGate
-	sendGate    readyGate
+	// onSub, when set, receives every subscription command from peer p
+	// right after it has been applied to p's SubTree, and takes ownership
+	// of m. It runs on p's reader goroutine, never after DetachPipe(p) or
+	// Close returns. XPUB installs it to maintain its refcounts and event
+	// queue; nil for PUB, which recycles the command.
+	onSub    func(p iface.Pipe, subscribe bool, prefix []byte, m *msg.Msg)
+	closeCh  chan struct{}
+	sendGate readyGate
 
 	// Metrics counters (embedded). sent increments once per Send call that
 	// has at least one frame; dropped increments per (message, peer) pair
@@ -132,36 +131,19 @@ func subscriptionFrame(subscribe bool, prefix []byte) []byte {
 	return buf
 }
 
-// subInboundItem pairs a subscription message with the pipe that produced
-// it so XPUB's dedup layer can track per-peer subscriptions and clean up
-// on DetachPipe.
-type subInboundItem struct {
-	m    *msg.Msg
-	pipe iface.Pipe
-}
-
 // NewPubEngine returns a new PUB socket engine.
 func NewPubEngine() iface.SocketEngine {
-	return newPubEngineBase(false)
+	return newPubEngineBase(nil)
 }
 
-// newPubEngineBase is the shared constructor used by PUB (surface=false)
-// and XPUB (surface=true).
-func newPubEngineBase(surface bool) *pubEngine {
+// newPubEngineBase is the shared constructor used by PUB (onSub nil) and
+// XPUB.
+func newPubEngineBase(onSub func(iface.Pipe, bool, []byte, *msg.Msg)) *pubEngine {
 	e := &pubEngine{
-		peers:       make(map[iface.Pipe]*pubPeer),
-		surfaceSubs: surface,
-		closeCh:     make(chan struct{}),
-		recvGate:    newReadyGate(),
-		sendGate:    newReadyGate(),
-	}
-	if surface {
-		// Small handoff buffer. HWM-style backpressure on the
-		// application isn't expressed here — XPUB applications are
-		// expected to drain promptly. A bigger buffer doesn't help
-		// because the synthetic messages are rare relative to data
-		// traffic.
-		e.subInbound = make(chan subInboundItem, 16)
+		peers:    make(map[iface.Pipe]*pubPeer),
+		onSub:    onSub,
+		closeCh:  make(chan struct{}),
+		sendGate: newReadyGate(),
 	}
 	e.snap.Store(&[]*pubPeer{})
 	return e
@@ -218,79 +200,69 @@ func (e *pubEngine) DetachPipe(p iface.Pipe) error {
 	return nil
 }
 
-// runPeerReader consumes messages from a single peer pipe. For PUB we
-// silently apply any synthetic subscription messages to the peer's
-// SubTree and drop everything else (PUB doesn't read data from peers).
-// For XPUB we additionally forward subscription messages to the
-// application via subInbound.
+// runPeerReader consumes messages from a single peer pipe, applying
+// subscription commands to the peer's SubTree and dropping everything
+// else (PUB doesn't read data from peers). It never blocks on the
+// application: XPUB's onSub hook only queues. Once the pipe closes, the
+// commands the peer sent before leaving are still applied, so XPUB sees
+// every SUBSCRIBE its DetachPipe will later CANCEL.
 func (e *pubEngine) runPeerReader(peer *pubPeer) {
 	defer close(peer.done)
-	// One watcher for the whole peer lifetime: it cancels the per-Recv ctx as
-	// soon as the peer stops, the engine closes, or this reader exits — so a
-	// blocked Pipe.Recv unblocks and neither goroutine leaks.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	readerDone := make(chan struct{})
-	defer close(readerDone)
-	go func() {
-		select {
-		case <-peer.stop:
-		case <-e.closeCh:
-		case <-readerDone:
-		}
-		cancel()
-	}()
+	cp := asChanPipe(peer.pipe)
+	recvCh := cp.RecvCh()
 	for {
-		m, err := peer.pipe.Recv(ctx)
-		if err != nil {
-			return
-		}
-		isSub, subscribe, prefix := isSubscriptionMsg(m)
-		if !isSub {
-			// PUB/XPUB ignore non-subscription inbound traffic. Recycle
-			// eagerly instead of leaving pooled buffers to the finalizer.
-			msg.Recycle(m)
-			continue
-		}
-		if subscribe {
-			peer.tree.Add(prefix)
-		} else {
-			peer.tree.Remove(prefix)
-		}
-		if e.surfaceSubs {
-			// Forward the subscription event to the application. Drop
-			// on close; drop silently on overflow rather than block
-			// the peer reader indefinitely.
-			select {
-			case e.subInbound <- subInboundItem{m: m, pipe: peer.pipe}:
-				e.recvGate.arm()
-			case <-peer.stop:
-				msg.Recycle(m)
-				return
-			case <-e.closeCh:
-				msg.Recycle(m)
-				return
+		select {
+		case m := <-recvCh:
+			e.applyPeerMsg(peer, m)
+		case <-cp.Closed():
+			// Draining a closed pipe is finite: Recv returns what is
+			// buffered, then EOF.
+			for {
+				m, err := peer.pipe.Recv(context.Background())
+				if err != nil {
+					return
+				}
+				e.applyPeerMsg(peer, m)
 			}
+		case <-peer.stop:
+			return
+		case <-e.closeCh:
+			return
 		}
 	}
 }
 
-func (e *pubEngine) ReadyRecv() <-chan struct{} {
-	if !e.surfaceSubs {
-		return nil
+// applyPeerMsg applies one inbound message from peer and takes ownership
+// of it.
+func (e *pubEngine) applyPeerMsg(peer *pubPeer, m *msg.Msg) {
+	isSub, subscribe, prefix := isSubscriptionMsg(m)
+	if !isSub {
+		// PUB/XPUB ignore non-subscription inbound traffic. Recycle
+		// eagerly instead of leaving pooled buffers to the finalizer.
+		msg.Recycle(m)
+		return
 	}
-	return e.recvGate.signal(e.CanRecvNow())
+	if subscribe {
+		peer.tree.Add(prefix)
+	} else {
+		peer.tree.Remove(prefix)
+	}
+	if e.onSub == nil {
+		msg.Recycle(m)
+		return
+	}
+	e.onSub(peer.pipe, subscribe, prefix, m)
 }
+
+// ReadyRecv: PUB has no recv direction. XPUB provides its own.
+func (e *pubEngine) ReadyRecv() <-chan struct{} { return nil }
 
 func (e *pubEngine) ReadyWrite() <-chan struct{} {
 	return e.sendGate.signal(e.CanSendNow())
 }
 
-func (e *pubEngine) CanRecvNow() bool {
-	// surfaceSubs ⇒ subInbound non-nil (both set together at construction);
-	// len(nil chan) is 0, so no nil-check is needed.
-	return e.surfaceSubs && len(e.subInbound) > 0
-}
+// CanRecvNow: PUB has no recv direction. XPUB provides its own.
+func (e *pubEngine) CanRecvNow() bool { return false }
 
 func (e *pubEngine) CanSendNow() bool {
 	e.mu.Lock()
@@ -379,19 +351,13 @@ func (e *pubEngine) sendToPeer(p iface.Pipe, m *msg.Msg) {
 	msg.Recycle(m)
 }
 
-// Metrics reports the PUB engine's counters. QueueDepth samples the
-// XPUB subInbound buffer (zero for plain PUB, since subInbound is nil
-// and the lookup short-circuits).
+// Metrics reports the PUB engine's counters. PUB has no inbound queue,
+// so QueueDepth is always zero.
 func (e *pubEngine) Metrics() iface.SocketMetrics {
-	var depth uint64
-	if e.subInbound != nil {
-		depth = uint64(len(e.subInbound))
-	}
-	return e.snapshot(e.dropped.Load(), depth)
+	return e.snapshot(e.dropped.Load(), 0)
 }
 
-// Recv: PUB is send-only → FSM violation. XPUB never delegates here —
-// xpubEngine.Recv consumes subInbound directly (see xpub.go).
+// Recv: PUB is send-only → FSM violation. XPUB never delegates here.
 func (e *pubEngine) Recv(context.Context) (*msg.Msg, error) {
 	return nil, fmt.Errorf("pub recv: %w", zmqerr.ErrFSMViolation)
 }

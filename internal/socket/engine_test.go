@@ -331,6 +331,47 @@ func TestFairQueue_DetachStopsForwarderOnPipeClose(t *testing.T) {
 	closePipes(a, b)
 }
 
+// TestFairQueue_DetachClosedDirectPipeDrains: detaching the sole (direct
+// mode) pipe after its peer closed keeps the messages the peer already
+// delivered receivable, in order, even when another pipe attaches while
+// they are still buffered.
+func TestFairQueue_DetachClosedDirectPipeDrains(t *testing.T) {
+	t.Parallel()
+	fq := socket.NewFairQueue()
+	defer fq.Close()
+	ctx := testCtx(t)
+
+	a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(a, b)
+	require.NoError(t, fq.Attach(a), "attach")
+	const n = 5
+	for i := range n {
+		require.NoError(t, b.Send(ctx, msg.FromBytes([]byte{byte(i)})), "peer send %d", i)
+	}
+	require.NoError(t, b.Close())
+	require.NoError(t, fq.Detach(a), "detach")
+	require.NoError(t, a.Close()) // the owner releases its end after detach
+
+	c, d := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(c, d)
+	require.NoError(t, fq.Attach(c), "attach replacement")
+	require.NoError(t, d.Send(ctx, msg.FromBytes([]byte{0xff})), "replacement send")
+
+	var fromA []byte
+	gotC := false
+	for range n + 1 {
+		m, src, err := fq.RecvWithSource(ctx)
+		require.NoError(t, err)
+		if src == c {
+			gotC = true
+			continue
+		}
+		fromA = append(fromA, m.Frames()[0][0])
+	}
+	require.True(t, gotC, "replacement pipe message")
+	require.Equal(t, []byte{0, 1, 2, 3, 4}, fromA, "drained messages in order")
+}
+
 // ---------------------- shared sanity ----------------------
 
 func TestLoadBalancer_DetachAdvancesCursor(t *testing.T) {

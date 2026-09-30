@@ -187,6 +187,22 @@ func TestStream_AnonymousPeerGetsSynthesizedIdentity(t *testing.T) {
 	require.Equal(t, []byte("reply"), got.Bytes())
 }
 
+// TestStream_SendToVanishedPeer: sending to a peer whose pipe closed but
+// has not been detached yet reports ErrRouteUnknown, like any unknown
+// identity, rather than a raw pipe error.
+func TestStream_SendToVanishedPeer(t *testing.T) {
+	t.Parallel()
+	eng := socket.NewStreamEngine()
+	defer eng.Close()
+	engP, peer := pipe.NewPair(4, 4, pipe.PeerInfo{Identity: []byte("gone")}, pipe.PeerInfo{})
+	defer closePipes(engP, peer)
+	mustAttach(t, eng, engP)
+	require.NoError(t, peer.Close())
+
+	err := eng.Send(testCtx(t), msg.FromFrames([]byte("gone"), []byte("x")))
+	require.ErrorIs(t, err, zmqerr.ErrRouteUnknown)
+}
+
 // TestStream_CloseUnblocksRecv asserts that Close wakes a pending Recv.
 func TestStream_CloseUnblocksRecv(t *testing.T) {
 	t.Parallel()

@@ -3,6 +3,7 @@ package socket_test
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -193,6 +194,79 @@ func TestRouter_AnonymousPeerGetsSynthesizedIdentity(t *testing.T) {
 	require.NoError(t, err, "peer recv")
 	require.Equal(t, 1, got2.NumFrames())
 	require.Equal(t, "world", string(got2.Bytes()))
+}
+
+// TestRouter_SendToVanishedPeer: a peer whose pipe closed but has not been
+// detached yet is an unknown route, not a raw pipe error: a silent drop
+// without mandatory, ErrRouteUnknown with it.
+func TestRouter_SendToVanishedPeer(t *testing.T) {
+	t.Parallel()
+	for _, mandatory := range []bool{false, true} {
+		t.Run(fmt.Sprintf("mandatory=%v", mandatory), func(t *testing.T) {
+			t.Parallel()
+			eng := socket.NewRouterEngine(mandatory)
+			defer eng.Close()
+			engineEnds, peerEnds := makeRouterPeers([][]byte{[]byte("gone")}, 4)
+			defer closePipes(engineEnds...)
+			mustAttach(t, eng, engineEnds...)
+			require.NoError(t, peerEnds[0].Close())
+
+			err := eng.Send(testCtx(t), msg.FromFrames([]byte("gone"), []byte("x")))
+			if mandatory {
+				require.ErrorIs(t, err, zmqerr.ErrRouteUnknown)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, uint64(1), eng.Metrics().Dropped)
+		})
+	}
+}
+
+// TestRouter_SynthesizedIdentitiesAreDistinct: every anonymous peer gets its
+// own routing identity, including when a named peer already holds the
+// zero-led identity the generator would produce next, so replies can never
+// be misrouted to another client.
+func TestRouter_SynthesizedIdentitiesAreDistinct(t *testing.T) {
+	t.Parallel()
+	eng := socket.NewRouterEngine(true)
+	defer eng.Close()
+	ctx := testCtx(t)
+
+	attach := func(info pipe.PeerInfo) iface.Pipe {
+		a, b := pipe.NewPair(4, 4, info, pipe.PeerInfo{})
+		t.Cleanup(func() { closePipes(a, b) })
+		mustAttach(t, eng, a)
+		return b
+	}
+	recvID := func() string {
+		got, err := eng.Recv(ctx)
+		require.NoError(t, err)
+		return string(got.Frames()[0])
+	}
+
+	// Learn where the generator is, then squat on its next value.
+	first := attach(pipe.PeerInfo{})
+	require.NoError(t, first.Send(ctx, msg.FromBytes([]byte("first"))))
+	firstID := []byte(recvID())
+	require.Len(t, firstID, 5)
+	squatter := make([]byte, 5)
+	binary.BigEndian.PutUint32(squatter[1:], binary.BigEndian.Uint32(firstID[1:])+1)
+
+	const n = 200
+	peers := []iface.Pipe{attach(pipe.PeerInfo{Identity: squatter})}
+	for range n {
+		peers = append(peers, attach(pipe.PeerInfo{}))
+	}
+	for i, b := range peers {
+		require.NoError(t, b.Send(ctx, msg.FromBytes([]byte{byte(i)})), "peer %d send", i)
+	}
+	seen := map[string]bool{string(firstID): true}
+	for range n + 1 {
+		id := recvID()
+		require.False(t, seen[id], "identity %x assigned twice", id)
+		seen[id] = true
+	}
+	require.True(t, seen[string(squatter)], "named peer keeps its identity")
 }
 
 // TestRouter_IdentityStableUnderDetachChurn stresses the Recv-vs-Detach

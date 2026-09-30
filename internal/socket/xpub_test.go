@@ -277,3 +277,78 @@ func TestXPub_DetachEmitsNoCancelWhileOtherSubscribersRemain(t *testing.T) {
 	require.NoError(t, err, "recv cancel")
 	require.Equal(t, socket.UnsubscribeByte, m.Frames()[0][0])
 }
+
+// requireXPubEvent receives the next subscription event from eng and checks
+// its kind and prefix.
+func requireXPubEvent(ctx context.Context, t *testing.T, eng interface {
+	Recv(context.Context) (*msg.Msg, error)
+}, subscribe bool, prefix string) {
+	t.Helper()
+	m, err := eng.Recv(ctx)
+	require.NoError(t, err)
+	body := m.Frames()[0]
+	want := socket.UnsubscribeByte
+	if subscribe {
+		want = socket.SubscribeByte
+	}
+	require.Equal(t, want, body[0], "event kind for %q", body[1:])
+	require.Equal(t, prefix, string(body[1:]))
+}
+
+// TestXPub_DetachBeforeRecvSettlesRefcounts: a peer that subscribes and
+// detaches before the application reads the SUBSCRIBE still gets its
+// CANCEL synthesized, and leaves no stale refcount that would suppress a
+// later subscriber's SUBSCRIBE.
+func TestXPub_DetachBeforeRecvSettlesRefcounts(t *testing.T) {
+	t.Parallel()
+	eng := socket.NewXPubEngineV(false)
+	defer eng.Close()
+	ctx := testCtx(t)
+
+	a1, b1 := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(a1, b1)
+	mustAttach(t, eng, a1)
+	require.NoError(t, b1.Send(ctx, subscribeMsg(true, []byte("A"))))
+	poll := eng.(socket.Pollable)
+	require.Eventually(t, poll.CanRecvNow, 2*time.Second, time.Millisecond, "SUBSCRIBE queued")
+	require.NoError(t, eng.DetachPipe(a1))
+
+	requireXPubEvent(ctx, t, eng, true, "A")
+	requireXPubEvent(ctx, t, eng, false, "A")
+
+	a2, b2 := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(a2, b2)
+	mustAttach(t, eng, a2)
+	require.NoError(t, b2.Send(ctx, subscribeMsg(true, []byte("A"))))
+	requireXPubEvent(ctx, t, eng, true, "A")
+}
+
+// TestXPub_ForeignCancelIgnored: a CANCEL for a prefix the sending peer never
+// subscribed to neither surfaces nor releases another peer's subscription.
+func TestXPub_ForeignCancelIgnored(t *testing.T) {
+	t.Parallel()
+	eng := socket.NewXPubEngineV(false)
+	defer eng.Close()
+	ctx := testCtx(t)
+
+	good, goodPeer := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	evil, evilPeer := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(good, goodPeer, evil, evilPeer)
+	mustAttach(t, eng, good, evil)
+
+	require.NoError(t, goodPeer.Send(ctx, subscribeMsg(true, []byte("A"))))
+	requireXPubEvent(ctx, t, eng, true, "A")
+
+	require.NoError(t, evilPeer.Send(ctx, subscribeMsg(false, []byte("A"))))
+	require.NoError(t, evilPeer.Send(ctx, subscribeMsg(true, []byte("C"))))
+	// Per-peer FIFO: the foreign CANCEL was processed before SUBSCRIBE C.
+	requireXPubEvent(ctx, t, eng, true, "C")
+
+	// Only evil's own prefix is released when it leaves.
+	require.NoError(t, eng.DetachPipe(evil))
+	requireXPubEvent(ctx, t, eng, false, "C")
+
+	// good's CANCEL is the last one for A, so it surfaces.
+	require.NoError(t, goodPeer.Send(ctx, subscribeMsg(false, []byte("A"))))
+	requireXPubEvent(ctx, t, eng, false, "A")
+}

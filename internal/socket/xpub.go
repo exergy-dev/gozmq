@@ -23,188 +23,199 @@ import (
 // observe every subscriber churn event must opt in with verbose=true.
 // Mirrors the semantics of ZMQ_XPUB_VERBOSE on a classic libzmq XPUB.
 func NewXPubEngineV(verbose bool) iface.SocketEngine {
-	return &xpubEngine{
-		pub:      newPubEngineBase(true),
+	e := &xpubEngine{
 		verbose:  verbose,
+		recvGate: newReadyGate(),
+		notify:   make(chan struct{}, 1),
 		prefRefs: make(map[string]int),
 		peerSubs: make(map[iface.Pipe]map[string]int),
 	}
+	e.pub = newPubEngineBase(e.onSubscription)
+	return e
 }
 
 // xpubEngine decorates pubEngine with the XPUB-specific subscribe-event
-// surface. In verbose mode Recv passes every synthetic subscription
-// message straight through from the embedded pub engine's subInbound
-// channel. In dedup mode Recv keeps a refcount per prefix across all
-// attached peers and suppresses messages that do not change a prefix's
-// presence in the aggregate subscription set (i.e. only the first
-// subscriber to a prefix and the last unsubscriber surface).
+// surface. The embedded pub engine's peer readers apply each command to
+// the peer's SubTree (so outbound fanout filtering is always current) and
+// then hand it to onSubscription, which settles the refcounts and decides
+// right there whether the event surfaces. Surfacing events are queued for
+// Recv; the rest are recycled.
 //
-// The peer-side subscription tree (SubTree per peer) lives in the
-// embedded pubEngine and is updated unconditionally by the peer reader
-// regardless of verbose mode — that way outbound fanout filtering stays
-// correct even when the application never sees the SUBSCRIBE event.
+// Deciding at apply time, rather than when the application reads, keeps
+// the refcounts in step with the SubTrees: a peer that subscribes and
+// detaches before the application calls Recv is still accounted for, so
+// DetachPipe emits its CANCEL and later SUBSCRIBEs are not suppressed.
+//
+// The event queue is unbounded, as in libzmq (its XPUB pending queue):
+// subscription processing never waits on the application, so a slow
+// reader cannot stall a peer's reader or leave its SubTree stale. Memory
+// is bounded by the peers' command rate against the application's Recv
+// rate; in dedup mode only prefix-presence transitions are queued.
 type xpubEngine struct {
 	pub     *pubEngine
 	verbose bool
+	// recvGate is the Poller-facing PollIn signal, armed on every enqueue.
+	recvGate readyGate
+	// notify wakes a blocked Recv; cap 1, re-signalled by Recv while
+	// events remain so concurrent receivers all make progress.
+	notify chan struct{}
 
-	mu       sync.Mutex
-	prefRefs map[string]int                // prefix -> number of peers currently subscribed
-	peerSubs map[iface.Pipe]map[string]int // pipe -> prefix -> sub count from that pipe
+	mu sync.Mutex
+	// pending holds the surfaced events not yet returned by Recv.
+	pending  []*msg.Msg
+	prefRefs map[string]int                // prefix -> subscriptions across all peers
+	peerSubs map[iface.Pipe]map[string]int // pipe -> prefix -> subscriptions from that pipe
+}
+
+// onSubscription is the pub engine's onSub hook; see xpubEngine.
+//
+// A CANCEL only counts if the peer itself holds the prefix: otherwise a
+// peer could release another peer's subscription and surface a CANCEL
+// while that peer is still subscribed.
+func (e *xpubEngine) onSubscription(p iface.Pipe, subscribe bool, prefix []byte, m *msg.Msg) {
+	key := string(prefix)
+	e.mu.Lock()
+	surface := e.verbose
+	ps := e.peerSubs[p]
+	switch {
+	case subscribe:
+		if ps == nil {
+			ps = make(map[string]int)
+			e.peerSubs[p] = ps
+		}
+		ps[key]++
+		e.prefRefs[key]++
+		surface = surface || e.prefRefs[key] == 1
+	case ps[key] > 0:
+		if ps[key]--; ps[key] == 0 {
+			delete(ps, key)
+		}
+		if e.prefRefs[key]--; e.prefRefs[key] == 0 {
+			delete(e.prefRefs, key)
+			surface = true
+		}
+	}
+	if surface {
+		e.pending = append(e.pending, m)
+	}
+	e.mu.Unlock()
+	if surface {
+		e.signal()
+	} else {
+		msg.Recycle(m)
+	}
+}
+
+// signal wakes a blocked Recv and arms the Poller gate.
+func (e *xpubEngine) signal() {
+	select {
+	case e.notify <- struct{}{}:
+	default:
+	}
+	e.recvGate.arm()
 }
 
 // AttachPipe delegates to the embedded pub engine.
 func (e *xpubEngine) AttachPipe(p iface.Pipe) error { return e.pub.AttachPipe(p) }
 
-// DetachPipe removes a peer and decrements the aggregate prefRefs for
-// every prefix that peer was subscribed to, preventing a leak where
-// departed peers leave stale refcounts that suppress future surface events.
+// DetachPipe removes a peer and releases every subscription it still
+// held. For each prefix whose aggregate count hits zero, a CANCEL is
+// queued — matching libzmq, where a terminating pipe generates
+// unsubscribe events so upstream proxy stages (XSUB side) can drop dead
+// topics. These CANCELs surface in both verbose and dedup mode.
 //
-// For each prefix whose aggregate refcount hits zero, a synthetic CANCEL
-// (unsubscribe) message is pushed onto the subscription-event queue —
-// matching libzmq, where a terminating pipe generates unsubscribe events
-// so upstream proxy stages (XSUB side) can drop dead topics. The
-// synthesized events bypass the Recv dedup filter (their refcounts were
-// already settled here) and are delivered in both verbose and dedup mode.
+// The peer's reader is stopped first, so no command from p can be
+// applied after its subscriptions are released.
 func (e *xpubEngine) DetachPipe(p iface.Pipe) error {
+	err := e.pub.DetachPipe(p)
 	e.mu.Lock()
-	var cancels []string
-	if subs, ok := e.peerSubs[p]; ok {
-		for prefix, count := range subs {
-			e.prefRefs[prefix] -= count
-			if e.prefRefs[prefix] <= 0 {
-				delete(e.prefRefs, prefix)
-				cancels = append(cancels, prefix)
-			}
+	queued := false
+	for prefix, count := range e.peerSubs[p] {
+		if e.prefRefs[prefix] -= count; e.prefRefs[prefix] <= 0 {
+			delete(e.prefRefs, prefix)
+			cm := msg.FromBytes(subscriptionFrame(false, []byte(prefix)))
+			cm.MarkSubscription()
+			e.pending = append(e.pending, cm)
+			queued = true
 		}
-		delete(e.peerSubs, p)
 	}
+	delete(e.peerSubs, p)
 	e.mu.Unlock()
-
-	for _, prefix := range cancels {
-		cm := msg.FromBytes(subscriptionFrame(false, []byte(prefix)))
-		cm.MarkSubscription()
-		// Non-blocking: a detach driven by the session layer must not
-		// stall behind an application that is slow to drain Recv. On
-		// overflow (or close) the event is dropped, mirroring the peer
-		// reader's overflow policy.
-		select {
-		case e.pub.subInbound <- subInboundItem{m: cm}: // pipe == nil ⇒ synthesized
-			e.pub.recvGate.arm()
-		case <-e.pub.closeCh:
-		default:
-		}
+	if queued {
+		e.signal()
 	}
-	return e.pub.DetachPipe(p)
+	return err
 }
 
 // Send delegates to the embedded pub engine's fanout path.
 func (e *xpubEngine) Send(ctx context.Context, m *msg.Msg) error { return e.pub.Send(ctx, m) }
 
-// Close delegates to the embedded pub engine.
+// Close delegates to the embedded pub engine. Events already queued stay
+// receivable, as with other engines' close-time drain.
 func (e *xpubEngine) Close() error { return e.pub.Close() }
 
-// Metrics delegates to the embedded pub engine. The pub engine tracks
-// sent (per Send call), dropped (per HWM-rejected peer), and recv (per
-// surfaced subscription event consumed by this engine's Recv below).
-func (e *xpubEngine) Metrics() iface.SocketMetrics { return e.pub.Metrics() }
+// Metrics reports the embedded pub engine's counters (sent per Send call,
+// dropped per HWM-rejected peer, recv per event returned by Recv) with the
+// event queue length as QueueDepth.
+func (e *xpubEngine) Metrics() iface.SocketMetrics {
+	e.mu.Lock()
+	depth := uint64(len(e.pending))
+	e.mu.Unlock()
+	return e.pub.snapshot(e.pub.dropped.Load(), depth)
+}
 
-func (e *xpubEngine) ReadyRecv() <-chan struct{}  { return e.pub.ReadyRecv() }
+func (e *xpubEngine) ReadyRecv() <-chan struct{}  { return e.recvGate.signal(e.CanRecvNow()) }
 func (e *xpubEngine) ReadyWrite() <-chan struct{} { return e.pub.ReadyWrite() }
-func (e *xpubEngine) CanRecvNow() bool            { return e.pub.CanRecvNow() }
 func (e *xpubEngine) CanSendNow() bool            { return e.pub.CanSendNow() }
+
+func (e *xpubEngine) CanRecvNow() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.pending) > 0
+}
 
 var _ Pollable = (*xpubEngine)(nil)
 
-// Recv delivers the next SUBSCRIBE/CANCEL event to the application.
-//
-// Verbose mode: forward every synthetic subscription message the pub
-// engine emits. Dedup mode: only forward the first SUBSCRIBE and last
-// CANCEL for each distinct prefix across the union of attached peers.
-// The filter spins internally until a surfaced event is produced or the
-// engine closes — so a caller that blocks on Recv during a burst of
-// duplicate SUBSCRIBEs sees at most one event per prefix transition.
+// Recv returns the next queued SUBSCRIBE/CANCEL event. Which events are
+// queued (all, or only prefix-presence transitions) was decided when the
+// command was applied; see onSubscription.
 func (e *xpubEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 	for {
-		// Read directly from the pub engine's internal sub channel.
-		// We share the package, so this is legal and lets us interpose
-		// a dedup filter without threading a new hook through pub.go.
-		var item subInboundItem
+		if m, ok := e.pop(); ok {
+			return m, nil
+		}
 		select {
-		case item = <-e.pub.subInbound:
+		case <-e.notify:
 		case <-e.pub.closeCh:
-			select {
-			case item = <-e.pub.subInbound:
-			default:
-				return nil, fmt.Errorf("xpub recv: %w", zmqerr.ErrSocketClosed)
+			if m, ok := e.pop(); ok {
+				return m, nil
 			}
+			return nil, fmt.Errorf("xpub recv: %w", zmqerr.ErrSocketClosed)
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
-		if item.pipe == nil {
-			// Synthesized by DetachPipe: refcounts are already settled,
-			// so bypass the dedup filter and surface directly.
-			e.pub.recv.Add(1)
-			return item.m, nil
-		}
-		if e.verbose {
-			// Surface everything, but still maintain the aggregate and
-			// per-peer refcounts so DetachPipe can synthesize CANCELs for
-			// the prefixes a departing peer leaves orphaned.
-			e.shouldSurface(item.m, item.pipe)
-			e.pub.recv.Add(1)
-			return item.m, nil
-		}
-		if e.shouldSurface(item.m, item.pipe) {
-			e.pub.recv.Add(1)
-			return item.m, nil
-		}
-		// Silently dropped; loop to await the next event.
 	}
 }
 
-// shouldSurface applies libzmq-style XPUB dedup: maintain an aggregate
-// refcount per prefix, and only surface the first SUBSCRIBE for a given
-// prefix and the last CANCEL (when the refcount returns to zero). A
-// CANCEL for a prefix the engine has never surfaced is dropped.
-func (e *xpubEngine) shouldSurface(m *msg.Msg, p iface.Pipe) bool {
-	isSub, subscribe, prefix := isSubscriptionMsg(m)
-	if !isSub {
-		// Not a subscription command — pub.runPeerReader never pushes
-		// anything else onto subInbound, so this shouldn't happen in
-		// practice. Surface defensively: better than dropping on an
-		// unexpected shape.
-		return true
-	}
-	key := string(prefix)
+// pop dequeues the oldest pending event, re-signalling notify if more
+// remain so another blocked Recv can take the next one.
+func (e *xpubEngine) pop() (*msg.Msg, bool) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	if subscribe {
-		prev := e.prefRefs[key]
-		e.prefRefs[key] = prev + 1
-		// Track per-peer subscription for cleanup on DetachPipe.
-		if e.peerSubs[p] == nil {
-			e.peerSubs[p] = make(map[string]int)
-		}
-		e.peerSubs[p][key]++
-		return prev == 0
+	if len(e.pending) == 0 {
+		e.mu.Unlock()
+		return nil, false
 	}
-	// Cancel.
-	prev := e.prefRefs[key]
-	if prev <= 0 {
-		// Unknown prefix — drop the spurious cancel.
-		return false
-	}
-	// Track per-peer unsubscription.
-	if ps := e.peerSubs[p]; ps != nil {
-		ps[key]--
-		if ps[key] <= 0 {
-			delete(ps, key)
+	m := e.pending[0]
+	e.pending[0] = nil
+	e.pending = e.pending[1:]
+	more := len(e.pending) > 0
+	e.mu.Unlock()
+	if more {
+		select {
+		case e.notify <- struct{}{}:
+		default:
 		}
 	}
-	if prev == 1 {
-		delete(e.prefRefs, key)
-		return true
-	}
-	e.prefRefs[key] = prev - 1
-	return false
+	e.pub.recv.Add(1)
+	return m, true
 }

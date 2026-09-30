@@ -3,9 +3,9 @@ package socket
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"math/rand/v2"
 	"slices"
 	"sync"
 
@@ -21,7 +21,7 @@ import (
 // engines differ only in their own Send framing and Metrics, plus whether
 // the post-detach identity cache below is enabled (ROUTER yes, STREAM no).
 //
-// Concurrency: idOf/pipeOf/closed and the detach cache are guarded by mu;
+// Concurrency: idOf/pipeOf/nextID/closed and the detach cache are guarded by mu;
 // sent/recv are atomic.
 type identityRouter struct {
 	fq   *FairQueue
@@ -44,6 +44,11 @@ type identityRouter struct {
 	// over; there is no option to get the rejecting behaviour. See
 	// docs/COMPATIBILITY.md.
 	pipeOf map[string]iface.Pipe
+	// nextID is the counter behind synthesized identities. It starts at a
+	// random value, as in libzmq: routing always hands an identity over to
+	// the newest claimant, so predictable identities would let a peer
+	// advertising one hijack an anonymous peer's replies.
+	nextID uint32
 	// sendGate is the Poller-facing PollOut signal, level-armed while at
 	// least one peer is attached.
 	sendGate readyGate
@@ -70,6 +75,7 @@ func newIdentityRouter(name string, detachCache bool) identityRouter {
 		name:         name,
 		idOf:         make(map[iface.Pipe][]byte),
 		pipeOf:       make(map[string]iface.Pipe),
+		nextID:       rand.Uint32(),
 		sendGate:     newReadyGate(),
 		detachedIdOf: detached,
 	}
@@ -160,7 +166,7 @@ func (e *identityRouter) AttachPipe(p iface.Pipe) error {
 	}
 	id := p.PeerIdentity()
 	if len(id) == 0 {
-		id = synthesizedIdentity()
+		id = e.synthesizeIdentityLocked()
 	}
 	// Copy defensively so later mutation of the peer-supplied slice can't
 	// corrupt the routing table.
@@ -248,31 +254,20 @@ func (e *identityRouter) metrics(extraDropped uint64) iface.SocketMetrics {
 	return e.snapshot(extraDropped+e.fq.Dropped(), e.fq.QueueDepth())
 }
 
-// synthesizedIdentity returns a 5-byte routing identity for an anonymous peer:
-// byte 0 is 0 (the libzmq marker for an auto-assigned identity), the remaining
-// 4 bytes are uniformly random. Collisions are astronomically unlikely and are
-// handled harmlessly by pipeOf (last-writer-wins).
-func synthesizedIdentity() []byte {
-	out := make([]byte, 5)
-	// byte 0 stays zero; fill 1..4 with randomness.
-	if _, err := rand.Read(out[1:]); err != nil {
-		// crypto/rand failing is an operational catastrophe; fall back to a
-		// deterministic but still unique-per-process identity so we don't
-		// panic in a library context.
-		synthFallback(out[1:])
+// synthesizeIdentityLocked returns a fresh 5-byte routing identity for an
+// anonymous peer: byte 0 is 0 (the libzmq marker for an auto-assigned
+// identity), then a big-endian per-engine counter, as libzmq does. A
+// counter cannot collide the way random bytes can (pipeOf is
+// last-writer-wins, so a collision would silently misroute replies); the
+// in-use check only matters after 2^32 attaches or when a peer advertised
+// a zero-led identity itself. Caller must hold e.mu.
+func (e *identityRouter) synthesizeIdentityLocked() []byte {
+	for {
+		e.nextID++
+		id := make([]byte, 5)
+		binary.BigEndian.PutUint32(id[1:], e.nextID)
+		if _, taken := e.pipeOf[string(id)]; !taken {
+			return id
+		}
 	}
-	return out
-}
-
-var (
-	synthMu      sync.Mutex
-	synthCounter uint32
-)
-
-func synthFallback(dst []byte) {
-	synthMu.Lock()
-	synthCounter++
-	c := synthCounter
-	synthMu.Unlock()
-	binary.BigEndian.PutUint32(dst[:4], c)
 }

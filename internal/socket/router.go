@@ -2,7 +2,9 @@ package socket
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"slices"
 
 	"github.com/exergy-dev/gozmq/internal/iface"
@@ -19,8 +21,9 @@ import (
 // route-misses, and a bounded post-detach identity cache.
 //
 // Send: the outbound message's leading frame is the peer identity; the engine
-// routes the remaining frames to the matching pipe. An unknown identity is a
-// silent drop (mandatory=false, libzmq default) or returns ErrRouteUnknown
+// routes the remaining frames to the matching pipe. An unknown identity — or a
+// peer whose pipe closed before it was detached — is a silent drop
+// (mandatory=false, libzmq default) or returns ErrRouteUnknown
 // (mandatory=true).
 //
 // Recv is race-safe against concurrent Detach: a message enqueued by a pipe's
@@ -34,7 +37,7 @@ type routerEngine struct {
 
 	mandatory bool
 	// dropped (promoted from identityRouter.counters) counts non-mandatory
-	// routes with an unknown identity.
+	// routes with an unknown identity or a vanished peer.
 }
 
 // NewRouterEngine returns a new ROUTER socket engine. If mandatory is true,
@@ -83,14 +86,23 @@ func (e *routerEngine) Send(ctx context.Context, m *msg.Msg) error {
 	routed := msg.FromFramesOwned(slices.Clone(rest))
 	routed.TransferPool(m)
 	if err := p.Send(ctx, routed); err != nil {
-		return err
+		if !errors.Is(err, io.ErrClosedPipe) {
+			return err
+		}
+		// The peer vanished between lookup and send: same as unknown.
+		if mandatory {
+			return fmt.Errorf("router send: identity %q: peer disconnected: %w", id, zmqerr.ErrRouteUnknown)
+		}
+		e.dropped.Add(1)
+		return nil
 	}
 	e.sent.Add(1)
 	return nil
 }
 
 // Metrics reports the ROUTER counters. Dropped covers silent non-mandatory
-// route-misses plus the FairQueue's ctx-cancel/close drops.
+// route-misses (including vanished peers) plus the FairQueue's
+// ctx-cancel/close drops.
 func (e *routerEngine) Metrics() iface.SocketMetrics {
 	return e.metrics(e.dropped.Load())
 }
