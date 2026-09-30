@@ -441,9 +441,11 @@ func (fq *FairQueue) forward(p *pipe.End, fwd *fairForwarder) {
 			fq.readyR.arm()
 		case <-fwd.ctx.Done():
 			fq.dropped.Add(1)
+			m.Release()
 			return
 		case <-fq.closeCh:
 			fq.dropped.Add(1)
+			m.Release()
 			return
 		}
 	}

@@ -232,9 +232,11 @@ gozmq itself always emits well-formed ERROR commands.
 
 ### Message ownership
 
-`RecvMsg` may return a `*Msg` backed by pooled buffers. Call `Release` when
-done. This has no libzmq analogue (`zmq_msg_close` is closest) and is a
-performance concession; `RecvBytes` avoids the bookkeeping entirely for
+By default `RecvMsg` returns frames in ordinary Go memory; nothing needs
+releasing. With the opt-in `WithRecvBufferPool(true)`, frames over 4 KiB are
+backed by pooled buffers and must be given back with `Release` (frames valid
+until then). This has no libzmq analogue (`zmq_msg_close` is closest) and is
+a performance concession; `RecvBytes` avoids the bookkeeping entirely for
 single-frame payloads.
 
 ---

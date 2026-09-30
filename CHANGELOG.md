@@ -33,6 +33,13 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
 
 - `security.DecodeError` for recognising a peer's ERROR command in custom
   mechanisms.
+- `WithRecvBufferPool(enabled)`: frames over 4 KiB on NULL/PLAIN sessions are
+  received into a size-tiered buffer pool. The receiver must `Release`;
+  frames are valid until the last reference is released; `SendMsg` holds its
+  own reference, so forward-then-`Release` is safe; over-release panics;
+  there is no finalizer, and a forgotten `Release` is safe (the GC collects
+  the buffer). Rejected on STREAM sockets.
+- `msg.NewWithRelease`, `(*Msg).Lent`, `(*Msg).Derive`.
 
 ### Changed
 
@@ -75,6 +82,8 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
   goroutine per pipe direction; inproc linger completes on a signal instead
   of polling.
 - inproc Conn deadlines no longer start a goroutine per Read/Write.
+- `(*Msg).Release`/`Retain` are reference operations on lent (pooled)
+  messages and remain no-ops on plain ones. `Msg` grew from 48 to 64 bytes.
 
 ### Removed
 

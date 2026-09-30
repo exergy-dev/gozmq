@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/exergy-dev/gozmq/internal/bufpool"
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
 	"github.com/exergy-dev/gozmq/security"
@@ -49,6 +50,13 @@ type Config struct {
 	// with an error wrapping zmqerr.ErrMalformedFrame. 0 means unlimited.
 	// The root socket layer wires its option through this field.
 	MaxMessageSize int64
+
+	// RecvBufferPool reads inbound frames larger than the reader's scratch
+	// into pooled buffers and delivers them as lent messages that return
+	// the buffers on their final Release (gozmq.WithRecvBufferPool). It
+	// applies only to identity-framed mechanisms (NULL, PLAIN), whose
+	// decoded frame is the buffer itself.
+	RecvBufferPool bool
 
 	// Logger is the destination for non-fatal diagnostics (heartbeat
 	// timeout reasons, malformed-frame events). When nil, slog.Default()
@@ -95,8 +103,14 @@ func New(cfg Config) Session {
 			directHeader = h
 		}
 	}
+	// recvAlloc hands the reader pooled frame buffers (see Config.RecvBufferPool).
+	var recvAlloc func(int) []byte
+	if cfg.RecvBufferPool && identityMech {
+		recvAlloc = bufpool.Get
+	}
 	s := &sessionImpl{
 		cfg:          cfg,
+		recvAlloc:    recvAlloc,
 		ctx:          ctx,
 		cancel:       cancel,
 		reader:       sessionReader(cfg.Conn),
@@ -170,6 +184,9 @@ type sessionImpl struct {
 	decode frameDecoder
 	// directHeader enables the writer's header-only fast path (see New).
 	directHeader zmtp.FrameHeaderAppender
+	// recvAlloc, when non-nil, supplies the reader's large frame buffers
+	// from the pool (see Config.RecvBufferPool).
+	recvAlloc func(int) []byte
 
 	// startOnce guards Start; stopOnce guards Stop.
 	startOnce sync.Once

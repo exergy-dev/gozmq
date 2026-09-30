@@ -137,11 +137,14 @@ func startCaptureTap(capture *Socket) *captureTap {
 		// only bounds them at shutdown, where a capture socket with no
 		// peer (PUSH, DEALER) would otherwise block stop forever.
 		for m := range t.ch {
-			if err := capture.SendMsg(ctx, m); err != nil {
+			err := capture.SendMsg(ctx, m)
+			m.Release()
+			if err != nil {
 				// The capture socket is gone or the proxy is
 				// stopping; keep draining so senders never block,
 				// but stop trying to send.
-				for range t.ch {
+				for m := range t.ch {
+					m.Release()
 				}
 				return
 			}
@@ -151,15 +154,19 @@ func startCaptureTap(capture *Socket) *captureTap {
 }
 
 // offer queues m for capture; the same *Msg is also forwarded, which is
-// safe because sockets only read the messages they send. It never blocks:
-// a full queue drops. A nil tap (no capture socket) is a no-op.
+// safe because sockets only read the messages they send. The tap holds its
+// own reference (a no-op for plain memory), released after the capture
+// send or on a drop. It never blocks: a full queue drops. A nil tap (no
+// capture socket) is a no-op.
 func (t *captureTap) offer(m *Msg) {
 	if t == nil {
 		return
 	}
+	m.Retain()
 	select {
 	case t.ch <- m:
 	default:
+		m.Release()
 	}
 }
 
@@ -190,7 +197,10 @@ func proxyOneWay(ctx context.Context, from, to *Socket, tap *captureTap) error {
 
 		tap.offer(m)
 
-		if err := to.SendMsg(ctx, m); err != nil {
+		// SendMsg holds its own reference, so ours goes right away.
+		err = to.SendMsg(ctx, m)
+		m.Release()
+		if err != nil {
 			if isProxyShutdown(ctx, err) {
 				return nil
 			}

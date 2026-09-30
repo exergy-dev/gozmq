@@ -73,12 +73,17 @@ func (e *routerEngine) Send(ctx context.Context, m *msg.Msg) error {
 		}
 		// Silent drop — counted so observers see the unknown-identity miss.
 		e.dropped.Add(1)
+		m.Release()
 		return nil
 	}
 
-	// Route everything after the identity frame in a new *Msg (m itself is
-	// never modified; the frame bytes are shared read-only).
-	if err := p.Send(ctx, msg.FromFrames(rest...)); err != nil {
+	// Route everything after the identity frame in a message derived from
+	// m (m itself is never modified; the frame bytes are shared
+	// read-only). The derived message carries its own reference, so m's
+	// is released whatever happens to it.
+	out := m.Derive(rest...)
+	if err := p.Send(ctx, out); err != nil {
+		out.Release()
 		if !errors.Is(err, io.ErrClosedPipe) {
 			return err
 		}
@@ -87,8 +92,10 @@ func (e *routerEngine) Send(ctx context.Context, m *msg.Msg) error {
 			return fmt.Errorf("router send: identity %q: peer disconnected: %w", id, zmqerr.ErrRouteUnknown)
 		}
 		e.dropped.Add(1)
+		m.Release()
 		return nil
 	}
+	m.Release()
 	e.sent.Add(1)
 	return nil
 }

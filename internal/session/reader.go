@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 
+	"github.com/exergy-dev/gozmq/internal/bufpool"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
 	"github.com/exergy-dev/gozmq/msg"
@@ -15,8 +17,9 @@ import (
 
 // readScratchSize sizes the reader's reusable frame buffer. Frames that
 // fit are read into it (no codec allocation) and user frames are then
-// copied out; larger frames get their own buffer from the codec, which
-// the *Msg adopts without a copy.
+// copied out; larger frames get their own buffer — from the pool with
+// Config.RecvBufferPool, else from the codec's make — which the *Msg
+// adopts without a copy.
 const readScratchSize = 4 * 1024
 
 // runReader is the wire->pipe traffic-phase goroutine. It loops reading
@@ -36,8 +39,13 @@ func (s *sessionImpl) runReader() {
 	// keeps, and user frames read into it are cloned below.
 	scratch := make([]byte, readScratchSize)
 
-	var current *msg.Msg
-	var currentSize int64 // decoded bytes accumulated into current
+	// frames accumulates the message in progress; it is built once the
+	// last frame arrives, so a lent message costs no extra allocation.
+	// lent holds its pooled frame buffers (recvAlloc only), which become
+	// the message's lease; on an exit mid-message they are left to the
+	// GC, which is always safe. Both slices are reused across messages.
+	var frames, lent [][]byte
+	var currentSize int64 // decoded bytes accumulated into frames
 	for {
 		// Honor cancellation between frames. The blocking io.Read will
 		// be interrupted by Conn.Close (called from shutdown/Stop).
@@ -47,7 +55,7 @@ func (s *sessionImpl) runReader() {
 		default:
 		}
 
-		flags, body, err := s.cfg.Codec.ReadFrame(s.reader, scratch)
+		flags, body, err := s.cfg.Codec.ReadFrame(s.reader, scratch, s.recvAlloc)
 		if err != nil {
 			if !isShutdownErr(err) {
 				s.cfg.Logger.Debug("gozmq/session: reader exit", "err", err)
@@ -73,9 +81,8 @@ func (s *sessionImpl) runReader() {
 		}
 
 		// User-message frame. Accumulate until MORE clears.
-		if current == nil {
+		if len(frames) == 0 {
 			s.lastInboundUnix.Store(s.cfg.Now())
-			current = msg.New()
 			currentSize = 0
 		}
 		// Enforce the logical-message size cap BEFORE appending: the
@@ -89,27 +96,57 @@ func (s *sessionImpl) runReader() {
 			return
 		}
 		frame := decoded
-		if len(body) <= len(scratch) {
+		switch {
+		case len(body) <= len(scratch):
 			// body was read into scratch and decoded may alias it (it
 			// always does for NULL/PLAIN), so copy the frame out before
 			// the next ReadFrame overwrites it.
 			frame = bytes.Clone(decoded)
+		case s.recvAlloc != nil:
+			// recvAlloc is only set for identity framing, so frame is
+			// body, the pool buffer.
+			lent = append(lent, body)
 		}
-		current.AppendFrame(frame)
+		frames = append(frames, frame)
 
 		if plainFlags&zmtp.FlagMore != 0 {
 			continue
 		}
 
 		// Last frame in the logical message — publish.
-		if err := s.publishInbound(current, false); err != nil {
+		var m *msg.Msg
+		if len(lent) > 0 {
+			m = lendFrames(frames, lent)
+			clear(lent)
+			lent = lent[:0]
+		} else {
+			m = msg.FromFrames(frames...)
+		}
+		clear(frames) // the message has its own copy of the list
+		frames = frames[:0]
+		if err := s.publishInbound(m, false); err != nil {
+			m.Release() // never queued: the buffers can go back now
 			if !isShutdownErr(err) {
 				s.cfg.Logger.Debug("gozmq/session: publish inbound", "err", err)
 			}
 			return
 		}
-		current = nil
 	}
+}
+
+// lendFrames returns a lent message holding frames whose final Release
+// returns the pool buffers bufs (bufs is copied; the reader reuses it).
+func lendFrames(frames, bufs [][]byte) *msg.Msg {
+	if len(bufs) == 1 {
+		b := bufs[0]
+		return msg.NewWithRelease(func() { bufpool.Put(b) }, frames...)
+	}
+	owned := slices.Clone(bufs)
+	return msg.NewWithRelease(func() {
+		for _, b := range owned {
+			bufpool.Put(b)
+		}
+	}, frames...)
 }
 
 // publishInbound enqueues a fully-assembled message on the session-side

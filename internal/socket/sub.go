@@ -312,6 +312,7 @@ func (e *SubEngine) xsubSend(ctx context.Context, m *msg.Msg) error {
 	for _, p := range peers {
 		e.forwardSubscription(ctx, p, subscribe, prefix)
 	}
+	m.Release() // prefix was copied wherever it is kept
 	e.sent.Add(1)
 	return nil
 }
@@ -342,9 +343,11 @@ func (e *SubEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 				e.recv.Add(1)
 				return m, nil
 			}
+			m.Release()
 			continue
 		}
 		if m.NumFrames() == 0 || !e.matches(m.Frames()[0]) {
+			m.Release()
 			continue
 		}
 		e.recv.Add(1)

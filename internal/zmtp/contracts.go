@@ -16,8 +16,9 @@ const (
 type FrameCodec interface {
 	// ReadFrame reads one frame from r. Returns the flags byte and a body
 	// slice. If dst has sufficient capacity the body aliases dst[:n];
-	// otherwise it is a freshly allocated buffer owned by the caller.
-	ReadFrame(r io.Reader, dst []byte) (flags uint8, body []byte, err error)
+	// otherwise it is a buffer of length n from alloc (a fresh allocation
+	// when alloc is nil) owned by the caller.
+	ReadFrame(r io.Reader, dst []byte, alloc func(n int) []byte) (flags uint8, body []byte, err error)
 
 	// WriteFrame writes flags + length + body as one ZMTP frame. Multi-byte
 	// lengths are big-endian per the spec. Implementations may internally

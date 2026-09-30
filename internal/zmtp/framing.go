@@ -48,7 +48,7 @@ func NewFrameCodec(maxBody int64) FrameCodec {
 }
 
 // ReadFrame implements FrameCodec.
-func (c *frameCodec) ReadFrame(r io.Reader, dst []byte) (uint8, []byte, error) {
+func (c *frameCodec) ReadFrame(r io.Reader, dst []byte, alloc func(n int) []byte) (uint8, []byte, error) {
 	var hdr [1]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		// Surface EOF/UnexpectedEOF unwrapped so callers can use errors.Is on
@@ -92,7 +92,7 @@ func (c *frameCodec) ReadFrame(r io.Reader, dst []byte) (uint8, []byte, error) {
 	}
 
 	n := int(length)
-	body := reuseOrAllocate(dst, n)
+	body := reuseOrAllocate(dst, n, alloc)
 	if n > 0 {
 		if _, err := io.ReadFull(r, body); err != nil {
 			return flags, nil, fmt.Errorf("gozmq/zmtp: read body (%d bytes): %w", n, wrapEOF(err))
@@ -169,11 +169,14 @@ func (c *frameCodec) validateWriteFrame(flags uint8, body []byte) (useLong bool,
 }
 
 // reuseOrAllocate returns dst[:n] when dst has the capacity, otherwise a
-// fresh heap buffer the caller owns outright (the session reader hands it
-// to the *Msg without copying).
-func reuseOrAllocate(dst []byte, n int) []byte {
+// buffer from alloc (make when alloc is nil) that the caller owns outright
+// (the session reader hands it to the *Msg without copying).
+func reuseOrAllocate(dst []byte, n int, alloc func(int) []byte) []byte {
 	if cap(dst) >= n {
 		return dst[:n]
+	}
+	if alloc != nil {
+		return alloc(n)
 	}
 	return make([]byte, n)
 }

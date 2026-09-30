@@ -40,7 +40,21 @@
 //	fmt.Printf("%s\n", msg.Bytes()) // "ping"
 //
 // Received frames are ordinary Go memory owned by the caller; there is
-// nothing to release ((*Msg).Release is a no-op kept for compatibility).
+// nothing to release ((*Msg).Release does nothing for them).
+//
+// # Receive buffer pool
+//
+// A socket created with [WithRecvBufferPool](true) receives frames larger
+// than 4 KiB into pooled buffers, which avoids a large allocation and its
+// garbage-collection cost per frame. Those messages are lent ([Msg.Lent]),
+// with an explicit contract: the receiver owns one reference and calls
+// [Msg.Release] when done; the frames are valid until the last reference
+// is released and are then reused; [Msg.Retain] adds a reference; releasing
+// more than retained panics. [Socket.SendMsg] takes its own reference, so a
+// forwarder can RecvMsg, SendMsg and Release in that order. To re-envelope a
+// lent message, use [Msg.Derive] rather than wrapping its frames in a new
+// message. There is no finalizer: a message dropped without Release is
+// simply garbage collected, never recycled under a live frame.
 //
 // # Security
 //

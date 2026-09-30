@@ -1,6 +1,7 @@
 package socket
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -156,6 +157,7 @@ func (e *repEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 			return nil, err
 		}
 		envelope, body, ok := splitRepEnvelope(m)
+		m.Release()
 		if !ok {
 			// Malformed incoming frame — skip it and keep receiving.
 			// Strict libzmq drops such frames silently; we do the same
@@ -165,6 +167,7 @@ func (e *repEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		e.mu.Lock()
 		if e.closed {
 			e.mu.Unlock()
+			body.Release()
 			return nil, fmt.Errorf("rep recv: %w", zmqerr.ErrSocketClosed)
 		}
 		e.currentPeer = src
@@ -200,6 +203,7 @@ func (e *repEngine) Send(ctx context.Context, m *msg.Msg) error {
 		// Peer detached between Recv and Send; silently drop per
 		// libzmq's REP semantics. The state is already restored to
 		// canRecv above so the application can continue.
+		m.Release()
 		return nil
 	}
 
@@ -207,11 +211,17 @@ func (e *repEngine) Send(ctx context.Context, m *msg.Msg) error {
 	// Block at HWM, racing engine close and the caller's ctx. A requester
 	// that vanished before its detach landed gets the reply dropped
 	// silently, as for a detached peer above.
-	switch err := peer.SendOr(ctx, wire, e.closeCh); {
+	err := peer.SendOr(ctx, wire, e.closeCh)
+	if err != nil {
+		wire.Release()
+	}
+	switch {
 	case err == nil:
+		m.Release()
 		e.sent.Add(1)
 		return nil
 	case errors.Is(err, io.ErrClosedPipe):
+		m.Release()
 		return nil
 	case errors.Is(err, pipe.ErrAborted):
 		return fmt.Errorf("rep send: %w", zmqerr.ErrSocketClosed)
@@ -222,8 +232,8 @@ func (e *repEngine) Send(ctx context.Context, m *msg.Msg) error {
 
 // splitRepEnvelope separates a REQ-shaped inbound frame into envelope
 // (identity frames plus the trailing empty delimiter) and body (the
-// remaining frames as a fresh *Msg). Returns ok=false if no empty
-// delimiter is present.
+// remaining frames as a *Msg derived from m; m keeps its own reference).
+// Returns ok=false if no empty delimiter is present.
 //
 // Shape: [id0, id1, ..., idN, empty, body...] where the identity stack
 // may be empty (for a direct REQ↔REP over a bare pipe). The envelope
@@ -234,8 +244,17 @@ func splitRepEnvelope(m *msg.Msg) (envelope [][]byte, body *msg.Msg, ok bool) {
 	for i, f := range frames {
 		if len(f) == 0 {
 			// The envelope (including the delimiter) outlives m in
-			// e.envelope, so it gets its own slice header.
-			return slices.Clone(frames[:i+1]), msg.FromFrames(frames[i+1:]...), true
+			// e.envelope, so it gets its own slice header — and, when m is
+			// lent, its own bytes: the reply joins it to a different
+			// message's frames, and a message holds only one lease.
+			// Routing frames are small, so the copy is cheap.
+			envelope = slices.Clone(frames[:i+1])
+			if m.Lent() {
+				for j, f := range envelope {
+					envelope[j] = bytes.Clone(f)
+				}
+			}
+			return envelope, m.Derive(frames[i+1:]...), true
 		}
 	}
 	return nil, nil, false

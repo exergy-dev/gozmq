@@ -39,7 +39,7 @@ func NewXPubEngineV(verbose bool) Engine {
 // the peer's SubTree (so outbound fanout filtering is always current) and
 // then hand it to onSubscription, which settles the refcounts and decides
 // right there whether the event surfaces. Surfacing events are queued for
-// Recv; the rest are recycled.
+// Recv; the rest are released.
 //
 // Deciding at apply time, rather than when the application reads, keeps
 // the refcounts in step with the SubTrees: a peer that subscribes and
@@ -72,7 +72,7 @@ type xpubEngine struct {
 // A CANCEL only counts if the peer itself holds the prefix: otherwise a
 // peer could release another peer's subscription and surface a CANCEL
 // while that peer is still subscribed.
-func (e *xpubEngine) onSubscription(p *pipe.End, subscribe bool, prefix []byte, m *msg.Msg) {
+func (e *xpubEngine) onSubscription(p *pipe.End, subscribe bool, prefix []byte, m *msg.Msg) (kept bool) {
 	key := string(prefix)
 	e.mu.Lock()
 	surface := e.verbose
@@ -102,6 +102,7 @@ func (e *xpubEngine) onSubscription(p *pipe.End, subscribe bool, prefix []byte, 
 	if surface {
 		e.signal()
 	}
+	return surface
 }
 
 // signal wakes a blocked Recv and arms the Poller gate.

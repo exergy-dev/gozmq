@@ -176,9 +176,9 @@ type bufferWriter interface {
 // (zero allocations after warm-up); slicing it is safe because all
 // appends complete before any subslice is taken.
 //
-// release is called after every flush (writeBatchFrom). It truncates all
-// per-batch state to zero length while preserving capacity, leaving the
-// batch ready for the next fill.
+// release is called after every flush (writeBatchFrom). It releases the
+// batched lent messages and truncates all per-batch state to zero length while
+// preserving capacity, leaving the batch ready for the next fill.
 type writerBatch struct {
 	buffers net.Buffers
 
@@ -186,6 +186,13 @@ type writerBatch struct {
 	// fully encoded: a later append() may relocate the array.
 	scratch []byte
 	entries []writerEntry
+
+	// lent are the batched lent messages. Each pipe item carries a
+	// reference the writer owns; for a lent message it is released only
+	// after the flush, because the direct path hands frame bodies to
+	// writev by reference. (Release on a plain message does nothing, so
+	// those are not tracked.)
+	lent []*msg.Msg
 }
 
 // maxRetainedScratch bounds the scratch capacity a batch keeps between
@@ -204,6 +211,11 @@ type writerEntry struct {
 }
 
 func (b *writerBatch) release() {
+	for _, m := range b.lent {
+		m.Release()
+	}
+	clear(b.lent)
+	b.lent = b.lent[:0]
 	clear(b.entries) // drop body references so sent frames can be collected
 	b.entries = b.entries[:0]
 	if cap(b.scratch) > maxRetainedScratch {
@@ -216,6 +228,9 @@ func (b *writerBatch) release() {
 }
 
 func (b *writerBatch) appendMessage(s *sessionImpl, m *msg.Msg, sizeSoFar int) (int, error) {
+	if m.Lent() {
+		b.lent = append(b.lent, m)
+	}
 	frames := m.Frames()
 	if len(frames) == 0 {
 		return b.appendFrame(s, 0, nil, sizeSoFar)

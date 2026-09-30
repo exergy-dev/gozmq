@@ -219,7 +219,9 @@ func (e *identityRouter) Recv(ctx context.Context) (*msg.Msg, error) {
 	// PeerIdentity fallback) and is never mutated afterward, so prepend it
 	// directly without re-cloning per Recv.
 	e.recv.Add(1)
-	return prependFrames([][]byte{id}, m), nil
+	out := prependFrames([][]byte{id}, m)
+	m.Release()
+	return out, nil
 }
 
 // Close releases engine state, unblocks pending Recv with ErrSocketClosed, and

@@ -192,7 +192,7 @@ func (s *sessionImpl) runSecurityHandshake() error {
 		}
 
 		// Read the peer's next handshake message.
-		flags, body, rerr := readCodec.ReadFrame(s.reader, nil)
+		flags, body, rerr := readCodec.ReadFrame(s.reader, nil, nil)
 		// Always reap the writer before propagating either error.
 		werr := <-writeErrCh
 		if werr != nil {

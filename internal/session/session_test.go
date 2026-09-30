@@ -82,7 +82,7 @@ func (c *fakeConn) Closed() <-chan struct{}     { return c.closed }
 
 type fakeCodec struct{}
 
-func (fakeCodec) ReadFrame(r io.Reader, _ []byte) (uint8, []byte, error) {
+func (fakeCodec) ReadFrame(r io.Reader, _ []byte, _ func(int) []byte) (uint8, []byte, error) {
 	var flagsBuf [1]byte
 	if _, err := io.ReadFull(r, flagsBuf[:]); err != nil {
 		return 0, nil, err

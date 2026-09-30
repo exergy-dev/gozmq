@@ -99,10 +99,11 @@ type pubEngine struct {
 	// that as its closed check.
 	snap atomic.Pointer[[]*pubPeer]
 	// onSub, when set, receives every subscription command from peer p
-	// right after it has been applied to p's SubTree. It runs on p's
-	// reader goroutine, never after DetachPipe(p) or Close returns. XPUB
-	// installs it to maintain its refcounts and event queue; nil for PUB.
-	onSub    func(p *pipe.End, subscribe bool, prefix []byte, m *msg.Msg)
+	// right after it has been applied to p's SubTree, and reports whether
+	// it kept m (taking over its reference). It runs on p's reader
+	// goroutine, never after DetachPipe(p) or Close returns. XPUB installs
+	// it to maintain its refcounts and event queue; nil for PUB.
+	onSub    func(p *pipe.End, subscribe bool, prefix []byte, m *msg.Msg) (kept bool)
 	closeCh  chan struct{}
 	sendGate readyGate
 
@@ -137,7 +138,7 @@ func NewPubEngine() Engine {
 
 // newPubEngineBase is the shared constructor used by PUB (onSub nil) and
 // XPUB.
-func newPubEngineBase(onSub func(*pipe.End, bool, []byte, *msg.Msg)) *pubEngine {
+func newPubEngineBase(onSub func(*pipe.End, bool, []byte, *msg.Msg) bool) *pubEngine {
 	e := &pubEngine{
 		peers:    make(map[*pipe.End]*pubPeer),
 		onSub:    onSub,
@@ -216,7 +217,9 @@ func (e *pubEngine) runPeerReader(peer *pubPeer) {
 		if err != nil {
 			return
 		}
-		e.applyPeerMsg(peer, m)
+		if !e.applyPeerMsg(peer, m) {
+			m.Release()
+		}
 		select {
 		case <-peer.stop:
 			return
@@ -225,21 +228,20 @@ func (e *pubEngine) runPeerReader(peer *pubPeer) {
 	}
 }
 
-// applyPeerMsg applies one inbound message from peer. PUB/XPUB ignore
-// non-subscription inbound traffic.
-func (e *pubEngine) applyPeerMsg(peer *pubPeer, m *msg.Msg) {
+// applyPeerMsg applies one inbound message from peer and reports whether
+// it was kept (see onSub). PUB/XPUB ignore non-subscription inbound
+// traffic.
+func (e *pubEngine) applyPeerMsg(peer *pubPeer, m *msg.Msg) (kept bool) {
 	isSub, subscribe, prefix := isSubscriptionMsg(m)
 	if !isSub {
-		return
+		return false
 	}
 	if subscribe {
 		peer.tree.Add(prefix)
 	} else {
 		peer.tree.Remove(prefix)
 	}
-	if e.onSub != nil {
-		e.onSub(peer.pipe, subscribe, prefix, m)
-	}
+	return e.onSub != nil && e.onSub(peer.pipe, subscribe, prefix, m)
 }
 
 // ReadyRecv: PUB has no recv direction. XPUB provides its own.
@@ -269,8 +271,11 @@ func (e *pubEngine) CanSendNow() bool {
 // PUB never backpressures — or even stalls — the publisher on slow
 // subscribers).
 //
-// ONE *Msg value is fanned out to every matching pipe; the session
-// writers only read its frames, so sharing it needs no copies.
+// A plain *Msg is fanned out as ONE value to every matching pipe; the
+// session writers only read its frames, so sharing it needs no copies. A
+// lent message instead gets a derived copy per pipe, each owning one
+// reference, so every receiver (a writer, or an inproc peer's Release)
+// gives up exactly its own.
 func (e *pubEngine) Send(ctx context.Context, m *msg.Msg) error {
 	snap := e.snap.Load()
 	if snap == nil {
@@ -292,11 +297,21 @@ func (e *pubEngine) Send(ctx context.Context, m *msg.Msg) error {
 	// Drop-on-HWM: a peer whose pipe has no room loses the message
 	// immediately (libzmq parity — no grace deadline, so one slow
 	// subscriber never delays delivery to the others).
+	lent := m.Lent()
 	for _, peer := range *snap {
-		if peer.tree.Match(topic) && !peer.pipe.TrySend(m) {
+		if !peer.tree.Match(topic) {
+			continue
+		}
+		out := m
+		if lent {
+			out = m.Derive(m.Frames()...)
+		}
+		if !peer.pipe.TrySend(out) {
+			out.Release()
 			e.dropped.Add(1)
 		}
 	}
+	m.Release()
 	e.sent.Add(1)
 	return nil
 }

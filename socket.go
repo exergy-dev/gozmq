@@ -561,6 +561,13 @@ func (s *Socket) startSession(conn transport.Conn, role security.Role) {
 
 // SendMsg enqueues m for transmission per the socket's pattern policy.
 //
+// m stays the caller's: for a lent message (see [Msg.Lent]) SendMsg takes
+// its own reference for the send, released once the message has been
+// written (or received and released by an inproc peer), so the caller may
+// Release m as soon as SendMsg returns — the usual forwarding idiom is
+// RecvMsg, SendMsg, Release. A plain message is sent as is; the caller
+// must not modify its frames while it may still be in flight.
+//
 // If WithMaxMessageSize is set (any positive cap), every frame in m is
 // measured against the cap up front and the call returns an error
 // wrapping ErrMalformedFrame on overflow — matching the per-frame
@@ -580,7 +587,17 @@ func (s *Socket) SendMsg(ctx context.Context, m *Msg) error {
 			}
 		}
 	}
-	return s.engine.Send(ctx, m)
+	if m == nil || !m.Lent() {
+		return s.engine.Send(ctx, m)
+	}
+	// The engine takes over the derived reference on success; a failed
+	// send leaves it with us.
+	d := m.Derive(m.Frames()...)
+	if err := s.engine.Send(ctx, d); err != nil {
+		d.Release()
+		return err
+	}
+	return nil
 }
 
 // SendBytes sends a single-frame message containing b. It is a
@@ -590,7 +607,9 @@ func (s *Socket) SendBytes(ctx context.Context, b []byte) error {
 }
 
 // RecvMsg blocks until a message arrives or ctx cancels. The returned
-// frames are ordinary memory owned by the caller.
+// frames are ordinary memory owned by the caller, except on a socket
+// created with [WithRecvBufferPool]: there large frames are lent, valid
+// until the message's final [Msg.Release] (see that option).
 func (s *Socket) RecvMsg(ctx context.Context) (*Msg, error) {
 	if s.closed.Load() {
 		return nil, ErrSocketClosed
@@ -600,13 +619,14 @@ func (s *Socket) RecvMsg(ctx context.Context) (*Msg, error) {
 
 // RecvBytes receives a single-frame message and returns an independent
 // copy of its payload (inproc delivery can share frame bytes with the
-// sender, e.g. PUB fan-out). Multipart messages return an error; use
-// RecvMsg for those.
+// sender, e.g. PUB fan-out), releasing the message itself. Multipart
+// messages return an error; use RecvMsg for those.
 func (s *Socket) RecvBytes(ctx context.Context) ([]byte, error) {
 	m, err := s.RecvMsg(ctx)
 	if err != nil {
 		return nil, err
 	}
+	defer m.Release()
 	f, ok := m.SingleFrame()
 	if !ok {
 		// ErrFSMViolation: a valid message met the wrong receive call (as

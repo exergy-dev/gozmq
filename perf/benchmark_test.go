@@ -18,6 +18,7 @@ package perf_test
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -196,19 +197,41 @@ func BenchmarkPushPullThroughput_TCP(b *testing.B) {
 	}
 }
 
+// BenchmarkPushPullLarge_TCP measures large-frame TCP throughput with the
+// receive buffer pool off (plain memory, the default) and on, where the
+// per-frame allocation and GC cost of plain memory dominates.
+func BenchmarkPushPullLarge_TCP(b *testing.B) {
+	for _, pooled := range []bool{false, true} {
+		for _, sz := range []struct {
+			name string
+			n    int
+		}{
+			{"64KB", 64 << 10},
+			{"256KB", 256 << 10},
+			{"1MB", 1 << 20},
+		} {
+			b.Run(fmt.Sprintf("pool=%v/%s", pooled, sz.name), func(b *testing.B) {
+				benchPushPullThroughput(b, sz.n, freeTCPEndpoint, gozmq.WithRecvBufferPool(pooled))
+			})
+		}
+	}
+}
+
 // benchPushPullThroughput times b.N PUSH→PULL deliveries of a size-msgSize
 // payload. The PUSH side runs in the benchmark goroutine; a helper runs
-// the PULL side. Because HWM on both ends defaults to 1000, we let the
-// producer race ahead by that much before the consumer starts receiving —
-// the timer covers the steady-state throughput, not the startup.
-func benchPushPullThroughput(b *testing.B, msgSize int, endpoint string) {
+// the PULL side, created with pullOpts, which releases each message (a
+// no-op unless the pool is on). Because HWM on both ends defaults to 1000,
+// we let the producer race ahead by that much before the consumer starts
+// receiving — the timer covers the steady-state throughput, not the
+// startup.
+func benchPushPullThroughput(b *testing.B, msgSize int, endpoint string, pullOpts ...gozmq.Option) {
 	b.Helper()
 	b.StopTimer()
 
 	ctxZmq := gozmq.NewContext()
 	defer ctxZmq.Close()
 
-	pull, err := ctxZmq.NewSocket(gozmq.Pull)
+	pull, err := ctxZmq.NewSocket(gozmq.Pull, pullOpts...)
 	if err != nil {
 		b.Fatalf("new pull: %v", err)
 	}
@@ -234,9 +257,11 @@ func benchPushPullThroughput(b *testing.B, msgSize int, endpoint string) {
 		warmCancel()
 		b.Fatalf("warmup send: %v", err)
 	}
-	if _, err := pull.RecvMsg(warmCtx); err != nil {
+	if m, err := pull.RecvMsg(warmCtx); err != nil {
 		warmCancel()
 		b.Fatalf("warmup recv: %v", err)
+	} else {
+		m.Release()
 	}
 	warmCancel()
 
@@ -249,9 +274,11 @@ func benchPushPullThroughput(b *testing.B, msgSize int, endpoint string) {
 	go func() {
 		defer recvWG.Done()
 		for {
-			if _, err := pull.RecvMsg(recvCtx); err != nil {
+			m, err := pull.RecvMsg(recvCtx)
+			if err != nil {
 				return
 			}
+			m.Release()
 			received.Add(1)
 		}
 	}()

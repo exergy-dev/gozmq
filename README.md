@@ -123,10 +123,19 @@ Breaking changes wait for a major version. Additions may land in any minor.
 
 ## Notes
 
-**Message ownership.** Frames returned by `RecvMsg` are ordinary Go memory
-that belongs to you: keep them, slice them, or re-send the message. There is
-nothing to release; `Msg.Release` and `Msg.Retain` are no-ops kept for
-compatibility.
+**Message ownership.** By default, frames returned by `RecvMsg` are ordinary
+Go memory that belongs to you: keep them, slice them, or re-send the message.
+There is nothing to release; `Msg.Release` and `Msg.Retain` do nothing.
+
+For large-frame throughput, `WithRecvBufferPool(true)` receives frames over
+4 KiB into pooled buffers instead. Such a message is lent (`Msg.Lent`): its
+frames stay valid until you call `Release`, after which the buffers are
+reused, so copy anything you keep. `Retain` adds a reference that needs its
+own `Release`, and releasing too often panics. Forwarding is safe:
+`SendMsg` holds its own reference until the write completes, so
+`RecvMsg`, `SendMsg`, `Release` is correct. Build derived messages with
+`Msg.Derive`, not by rewrapping the frames. A forgotten `Release` is safe;
+the buffer is left to the garbage collector.
 
 **Security defaults.** The default mechanism is NULL: no authentication, no
 encryption, matching libzmq. That is fine for `inproc`, `ipc`, and trusted

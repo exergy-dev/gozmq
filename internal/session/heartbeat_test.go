@@ -82,7 +82,7 @@ func newManualPeer(t *testing.T, conn *fakeConn, props map[string]string) *manua
 	require.NoError(t, err, "manual peer: write greeting")
 
 	// Security handshake: one round of fake props, mirroring fakeMech.
-	flags, _, err := fakeCodec{}.ReadFrame(conn, nil)
+	flags, _, err := fakeCodec{}.ReadFrame(conn, nil, nil)
 	require.NoError(t, err, "manual peer: read handshake frame")
 	require.NotZero(t, flags&zmtp.FlagCommand, "manual peer: expected COMMAND handshake frame")
 	require.NoError(t,
@@ -107,7 +107,7 @@ func (p *manualPeer) startReadLoop() <-chan peerFrame {
 	go func() {
 		defer close(ch)
 		for {
-			flags, body, err := fakeCodec{}.ReadFrame(p.conn, nil)
+			flags, body, err := fakeCodec{}.ReadFrame(p.conn, nil, nil)
 			if err != nil {
 				return
 			}

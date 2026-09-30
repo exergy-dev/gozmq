@@ -53,6 +53,18 @@
 // LoadBalancer, FairQueue, and SubTree are themselves goroutine-safe so
 // tests and future patterns can use them directly.
 //
+// # Message references
+//
+// Every *msg.Msg queued on a pipe carries one reference (a no-op for plain
+// memory; see msg's "Lent frames"), owned by whoever holds the message.
+// Send takes over m's reference when it returns nil — handing m to one
+// pipe, or releasing it once a derived message, a fan-out copy or a drop
+// has replaced it — and leaves it with the caller on error. Recv hands
+// the caller one reference. An engine that rewrites an envelope derives
+// the new message from the old one (msg.Msg.Derive) and releases the old
+// one; it never modifies a message it was given. Messages an engine
+// discards (filter misses, stale replies, drops) are released.
+//
 // # Ownership model
 //
 // Each engine owns the per-peer bookkeeping for every pipe it has been
@@ -102,16 +114,18 @@ func (c *counters) snapshot(dropped, queueDepth uint64) Metrics {
 }
 
 // prependFrames returns a new Msg holding head followed by body's frames
-// (body may be nil). The frame list is assembled in a stack buffer, so for
-// envelopes of typical depth msg.FromFrames' copy is the only allocation of
-// a frame slice.
+// (body may be nil), derived from body so it keeps body's lent frames
+// alive on its own reference; body is untouched and still needs its own
+// Release. The frame list is assembled in a stack buffer, so for envelopes
+// of typical depth the message's copy is the only allocation of a frame
+// slice.
 func prependFrames(head [][]byte, body *msg.Msg) *msg.Msg {
 	var buf [8][]byte
 	frames := append(buf[:0], head...)
-	if body != nil {
-		frames = append(frames, body.Frames()...)
+	if body == nil {
+		return msg.FromFrames(frames...)
 	}
-	return msg.FromFrames(frames...)
+	return body.Derive(append(frames, body.Frames()...)...)
 }
 
 // readyGate is a level-triggered, single-slot readiness signal for the Poller.

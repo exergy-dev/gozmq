@@ -38,6 +38,7 @@ func (s *Socket) buildSession(conn transport.Conn, role security.Role) (session.
 		SendHWM:           s.cfg.sendHWM,
 		RecvHWM:           s.cfg.recvHWM,
 		MaxMessageSize:    s.cfg.maxMessageSize,
+		RecvBufferPool:    s.cfg.recvBufferPool,
 		Logger:            s.cfg.logger,
 	}), nil
 }

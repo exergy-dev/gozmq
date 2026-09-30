@@ -175,10 +175,17 @@ func (s reqState) violation() string {
 }
 
 // send delivers one request with the FSM reserved in reqStateSending. On
-// success it moves the FSM to canRecv; on error the caller restores canSend.
+// success it moves the FSM to canRecv and releases m (the wire message
+// holds its own reference); on error the caller restores canSend.
 func (e *reqEngine) send(ctx context.Context, m *msg.Msg) error {
 	// Build wire message: empty delimiter + caller's frames.
 	wire := prependFrames(reqDelimiter, m)
+	queued := false
+	defer func() {
+		if !queued {
+			wire.Release()
+		}
+	}()
 
 	// Pick a peer and deliver. Retry on peer churn / closed pipe.
 	for {
@@ -210,9 +217,11 @@ func (e *reqEngine) send(ctx context.Context, m *msg.Msg) error {
 		// peer-gone reset). Delivering it as this request's answer would
 		// desynchronize request/reply pairing.
 		for {
-			if _, ok := p.TryRecv(); !ok {
+			stale, ok := p.TryRecv()
+			if !ok {
 				break
 			}
+			stale.Release()
 		}
 
 		// Block at HWM, racing engine close and the caller's ctx — a bare
@@ -220,6 +229,7 @@ func (e *reqEngine) send(ctx context.Context, m *msg.Msg) error {
 		// contract.
 		switch err := p.SendOr(ctx, wire, closeCh); {
 		case err == nil:
+			queued = true
 		case errors.Is(err, io.ErrClosedPipe):
 			// Peer vanished; drop it from the set and retry.
 			_ = e.DetachPipe(p)
@@ -244,6 +254,7 @@ func (e *reqEngine) send(ctx context.Context, m *msg.Msg) error {
 		e.sticky = p
 		e.state = reqStateCanRecv
 		e.mu.Unlock()
+		m.Release()
 		e.sent.Add(1)
 		return nil
 	}
@@ -285,6 +296,7 @@ func (e *reqEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 	}
 
 	stripped, serr := stripReqDelimiter(m)
+	m.Release()
 	if serr != nil {
 		// Malformed reply — still flip state so the FSM can continue.
 		e.mu.Lock()
@@ -363,14 +375,14 @@ func (e *reqEngine) CanSendNow() bool {
 
 // stripReqDelimiter removes the leading empty delimiter frame from an
 // inbound REP reply. The wire shape is [empty, body...]; we return a
-// fresh *Msg holding just the body frames (a single body frame, the
-// common case, fits the Msg's inline slot without allocating).
+// *Msg derived from m holding just the body frames (a single body frame,
+// the common case, fits the Msg's inline slot without allocating).
 func stripReqDelimiter(m *msg.Msg) (*msg.Msg, error) {
 	frames := m.Frames()
 	if len(frames) < 1 || len(frames[0]) != 0 {
 		return nil, fmt.Errorf("req recv: missing empty delimiter: %w", zmqerr.ErrMalformedFrame)
 	}
-	return msg.FromFrames(frames[1:]...), nil
+	return m.Derive(frames[1:]...), nil
 }
 
 // Metrics reports the REQ engine's counters. REQ has no fair-queue;

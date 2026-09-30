@@ -34,6 +34,7 @@ type socketConfig struct {
 	maxMessageSize       int64
 	routerMandatory      bool
 	xpubVerbose          bool
+	recvBufferPool       bool
 	subscriptions        [][]byte
 	handshakeTimeout     time.Duration
 	zapDomain            string
@@ -188,6 +189,37 @@ func WithHeartbeat(interval, timeout time.Duration) Option {
 // unbounded allocation.
 func WithMaxMessageSize(n int64) Option {
 	return newOption(func(c *socketConfig) error { c.maxMessageSize = n; return nil })
+}
+
+// WithRecvBufferPool, when enabled, receives inbound frames larger than
+// 4 KiB into buffers drawn from a shared, size-tiered pool instead of a
+// fresh allocation per frame, which saves the allocation and garbage
+// collection cost that dominates large-frame throughput. Default is false.
+//
+// It changes the ownership of received messages, which is why it is opt-in.
+// A message carrying pooled frames is lent (see [Msg.Lent]):
+//
+//   - The receiver holds one reference and must call [Msg.Release] when
+//     done with the message; [Msg.Retain] adds a reference, each needing
+//     its own Release.
+//   - The frames — including any slice taken from Frames, Bytes or
+//     SingleFrame — are valid only until the last reference is released.
+//     Their buffers then go back to the pool and are overwritten by later
+//     receives, so copy anything that must outlive the message.
+//   - Forwarding is safe: [Socket.SendMsg] holds its own reference until
+//     the message is written, so RecvMsg, SendMsg, Release is correct.
+//     Build a forwarded message with [Msg.Derive], never by wrapping the
+//     frames in NewMsgFromBytes or NewMsgFromFrames.
+//   - Forgetting Release is safe: there is no finalizer, so the buffer is
+//     simply collected by the garbage collector instead of being reused.
+//   - Releasing more times than retained panics.
+//
+// Smaller frames, and frames on CURVE or custom-mechanism sessions (whose
+// decoding produces a fresh plaintext anyway), are always ordinary memory,
+// for which Release does nothing. The option affects receiving only, and
+// is not applicable to STREAM sockets.
+func WithRecvBufferPool(enabled bool) Option {
+	return newOption(func(c *socketConfig) error { c.recvBufferPool = enabled; return nil })
 }
 
 // WithRouterMandatory controls ROUTER.Send behaviour for unroutable
@@ -451,6 +483,8 @@ func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 			return fmt.Errorf("gozmq: WithHandshakeTimeout is not applicable to STREAM sockets (no ZMTP handshake)")
 		case cfg.zapDomain != "":
 			return fmt.Errorf("gozmq: WithZAPDomain is not applicable to STREAM sockets (no ZMTP handshake)")
+		case cfg.recvBufferPool:
+			return fmt.Errorf("gozmq: WithRecvBufferPool is not applicable to STREAM sockets (no ZMTP framing)")
 		}
 	}
 	if err := validateCurveKey("secret", cfg.curveSecretKey); err != nil {

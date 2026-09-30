@@ -94,6 +94,7 @@ func (e *streamEngine) Send(ctx context.Context, m *msg.Msg) error {
 		}
 		return err
 	}
+	m.Release() // out is a copy
 	e.sent.Add(1)
 	return nil
 }
