@@ -48,10 +48,10 @@ const (
 	// handshake begins. Event.Endpoint is the peer's remote endpoint.
 	EventAccepted
 
-	// EventAcceptFailed fires when the accept loop exits due to a
-	// listener error. Event.Endpoint is the bound endpoint;
-	// Event.Reason carries the underlying error (e.g. a context
-	// cancellation during shutdown, or a real network error).
+	// EventAcceptFailed fires for each non-terminal accept error (a
+	// failed TLS handshake, EMFILE, ...); the accept loop keeps running
+	// and retries with capped backoff. Event.Endpoint is the bound
+	// endpoint; Event.Reason carries the underlying error.
 	EventAcceptFailed
 
 	// EventClosed fires once Socket.Close has completed its teardown

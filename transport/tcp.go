@@ -170,17 +170,6 @@ func (c *tcpConn) RemoteEndpoint() string {
 	return formatTCPEndpoint(c.scheme, c.RemoteAddr())
 }
 
-// SetLinger forwards to the underlying *net.TCPConn so the session layer
-// can arrange a graceful close that waits for the kernel send buffer to
-// flush (avoids losing last-moment data when the process exits shortly
-// after Close). Returns nil silently for non-TCP connections.
-func (c *tcpConn) SetLinger(sec int) error {
-	if tc, ok := c.Conn.(*net.TCPConn); ok {
-		return tc.SetLinger(sec)
-	}
-	return nil
-}
-
 func (c *tcpConn) WriteBuffers(buffers *net.Buffers) (int64, error) {
 	return buffers.WriteTo(c.Conn)
 }
