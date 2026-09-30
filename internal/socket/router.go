@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"slices"
 
 	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
@@ -78,14 +77,9 @@ func (e *routerEngine) Send(ctx context.Context, m *msg.Msg) error {
 		return nil
 	}
 
-	// Route everything after the identity frame. Clone the frame-slice header
-	// (the frame BYTES still alias m's), hand the locally-built slice off via
-	// FromFramesOwned, and transfer pooled-buffer ownership so the session
-	// writer's post-flush Recycle reclaims via routed instead of leaving m's
-	// pooled frames live under the in-flight write (use-after-free).
-	routed := msg.FromFramesOwned(slices.Clone(rest))
-	routed.TransferPool(m)
-	if err := p.Send(ctx, routed); err != nil {
+	// Route everything after the identity frame in a new *Msg (m itself is
+	// never modified; the frame bytes are shared read-only).
+	if err := p.Send(ctx, msg.FromFrames(rest...)); err != nil {
 		if !errors.Is(err, io.ErrClosedPipe) {
 			return err
 		}

@@ -90,16 +90,9 @@ func socketTypeName(t SocketType) string {
 func (t SocketType) String() string { return socketTypeName(t) }
 
 // Msg is a ZMTP multipart message. Frames delivered by RecvMsg are
-// caller-owned and safe to retain, stash, or pass between goroutines.
-//
-// Some large inbound frames are backed by buffers drawn from an internal
-// size-tiered pool; call (*Msg).Release when finished to return those
-// buffers to the pool. Release is always safe to call (it is a no-op for
-// *Msg values that carry no pooled frames, including any *Msg you
-// constructed via NewMsg / NewMsgFromBytes / NewMsgFromFrames), so the
-// safest pattern is to call Release on every received *Msg once done.
-// A safety-net finalizer reclaims pooled buffers for callers that drop
-// a *Msg without calling Release, but it is not the primary path.
+// ordinary Go memory owned by the caller: safe to retain, stash, re-send,
+// or pass between goroutines, and reclaimed by the garbage collector.
+// (*Msg).Release and Retain are no-ops kept for compatibility.
 //
 // Msg is an alias for [msg.Msg]; see that package for the full method
 // set and for which methods the compatibility promise covers. There is

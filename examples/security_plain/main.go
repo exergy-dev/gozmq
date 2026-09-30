@@ -33,7 +33,6 @@ func main() {
 	check(client.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("authenticated hello"))), "send")
 	msg, err := server.RecvMsg(callCtx)
 	check(err, "recv")
-	defer msg.Release()
 	fmt.Printf("server accepted PLAIN client and received %q\n", msg.Bytes())
 }
 

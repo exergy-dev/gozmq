@@ -37,14 +37,10 @@
 //
 //	_ = client.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("ping")))
 //	msg, _ := server.RecvMsg(callCtx)
-//	defer msg.Release()
 //	fmt.Printf("%s\n", msg.Bytes()) // "ping"
 //
-// Always call (*Msg).Release on received messages when done — it is a
-// no-op unless the message carries pooled frame buffers, so calling it
-// unconditionally is safe. For single-frame payloads where even that
-// bookkeeping is unwelcome, [Socket.RecvBytes] returns an independent
-// copy of the payload and releases the internal buffers itself.
+// Received frames are ordinary Go memory owned by the caller; there is
+// nothing to release ((*Msg).Release is a no-op kept for compatibility).
 //
 // # Security
 //

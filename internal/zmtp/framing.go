@@ -14,7 +14,6 @@ import (
 	"io"
 	"math"
 
-	"github.com/exergy-dev/gozmq/internal/bufpool"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
@@ -170,15 +169,13 @@ func (c *frameCodec) validateWriteFrame(flags uint8, body []byte) (useLong bool,
 }
 
 // reuseOrAllocate returns dst[:n] when dst has the capacity, otherwise a
-// fresh buffer drawn from the size-tiered frame-body pool. The session
-// reader may retain the returned slice beyond the next ReadFrame — in
-// that case a runtime finalizer on the user-facing *Msg is responsible
-// for returning pooled buffers to the pool.
+// fresh heap buffer the caller owns outright (the session reader hands it
+// to the *Msg without copying).
 func reuseOrAllocate(dst []byte, n int) []byte {
 	if cap(dst) >= n {
 		return dst[:n]
 	}
-	return bufpool.Get(n)
+	return make([]byte, n)
 }
 
 // wrapEOF normalizes "stream ended mid-frame" into ErrUnexpectedEOF wrapped

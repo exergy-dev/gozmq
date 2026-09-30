@@ -77,7 +77,6 @@ func worker(ctx context.Context, id int, pull *gozmq.Socket, out chan<- result) 
 			return
 		}
 		out <- result{worker: id, body: string(msg.Bytes())}
-		msg.Release()
 	}
 }
 

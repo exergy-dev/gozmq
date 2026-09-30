@@ -34,7 +34,7 @@ func (r *Receiver[T]) Handle(
 // handleLoop is the shared dispatch loop for Receiver.Handle and
 // Subscriber.Handle. decode turns each received message into a V (or a
 // decode error already wrapping ErrDecode); the loop owns RecvMsg,
-// Release, error reporting, and fn invocation. It blocks until:
+// error reporting, and fn invocation. It blocks until:
 //
 //   - ctx is cancelled — returns ctx.Err();
 //   - RecvMsg returns a non-context error (e.g. ErrSocketClosed) —
@@ -58,7 +58,6 @@ func handleLoop[V any](
 			return err
 		}
 		v, decodeErr := decode(m)
-		m.Release()
 		if decodeErr != nil {
 			if stop := o.report(decodeErr); stop != nil {
 				return stop

@@ -214,11 +214,9 @@ func (e *reqEngine) send(ctx context.Context, m *msg.Msg) error {
 		// peer-gone reset). Delivering it as this request's answer would
 		// desynchronize request/reply pairing.
 		for {
-			stale, ok := cp.TryRecv()
-			if !ok {
+			if _, ok := cp.TryRecv(); !ok {
 				break
 			}
-			msg.Recycle(stale)
 		}
 
 		delivered := cp.TrySend(wire)
@@ -398,16 +396,14 @@ var _ Pollable = (*reqEngine)(nil)
 // stripReqDelimiter removes the leading empty delimiter frame from an
 // inbound REP reply. The wire shape is [empty, body...]; we return a
 // fresh *Msg holding just the body frames. The engine solely owns the
-// inbound *Msg (it is about to TransferPool it), so the resliced frame
-// header can be adopted directly without a copy.
+// inbound *Msg, so the resliced frame header can be adopted directly
+// without a copy.
 func stripReqDelimiter(m *msg.Msg) (*msg.Msg, error) {
 	frames := m.Frames()
 	if len(frames) < 1 || len(frames[0]) != 0 {
 		return nil, fmt.Errorf("req recv: missing empty delimiter: %w", zmqerr.ErrMalformedFrame)
 	}
-	result := msg.FromFramesOwned(frames[1:])
-	result.TransferPool(m)
-	return result, nil
+	return msg.FromFramesOwned(frames[1:]), nil
 }
 
 // Metrics reports the REQ engine's counters. REQ has no fair-queue;

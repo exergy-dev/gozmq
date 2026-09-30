@@ -81,7 +81,6 @@ func (r *Receiver[T]) Recv(ctx context.Context) (T, error) {
 		var zero T
 		return zero, err
 	}
-	defer m.Release()
 	return r.decode(m)
 }
 
@@ -159,7 +158,6 @@ func (s *Subscriber[T]) Recv(ctx context.Context) (Message[T], error) {
 	if err != nil {
 		return Message[T]{}, err
 	}
-	defer m.Release()
 	return s.decode(m)
 }
 

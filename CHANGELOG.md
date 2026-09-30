@@ -68,6 +68,9 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
   `Encode/DecodeZapRequest/Response` → `Encode/DecodeZAPRequest/Response`;
   `ZapStatus*` → `ZAPStatus*`; `ErrZapTemporary` → `ErrZAPTemporary`;
   `MechBase.ConfigureZAP` takes a `security.ZAPHandler`.
+- Received frames are ordinary Go memory owned by the caller.
+  `(*Msg).Release` and `(*Msg).Retain` are now no-ops kept for
+  compatibility; calling them is unnecessary.
 
 ### Removed
 
@@ -80,6 +83,9 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
   `security.ZapConfigurable`, replaced by the single func type
   `security.ZAPHandler` (whose `ServeRequest` method serves RFC 27 wire
   requests).
+- **Breaking (internal plumbing):** `msg.Recycle`, `(*Msg).IsPooled`,
+  `(*Msg).AppendPooledFrame`, `(*Msg).TransferPool` and `(*Msg).Reset` are
+  gone, along with `internal/bufpool` and the `*Msg` finalizer.
 
 ### Fixed
 
@@ -144,6 +150,14 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
   has a peer) is now torn down and retried with backoff instead of staying
   open unattached; `EventConnected` is emitted only after a successful attach.
 - `RecvBytes`' multipart-message error now wraps `ErrFSMViolation`.
+- Forwarding a received message (`RecvMsg` → `SendMsg` → `Release`) no longer
+  corrupts large frames in flight.
+- Frame slices kept after dropping their `*Msg` are no longer recycled by a
+  finalizer.
+- ROUTER `Send` no longer mutates the caller's message (data race with
+  `Proxy` capture).
+- A REP `Send` blocked at HWM now returns `ErrSocketClosed` when the socket
+  closes.
 
 ## [1.0.0] - 2026-08-10
 

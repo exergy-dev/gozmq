@@ -54,9 +54,8 @@ type resourceSample struct {
 	heapBytes  uint64
 }
 
-// sampleResources forces a GC (twice — the first may only queue finalizers,
-// and *Msg reclamation has a finalizer safety net) and then reads the
-// counters. The sleep gives goroutines that were signalled to exit a chance
+// sampleResources forces a GC (twice — the first may only queue finalizers)
+// and then reads the counters. The sleep gives goroutines that were signalled to exit a chance
 // to actually be descheduled, so the count is not spuriously high.
 func sampleResources() resourceSample {
 	for range 3 {

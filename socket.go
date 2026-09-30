@@ -635,9 +635,7 @@ func (s *Socket) SendBytes(ctx context.Context, b []byte) error {
 }
 
 // RecvMsg blocks until a message arrives or ctx cancels. The returned
-// *Msg owns its frame bytes. Call (*Msg).Release when done; this is
-// always safe and recycles any internal pool buffers backing large
-// inbound frames (see the Msg doc).
+// frames are ordinary memory owned by the caller.
 func (s *Socket) RecvMsg(ctx context.Context) (*Msg, error) {
 	if s.closed.Load() {
 		return nil, ErrSocketClosed
@@ -646,16 +644,14 @@ func (s *Socket) RecvMsg(ctx context.Context) (*Msg, error) {
 }
 
 // RecvBytes receives a single-frame message and returns an independent
-// copy of its payload. It releases the message's internal pool buffers
-// before returning, so no (*Msg).Release bookkeeping is needed — it is
-// the misuse-proof counterpart to SendBytes. Multipart messages return
-// an error; use RecvMsg for those.
+// copy of its payload (inproc delivery can share frame bytes with the
+// sender, e.g. PUB fan-out). Multipart messages return an error; use
+// RecvMsg for those.
 func (s *Socket) RecvBytes(ctx context.Context) ([]byte, error) {
 	m, err := s.RecvMsg(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer m.Release()
 	f, ok := m.SingleFrame()
 	if !ok {
 		// ErrFSMViolation: a valid message met the wrong receive call (as

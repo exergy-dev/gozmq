@@ -1,11 +1,9 @@
 package socket
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"fmt"
-	"io"
+	"slices"
 	"sync"
 
 	"github.com/exergy-dev/gozmq/internal/iface"
@@ -66,6 +64,8 @@ type repEngine struct {
 	// empty delimiter) captured from the current request. Valid only in
 	// canSend. Stored as a fresh slice independent of any caller *Msg.
 	envelope [][]byte
+	// closeCh is closed by Close so a Send parked at HWM unblocks.
+	closeCh chan struct{}
 
 	counters
 }
@@ -73,7 +73,8 @@ type repEngine struct {
 // NewRepEngine returns a new REP socket engine.
 func NewRepEngine() iface.SocketEngine {
 	return &repEngine{
-		fq: NewFairQueue(),
+		fq:      NewFairQueue(),
+		closeCh: make(chan struct{}),
 	}
 }
 
@@ -132,7 +133,6 @@ func (e *repEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 			// Malformed incoming frame — skip it and keep receiving.
 			// Strict libzmq drops such frames silently; we do the same
 			// to stay interop-safe.
-			msg.Recycle(m)
 			continue
 		}
 		e.mu.Lock()
@@ -185,13 +185,28 @@ func (e *repEngine) Send(ctx context.Context, m *msg.Msg) error {
 	// wireFrames is built locally and handed off; FromFramesOwned adopts it
 	// without the extra copy FromFrames would make.
 	wire := msg.FromFramesOwned(wireFrames)
-	if err := peer.Send(ctx, wire); err != nil {
-		if errors.Is(err, io.ErrClosedPipe) {
-			// The requester vanished before its detach landed; drop the
-			// reply silently, as for a detached peer above.
+	cp := asChanPipe(peer)
+	if !cp.TrySend(wire) {
+		// Pipe closed or at HWM. A requester that vanished before its
+		// detach landed gets the reply dropped silently, as for a
+		// detached peer above; check that first, since the select below
+		// would pick randomly while SendCh still has room.
+		select {
+		case <-peer.Closed():
 			return nil
+		default:
 		}
-		return err
+		// At HWM: block, racing pipe close, engine close, and the
+		// caller's ctx — a bare pipe Send here would ignore Close.
+		select {
+		case cp.SendCh() <- wire:
+		case <-peer.Closed():
+			return nil
+		case <-e.closeCh:
+			return fmt.Errorf("rep send: %w", zmqerr.ErrSocketClosed)
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	e.sent.Add(1)
 	return nil
@@ -210,28 +225,10 @@ func splitRepEnvelope(m *msg.Msg) (envelope [][]byte, body *msg.Msg, ok bool) {
 	frames := m.Frames()
 	for i, f := range frames {
 		if len(f) == 0 {
-			// Envelope is frames[0:i+1] (includes the empty delimiter). It is
-			// stashed into e.envelope and outlives m — and the body *Msg below
-			// takes ownership of m's pooled buffers and may be recycled before
-			// the reply Send. The envelope frames must therefore be DEEP
-			// copies: cloning only the slice headers would leave the envelope
-			// bytes aliasing pool-backed storage that the body's Recycle can
-			// reclaim (identity frames are ≤255 B, but DEALER peers put
-			// arbitrary user frames in the envelope, so clone them all).
-			env := make([][]byte, i+1)
-			for j, ef := range frames[:i+1] {
-				env[j] = bytes.Clone(ef)
-			}
-			// Body is frames[i+1:]. The engine solely owns m here and disarms
-			// it via result.TransferPool below (m is dropped immediately
-			// after), so we can reslice m's frame-slice header in place
-			// instead of make+copy — the body *Msg becomes the sole owner of
-			// the pooled buffers. (Frame byte contents are shared either way;
-			// only the slice header allocation is saved.)
-			bodyFrames := frames[i+1:]
-			result := msg.FromFramesOwned(bodyFrames)
-			result.TransferPool(m)
-			return env, result, true
+			// The envelope (including the delimiter) outlives m in
+			// e.envelope, so it gets its own slice header; the body *Msg
+			// adopts the rest of m's header, which the engine solely owns.
+			return slices.Clone(frames[:i+1]), msg.FromFramesOwned(frames[i+1:]), true
 		}
 	}
 	return nil, nil, false
@@ -251,6 +248,7 @@ func (e *repEngine) Close() error {
 		return nil
 	}
 	e.closed = true
+	close(e.closeCh)
 	e.currentPeer = nil
 	e.envelope = nil
 	e.mu.Unlock()

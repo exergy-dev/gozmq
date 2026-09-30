@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/exergy-dev/gozmq/internal/bufpool"
 	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
@@ -158,15 +157,6 @@ func (s *sessionImpl) runSecurityHandshake() error {
 	var in []byte
 	for {
 		out, done, err := s.cfg.Mech.NextHandshake(in)
-		// `in` is a codec pool buffer from the previous iteration's
-		// ReadFrame. NextHandshake copies anything it retains (metadata
-		// maps, keys), so the scratch can go back to the pool now.
-		bufpool.Put(in)
-		// Drop the alias immediately. The store is dead today (every path
-		// below reassigns before the next read), but leaving a live
-		// reference to a buffer already back in the pool is exactly the
-		// shape of the use-after-free bugs this path has had before.
-		in = nil //nolint:ineffassign,staticcheck // defensive, see above
 		if err != nil {
 			// Mechanisms may return an encoded ERROR command alongside the
 			// failure (e.g. ZAP rejection) so the peer learns the reason
@@ -203,20 +193,15 @@ func (s *sessionImpl) runSecurityHandshake() error {
 
 		// Read the peer's next handshake message.
 		flags, body, rerr := readCodec.ReadFrame(s.reader, nil)
-		// Always reap the writer before propagating either error. On the
-		// error paths body is nil or an unreferenced pool buffer — return
-		// it rather than leaking it from the pool.
+		// Always reap the writer before propagating either error.
 		werr := <-writeErrCh
 		if werr != nil {
-			bufpool.Put(body)
 			return fmt.Errorf("gozmq/session: write handshake frame: %w", werr)
 		}
 		if rerr != nil {
-			bufpool.Put(body)
 			return fmt.Errorf("gozmq/session: read handshake frame: %w", rerr)
 		}
 		if flags&iface.FlagCommand == 0 {
-			bufpool.Put(body)
 			return fmt.Errorf("%w: expected COMMAND frame in handshake, flags=0x%02x", zmqerr.ErrMalformedFrame, flags)
 		}
 		// Do NOT route through Mech.DecodeFrame here: that method is the

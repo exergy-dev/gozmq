@@ -276,3 +276,38 @@ func TestRep_CloseUnblocksRecv(t *testing.T) {
 		require.Fail(t, "recv did not unblock on close")
 	}
 }
+
+// TestRep_CloseUnblocksSendAtHWM: a reply Send blocked on the requester's
+// full pipe must unblock with ErrSocketClosed when the engine closes,
+// instead of waiting for the caller's ctx.
+func TestRep_CloseUnblocksSendAtHWM(t *testing.T) {
+	t.Parallel()
+	eng := socket.NewRepEngine()
+
+	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(a, b)
+	mustAttach(t, eng, a)
+
+	ctx := testCtx(t)
+	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("q"))), "request")
+	_, err := eng.Recv(ctx)
+	require.NoError(t, err, "recv")
+	// Fill the single HWM slot toward the requester so the reply blocks.
+	require.NoError(t, a.Send(ctx, msg.FromBytes([]byte("fill"))), "fill")
+
+	sendDone := make(chan error, 1)
+	go func() { sendDone <- eng.Send(context.Background(), msg.FromBytes([]byte("reply"))) }()
+	select {
+	case err := <-sendDone:
+		require.Fail(t, "send returned before close", "%v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	require.NoError(t, eng.Close(), "close")
+	select {
+	case err := <-sendDone:
+		require.ErrorIs(t, err, zmqerr.ErrSocketClosed, "blocked send")
+	case <-time.After(time.Second):
+		require.Fail(t, "send at HWM did not unblock on close")
+	}
+}

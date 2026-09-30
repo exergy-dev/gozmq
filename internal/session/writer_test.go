@@ -193,6 +193,13 @@ func TestWriter_BatchRetainsBufferCapacityAcrossFlushes(t *testing.T) {
 		require.GreaterOrEqual(t, cap(batch.buffers), capAfterFirst,
 			"batch.buffers capacity eroded on flush %d", i)
 	}
+	// The fallback path (this mech is not identity-framing) serializes
+	// whole frames into scratch; that capacity is kept too...
+	require.Positive(t, cap(batch.scratch), "fallback scratch not reused")
+	// ...unless one oversized message grew it past the retention cap.
+	big := make([]byte, maxRetainedScratch)
+	require.NoError(t, s.writeBatchFrom(&batch, msg.FromBytes(big)), "flush(big)")
+	require.Zero(t, cap(batch.scratch), "oversized scratch retained after flush")
 }
 
 // --------------------------------------------------------------------------

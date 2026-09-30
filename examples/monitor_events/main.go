@@ -32,8 +32,7 @@ func main() {
 	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	check(client.SendBytes(callCtx, []byte("hello")), "send")
-	// RecvBytes copies the payload and releases the message internally,
-	// so no (*Msg).Release bookkeeping is needed.
+	// RecvBytes returns a single-frame payload directly.
 	_, err = server.RecvBytes(callCtx)
 	check(err, "recv")
 

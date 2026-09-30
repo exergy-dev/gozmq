@@ -126,20 +126,10 @@ Breaking changes wait for a major version. Additions may land in any minor.
 
 ## Notes
 
-**Message release.** `RecvMsg` may hand back a `*Msg` backed by pooled
-buffers, so call `Release` when you are done with it:
-
-```go
-msg, err := sock.RecvMsg(ctx)
-if err != nil {
-    return err
-}
-defer msg.Release()
-```
-
-`Release` is always safe — a no-op for messages with no pooled frames — so
-calling it unconditionally is the right habit. `RecvBytes` skips the
-bookkeeping entirely for single-frame payloads.
+**Message ownership.** Frames returned by `RecvMsg` are ordinary Go memory
+that belongs to you: keep them, slice them, or re-send the message. There is
+nothing to release; `Msg.Release` and `Msg.Retain` are no-ops kept for
+compatibility.
 
 **Security defaults.** The default mechanism is NULL: no authentication, no
 encryption, matching libzmq. That is fine for `inproc`, `ipc`, and trusted

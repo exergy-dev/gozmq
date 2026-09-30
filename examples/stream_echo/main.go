@@ -46,7 +46,6 @@ func main() {
 		}
 		peerID = append(peerID[:0], msg.Frames()[0]...)
 		got.Write(msg.Frames()[1])
-		msg.Release()
 	}
 	fmt.Printf("STREAM received raw request:\n%s", got.String())
 

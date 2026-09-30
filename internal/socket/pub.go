@@ -99,10 +99,9 @@ type pubEngine struct {
 	// that as its closed check.
 	snap atomic.Pointer[[]*pubPeer]
 	// onSub, when set, receives every subscription command from peer p
-	// right after it has been applied to p's SubTree, and takes ownership
-	// of m. It runs on p's reader goroutine, never after DetachPipe(p) or
-	// Close returns. XPUB installs it to maintain its refcounts and event
-	// queue; nil for PUB, which recycles the command.
+	// right after it has been applied to p's SubTree. It runs on p's
+	// reader goroutine, never after DetachPipe(p) or Close returns. XPUB
+	// installs it to maintain its refcounts and event queue; nil for PUB.
 	onSub    func(p iface.Pipe, subscribe bool, prefix []byte, m *msg.Msg)
 	closeCh  chan struct{}
 	sendGate readyGate
@@ -232,14 +231,11 @@ func (e *pubEngine) runPeerReader(peer *pubPeer) {
 	}
 }
 
-// applyPeerMsg applies one inbound message from peer and takes ownership
-// of it.
+// applyPeerMsg applies one inbound message from peer. PUB/XPUB ignore
+// non-subscription inbound traffic.
 func (e *pubEngine) applyPeerMsg(peer *pubPeer, m *msg.Msg) {
 	isSub, subscribe, prefix := isSubscriptionMsg(m)
 	if !isSub {
-		// PUB/XPUB ignore non-subscription inbound traffic. Recycle
-		// eagerly instead of leaving pooled buffers to the finalizer.
-		msg.Recycle(m)
 		return
 	}
 	if subscribe {
@@ -247,11 +243,9 @@ func (e *pubEngine) applyPeerMsg(peer *pubPeer, m *msg.Msg) {
 	} else {
 		peer.tree.Remove(prefix)
 	}
-	if e.onSub == nil {
-		msg.Recycle(m)
-		return
+	if e.onSub != nil {
+		e.onSub(peer.pipe, subscribe, prefix, m)
 	}
-	e.onSub(peer.pipe, subscribe, prefix, m)
 }
 
 // ReadyRecv: PUB has no recv direction. XPUB provides its own.
@@ -283,19 +277,8 @@ var _ Pollable = (*pubEngine)(nil)
 // PUB never backpressures — or even stalls — the publisher on slow
 // subscribers).
 //
-// Ownership: the caller hands m off on Send. ONE *Msg value is fanned
-// out to every matching pipe, and each pipe's session writer calls
-// msg.Recycle post-flush — so Send must hold one reference per target.
-// Fan-out runs lock-free over the copy-on-write peer snapshot in a
-// single pass, holding back the most recent match as "pending": when a
-// further match turns up, Send Retains (reserving a reference for the
-// new match) BEFORE delivering the pending one, so a fast consumer can
-// never Recycle the message to zero while fan-out is still using it.
-// The final pending send consumes the caller's original reference; when
-// no peer matches, Send consumes it here via Recycle. The drop path
-// (sendToPeer) releases the dropped target's reference. Recycle is
-// refcount-aware, so the pooled frame buffers are reclaimed exactly
-// once, by the last consumer.
+// ONE *Msg value is fanned out to every matching pipe; the session
+// writers only read its frames, so sharing it needs no copies.
 func (e *pubEngine) Send(ctx context.Context, m *msg.Msg) error {
 	snap := e.snap.Load()
 	if snap == nil {
@@ -312,43 +295,18 @@ func (e *pubEngine) Send(ctx context.Context, m *msg.Msg) error {
 	// Single pass, no allocation: each peer's SubTree is goroutine-safe,
 	// and the snapshot entries are immutable, so matching needs no engine
 	// lock. A peer detached concurrently may still appear in a loaded
-	// snapshot; its pipe rejects the TrySend and the drop path releases
-	// the reference, so nothing is stranded.
-	var pending iface.Pipe
+	// snapshot; its pipe rejects the TrySend, which counts as a drop.
+	//
+	// Drop-on-HWM: a peer whose pipe has no room loses the message
+	// immediately (libzmq parity — no grace deadline, so one slow
+	// subscriber never delays delivery to the others).
 	for _, peer := range *snap {
-		if !peer.tree.Match(topic) {
-			continue
+		if peer.tree.Match(topic) && !asChanPipe(peer.pipe).TrySend(m) {
+			e.dropped.Add(1)
 		}
-		if pending != nil {
-			// Reserve a reference for the newly-found match before the
-			// pending target's consumer can Recycle.
-			m.Retain()
-			e.sendToPeer(pending, m)
-		}
-		pending = peer.pipe
-	}
-	if pending != nil {
-		e.sendToPeer(pending, m)
-	} else {
-		// Nobody subscribed: the message is consumed here.
-		msg.Recycle(m)
 	}
 	e.sent.Add(1)
 	return nil
-}
-
-// sendToPeer delivers m to a single matched peer with PUB drop-on-HWM
-// semantics: a peer whose pipe has no room loses the message immediately
-// (libzmq parity — no grace deadline, so one slow subscriber never
-// delays delivery to the others). Called outside e.mu. On drop it
-// increments the dropped counter and releases the reference Send holds
-// for this peer.
-func (e *pubEngine) sendToPeer(p iface.Pipe, m *msg.Msg) {
-	if asChanPipe(p).TrySend(m) {
-		return
-	}
-	e.dropped.Add(1)
-	msg.Recycle(m)
 }
 
 // Metrics reports the PUB engine's counters. PUB has no inbound queue,

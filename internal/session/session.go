@@ -102,7 +102,6 @@ func New(cfg Config) iface.Session {
 		reader:       sessionReader(cfg.Conn),
 		encode:       encode,
 		decode:       decode,
-		identityMech: identityMech,
 		directHeader: directHeader,
 		writerCtx:    wctx,
 		writerCancel: wcancel,
@@ -127,11 +126,7 @@ type sessionImpl struct {
 	reader io.Reader
 	encode frameEncoder
 	decode frameDecoder
-	// identityMech reports an identity-framing mechanism (NULL/PLAIN; see
-	// sessionFramePaths): encode and decode are identity transforms, so
-	// frame bodies cross the wire unmodified. Gates the reader's
-	// zero-copy pooled-frame path.
-	identityMech bool
+	// directHeader enables the writer's header-only fast path (see New).
 	directHeader iface.FrameHeaderAppender
 
 	// startOnce guards Start; stopOnce guards Stop.
@@ -495,7 +490,7 @@ func (s *sessionImpl) closeWriterExited() {
 // body) and hands it to the writer goroutine via cmdCh — the reader and
 // heartbeat goroutines must never write to the wire themselves (see the
 // cmdCh field doc). The body bytes are copied during serialization, so
-// callers may pass slices aliasing pooled buffers.
+// callers may pass slices aliasing the reader's scratch buffer.
 //
 // If the channel is full the command is dropped: PING/PONG are advisory
 // keep-alives — the peer (or our next tick) simply retries — and

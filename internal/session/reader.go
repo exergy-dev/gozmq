@@ -7,20 +7,17 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"unsafe"
 
-	"github.com/exergy-dev/gozmq/internal/bufpool"
 	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
-// largeFrameThreshold picks the boundary between the always-copy receive
-// path (simple, cheap) and the refcounted zero-copy path (the pool buffer
-// is attached to the *Msg and returned via Release). 4 KiB lets memcpy
-// at ~20 GB/s amortise the refcount bookkeeping; below it the copy is
-// cheaper than the bookkeeping plus the consumer's mandatory Release.
-const largeFrameThreshold = 4 * 1024
+// readScratchSize sizes the reader's reusable frame buffer. Frames that
+// fit are read into it (no codec allocation) and user frames are then
+// copied out; larger frames get their own buffer from the codec, which
+// the *Msg adopts without a copy.
+const readScratchSize = 4 * 1024
 
 // runReader is the wire->pipe traffic-phase goroutine. It loops reading
 // frames; user-message frames accumulate into a *msg.Msg until MORE
@@ -34,28 +31,10 @@ func (s *sessionImpl) runReader() {
 	defer s.wg.Done()
 	defer s.shutdown()
 
-	// scratch is a persistent dst handed to ReadFrame, sized to EXACTLY
-	// largeFrameThreshold. The size is the invariant: any frame that fits
-	// in scratch is, by definition, at or below the threshold and thus on
-	// the always-copy delivery path below, so scratch-backed bytes never
-	// outlive one loop iteration — small user frames are bytes.Clone'd
-	// into the Msg, and command bodies are fully consumed by handleCommand
-	// (PING/SUBSCRIBE/CANCEL copy whatever they keep) before the next
-	// ReadFrame overwrites scratch. Frames larger than the threshold
-	// exceed scratch's capacity, so the codec draws them from the frame
-	// pool and the zero-copy AppendPooledFrame path is unaffected.
-	//
-	// scratch itself must NEVER be returned to the frame pool (its 4 KiB
-	// capacity matches a pool tier, so bufpool.Put would accept it and a later
-	// bufpool.Get could hand it out while the reader still overwrites it on
-	// every frame): putBody identity-checks every return site.
-	scratch := make([]byte, largeFrameThreshold)
-	scratchPtr := unsafe.SliceData(scratch)
-	putBody := func(body []byte) {
-		if unsafe.SliceData(body) != scratchPtr {
-			bufpool.Put(body)
-		}
-	}
+	// scratch is overwritten by every ReadFrame, so nothing aliasing it
+	// may outlive a loop iteration: handleCommand copies whatever it
+	// keeps, and user frames read into it are cloned below.
+	scratch := make([]byte, readScratchSize)
 
 	var current *msg.Msg
 	var currentSize int64 // decoded bytes accumulated into current
@@ -73,33 +52,20 @@ func (s *sessionImpl) runReader() {
 			if !isShutdownErr(err) {
 				s.cfg.Logger.Debug("gozmq/session: reader exit", "err", err)
 			}
-			// body is nil on the header-error paths or a partially-filled
-			// buffer on the body-read path — scratch (skipped by putBody)
-			// or a pool buffer we can return since no one holds it.
-			putBody(body)
 			return
 		}
 
 		// Decode the body through the security mechanism. For NULL/PLAIN
-		// (identity) decoded aliases body and the same pool buffer will
-		// back the user Msg; for CURVE decoded is a fresh slice produced
-		// by box.Open and body is scratch to return to the pool now.
+		// decoded is body itself; CURVE returns a fresh plaintext slice.
 		plainFlags, decoded, err := s.decode(flags, body)
 		if err != nil {
 			s.cfg.Logger.Warn("gozmq/session: decode frame failed", "err", err)
-			putBody(body)
 			return
 		}
 
 		if plainFlags&iface.FlagCommand != 0 {
-			// handleCommand is synchronous and does not retain decoded
-			// past return (SUBSCRIBE/CANCEL copy into a fresh slice
-			// before publishing), so releasing/reusing body is safe
-			// whether decoded aliased body (or scratch) or not.
 			s.lastInboundUnix.Store(s.cfg.Now())
-			cmdErr := s.handleCommand(decoded)
-			putBody(body)
-			if cmdErr != nil {
+			if cmdErr := s.handleCommand(decoded); cmdErr != nil {
 				s.cfg.Logger.Warn("gozmq/session: command handling failed", "err", cmdErr)
 				return
 			}
@@ -107,26 +73,6 @@ func (s *sessionImpl) runReader() {
 		}
 
 		// User-message frame. Accumulate until MORE clears.
-		//
-		// Two delivery paths, chosen by frame size:
-		//
-		//   - Small (<= largeFrameThreshold): always-copy. The decoded
-		//     bytes are copied into a heap-owned frame and the pool
-		//     buffer is returned immediately. The extra memcpy is
-		//     cheaper than the refcount bookkeeping plus the
-		//     consumer's mandatory Release for small frames.
-		//
-		//   - Large (> largeFrameThreshold) with an identity mechanism
-		//     (NULL/PLAIN): attach the pool buffer to the Msg via
-		//     AppendPooledFrame, which sets refs=1. The consumer
-		//     (Socket.RecvMsg user) returns the buffer to the pool by
-		//     calling *Msg.Release when done; a runtime finalizer is
-		//     the safety net for callers that drop the *Msg without
-		//     Release.
-		//
-		//   - Large CURVE: decoded is a fresh box.Open slice, not a
-		//     pool buffer. Attach as an ordinary heap frame and bufpool.Put
-		//     the ciphertext scratch.
 		if current == nil {
 			s.lastInboundUnix.Store(s.cfg.Now())
 			current = msg.New()
@@ -140,21 +86,16 @@ func (s *sessionImpl) runReader() {
 			err := fmt.Errorf("%w: multipart message size %d exceeds MaxMessageSize %d",
 				zmqerr.ErrMalformedFrame, currentSize, s.cfg.MaxMessageSize)
 			s.cfg.Logger.Warn("gozmq/session: reader exit", "err", err)
-			msg.Recycle(current)
-			putBody(body)
 			return
 		}
-		switch {
-		case len(decoded) > largeFrameThreshold && s.identityMech:
-			// body cannot alias scratch here: an identity-decoded frame
-			// larger than the threshold did not fit in scratch's exactly-
-			// threshold capacity, so the codec drew it from the pool.
-			current.AppendPooledFrame(decoded, body)
-		default:
-			frame := bytes.Clone(decoded)
-			current.AppendFrame(frame)
-			putBody(body)
+		frame := decoded
+		if len(body) <= len(scratch) {
+			// body was read into scratch and decoded may alias it (it
+			// always does for NULL/PLAIN), so copy the frame out before
+			// the next ReadFrame overwrites it.
+			frame = bytes.Clone(decoded)
 		}
+		current.AppendFrame(frame)
 
 		if plainFlags&iface.FlagMore != 0 {
 			continue
@@ -221,7 +162,7 @@ func (s *sessionImpl) handleCommand(body []byte) error {
 		// TTL). The reply is handed to the writer goroutine via cmdCh —
 		// writing inline here would take writeMu on the read goroutine
 		// and deadlock against a writer parked in conn.Write.
-		// enqueueCommand copies ctxBytes, which aliases the pooled body.
+		// enqueueCommand copies ctxBytes, which may alias scratch.
 		var ctxBytes []byte
 		if len(rest) >= 2 {
 			ctxBytes = rest[2:]

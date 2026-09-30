@@ -41,7 +41,6 @@ Most examples bind to `tcp://127.0.0.1:0` by default and use
 `Socket.LastEndpoint()` to discover the selected port. `pair_ping` can also run
 over `inproc://`.
 
-Messages returned by `Socket.RecvMsg` are released with `(*Msg).Release` once
-consumed — always safe to call, and required best practice for pooled
-large-frame buffers. `Socket.RecvBytes` (see `monitor_events`) copies and
-releases internally for callers who want no bookkeeping.
+Frames returned by `Socket.RecvMsg` are ordinary Go memory owned by the
+caller; nothing needs releasing. `Socket.RecvBytes` (see `monitor_events`) is
+the single-frame shortcut.

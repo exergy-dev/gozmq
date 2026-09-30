@@ -314,18 +314,9 @@ func (e *SubEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 				e.recv.Add(1)
 				return m, nil
 			}
-			msg.Recycle(m)
 			continue
 		}
-		if m.NumFrames() == 0 {
-			msg.Recycle(m)
-			continue
-		}
-		if !e.matches(m.Frames()[0]) {
-			// Filter miss: the engine is the message's last owner, so
-			// recycle eagerly instead of leaving pooled buffers to the
-			// finalizer.
-			msg.Recycle(m)
+		if m.NumFrames() == 0 || !e.matches(m.Frames()[0]) {
 			continue
 		}
 		e.recv.Add(1)

@@ -2,14 +2,12 @@ package socket_test
 
 import (
 	"context"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/exergy-dev/gozmq/internal/bufpool"
 	"github.com/exergy-dev/gozmq/internal/iface"
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
@@ -316,13 +314,9 @@ func TestPub_SlowSubscriberDoesNotDelayOthers(t *testing.T) {
 	}
 }
 
-// TestPub_FanoutPooledMessageRecycledOnce is the double-recycle regression
-// (XSUB→XPUB proxy shape): one pooled >4KiB *Msg fanned out to two pipes
-// whose consumers Recycle concurrently must reclaim its buffers exactly
-// once — Send reserves a reference per extra target and Recycle is
-// refcount-aware, so -race stays quiet and IsPooled flips only after the
-// last consumer is done.
-func TestPub_FanoutPooledMessageRecycledOnce(t *testing.T) {
+// TestPub_FanoutSharesOneMessage: fanout hands the SAME *Msg value to
+// every matching pipe (single-copy fanout) and leaves its frames intact.
+func TestPub_FanoutSharesOneMessage(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewPubEngine()
 	defer eng.Close()
@@ -337,67 +331,17 @@ func TestPub_FanoutPooledMessageRecycledOnce(t *testing.T) {
 	require.NoError(t, b2.Send(ctx, subscribeMsg(true, []byte{})), "peer2 subscribe")
 	time.Sleep(50 * time.Millisecond) // let the peer readers apply the subs
 
-	// Build a pooled message the way the session reader does for >4KiB
-	// frames.
-	buf := bufpool.Get(8 * 1024)
-	m := msg.New()
-	m.AppendFrame([]byte("t")) // topic
-	m.AppendPooledFrame(buf, buf)
-	require.True(t, m.IsPooled())
-
-	require.NoError(t, eng.Send(ctx, m), "fanout send")
-
-	// Both peers must observe the SAME *Msg value (single-copy fanout).
-	got1, err := b1.Recv(ctx)
-	require.NoError(t, err, "peer1 recv")
-	got2, err := b2.Recv(ctx)
-	require.NoError(t, err, "peer2 recv")
-	require.Same(t, m, got1, "peer1 must receive the fanned-out message")
-	require.Same(t, m, got2, "peer2 must receive the fanned-out message")
-
-	// Concurrent post-flush Recycle from both consumers (what the two
-	// session writers do in production).
-	var wg sync.WaitGroup
-	for i := 0; i < 2; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			msg.Recycle(m)
-		}()
+	payload := make([]byte, 8*1024)
+	for i := range payload {
+		payload[i] = byte(i)
 	}
-	wg.Wait()
-	require.False(t, m.IsPooled(), "pooled buffers must be reclaimed after the last Recycle")
-}
-
-// TestPub_DropOnHWMReleasesReservedReference: when fanout drops a pooled
-// message for a saturated peer, the reference reserved for that peer is
-// released — the surviving consumer's Recycle still reclaims, with no
-// leaked refcount.
-func TestPub_DropOnHWMReleasesReservedReference(t *testing.T) {
-	t.Parallel()
-	eng := socket.NewPubEngine()
-	defer eng.Close()
-
-	full, fullPeer := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
-	free, freePeer := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
-	defer closePipes(full, fullPeer, free, freePeer)
-	mustAttach(t, eng, full, free)
-
-	ctx := testCtx(t)
-	require.NoError(t, fullPeer.Send(ctx, subscribeMsg(true, []byte{})), "full subscribe")
-	require.NoError(t, freePeer.Send(ctx, subscribeMsg(true, []byte{})), "free subscribe")
-	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, full.Send(ctx, msg.FromBytes([]byte("plug"))), "saturate full peer")
-
-	buf := bufpool.Get(8 * 1024)
-	m := msg.New()
-	m.AppendFrame([]byte("t"))
-	m.AppendPooledFrame(buf, buf)
-
+	m := msg.FromFrames([]byte("t"), payload)
 	require.NoError(t, eng.Send(ctx, m), "fanout send")
-	got, err := freePeer.Recv(ctx)
-	require.NoError(t, err, "free peer recv")
-	require.Same(t, m, got)
-	msg.Recycle(got)
-	require.False(t, m.IsPooled(), "drop path leaked its reserved reference")
+
+	for i, peer := range []iface.Pipe{b1, b2} {
+		got, err := peer.Recv(ctx)
+		require.NoError(t, err, "peer%d recv", i+1)
+		require.Same(t, m, got, "peer%d must receive the fanned-out message", i+1)
+		require.Equal(t, payload, got.Frames()[1], "peer%d payload", i+1)
+	}
 }

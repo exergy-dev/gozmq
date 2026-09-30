@@ -40,7 +40,6 @@ func main() {
 	check(client.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("encrypted hello"))), "send")
 	msg, err := server.RecvMsg(callCtx)
 	check(err, "recv")
-	defer msg.Release()
 	fmt.Printf("server received over CURVE: %q\n", msg.Bytes())
 }
 

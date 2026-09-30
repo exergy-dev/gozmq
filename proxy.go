@@ -138,13 +138,10 @@ func startCaptureTap(capture *Socket) *captureTap {
 		// peer (PUSH, DEALER) would otherwise block stop forever.
 		for m := range t.ch {
 			if err := capture.SendMsg(ctx, m); err != nil {
-				// A failed SendMsg leaves m with us.
-				m.Release()
 				// The capture socket is gone or the proxy is
 				// stopping; keep draining so senders never block,
 				// but stop trying to send.
-				for m := range t.ch {
-					m.Release()
+				for range t.ch {
 				}
 				return
 			}
@@ -153,18 +150,16 @@ func startCaptureTap(capture *Socket) *captureTap {
 	return t
 }
 
-// offer queues m for capture, taking a reference the tap goroutine gives
-// back. It never blocks: a full queue drops. A nil tap (no capture socket)
-// is a no-op.
+// offer queues m for capture; the same *Msg is also forwarded, which is
+// safe because sockets only read the messages they send. It never blocks:
+// a full queue drops. A nil tap (no capture socket) is a no-op.
 func (t *captureTap) offer(m *Msg) {
 	if t == nil {
 		return
 	}
-	m.Retain()
 	select {
 	case t.ch <- m:
 	default:
-		m.Release()
 	}
 }
 
@@ -174,7 +169,7 @@ func (t *captureTap) stop() {
 	}
 	// Both directions have exited, so nothing offers any more: cancel
 	// unblocks an in-flight capture send, and closing ch lets the
-	// goroutine release whatever is still queued and exit.
+	// goroutine drain whatever is still queued and exit.
 	t.cancel()
 	close(t.ch)
 	<-t.done
@@ -196,7 +191,6 @@ func proxyOneWay(ctx context.Context, from, to *Socket, tap *captureTap) error {
 		tap.offer(m)
 
 		if err := to.SendMsg(ctx, m); err != nil {
-			m.Release()
 			if isProxyShutdown(ctx, err) {
 				return nil
 			}

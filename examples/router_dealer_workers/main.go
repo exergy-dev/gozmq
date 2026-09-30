@@ -44,7 +44,6 @@ func main() {
 		identity := bytes.Clone(frames[0])
 		identities = append(identities, identity)
 		fmt.Printf("router saw %s send %q\n", identity, frames[1])
-		msg.Release()
 	}
 
 	for i, id := range identities {
@@ -61,7 +60,6 @@ func main() {
 			log.Fatalf("result frame count = %d, want identity + body", len(frames))
 		}
 		fmt.Printf("router received %q from %s\n", frames[1], frames[0])
-		msg.Release()
 	}
 }
 
@@ -72,7 +70,6 @@ func dealerWorker(id string, sock *gozmq.Socket) {
 	check(sock.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("ready"))), id+" send ready")
 	job, err := sock.RecvMsg(callCtx)
 	check(err, id+" recv job")
-	defer job.Release()
 	body := fmt.Sprintf("%s done by %s", job.Bytes(), id)
 	check(sock.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte(body))), id+" send result")
 }

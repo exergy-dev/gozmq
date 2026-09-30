@@ -60,7 +60,6 @@ func main() {
 
 	got, err := server.RecvMsg(callCtx)
 	check(err, "server recv")
-	defer got.Release()
 	fmt.Printf("server received %d frames:\n", got.NumFrames())
 	for i, f := range got.Frames() {
 		fmt.Printf("  frame %d: %q\n", i, f)
@@ -69,7 +68,6 @@ func main() {
 	check(server.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("ack"))), "server send")
 	reply, err := client.RecvMsg(callCtx)
 	check(err, "client recv")
-	defer reply.Release()
 	fmt.Printf("client received reply: %q\n", reply.Bytes())
 }
 

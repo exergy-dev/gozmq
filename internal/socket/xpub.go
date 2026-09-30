@@ -101,8 +101,6 @@ func (e *xpubEngine) onSubscription(p iface.Pipe, subscribe bool, prefix []byte,
 	e.mu.Unlock()
 	if surface {
 		e.signal()
-	} else {
-		msg.Recycle(m)
 	}
 }
 

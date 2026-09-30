@@ -470,7 +470,8 @@ func TestSession_FramePathsIgnoreMechName(t *testing.T) {
 				// transform, so it sees the raw wire bytes A produced.
 				Config{Conn: connB, Mech: newFakeMech(name, true, nil), SendHWM: 4, RecvHWM: 4},
 			)
-			require.False(t, sA.(*sessionImpl).identityMech, "name alone must not select identity framing")
+			_, _, identity := sessionFramePaths(xorMech{newFakeMech(name, false, nil)})
+			require.False(t, identity, "name alone must not select identity framing")
 			ctx := testCtx(t, 2*time.Second)
 			require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("hello"))))
 			got, err := sB.Pipe().Recv(ctx)
@@ -485,10 +486,10 @@ func TestSession_FramePathsIgnoreMechName(t *testing.T) {
 		})
 	}
 
-	s := New(Config{Conn: &fakeConn{}, Mech: identityFramingMech{newFakeMech("CUSTOM", false, nil)}, Codec: fakeCodec{}})
-	require.True(t, s.(*sessionImpl).identityMech, "IdentityFraming() true must select identity framing")
-	s = New(Config{Conn: &fakeConn{}, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{}})
-	require.False(t, s.(*sessionImpl).identityMech, "a mech without IdentityFraming takes the generic path")
+	_, _, identity := sessionFramePaths(identityFramingMech{newFakeMech("CUSTOM", false, nil)})
+	require.True(t, identity, "IdentityFraming() true must select identity framing")
+	_, _, identity = sessionFramePaths(newFakeMech("NULL", false, nil))
+	require.False(t, identity, "a mech without IdentityFraming takes the generic path")
 }
 
 // lingerRecordingConn records SetLinger calls. Stop must close the conn
@@ -764,15 +765,14 @@ func TestReader_MaxMessageSize_OverLimit(t *testing.T) {
 
 // --------------------------------------------------------------------------
 // Reader scratch-buffer tests. The reader hands ReadFrame a persistent
-// scratch dst of exactly largeFrameThreshold bytes, so every frame that
-// fits in it lands on the always-copy path; anything larger must come
-// from the frame pool and surface via the zero-copy pooled path. These
+// scratch dst of readScratchSize bytes; frames that fit are read into it
+// and must be copied out, larger frames get their own codec buffer. These
 // run against the REAL zmtp codec — fakeCodec ignores dst.
 // --------------------------------------------------------------------------
 
 // startZmtpPair is startPair with the real ZMTP framing codec on both
-// ends, so the reader's scratch-vs-pool dst handling is exercised. The
-// mechs declare IdentityFraming so the zero-copy paths are taken.
+// ends, so the reader's scratch dst handling is exercised. The mechs
+// declare IdentityFraming so decoded frames alias the read buffer.
 func startZmtpPair(t *testing.T, hwm int) (sA, sB iface.Session) {
 	t.Helper()
 	connA, connB := newFakeConnPair()
@@ -784,30 +784,28 @@ func startZmtpPair(t *testing.T, hwm int) (sA, sB iface.Session) {
 	)
 }
 
-// TestReader_ScratchThresholdBoundary: a frame of exactly
-// largeFrameThreshold bytes fits in scratch and must take the always-copy
-// path (Msg not pooled); one byte more must overflow scratch into a pool
-// buffer and surface through the zero-copy AppendPooledFrame path.
-func TestReader_ScratchThresholdBoundary(t *testing.T) {
+// TestReader_ScratchSizeBoundary: frames of exactly readScratchSize bytes
+// (read into scratch, must be copied out) and one byte more (own buffer,
+// adopted) are queued back to back; each must arrive intact, so no
+// delivered frame may alias scratch.
+func TestReader_ScratchSizeBoundary(t *testing.T) {
 	sA, sB := startZmtpPair(t, 8)
 	ctx := testCtx(t, 5*time.Second)
 
-	atThreshold := bytes.Repeat([]byte{0xA5}, largeFrameThreshold)
-	require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes(bytes.Clone(atThreshold))), "Send(at)")
-	got, err := sB.Pipe().Recv(ctx)
-	require.NoError(t, err, "Recv(at)")
-	require.Equal(t, atThreshold, got.Bytes(), "at-threshold payload")
-	require.False(t, got.IsPooled(),
-		"frame of exactly largeFrameThreshold bytes must take the always-copy path")
-
-	overThreshold := bytes.Repeat([]byte{0x5A}, largeFrameThreshold+1)
-	require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes(bytes.Clone(overThreshold))), "Send(over)")
-	got, err = sB.Pipe().Recv(ctx)
-	require.NoError(t, err, "Recv(over)")
-	require.Equal(t, overThreshold, got.Bytes(), "over-threshold payload")
-	require.True(t, got.IsPooled(),
-		"threshold+1 frame must overflow scratch into the pooled zero-copy path")
-	got.Release()
+	payloads := [][]byte{
+		bytes.Repeat([]byte{0xA5}, readScratchSize),
+		bytes.Repeat([]byte{0x5A}, readScratchSize+1),
+		bytes.Repeat([]byte{0x3C}, readScratchSize),
+		bytes.Repeat([]byte{0xC3}, readScratchSize-1),
+	}
+	for i, p := range payloads {
+		require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes(bytes.Clone(p))), "Send[%d]", i)
+	}
+	for i, p := range payloads {
+		got, err := sB.Pipe().Recv(ctx)
+		require.NoError(t, err, "Recv[%d]", i)
+		require.Equal(t, p, got.Bytes(), "payload[%d]", i)
+	}
 }
 
 // TestReader_SmallFrameBurstIndependentPayloads: a burst of small frames
