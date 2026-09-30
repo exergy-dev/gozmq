@@ -158,6 +158,14 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
   `Proxy` capture).
 - A REP `Send` blocked at HWM now returns `ErrSocketClosed` when the socket
   closes.
+- CURVE: traffic-phase commands (heartbeat PING/PONG) are now carried in the
+  encrypted MESSAGE flags byte (command bit 0x02) with no outer COMMAND flag,
+  matching libzmq. Previously, with heartbeats enabled (the default), libzmq
+  CURVE peers' PINGs were rejected as malformed and tore the session down, and
+  gozmq's PINGs reached libzmq applications as user messages. Commands from
+  older gozmq peers (outer COMMAND flag) are still accepted, but older gozmq
+  releases reject the new encoding: upgrade both ends of gozmq↔gozmq CURVE
+  links together.
 
 ## [1.0.0] - 2026-08-10
 

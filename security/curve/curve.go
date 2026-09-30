@@ -76,6 +76,13 @@ const (
 	// Protocol version this implementation emits. RFC 26 specifies 1.0.
 	curveVersionMajor = 0x01
 	curveVersionMinor = 0x00
+
+	// Bits of the encrypted MESSAGE flags byte (libzmq curve_mechanism_base
+	// flag_mask_more / flag_mask_command). A frame's MORE and COMMAND state
+	// travel here, inside the box; the outer ZMTP frame carrying a MESSAGE
+	// has neither flag set.
+	innerFlagMore    uint8 = 0x01
+	innerFlagCommand uint8 = 0x02
 )
 
 // --------------------------------------------------------------------------
@@ -824,15 +831,18 @@ func (m *curveMech) parseReady(body []byte) error {
 // MESSAGE (traffic phase).
 // --------------------------------------------------------------------------
 
-// EncodeFrame wraps one plaintext ZMTP frame body in a MESSAGE command body
-// suitable for emission as a COMMAND-flagged ZMTP frame. The returned bytes
-// contain the full MESSAGE command body:
+// EncodeFrame wraps one plaintext ZMTP frame body (data or command) in a
+// MESSAGE command body, emitted as the body of a single ZMTP frame. The
+// returned bytes contain the full MESSAGE command body:
 //
 //	[7]"MESSAGE" + short-nonce(8) + box(flags || plaintext)
 //
 // RFC 26 carries multipart state in the encrypted inner flags byte, not in
-// the outer ZMTP frame flags. We therefore consume outer MORE here and
-// return a wireFlags value with MORE cleared; outer COMMAND is preserved.
+// the outer ZMTP frame flags, and libzmq does the same for the COMMAND
+// flag: a traffic-phase command (PING, PONG, ...) is boxed with the inner
+// command bit and sent as an ordinary MESSAGE frame. We therefore consume
+// MORE and COMMAND here and return a wireFlags value with both cleared,
+// matching libzmq's wire format.
 //
 // Concurrency contract: EncodeFrame must be called from at most one
 // goroutine, and DecodeFrame from at most one goroutine (the two may be
@@ -856,9 +866,7 @@ func (m *curveMech) EncodeFrame(flags uint8, plain []byte) (uint8, []byte, error
 	m.ourShortNonce++
 	nonce := shortNonce(m.encPrefix, counter)
 
-	// Box plaintext: 1-byte flags || frame body. RFC 26 uses only the MORE
-	// bit here; outer COMMAND remains visible to the session layer. The
-	// shared key was precomputed in finishHandshake, so sealing is pure
+	// Box plaintext: 1-byte flags || frame body. The shared key was precomputed in finishHandshake, so sealing is pure
 	// XSalsa20/Poly1305 — no per-frame ECDH.
 	//
 	// The inner plaintext lives in the per-mechanism scratch buffer (see
@@ -870,7 +878,13 @@ func (m *curveMech) EncodeFrame(flags uint8, plain []byte) (uint8, []byte, error
 		m.encScratch = make([]byte, 1+len(plain))
 	}
 	inner := m.encScratch[:1+len(plain)]
-	inner[0] = flags & zmtp.FlagMore
+	inner[0] = 0
+	if flags&zmtp.FlagMore != 0 {
+		inner[0] |= innerFlagMore
+	}
+	if flags&zmtp.FlagCommand != 0 {
+		inner[0] |= innerFlagCommand
+	}
 	copy(inner[1:], plain)
 
 	const headerLen = 1 + len(cmdMessage) + 8
@@ -879,7 +893,7 @@ func (m *curveMech) EncodeFrame(flags uint8, plain []byte) (uint8, []byte, error
 	copy(body[1:], cmdMessage)
 	binary.BigEndian.PutUint64(body[1+len(cmdMessage):], counter)
 	body = box.SealAfterPrecomputation(body, inner, &nonce, &m.shared)
-	return flags &^ zmtp.FlagMore, body, nil
+	return flags &^ (zmtp.FlagMore | zmtp.FlagCommand), body, nil
 }
 
 // DecodeFrame reverses EncodeFrame. Returns ErrMalformedFrame on MAC
@@ -920,15 +934,25 @@ func (m *curveMech) DecodeFrame(flags uint8, wire []byte) (uint8, []byte, error)
 	if len(plain) < 1 {
 		return 0, nil, fmt.Errorf("gozmq/security/curve: MESSAGE plaintext empty: %w", zmqerr.ErrMalformedFrame)
 	}
-	if plain[0]&^zmtp.FlagMore != 0 {
-		return 0, nil, fmt.Errorf("gozmq/security/curve: MESSAGE inner flags %#x invalid: %w", plain[0], zmqerr.ErrMalformedFrame)
+	inner := plain[0]
+	if inner&^(innerFlagMore|innerFlagCommand) != 0 {
+		return 0, nil, fmt.Errorf("gozmq/security/curve: MESSAGE inner flags %#x invalid: %w", inner, zmqerr.ErrMalformedFrame)
 	}
-	// Strip the 1-byte inner flags prefix and restore MORE to the logical
-	// outer flags seen by the session layer. plain is a fresh slice
-	// produced by box.Open; slicing it (rather than make+copy) is safe —
-	// the backing array has no other referents.
+	// Strip the 1-byte inner flags prefix and restore MORE and COMMAND to
+	// the logical flags seen by the session layer. An outer COMMAND flag is
+	// passed through rather than cleared: earlier gozmq releases sent
+	// commands that way, and the session still recognises them as such.
+	// plain is a fresh slice produced by box.Open; slicing it (rather than
+	// make+copy) is safe — the backing array has no other referents.
+	out := flags &^ zmtp.FlagMore
+	if inner&innerFlagMore != 0 {
+		out |= zmtp.FlagMore
+	}
+	if inner&innerFlagCommand != 0 {
+		out |= zmtp.FlagCommand
+	}
 	m.peerShortNonce = counter + 1
-	return (flags &^ zmtp.FlagMore) | (plain[0] & zmtp.FlagMore), plain[1:], nil
+	return out, plain[1:], nil
 }
 
 // --------------------------------------------------------------------------

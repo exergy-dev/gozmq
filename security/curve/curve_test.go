@@ -2,10 +2,12 @@ package curve
 
 import (
 	"bytes"
+	"encoding/binary"
 	"math"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/nacl/box"
 
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
@@ -131,6 +133,84 @@ func TestCurveMessageFlagsRoundTrip(t *testing.T) {
 	require.NoError(t, err, "server DecodeFrame")
 	require.NotZero(t, gotFlags&zmtp.FlagMore, "decoded flags missing MORE: %#x", gotFlags)
 	require.Equal(t, payload, got, "decoded payload")
+}
+
+// openInnerFlags decrypts a MESSAGE body with the receiver's keys and
+// returns the inner flags byte, without advancing the receiver's state.
+func openInnerFlags(t *testing.T, recv *curveMech, wire []byte) byte {
+	t.Helper()
+	off := 1 + len(cmdMessage)
+	nonce := shortNonce(recv.decPrefix, binary.BigEndian.Uint64(wire[off:off+8]))
+	plain, ok := box.OpenAfterPrecomputation(nil, wire[off+8:], &nonce, &recv.shared)
+	require.True(t, ok, "box open")
+	require.NotEmpty(t, plain, "inner plaintext")
+	return plain[0]
+}
+
+// sealMessage builds a MESSAGE body from sender with an arbitrary inner
+// plaintext (flags byte included), bypassing EncodeFrame's flag mapping.
+func sealMessage(sender *curveMech, inner []byte) []byte {
+	counter := sender.ourShortNonce
+	sender.ourShortNonce++
+	nonce := shortNonce(sender.encPrefix, counter)
+	body := append([]byte{byte(len(cmdMessage))}, cmdMessage...)
+	body = binary.BigEndian.AppendUint64(body, counter)
+	return box.SealAfterPrecomputation(body, inner, &nonce, &sender.shared)
+}
+
+// TestCurveMessageCommandFlag pins the libzmq wire format for traffic-phase
+// commands (heartbeat PING/PONG): the COMMAND flag travels as bit 0x02 of
+// the encrypted flags byte and the outer frame carries no COMMAND flag.
+// libzmq drops the outer flags of a MESSAGE, so an outer-only COMMAND made
+// gozmq's PINGs surface as user data there, and its inner 0x02 was
+// rejected here as malformed, tearing the session down.
+func TestCurveMessageCommandFlag(t *testing.T) {
+	c, s := runHandshake(t)
+	client, server := c.(*curveMech), s.(*curveMech)
+	ping := zmtp.EncodeCommand(zmtp.Command{Name: "PING", Body: []byte{0x00, 0x0a}})
+
+	for _, tc := range []struct {
+		name  string
+		flags uint8
+		inner byte
+	}{
+		{"data", 0, 0x00},
+		{"more", zmtp.FlagMore, innerFlagMore},
+		{"command", zmtp.FlagCommand, innerFlagCommand},
+		{"command+more", zmtp.FlagCommand | zmtp.FlagMore, innerFlagCommand | innerFlagMore},
+	} {
+		wireFlags, wire, err := client.EncodeFrame(tc.flags, ping)
+		require.NoError(t, err, "%s: EncodeFrame", tc.name)
+		require.Zero(t, wireFlags&(zmtp.FlagMore|zmtp.FlagCommand), "%s: outer flags %#x", tc.name, wireFlags)
+		require.Equal(t, tc.inner, openInnerFlags(t, server, wire), "%s: inner flags", tc.name)
+
+		gotFlags, got, err := server.DecodeFrame(wireFlags, wire)
+		require.NoError(t, err, "%s: DecodeFrame", tc.name)
+		require.Equal(t, tc.flags, gotFlags, "%s: decoded flags", tc.name)
+		require.Equal(t, ping, got, "%s: decoded body", tc.name)
+	}
+}
+
+// TestCurveMessageLegacyOuterCommand keeps older gozmq peers working: they
+// sent commands with the outer COMMAND flag and inner flags 0.
+func TestCurveMessageLegacyOuterCommand(t *testing.T) {
+	c, s := runHandshake(t)
+	client, server := c.(*curveMech), s.(*curveMech)
+	wire := sealMessage(client, append([]byte{0x00}, "\x04PING\x00\x0a"...))
+	gotFlags, got, err := server.DecodeFrame(zmtp.FlagCommand, wire)
+	require.NoError(t, err, "DecodeFrame")
+	require.Equal(t, zmtp.FlagCommand, gotFlags, "decoded flags")
+	require.Equal(t, []byte("\x04PING\x00\x0a"), got, "decoded body")
+}
+
+// TestCurveMessageUnknownInnerFlagRejected: inner bits other than MORE and
+// COMMAND are undefined and treated as a malformed frame.
+func TestCurveMessageUnknownInnerFlagRejected(t *testing.T) {
+	c, s := runHandshake(t)
+	client, server := c.(*curveMech), s.(*curveMech)
+	wire := sealMessage(client, []byte{0x04, 'x'})
+	_, _, err := server.DecodeFrame(0, wire)
+	require.ErrorIs(t, err, zmqerr.ErrMalformedFrame, "inner flags 0x04")
 }
 
 // TestCurveMetadataIsolated confirms Metadata returns a copy so external
