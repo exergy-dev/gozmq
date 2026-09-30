@@ -647,3 +647,21 @@ lock/wake machinery at ~36% of CPU there. Measured non-starters this
 round: raising the 32-message batch cap (syscall count is not the
 limiter), a Msg sync.Pool (cross-goroutine hit rate ~0%), and bufio/TCP
 buffer tuning (already saturated).
+
+## Update (2026-09-30): single-peer fast-path evaluation
+
+Each single-peer fast path was measured against the plain path it
+shortcuts (interleaved prebuilt binaries, `-count 10`, benchstat), with
+the rule that a fast path earning under ~10% is removed.
+
+| benchmark (32B / 1KB)        | FairQueue always-forwarder | LoadBalancer always-locked |
+|:-----------------------------|---------------------------:|---------------------------:|
+| PushPullThroughput_Inproc    | +329% / +331%              | +8.6% / +8.5%              |
+| PushPullThroughput_TCP       | +119% / +12%               | ~ / -1.1%                  |
+| ReqRepRoundTrip_Inproc       | +27% / +27%                | +0.4% / +0.7%              |
+| RouterDealerLatency_Inproc   | +56% / +55%                | ~ / ~                      |
+| PubSubFanout_Inproc          | +1117% / +1081%            | ~ / ~                      |
+
+(sec/op versus the tree with both fast paths; `~` is not significant.)
+FairQueue direct mode stays. The lock-free LoadBalancer single-peer send
+snapshot was removed: its best case is under 9%.

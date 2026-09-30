@@ -148,6 +148,13 @@ Behaviour:
 - CURVE no longer wipes its per-connection copy of the long-term secret key
   after the handshake: the socket keeps the key for later connections, so
   the wipe protected nothing. Ephemeral and cookie keys are still wiped.
+- ROUTER/STREAM: the routing identity now travels with the peer's pipe, so
+  messages drained after a peer disconnects keep its identity without the
+  1024-entry post-detach cache, which pinned up to ~16 MB of pipe buffers
+  under connection churn. ROUTER `Recv` no longer takes the engine lock.
+- PUSH/DEALER send: removed the lock-free single-peer fast path (measured at
+  under 9% on inproc PUSH/PULL, nothing elsewhere). FairQueue's single-peer
+  receive path is kept (1.3×–12× on the perf suite).
 
 ### Removed
 

@@ -371,6 +371,54 @@ func TestFairQueue_DetachClosedDirectPipeDrains(t *testing.T) {
 	require.Equal(t, []byte{0, 1, 2, 3, 4}, fromA, "drained messages in order")
 }
 
+// TestFairQueue_DirectRecvWaitsOutClosedPipe: a direct-mode receiver that
+// drains the sole pipe after its peer closed stays parked (no error, no
+// spurious message) until the owner detaches the pipe, then receives from
+// the replacement.
+func TestFairQueue_DirectRecvWaitsOutClosedPipe(t *testing.T) {
+	t.Parallel()
+	fq := socket.NewFairQueue()
+	defer fq.Close()
+	ctx := testCtx(t)
+
+	a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(a, b)
+	require.NoError(t, fq.Attach(a), "attach")
+	require.NoError(t, b.Send(ctx, msg.FromBytes([]byte("last"))))
+	require.NoError(t, b.Close())
+
+	m, err := fq.Recv(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "last", string(m.Bytes()), "backlog survives the close")
+
+	got := make(chan string, 1)
+	go func() {
+		m, err := fq.Recv(ctx)
+		if err != nil {
+			got <- "error: " + err.Error()
+			return
+		}
+		got <- string(m.Bytes())
+	}()
+	select {
+	case s := <-got:
+		require.Fail(t, "recv returned on a closed, empty, still-attached pipe", s)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	require.NoError(t, fq.Detach(a), "detach")
+	c, d := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(c, d)
+	require.NoError(t, fq.Attach(c), "attach replacement")
+	require.NoError(t, d.Send(ctx, msg.FromBytes([]byte("next"))))
+	select {
+	case s := <-got:
+		require.Equal(t, "next", s)
+	case <-ctx.Done():
+		require.Fail(t, "parked recv never reached the replacement pipe")
+	}
+}
+
 // ---------------------- shared sanity ----------------------
 
 func TestLoadBalancer_DetachAdvancesCursor(t *testing.T) {

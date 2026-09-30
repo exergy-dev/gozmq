@@ -302,9 +302,12 @@ func (fq *FairQueue) RecvWithSource(ctx context.Context) (*msg.Msg, *pipe.End, e
 //
 // Fast path: when exactly one pipe is attached (direct mode), it reads
 // from that pipe directly — bypassing both the forwarder goroutine and the
-// inbound channel, saving ~100 ns per message — racing the read against
-// the snapshot's wake channel instead of allocating a context. wake is
-// closed by Detach/Close/promotion to unblock a parked read.
+// inbound channel — racing the read against the snapshot's wake channel
+// instead of allocating a context. wake is closed by Detach/Close/promotion
+// to unblock a parked read. Direct mode earns its complexity: against an
+// always-forwarder FairQueue it measured 4.3x inproc PUSH/PULL throughput,
+// 2.2x over TCP (32B), 12x inproc PUB/SUB fanout, and 22-36% lower
+// REQ/REP and ROUTER/DEALER round-trip latency (perf/, 2026-09).
 func (fq *FairQueue) recvItem(ctx context.Context) (fairItem, error) {
 	for {
 		if ds := fq.direct.Load(); ds != nil {

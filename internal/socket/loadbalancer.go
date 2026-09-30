@@ -41,31 +41,15 @@ type LoadBalancer struct {
 	readyW   readyGate // level-armed while ring.len() > 0; Poller-facing
 	closed   bool
 
-	// single is an atomically-swapped snapshot of the sole attached peer.
-	// When exactly one pipe is attached it holds that peer; Send reads it
-	// without holding mu, inlines the blocking select, and skips both the
-	// peer-pick lock and the cursor-advance lock. It is nil whenever 0 or
-	// 2+ pipes are attached (forcing the locked round-robin path) and is
-	// cleared atomically on Detach/Close so a Send can never use a stale
-	// pipe. Mirrors FairQueue.direct on the recv side. Round-robin
-	// fairness with a single peer is trivial, so no cursor math is needed.
-	single atomic.Pointer[singleSnapshot]
+	// There is deliberately no lock-free single-peer fast path (unlike
+	// FairQueue's direct mode): measured against this locked path it was
+	// worth under 9% on inproc PUSH/PULL throughput and nothing on the
+	// other perf/ benchmarks, which does not pay for a second send path.
 
 	// sent is the count of messages successfully dispatched. Incremented
 	// after the pipe accepts the message. Send-side errors do NOT
 	// increment this — they are surfaced to the caller.
 	sent atomic.Uint64
-}
-
-// singleSnapshot holds the lock-free send state for the single-peer
-// LoadBalancer fast path. A nil *singleSnapshot means the locked
-// round-robin path must be used (0 or 2+ peers). notify is the
-// generation channel current when the snapshot was taken: any later
-// peer-set change closes it, invalidating the snapshot for parked
-// senders.
-type singleSnapshot struct {
-	pipe   *pipe.End
-	notify <-chan struct{}
 }
 
 // Sent reports the number of messages this LoadBalancer has successfully
@@ -99,23 +83,6 @@ func (lb *LoadBalancer) HasPeers() bool {
 	return lb.ring.len() > 0 && !lb.closed
 }
 
-// refreshSingleLocked recomputes the single-peer send snapshot. Caller
-// must hold lb.mu, and must call signalLocked FIRST when the peer set
-// changed so the snapshot captures the fresh notify generation. When
-// exactly one pipe is attached (and not closed) the snapshot is
-// populated so Send can take the lock-free fast path; otherwise it is
-// cleared, forcing the locked round-robin path.
-func (lb *LoadBalancer) refreshSingleLocked() {
-	if lb.closed || lb.ring.len() != 1 {
-		lb.single.Store(nil)
-		return
-	}
-	lb.single.Store(&singleSnapshot{
-		pipe:   lb.ring.pipes[0],
-		notify: lb.notifyCh,
-	})
-}
-
 // signalReadyWriteLocked re-arms the write-ready gate when peers are
 // present. Caller must hold lb.mu.
 func (lb *LoadBalancer) signalReadyWriteLocked() {
@@ -137,7 +104,6 @@ func (lb *LoadBalancer) Attach(p *pipe.End) error {
 		return nil
 	}
 	lb.signalLocked()
-	lb.refreshSingleLocked()
 	lb.signalReadyWriteLocked()
 	return nil
 }
@@ -149,7 +115,6 @@ func (lb *LoadBalancer) Detach(p *pipe.End) error {
 	defer lb.mu.Unlock()
 	if lb.ring.remove(p) {
 		lb.signalLocked()
-		lb.refreshSingleLocked()
 		lb.signalReadyWriteLocked()
 	}
 	return nil
@@ -163,23 +128,6 @@ func (lb *LoadBalancer) Detach(p *pipe.End) error {
 // Returns zmqerr.ErrSocketClosed (wrapped) after Close, ctx.Err() on
 // cancellation, or the underlying Pipe.Send error.
 func (lb *LoadBalancer) Send(ctx context.Context, m *msg.Msg) error {
-	// Single-peer fast path: when exactly one peer is attached we read it
-	// from an atomic snapshot and send without taking the lock. The
-	// blocking send aborts on the notify generation, which a peer-set
-	// change (Attach/Detach) and Close both close; the locked path below
-	// then re-reads the current set, or reports the close.
-	if s := lb.single.Load(); s != nil {
-		err := s.pipe.SendOr(ctx, m, s.notify)
-		if err == nil {
-			lb.sent.Add(1)
-			return nil
-		}
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-		// ErrAborted or a closed pipe: fall through to the locked path.
-	}
-
 	for {
 		lb.mu.Lock()
 		if lb.closed {
@@ -244,7 +192,7 @@ func (lb *LoadBalancer) Send(ctx context.Context, m *msg.Msg) error {
 
 // signalLocked broadcasts a peer-set change by closing the current
 // notify generation and installing a fresh one. Caller must hold lb.mu.
-// Every parked Send (fast path or locked path) holds some generation and
+// Every parked Send holds some generation and
 // wakes when it closes; senders that arrive later grab the new, open
 // generation and are unaffected.
 func (lb *LoadBalancer) signalLocked() {
@@ -261,7 +209,6 @@ func (lb *LoadBalancer) Close() error {
 		return nil
 	}
 	lb.closed = true
-	lb.single.Store(nil)
 	lb.signalLocked()
 	return nil
 }
