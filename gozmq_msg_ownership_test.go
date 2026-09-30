@@ -432,14 +432,16 @@ func TestRecvBufferPool_RetainedUntilRelease(t *testing.T) {
 	churn() // one reference left
 	kept.Release()
 
-	// Released: the buffer may now be reused. sync.Pool gives no guarantee
-	// (and drops some Puts under -race), so allow many tries.
+	// Released: the buffer may now be reused. Reuse is an optimisation, not
+	// part of the contract — sync.Pool can drop it (a GC, or deliberately
+	// under -race) — so only report it; the safety property (no reuse while
+	// referenced) is asserted by churn above.
 	reused := false
 	for i := 0; i < 500 && !reused; i++ {
 		send(i)
 		reused = recvRelease() == &frame[0]
 	}
-	require.True(t, reused, "released buffer never came back from the pool")
+	t.Logf("released buffer reused by the pool: %v", reused)
 }
 
 // TestRecvBufferPool_OverRelease: releasing a received message more often
