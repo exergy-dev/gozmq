@@ -307,6 +307,71 @@ func TestPoller_OnlySecondPullReady(t *testing.T) {
 	}
 }
 
+// TestPoller_TwoWaitersSameSocket parks two Polls on one readable socket —
+// through two Pollers and through concurrent Poll calls on one Poller (which
+// the Poller documents as safe). Engines expose a single-slot readiness
+// gate, so the first waiter to wake consumes the token; the message stays
+// queued, and the second waiter must still wake rather than sleep until its
+// ctx expires.
+func TestPoller_TwoWaitersSameSocket(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		pollers func() (*gozmq.Poller, *gozmq.Poller)
+	}{
+		{"two pollers", func() (*gozmq.Poller, *gozmq.Poller) { return gozmq.NewPoller(), gozmq.NewPoller() }},
+		{"one poller", func() (*gozmq.Poller, *gozmq.Poller) { p := gozmq.NewPoller(); return p, p }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			zctx := gozmq.NewContext()
+			defer zctx.Close()
+			pull, err := zctx.NewSocket(gozmq.Pull)
+			if err != nil {
+				t.Fatalf("new pull: %v", err)
+			}
+			defer pull.Close()
+			if err := pull.Bind("inproc://poller-two-waiters"); err != nil {
+				t.Fatalf("bind: %v", err)
+			}
+			push, err := zctx.NewSocket(gozmq.Push)
+			if err != nil {
+				t.Fatalf("new push: %v", err)
+			}
+			defer push.Close()
+			if err := push.Connect("inproc://poller-two-waiters"); err != nil {
+				t.Fatalf("connect: %v", err)
+			}
+
+			p1, p2 := tc.pollers()
+			p1.Add(pull, gozmq.PollIn)
+			p2.Add(pull, gozmq.PollIn)
+			res := make(chan error, 2)
+			for _, p := range []*gozmq.Poller{p1, p2} {
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					defer cancel()
+					_, err := p.Poll(ctx)
+					res <- err
+				}()
+			}
+			// Let both waiters park. If one has not yet, it finds the
+			// message on its immediate scan and the test passes
+			// trivially rather than flaking.
+			time.Sleep(100 * time.Millisecond)
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := push.SendMsg(ctx, gozmq.NewMsgFromBytes([]byte("x"))); err != nil {
+				t.Fatalf("send: %v", err)
+			}
+			for range 2 {
+				if err := <-res; err != nil {
+					t.Fatalf("poll on a readable socket: %v", err)
+				}
+			}
+		})
+	}
+}
+
 // TestPoller_ContextCancel asserts Poll returns ctx.Err() when ctx
 // cancels before any socket becomes ready.
 func TestPoller_ContextCancel(t *testing.T) {

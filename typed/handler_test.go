@@ -97,7 +97,7 @@ func TestSubscriber_Handle_TopicRoundtrip(t *testing.T) {
 	sub := typed.NewSubscriber[payload](subSock, jsonCodec{})
 	require.NoError(t, sub.Subscribe("orders."))
 	require.NoError(t, subSock.Connect("inproc://typed-handle-pubsub"))
-	time.Sleep(100 * time.Millisecond)
+	syncSub(t, pubSock, subSock, "orders.")
 
 	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

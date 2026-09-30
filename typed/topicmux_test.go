@@ -3,10 +3,13 @@ package typed_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
@@ -70,7 +73,8 @@ func TestTopicMux_DispatchesHeterogeneousTypes(t *testing.T) {
 		return nil
 	}))
 	require.NoError(t, subSock.Connect("inproc://typed-router-hetero"))
-	time.Sleep(100 * time.Millisecond)
+	syncSub(t, pubSock, subSock, "orders.")
+	syncSub(t, pubSock, subSock, "alerts.")
 
 	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -141,7 +145,7 @@ func TestTopicMux_LongestPrefixWins(t *testing.T) {
 	}))
 
 	require.NoError(t, subSock.Connect("inproc://typed-router-longest"))
-	time.Sleep(100 * time.Millisecond)
+	syncSub(t, pubSock, subSock, "orders.priority.")
 
 	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -182,11 +186,11 @@ func TestTopicMux_RegisterAfterRunReturnsError(t *testing.T) {
 	runErr := make(chan error, 1)
 	go func() { runErr <- router.Run(runCtx) }()
 
-	// Give Run a moment to set started.
-	time.Sleep(50 * time.Millisecond)
-
-	err := typed.Register[order](router, "orders.", func(context.Context, typed.Message[order]) error { return nil })
-	require.ErrorIs(t, err, typed.ErrTopicMuxRunning, "Register after Run")
+	// Run latches started asynchronously; wait for it rather than sleep.
+	require.Eventually(t, func() bool {
+		err := typed.Register[order](router, "orders.", func(context.Context, typed.Message[order]) error { return nil })
+		return errors.Is(err, typed.ErrTopicMuxRunning)
+	}, 5*time.Second, time.Millisecond, "Register after Run")
 	require.ErrorIs(t, router.Unregister("orders."), typed.ErrTopicMuxRunning, "Unregister after Run")
 
 	runCancel()
@@ -227,7 +231,7 @@ func TestTopicMux_UnmatchedTopicSurfacesErrNoTopicMatch(t *testing.T) {
 	require.NoError(t, typed.Register[order](router, "orders.", func(context.Context, typed.Message[order]) error { return nil }))
 	require.NoError(t, subSock.Subscribe([]byte("metrics.")))
 	require.NoError(t, subSock.Connect("inproc://typed-router-nomatch"))
-	time.Sleep(100 * time.Millisecond)
+	syncSub(t, pubSock, subSock, "metrics.")
 
 	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -241,4 +245,84 @@ func TestTopicMux_UnmatchedTopicSurfacesErrNoTopicMatch(t *testing.T) {
 		return nil
 	}))
 	require.ErrorIs(t, err, typed.ErrNoTopicMatch)
+}
+
+// A second Run while one is executing must be rejected, not run alongside
+// it (and must not clear the first Run's latch when it returns).
+func TestTopicMux_ConcurrentRunRejected(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	zctx, pubSock, subSock := newPubSubPair(t, "inproc://typed-router-concurrent-run")
+	defer zctx.Close()
+	defer pubSock.Close()
+	defer subSock.Close()
+
+	router := typed.NewTopicMux(subSock, jsonCodec{})
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- router.Run(runCtx) }()
+	require.Eventually(t, func() bool {
+		return errors.Is(router.Unregister("x."), typed.ErrTopicMuxRunning)
+	}, 5*time.Second, time.Millisecond, "first Run never started")
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.ErrorIs(t, router.Run(ctx), typed.ErrTopicMuxRunning, "second Run")
+	require.ErrorIs(t, router.Unregister("x."), typed.ErrTopicMuxRunning,
+		"rejected Run must leave the first Run's latch set")
+
+	runCancel()
+	require.ErrorIs(t, <-runErr, context.Canceled)
+}
+
+// Register racing a starting Run must either land before Run snapshots the
+// handlers or be rejected, never mutate the table Run is reading. Run under
+// -race: messages already queued make Run consult the table immediately.
+func TestTopicMux_RegisterRacesRun(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	zctx, pubSock, subSock := newPubSubPair(t, "inproc://typed-router-register-race")
+	defer zctx.Close()
+	defer pubSock.Close()
+	defer subSock.Close()
+
+	router := typed.NewTopicMux(subSock, jsonCodec{})
+	var got atomic.Int32
+	require.NoError(t, typed.Register[order](router, "a.", func(context.Context, typed.Message[order]) error {
+		got.Add(1)
+		return nil
+	}))
+	require.NoError(t, subSock.Connect("inproc://typed-router-register-race"))
+	syncSub(t, pubSock, subSock, "a.")
+
+	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pub := typed.NewPublisher[order](pubSock, jsonCodec{})
+	const n = 50
+	for i := range n {
+		require.NoError(t, pub.Send(callCtx, "a.x", order{ID: i}))
+	}
+
+	regDone := make(chan struct{})
+	go func() {
+		defer close(regDone)
+		for i := 0; ; i++ {
+			err := typed.Register[order](router, fmt.Sprintf("b%d.", i),
+				func(context.Context, typed.Message[order]) error { return nil })
+			if errors.Is(err, typed.ErrTopicMuxRunning) {
+				return
+			}
+			assert.NoError(t, err)
+		}
+	}()
+	loopCtx, loopCancel := context.WithCancel(callCtx)
+	defer loopCancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- router.Run(loopCtx) }()
+
+	<-regDone
+	require.Eventually(t, func() bool { return got.Load() == n }, 5*time.Second, time.Millisecond)
+	loopCancel()
+	require.ErrorIs(t, <-runErr, context.Canceled)
 }

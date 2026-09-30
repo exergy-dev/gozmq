@@ -11,6 +11,9 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
   buffered, then blocks until the next peer attaches (libzmq semantics)
   instead of returning `io.EOF`; a `SendMsg` racing the disconnect waits
   for the next peer instead of returning `io.ErrClosedPipe`.
+- `typed.Receiver.Recv` and `typed.Subscriber.Recv` decode errors now wrap
+  `typed.ErrDecode` (still `ErrFrameCount` where applicable); message text
+  changed from "typed: unmarshal: …" to "typed: decode failed: …".
 
 ### Fixed
 
@@ -33,6 +36,17 @@ All notable changes to `gozmq` are documented here. The format follows [Keep a C
   silently instead of returning a raw `io.ErrClosedPipe`.
 - PAIR: a reconnecting peer is no longer rejected when it attaches before
   the previous peer's pipe has been detached.
+- `Proxy` now returns promptly after ctx cancellation even when the capture
+  socket blocks (e.g. a PUSH/DEALER with no peer); taps queued or in flight
+  at shutdown may be dropped.
+- `Poller`: two Pollers, or concurrent `Poll` calls, waiting on the same
+  socket no longer lose a wakeup; the second waiter used to sleep until its
+  context expired while the message stayed queued.
+- `typed.TopicMux`: a concurrent `Run` now returns `ErrTopicMuxRunning`
+  instead of running alongside the first; fixed a data race between
+  `Register`/`Unregister` and a starting `Run`.
+- STREAM sockets no longer pin a 32 KiB buffer per received chunk (small
+  segments at the HWM could hold tens of MiB per peer).
 
 ## [1.0.0] - 2026-08-10
 

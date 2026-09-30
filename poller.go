@@ -172,6 +172,7 @@ func (p *Poller) Poll(ctx context.Context) ([]PollEvent, error) {
 		// Immediate non-blocking pass: anything ready right now wins
 		// without going through reflect.Select.
 		if ready := scanReady(snap.regs); len(ready) > 0 {
+			rearm(ready)
 			return ready, nil
 		}
 
@@ -282,6 +283,26 @@ func scanReady(regs []pollerReg) []PollEvent {
 		}
 	}
 	return out
+}
+
+// rearm re-arms the ready gates of the sockets Poll is about to report.
+// Each engine gate is a single-slot token: when two waiters (two Pollers,
+// or concurrent Poll calls) park on the same socket, the one that wakes
+// consumes the token and the other would sleep until ctx expired even
+// though the message is still queued. Ready{Recv,Write} arm the gate
+// whenever the direction is ready, so calling them hands the token on.
+// A stale token left behind costs a later Poll one spurious wakeup.
+func rearm(ready []PollEvent) {
+	for _, ev := range ready {
+		// scanReady only reports pollable engines.
+		eng := ev.Socket.engine.(pollable) //nolint:errcheck // invariant, see above
+		if ev.Events&PollIn != 0 {
+			eng.ReadyRecv()
+		}
+		if ev.Events&PollOut != 0 {
+			eng.ReadyWrite()
+		}
+	}
 }
 
 // waitForWake parks until at least one registered ready channel fires

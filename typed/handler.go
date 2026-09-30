@@ -8,9 +8,9 @@ import (
 	"github.com/exergy-dev/gozmq"
 )
 
-// ErrDecode wraps errors the dispatch loop observes while turning a
-// received message into a value of type T (frame-shape mismatches,
-// Codec.Unmarshal failures). Use errors.Is against ErrDecode inside a
+// ErrDecode wraps errors observed while turning a received message into a
+// value of type T (frame-shape mismatches, Codec.Unmarshal failures), from
+// Recv as well as the dispatch loops. Use errors.Is against ErrDecode inside a
 // WithErrorHandler callback to tell decode failures from handler
 // failures.
 var ErrDecode = errors.New("typed: decode failed")
@@ -28,22 +28,13 @@ func (r *Receiver[T]) Handle(
 	fn func(context.Context, T) error,
 	opts ...Option,
 ) error {
-	return handleLoop(ctx, r.sock, func(m *gozmq.Msg) (T, error) {
-		var v T
-		if m.NumFrames() != 1 {
-			return v, fmt.Errorf("%w: expected 1 frame, got %d: %w", ErrDecode, m.NumFrames(), ErrFrameCount)
-		}
-		if err := r.codec.Unmarshal(m.Bytes(), &v); err != nil {
-			return v, fmt.Errorf("%w: %w", ErrDecode, err)
-		}
-		return v, nil
-	}, fn, apply(opts))
+	return handleLoop(ctx, r.sock, r.decode, fn, apply(opts))
 }
 
 // handleLoop is the shared dispatch loop for Receiver.Handle and
 // Subscriber.Handle. decode turns each received message into a V (or a
-// decode error already wrapping ErrDecode); the loop owns ctx checks,
-// RecvMsg, Release, error reporting, and fn invocation. It blocks until:
+// decode error already wrapping ErrDecode); the loop owns RecvMsg,
+// Release, error reporting, and fn invocation. It blocks until:
 //
 //   - ctx is cancelled — returns ctx.Err();
 //   - RecvMsg returns a non-context error (e.g. ErrSocketClosed) —
@@ -62,9 +53,6 @@ func handleLoop[V any](
 	o options,
 ) error {
 	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
 		m, err := sock.RecvMsg(ctx)
 		if err != nil {
 			return err
@@ -93,16 +81,5 @@ func (s *Subscriber[T]) Handle(
 	fn func(context.Context, Message[T]) error,
 	opts ...Option,
 ) error {
-	return handleLoop(ctx, s.sock, func(m *gozmq.Msg) (Message[T], error) {
-		var msg Message[T]
-		frames := m.Frames()
-		if len(frames) != 2 {
-			return msg, fmt.Errorf("%w: expected [topic, payload], got %d frames: %w", ErrDecode, len(frames), ErrFrameCount)
-		}
-		if err := s.codec.Unmarshal(frames[1], &msg.Value); err != nil {
-			return msg, fmt.Errorf("%w: %w", ErrDecode, err)
-		}
-		msg.Topic = string(frames[0])
-		return msg, nil
-	}, fn, apply(opts))
+	return handleLoop(ctx, s.sock, s.decode, fn, apply(opts))
 }

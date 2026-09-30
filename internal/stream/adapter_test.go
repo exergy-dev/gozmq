@@ -45,10 +45,7 @@ func TestAdapter_InboundChunking(t *testing.T) {
 	t.Parallel()
 	ac, pc := newFakePair()
 
-	ad := NewAdapter(context.Background(), ac, Config{
-		Identity:    []byte("peer-1"),
-		ReadBufSize: 4 * 1024,
-	})
+	ad := NewAdapter(context.Background(), ac, Config{})
 	defer ad.Close()
 	eng := ad.EnginePipe()
 
@@ -76,6 +73,38 @@ func TestAdapter_InboundChunking(t *testing.T) {
 	require.Equal(t, payload, got.Bytes(), "reassembled body mismatch")
 
 	require.NoError(t, <-writerDone, "peer write")
+}
+
+// TestAdapter_InboundChunkSized asserts each forwarded chunk owns only the
+// bytes read, not the whole read buffer: a queued 1-byte segment must not
+// pin a 32 KiB allocation (1-byte segments × HWM would otherwise hold tens
+// of MiB per peer). It also checks chunks do not alias a reused buffer.
+func TestAdapter_InboundChunkSized(t *testing.T) {
+	t.Parallel()
+	ac, pc := newFakePair()
+	defer pc.Close()
+
+	ad := NewAdapter(context.Background(), ac, Config{})
+	defer ad.Close()
+	eng := ad.EnginePipe()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// net.Pipe hands each Write to exactly one Read, so these arrive as
+	// two separate chunks; hold the first while the second is read.
+	var chunks []*msg.Msg
+	for _, b := range []string{"a", "b"} {
+		_, err := pc.Write([]byte(b))
+		require.NoError(t, err, "peer write")
+		m, err := eng.Recv(ctx)
+		require.NoError(t, err, "eng recv")
+		chunks = append(chunks, m)
+	}
+	for i, want := range []string{"a", "b"} {
+		require.Equal(t, want, string(chunks[i].Bytes()), "chunk %d", i)
+		require.Less(t, cap(chunks[i].Bytes()), 64, "chunk %d pins its read buffer", i)
+	}
 }
 
 // TestAdapter_OutboundWrite pushes a Msg through the engine pipe; the
@@ -215,9 +244,9 @@ func TestAdapter_TCPRoundTrip(t *testing.T) {
 	clientSide := &testConn{Conn: clientConn, local: clientConn.LocalAddr().String(), remote: clientConn.RemoteAddr().String()}
 	serverSide := &testConn{Conn: srv.conn, local: srv.conn.LocalAddr().String(), remote: srv.conn.RemoteAddr().String()}
 
-	clientAd := NewAdapter(context.Background(), clientSide, Config{Identity: []byte("client")})
+	clientAd := NewAdapter(context.Background(), clientSide, Config{})
 	defer clientAd.Close()
-	serverAd := NewAdapter(context.Background(), serverSide, Config{Identity: []byte("server")})
+	serverAd := NewAdapter(context.Background(), serverSide, Config{})
 	defer serverAd.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -307,6 +307,37 @@ func TestProxyStopsCleanlyOnSocketClose(t *testing.T) {
 	}
 }
 
+// A capture socket that blocks forever (a PUSH with no peer) must not wedge
+// shutdown: Proxy's doc promises it returns once ctx is cancelled, and the
+// tap goroutine's pending SendMsg is part of that teardown.
+func TestProxyCaptureBlockedDoesNotHangShutdown(t *testing.T) {
+	_, front, feeder := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "inproc://proxy-caphang-front", nil, nil)
+	_, back, drain := newSocketPairTypes(t, gozmq.Push, gozmq.Pull, "inproc://proxy-caphang-back", nil, nil)
+	_, capture := newTestSocket(t, gozmq.Push)
+	require.NoError(t, capture.Bind("inproc://proxy-caphang-nobody"))
+
+	pctx, pcancel := context.WithCancel(context.Background())
+	defer pcancel()
+	done := make(chan error, 1)
+	go func() { done <- gozmq.Proxy(pctx, front, back, capture) }()
+
+	ctx := testCtx(t)
+	require.NoError(t, feeder.SendMsg(ctx, gozmq.NewMsgFromBytes([]byte("x"))))
+	m, err := drain.RecvMsg(ctx)
+	require.NoError(t, err)
+	m.Release()
+
+	pcancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		_ = capture.Close() // unwedge so cleanup can run
+		<-done
+		t.Fatal("Proxy did not return after ctx cancel: capture tap blocked shutdown")
+	}
+}
+
 // recvWithRetry re-runs send until sub receives something or ctx expires.
 // PUB/SUB drops messages published before the subscription has propagated,
 // which through a proxy takes two hops.

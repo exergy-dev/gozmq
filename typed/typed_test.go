@@ -84,8 +84,7 @@ func TestPublisherSubscriber_TopicRoundtrip(t *testing.T) {
 	require.NoError(t, sub.Subscribe("orders."))
 	require.NoError(t, subSock.Connect("inproc://typed-pubsub"))
 
-	// Slow-joiner: allow subscription to propagate before publishing.
-	time.Sleep(100 * time.Millisecond)
+	syncSub(t, pubSock, subSock, "orders.")
 
 	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -151,6 +150,7 @@ func TestReceiver_WrongFrameCount(t *testing.T) {
 	receiver := typed.NewReceiver[payload](pull, jsonCodec{})
 	_, err = receiver.Recv(callCtx)
 	require.ErrorIs(t, err, typed.ErrFrameCount)
+	require.ErrorIs(t, err, typed.ErrDecode)
 }
 
 func TestReceiver_ContextCancelled(t *testing.T) {

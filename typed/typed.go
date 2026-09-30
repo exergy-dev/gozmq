@@ -73,22 +73,29 @@ func NewReceiver[T any](sock *gozmq.Socket, codec Codec) *Receiver[T] {
 }
 
 // Recv blocks until a single-frame message arrives or ctx cancels, then
-// unmarshals the payload into a T.
+// unmarshals the payload into a T. Frame-count and Codec failures wrap
+// ErrDecode.
 func (r *Receiver[T]) Recv(ctx context.Context) (T, error) {
-	var zero T
 	m, err := r.sock.RecvMsg(ctx)
 	if err != nil {
+		var zero T
 		return zero, err
 	}
 	defer m.Release()
+	return r.decode(m)
+}
+
+// decode turns a single-frame message into a T; shared by Recv and Handle.
+func (r *Receiver[T]) decode(m *gozmq.Msg) (T, error) {
+	var v T
 	if m.NumFrames() != 1 {
-		return zero, fmt.Errorf("typed: expected 1 frame, got %d: %w", m.NumFrames(), ErrFrameCount)
+		return v, fmt.Errorf("%w: expected 1 frame, got %d: %w", ErrDecode, m.NumFrames(), ErrFrameCount)
 	}
-	var out T
-	if err := r.codec.Unmarshal(m.Bytes(), &out); err != nil {
-		return zero, fmt.Errorf("typed: unmarshal: %w", err)
+	if err := r.codec.Unmarshal(m.Bytes(), &v); err != nil {
+		var zero T
+		return zero, fmt.Errorf("%w: %w", ErrDecode, err)
 	}
-	return out, nil
+	return v, nil
 }
 
 // Message is a received value with its topic prefix attached.
@@ -146,20 +153,26 @@ func (s *Subscriber[T]) Unsubscribe(topic string) error {
 
 // Recv blocks until a [topic, payload] message arrives or ctx cancels,
 // then unmarshals the payload and returns it alongside the topic.
+// Frame-count and Codec failures wrap ErrDecode.
 func (s *Subscriber[T]) Recv(ctx context.Context) (Message[T], error) {
-	var zero Message[T]
 	m, err := s.sock.RecvMsg(ctx)
 	if err != nil {
-		return zero, err
+		return Message[T]{}, err
 	}
 	defer m.Release()
+	return s.decode(m)
+}
+
+// decode turns a [topic, payload] message into a Message[T]; shared by
+// Recv and Handle.
+func (s *Subscriber[T]) decode(m *gozmq.Msg) (Message[T], error) {
 	frames := m.Frames()
 	if len(frames) != 2 {
-		return zero, fmt.Errorf("typed: expected [topic, payload], got %d frames: %w", len(frames), ErrFrameCount)
+		return Message[T]{}, fmt.Errorf("%w: expected [topic, payload], got %d frames: %w", ErrDecode, len(frames), ErrFrameCount)
 	}
 	var v T
 	if err := s.codec.Unmarshal(frames[1], &v); err != nil {
-		return zero, fmt.Errorf("typed: unmarshal: %w", err)
+		return Message[T]{}, fmt.Errorf("%w: %w", ErrDecode, err)
 	}
 	return Message[T]{Topic: string(frames[0]), Value: v}, nil
 }

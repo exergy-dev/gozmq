@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/exergy-dev/gozmq"
@@ -36,8 +37,13 @@ var ErrTopicAlreadyRegistered = errors.New("typed: topic already registered")
 // calls made mid-Run return ErrTopicMuxRunning. Once Run returns,
 // registration is available again ahead of a subsequent Run.
 type TopicMux struct {
-	sock    *gozmq.Socket
-	codec   Codec
+	sock  *gozmq.Socket
+	codec Codec
+
+	// mu orders registration against Run's snapshot of entries: a
+	// Register that saw started == false finishes before Run reads the
+	// table, and one that starts after Run's snapshot sees started.
+	mu      sync.Mutex
 	entries []muxEntry
 	started atomic.Bool
 }
@@ -62,6 +68,8 @@ func Register[T any](
 	topic string,
 	handler func(context.Context, Message[T]) error,
 ) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.started.Load() {
 		return ErrTopicMuxRunning
 	}
@@ -103,6 +111,8 @@ func Register[T any](
 // that prefix. Returns ErrTopicMuxRunning while Run is executing. Unknown
 // topics are a no-op.
 func (r *TopicMux) Unregister(topic string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.started.Load() {
 		return ErrTopicMuxRunning
 	}
@@ -119,11 +129,19 @@ func (r *TopicMux) Unregister(topic string) error {
 // ErrHandler, and ErrNoTopicMatch. Socket-level errors are always
 // fatal; ctx cancellation returns ctx.Err().
 //
-// Calling Run a second time on the same TopicMux is supported only if
-// the previous Run returned; concurrent Run calls are not supported.
+// Calling Run a second time on the same TopicMux is supported once the
+// previous Run returned; a Run started while another is executing returns
+// ErrTopicMuxRunning.
 func (r *TopicMux) Run(ctx context.Context, opts ...Option) error {
-	r.started.Store(true)
+	if !r.started.CompareAndSwap(false, true) {
+		return ErrTopicMuxRunning
+	}
 	defer r.started.Store(false)
+	// Registration is frozen from here until Run returns, so a snapshot
+	// taken under mu stays current without locking per message.
+	r.mu.Lock()
+	entries := r.entries
+	r.mu.Unlock()
 
 	// muxDispatch carries a decoded message through handleLoop: the
 	// matched entry plus the decoded value, ready to invoke.
@@ -139,7 +157,7 @@ func (r *TopicMux) Run(ctx context.Context, opts ...Option) error {
 			return d, fmt.Errorf("%w: expected [topic, payload], got %d frames: %w", ErrDecode, len(frames), ErrFrameCount)
 		}
 		d.topic = string(frames[0])
-		entry, ok := r.match(d.topic)
+		entry, ok := match(entries, d.topic)
 		if !ok {
 			return d, fmt.Errorf("%w: %q", ErrNoTopicMatch, d.topic)
 		}
@@ -157,8 +175,10 @@ func (r *TopicMux) Run(ctx context.Context, opts ...Option) error {
 	}, apply(opts))
 }
 
-func (r *TopicMux) match(topic string) (muxEntry, bool) {
-	for _, e := range r.entries {
+// match returns the longest registered prefix of topic; entries is kept
+// sorted by descending prefix length, so the first hit is the longest.
+func match(entries []muxEntry, topic string) (muxEntry, bool) {
+	for _, e := range entries {
 		if strings.HasPrefix(topic, e.topic) {
 			return e, true
 		}

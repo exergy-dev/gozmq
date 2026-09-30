@@ -33,7 +33,8 @@ import (
 // own goroutine behind a bounded queue, so a tap that keeps up sees every
 // message, and one that stalls or fills its high-water mark drops rather
 // than applying backpressure to the data path. Capture errors never fail
-// the proxy.
+// the proxy, and a capture socket that blocks never delays its return:
+// taps still queued or in flight when Proxy stops may be dropped.
 //
 // Proxy blocks until it stops. It returns nil for the expected shutdown —
 // ctx cancellation, or either socket being closed by another goroutine —
@@ -114,27 +115,34 @@ const captureTapDepth = 256
 // randomly among ready cases, so it would drop messages even when the
 // capture socket had room.
 type captureTap struct {
-	ch   chan *Msg
-	done chan struct{}
+	ch     chan *Msg
+	done   chan struct{}
+	cancel context.CancelFunc // aborts a capture SendMsg blocked at shutdown
 }
 
 func startCaptureTap(capture *Socket) *captureTap {
 	if capture == nil {
 		return nil
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	t := &captureTap{
-		ch:   make(chan *Msg, captureTapDepth),
-		done: make(chan struct{}),
+		ch:     make(chan *Msg, captureTapDepth),
+		done:   make(chan struct{}),
+		cancel: cancel,
 	}
 	go func() {
 		defer close(t.done)
 		// Blocking sends are fine here: this goroutine is off the data
-		// path, and backpressure just fills t.ch, which then drops.
+		// path, and backpressure just fills t.ch, which then drops. ctx
+		// only bounds them at shutdown, where a capture socket with no
+		// peer (PUSH, DEALER) would otherwise block stop forever.
 		for m := range t.ch {
-			if err := capture.SendMsg(context.Background(), m); err != nil {
+			if err := capture.SendMsg(ctx, m); err != nil {
+				// A failed SendMsg leaves m with us.
 				m.Release()
-				// The capture socket is gone; keep draining so
-				// senders never block, but stop trying to send.
+				// The capture socket is gone or the proxy is
+				// stopping; keep draining so senders never block,
+				// but stop trying to send.
 				for m := range t.ch {
 					m.Release()
 				}
@@ -164,6 +172,10 @@ func (t *captureTap) stop() {
 	if t == nil {
 		return
 	}
+	// Both directions have exited, so nothing offers any more: cancel
+	// unblocks an in-flight capture send, and closing ch lets the
+	// goroutine release whatever is still queued and exit.
+	t.cancel()
 	close(t.ch)
 	<-t.done
 }

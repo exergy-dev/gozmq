@@ -13,13 +13,13 @@ import (
 	"github.com/exergy-dev/gozmq/msg"
 )
 
-// defaultReadBufSize is the max chunk pulled from conn.Read per iteration.
-// 32 KiB is large enough to absorb a typical HTTP request/response head in
-// one syscall and small enough that per-peer steady-state memory stays
-// under a handful of pages. Each call is still just one conn.Read — the
-// adapter never concatenates reads, honoring the STREAM "bytes-as-they-
-// arrive" contract.
-const defaultReadBufSize = 32 * 1024
+// readBufSize is the max chunk pulled from conn.Read per iteration. 32 KiB
+// is large enough to absorb a typical HTTP request/response head in one
+// syscall. The buffer is reused across reads and each chunk is copied out
+// at its read length, so the only per-peer cost is this one buffer. Each
+// call is still just one conn.Read — the adapter never concatenates reads,
+// honoring the STREAM "bytes-as-they-arrive" contract.
+const readBufSize = 32 * 1024
 
 // defaultPipeHWM is the per-direction high-water mark for the engine<->
 // adapter pipe. Matches session.Config defaults in spirit: bounded enough
@@ -30,15 +30,6 @@ const defaultPipeHWM = 1024
 // Config parameterizes an Adapter. All fields are optional; sane defaults
 // apply when zero.
 type Config struct {
-	// Identity is the ZMTP-style peer identity advertised to the engine
-	// via PeerInfo.Identity. Typically empty for STREAM (raw TCP peers
-	// do not announce one); the engine synthesizes a 5-byte identity in
-	// that case, matching libzmq's anonymous-peer convention.
-	Identity []byte
-
-	// ReadBufSize caps each conn.Read. Defaults to 32 KiB when <= 0.
-	ReadBufSize int
-
 	// SendHWM / RecvHWM bound the adapter<->engine pipe in each
 	// direction. Default defaultPipeHWM when <= 0. A value of 0 means
 	// "default", not "unbuffered" — raw-stream traffic without a buffer
@@ -58,10 +49,9 @@ type Config struct {
 // engine.DetachPipe on shutdown — the Adapter signals that via
 // EnginePipe's Closed() channel, which fires when either goroutine exits.
 type Adapter struct {
-	conn    iface.Conn
-	engEnd  iface.Pipe // handed to streamEngine via AttachPipe
-	admEnd  iface.Pipe // used internally by reader/writer goroutines
-	bufSize int
+	conn   iface.Conn
+	engEnd iface.Pipe // handed to streamEngine via AttachPipe
+	admEnd iface.Pipe // used internally by reader/writer goroutines
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -83,9 +73,6 @@ type Adapter struct {
 // conn is owned by the Adapter from this point on; the adapter closes it
 // on shutdown. Callers MUST NOT Read/Write conn directly afterwards.
 func NewAdapter(parent context.Context, conn iface.Conn, cfg Config) *Adapter {
-	if cfg.ReadBufSize <= 0 {
-		cfg.ReadBufSize = defaultReadBufSize
-	}
 	if cfg.SendHWM <= 0 {
 		cfg.SendHWM = defaultPipeHWM
 	}
@@ -93,27 +80,22 @@ func NewAdapter(parent context.Context, conn iface.Conn, cfg Config) *Adapter {
 		cfg.RecvHWM = defaultPipeHWM
 	}
 
-	engInfo := pipe.PeerInfo{
-		Identity: bytes.Clone(cfg.Identity),
-	}
-	// admInfo is what the adapter end sees as "the peer" — the engine
-	// side. STREAM has no identity to advertise in that direction, so
-	// leave it zero.
-	admInfo := pipe.PeerInfo{}
-
+	// Raw-stream peers announce no identity in either direction; the
+	// engine synthesizes one for the peer, matching libzmq's
+	// anonymous-peer convention.
+	//
 	// NewPair(aToB, bToA, aInfo, bInfo): a is engEnd, b is admEnd.
 	// aToB = engine→adapter traffic (outbound writes).
 	// bToA = adapter→engine traffic (inbound reads).
-	engEnd, admEnd := pipe.NewPair(cfg.SendHWM, cfg.RecvHWM, engInfo, admInfo)
+	engEnd, admEnd := pipe.NewPair(cfg.SendHWM, cfg.RecvHWM, pipe.PeerInfo{}, pipe.PeerInfo{})
 
 	ctx, cancel := context.WithCancel(parent)
 	a := &Adapter{
-		conn:    conn,
-		engEnd:  engEnd,
-		admEnd:  admEnd,
-		bufSize: cfg.ReadBufSize,
-		ctx:     ctx,
-		cancel:  cancel,
+		conn:   conn,
+		engEnd: engEnd,
+		admEnd: admEnd,
+		ctx:    ctx,
+		cancel: cancel,
 	}
 
 	a.doneWG.Add(2)
@@ -159,6 +141,7 @@ func (a *Adapter) readerLoop() {
 		a.cancel()
 	}()
 
+	buf := make([]byte, readBufSize)
 	for {
 		// Fast path: ctx already done.
 		select {
@@ -167,13 +150,14 @@ func (a *Adapter) readerLoop() {
 		default:
 		}
 
-		buf := make([]byte, a.bufSize)
 		n, err := a.conn.Read(buf)
 		if n > 0 {
 			// Deliver the chunk as a single-frame Msg. The engine's
 			// streamEngine tags it with the peer identity before
-			// surfacing to the app.
-			m := msg.FromBytes(buf[:n])
+			// surfacing to the app. Copying at the read length keeps
+			// a queued small segment from pinning the whole buffer
+			// (1-byte reads × the pipe HWM would hold ~32 MiB).
+			m := msg.FromBytes(bytes.Clone(buf[:n]))
 			if sendErr := a.admEnd.Send(a.ctx, m); sendErr != nil {
 				// Pipe closed or ctx cancelled — shut down.
 				return
