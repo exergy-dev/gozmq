@@ -63,14 +63,14 @@ func TestFairQueue_GateWakesOnSinglePipeDelivery(t *testing.T) {
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	require.NoError(t, fq.Attach(a), "attach") // single pipe → direct mode
+	require.NoError(t, fq.Attach(a), "attach") // single pipe → single-pipe path
 
 	require.False(t, fq.CanRecv())
 	woke := parkOnGate(gate)
 	requireNoWake(t, woke)
 
 	require.NoError(t, b.Send(testCtx(t), msg.FromBytes([]byte("x"))), "peer send")
-	requireWake(t, woke, "fairqueue direct mode")
+	requireWake(t, woke, "fairqueue single pipe")
 	require.True(t, fq.CanRecv(), "message must still be pending (non-consuming signal)")
 }
 

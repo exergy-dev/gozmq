@@ -355,11 +355,11 @@ func TestRouter_IdentityStableUnderDetachChurn(t *testing.T) {
 				s.mu.Lock()
 				oldEng := s.eng
 				oldPrx := s.prx
-				// Detach the old pipe from the engine first. The
-				// FairQueue forwarder for this pipe may still be
-				// holding an in-flight message at the moment of
-				// Detach; the engine must stamp the *old* identity on
-				// that message (not empty, not the new peer's id).
+				// Detach the old pipe from the engine first. A
+				// receiver may be taking a message from this pipe at
+				// the moment of Detach; the engine must stamp the
+				// *old* identity on that message (not empty, not the
+				// new peer's id).
 				_ = eng.DetachPipe(oldEng)
 				// Freshly construct the peer pair. For named peers we
 				// reuse the same PeerIdentity — deliberately creating
@@ -383,11 +383,9 @@ func TestRouter_IdentityStableUnderDetachChurn(t *testing.T) {
 				s.eng = a
 				s.prx = b
 				s.mu.Unlock()
-				// Close the old ends after the swap. Any message still
-				// buffered in oldEng's forwarder has already been
-				// handed to the FairQueue's inbound channel or is
-				// about to be; the pipe's routing ID carries the
-				// identity either way.
+				// Close the old ends after the swap. A message a
+				// receiver took from oldEng before the detach carries
+				// the old identity on the pipe's routing ID.
 				_ = oldEng.Close()
 				_ = oldPrx.Close()
 				// Short pause so we don't just hammer the lock.
@@ -507,10 +505,10 @@ func TestRouter_IdentityStableUnderDetachChurn(t *testing.T) {
 	churnWg.Wait()
 
 	// Wait briefly for the Recv goroutine to drain any final messages.
-	// The exact count depends on churn (messages on detached pipes may
-	// be dropped by the FairQueue forwarder when its pipe closes mid-
-	// forward), so we don't assert an exact count — just that every
-	// message that made it through carried a correct identity.
+	// The exact count depends on churn (messages still queued on a pipe
+	// detached while open are never received), so we don't assert an
+	// exact count — just that every message that made it through
+	// carried a correct identity.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if err, _ := recvErr.Load().(error); err != nil {
@@ -535,7 +533,7 @@ func TestRouter_IdentityStableUnderDetachChurn(t *testing.T) {
 
 // TestRouter_RecvAfterDetachKeepsIdentity: messages a peer delivered before
 // it left, received after DetachPipe, carry that peer's routing identity,
-// not a replacement peer's, in both direct (sole peer) and forwarder mode.
+// not a replacement peer's, both as the sole peer and among several.
 func TestRouter_RecvAfterDetachKeepsIdentity(t *testing.T) {
 	for _, extraPeer := range []bool{false, true} {
 		t.Run(fmt.Sprintf("extraPeer=%v", extraPeer), func(t *testing.T) {

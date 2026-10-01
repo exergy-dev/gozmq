@@ -341,8 +341,8 @@ func TestFairQueue_DetachedPipeNoLongerNotifies(t *testing.T) {
 	require.Equal(t, "kept", string(m.Bytes()))
 }
 
-// TestFairQueue_DetachClosedDirectPipeDrains: detaching the sole (direct
-// mode) pipe after its peer closed keeps the messages the peer already
+// TestFairQueue_DetachClosedDirectPipeDrains: detaching the sole pipe
+// (single-pipe path) after its peer closed keeps the messages the peer already
 // delivered receivable, in order, even when another pipe attaches while
 // they are still buffered.
 func TestFairQueue_DetachClosedDirectPipeDrains(t *testing.T) {

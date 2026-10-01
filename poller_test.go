@@ -415,7 +415,7 @@ func TestPoller_DealerRouterPollOut(t *testing.T) {
 
 	// DEALER does not become PollOut-ready until its session pipe is
 	// attached post-handshake; the blocking Poll parks until the
-	// LoadBalancer signals readyWrite.
+	// attach arms the engine's out-gate.
 	events := waitPoll(t, p, 2*time.Second)
 	if len(events) != 1 {
 		t.Fatalf("want 1 event, got %d: %+v", len(events), events)

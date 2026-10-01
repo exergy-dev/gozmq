@@ -1,6 +1,6 @@
 # Performance Report
 
-Date: 2026-04-20 (updated 2026-06-10 — see Round 6)
+Date: 2026-04-20 (updated 2026-06-10 — see Round 6; latest section: Architecture simplification, 2026-10)
 
 This report summarizes the measured performance work completed after the
 initial `gozmq` performance plan. It focuses on the small-message PUSH->PULL
@@ -665,3 +665,155 @@ the rule that a fast path earning under ~10% is removed.
 (sec/op versus the tree with both fast paths; `~` is not significant.)
 FairQueue direct mode stays. The lock-free LoadBalancer single-peer send
 snapshot was removed: its best case is under 9%.
+
+## Architecture simplification (2026-10)
+
+### What changed
+
+The engines and sessions lost the goroutines they ran besides I/O. The
+FairQueue reads its peers' pipes directly over a pipe idle/notify protocol,
+after libzmq's `fq_t`, instead of through a forwarder goroutine per peer
+plus a single-peer "direct mode". PUB/XPUB apply subscriptions on their next
+`Send`/`Recv`/poll instead of in a reader goroutine per subscriber, and XSUB
+no longer surfaces upstream SUBSCRIBE commands. Each engine has one readiness
+object (`Gates()`) shared by its receivers and the Poller. inproc is a
+single pipe pair built into the Context, with no session, transport or
+security. A session is a reader and a writer driven by `OnReady`/`OnClosed`
+callbacks, with the heartbeat on a timer. STREAM is a raw session mode, and
+every peer is one `link` type that removes itself when it ends. The design
+is described in `design.md` §4.3–§4.8.
+
+### Goroutines
+
+Long-lived goroutines for an idle, established connection, counted by
+`gozmq_goroutines_test.go`:
+
+| Unit | Before | After |
+|:-----|-------:|------:|
+| TCP connection, both ends (incl. the client's reconnector) | 11 | 5 |
+| inproc link | 3 | 0 |
+| STREAM connection | 3 | 2 |
+| Engines | a FairQueue forwarder per peer, a PUB/XPUB reader per subscriber | 0 |
+
+### Benchmarks
+
+Measured with `perf/benchgate.sh`: interleaved prebuilt test binaries, n=10,
+`GOMAXPROCS=8`, `-benchtime 1s`, `-benchmem`, benchstat; i9-14900KF, WSL2.
+Base is `a7945b0` (the library before the simplification, with the Wave 0
+benchmarks so both sides run identical benchmark code); candidate is
+`1c2b01b`. `~` means not significant (p ≥ 0.05).
+
+sec/op (`./perf`):
+
+```
+ReqRepRoundTrip_Inproc/32B-8             1.104µ ±  1%   1.085µ ±    1%   -1.72% (p=0.000 n=10)
+ReqRepRoundTrip_Inproc/64B-8             1.100µ ±  1%   1.086µ ±    0%   -1.32% (p=0.000 n=10)
+ReqRepRoundTrip_Inproc/1KB-8             1.104µ ±  1%   1.085µ ±    0%   -1.72% (p=0.000 n=10)
+ReqRepRoundTrip_Inproc/64KB-8            1.107µ ±  1%   1.084µ ±    0%   -2.03% (p=0.000 n=10)
+ReqRepRoundTrip_TCP/32B-8                30.96µ ±  2%   31.62µ ±    2%   +2.13% (p=0.029 n=10)
+ReqRepRoundTrip_TCP/64B-8                31.23µ ±  3%   31.25µ ±    2%        ~ (p=0.754 n=10)
+ReqRepRoundTrip_TCP/1KB-8                31.72µ ±  1%   31.51µ ±    3%        ~ (p=0.315 n=10)
+ReqRepRoundTrip_TCP/64KB-8               69.98µ ±  1%   69.92µ ±    1%        ~ (p=0.684 n=10)
+PushPullThroughput_Inproc/32B-8          85.58n ± 16%   77.05n ±   10%   -9.96% (p=0.000 n=10)
+PushPullThroughput_Inproc/64B-8          83.99n ±  2%   76.97n ±   10%   -8.36% (p=0.000 n=10)
+PushPullThroughput_Inproc/1KB-8          83.80n ±  5%   76.86n ±   10%   -8.28% (p=0.000 n=10)
+PushPullThroughput_Inproc/64KB-8         84.87n ±  3%   76.65n ±    9%   -9.70% (p=0.000 n=10)
+PushPullThroughput_TCP/32B-8             170.8n ±  2%   171.5n ±    4%        ~ (p=0.971 n=10)
+PushPullThroughput_TCP/64B-8             183.5n ±  3%   173.1n ±    4%   -5.67% (p=0.000 n=10)
+PushPullThroughput_TCP/1KB-8             525.1n ±  3%   515.5n ±    2%   -1.84% (p=0.014 n=10)
+PushPullThroughput_TCP/64KB-8            15.29µ ±  4%   15.50µ ±    6%        ~ (p=0.631 n=10)
+PushPullLarge_TCP/pool=false/64KB-8      14.94µ ± 11%   15.29µ ±    8%        ~ (p=0.631 n=10)
+PushPullLarge_TCP/pool=false/256KB-8     51.52µ ±  2%   51.60µ ±    4%        ~ (p=0.971 n=10)
+PushPullLarge_TCP/pool=false/1MB-8       250.8µ ± 16%   286.8µ ±   27%        ~ (p=0.165 n=10)
+PushPullLarge_TCP/pool=true/64KB-8       7.521µ ± 15%   7.613µ ±   10%        ~ (p=0.631 n=10)
+PushPullLarge_TCP/pool=true/256KB-8      18.21µ ±  7%   18.35µ ±    6%        ~ (p=0.796 n=10)
+PushPullLarge_TCP/pool=true/1MB-8        72.12µ ±  2%   72.06µ ±    1%        ~ (p=0.739 n=10)
+PubSubFanout_Inproc/32B-8                216.0n ±  4%   207.3n ±    2%   -4.03% (p=0.019 n=10)
+PubSubFanout_Inproc/64B-8                212.5n ±  5%   207.2n ±    2%   -2.52% (p=0.041 n=10)
+PubSubFanout_Inproc/1KB-8                216.6n ±  4%   210.8n ±    2%        ~ (p=0.089 n=10)
+PubSubFanout_Inproc/64KB-8               213.1n ±  4%   206.1n ±    3%   -3.28% (p=0.005 n=10)
+RouterDealerLatency_Inproc/32B-8         934.6n ±  1%   879.9n ±    1%   -5.85% (p=0.000 n=10)
+RouterDealerLatency_Inproc/1KB-8         936.4n ±  1%   880.6n ±    1%   -5.96% (p=0.000 n=10)
+RouterDealerLatency_Inproc/64KB-8        936.5n ±  1%   879.3n ±    1%   -6.10% (p=0.000 n=10)
+RouterDealerLatency_TCP/32B-8            29.98µ ±  2%   30.44µ ±    2%   +1.52% (p=0.009 n=10)
+RouterDealerLatency_TCP/1KB-8            31.46µ ±  2%   31.73µ ±    1%        ~ (p=0.218 n=10)
+RouterDealerLatency_TCP/64KB-8           69.10µ ±  2%   68.74µ ±    1%        ~ (p=0.052 n=10)
+XPubXSubLatency_Inproc/32B-8             88.63n ±  0%   77.08n ±    1%  -13.03% (p=0.000 n=10)
+XPubXSubLatency_Inproc/1KB-8             88.81n ±  1%   77.35n ±    1%  -12.90% (p=0.000 n=10)
+XPubXSubLatency_Inproc/64KB-8            88.61n ±  1%   77.27n ±    1%  -12.79% (p=0.000 n=10)
+XPubXSubThroughput_Inproc/32B-8         116.80n ± 23%   96.50n ±   13%  -17.38% (p=0.002 n=10)
+XPubXSubThroughput_Inproc/64B-8         118.05n ± 26%   89.01n ±   15%  -24.60% (p=0.002 n=10)
+XPubXSubThroughput_Inproc/1KB-8         116.30n ± 16%   93.80n ± 2523%        ~ (p=0.052 n=10)
+XPubXSubThroughput_Inproc/64KB-8        116.85n ± 23%   89.07n ±   27%  -23.77% (p=0.004 n=10)
+ReqRepThroughput_Inproc/32B-8            1.109µ ±  1%   1.087µ ±    1%   -1.98% (p=0.000 n=10)
+ReqRepThroughput_Inproc/1KB-8            1.106µ ±  1%   1.089µ ±    0%   -1.58% (p=0.000 n=10)
+ReqRepThroughput_Inproc/64KB-8           1.114µ ±  1%   1.088µ ±    0%   -2.29% (p=0.000 n=10)
+ReqRepThroughput_TCP/32B-8               31.20µ ±  2%   31.21µ ±    2%        ~ (p=0.912 n=10)
+ReqRepThroughput_TCP/1KB-8               31.48µ ±  1%   31.88µ ±    2%   +1.26% (p=0.035 n=10)
+ReqRepThroughput_TCP/64KB-8              70.30µ ±  1%   69.87µ ±    1%   -0.62% (p=0.035 n=10)
+PushPullFanIn_Inproc/pushers=2-8        376.40n ±  3%   78.91n ±    3%  -79.04% (p=0.000 n=10)
+PushPullFanIn_Inproc/pushers=16-8      1205.50n ±  3%   77.59n ±    7%  -93.56% (p=0.000 n=10)
+PushPullFanIn_Inproc/pushers=256-8      2205.5n ±  4%   510.3n ±    6%  -76.86% (p=0.000 n=10)
+PushPullFanIn_TCP/pushers=2-8            427.9n ±  5%   132.6n ±    4%  -69.02% (p=0.000 n=10)
+PushPullFanIn_TCP/pushers=16-8         1056.00n ±  4%   86.72n ±    3%  -91.79% (p=0.000 n=10)
+RouterIdlePeers_Inproc/idle=0-8          942.7n ±  1%   891.8n ±    1%   -5.40% (p=0.000 n=10)
+RouterIdlePeers_Inproc/idle=1000-8       1.200µ ±  1%   1.075µ ±    1%  -10.46% (p=0.000 n=10)
+PubSubFanoutWide_Inproc/subs=64-8        8.309µ ±  9%   7.614µ ±    5%   -8.36% (p=0.007 n=10)
+XPubSubscribeChurn_Inproc-8              3.330µ ±  3%   1.689µ ±    1%  -49.29% (p=0.000 n=10)
+ConnectHandshake_TCP-8                   213.6µ ±  1%   160.4µ ±    2%  -24.91% (p=0.000 n=10)
+geomean                                  1.836µ         1.458µ          -20.61%
+```
+
+Root package: `Poller_PollReady` 132.4n → 123.8n (−6.53%, p=0.001).
+
+Summary:
+
+- Geomean −20.6%.
+- Fan-in: −69% to −94% (`PushPullFanIn_*`). Receivers walk only the pipes
+  with data, and multi-peer receive no longer hops through a forwarder.
+- `RouterIdlePeers_Inproc/idle=1000` −10%: receive cost no longer grows
+  with idle peers.
+- `XPubSubscribeChurn_Inproc` −49%; `XPubXSubThroughput_Inproc` −17% to
+  −25%; `XPubXSubLatency_Inproc` −13%.
+- `ConnectHandshake_TCP` −25%: no per-write handshake goroutines, no
+  supervisor goroutine; allocs/op 277 → 253, B/op −1.3%.
+- inproc PUSH/PULL −8% to −10%; inproc ROUTER/DEALER −6%; inproc REQ/REP
+  −1.3% to −2.3%; `PubSubFanoutWide_Inproc/subs=64` −8%.
+- The only significant slowdowns: `ReqRepRoundTrip_TCP/32B` +2.1%,
+  `RouterDealerLatency_TCP/32B` +1.5%, `ReqRepThroughput_TCP/1KB` +1.3%, all
+  within the 5% bar.
+- B/op and allocs/op: no benchmark increased. Everything is identical except
+  `ConnectHandshake_TCP` (B/op −1.26%, allocs/op −8.66%).
+
+Per-wave gates, each against the commit before it:
+
+- Wave 2 (readiness gates, inproc rewrite, two-goroutine session;
+  `d49f96a` → `c334713`): geomean −1.3%, no significant regression.
+  inproc PUSH/PULL −5% to −9%, `ConnectHandshake_TCP` −11% (allocs/op
+  276 → 253), `Poller_PollReady` −7.7%, `XPubSubscribeChurn_Inproc` −7%.
+- Wave 3 (STREAM raw sessions, one link type; `c334713` → `1c2b01b`):
+  geomean +0.1%. inproc REQ/REP and `RouterIdlePeers_Inproc` +1.7% to
+  +2.3%, `PushPullFanIn_Inproc/pushers=2` +3.3%, all within the 5% bar;
+  `ConnectHandshake_TCP` B/op +0.2%, allocs/op unchanged.
+
+### Running the gate
+
+```sh
+perf/benchgate.sh <base-commit> [bench-regex] [count]
+```
+
+It checks out the base in a temporary git worktree, builds the `./perf` and
+root-package test binaries for both sides (the candidate is the working
+tree, uncommitted changes included), runs them interleaved `count` times
+(default 10) with `GOMAXPROCS=8`, and prints benchstat tables. `ROOT_RE`
+selects the root-package benchmarks (default `Poller`; empty skips them).
+It needs `benchstat` (`go install golang.org/x/perf/cmd/benchstat@latest`)
+to be installed.
+
+A change passes when no benchmark shows a significant (p < 0.05) sec/op
+regression above 5%, no allocs/op rises, and B/op stays within 5%. Re-run a
+flagged benchmark at n=16 before calling it a regression:
+
+```sh
+perf/benchgate.sh <base-commit> '<flagged regex>' 16
+```

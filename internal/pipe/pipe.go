@@ -1,6 +1,6 @@
 // Package pipe provides End, one side of the bidirectional in-memory message
-// queue that connects a socket engine to a session, a STREAM adapter, or
-// (for inproc direct pipes) another socket's engine.
+// queue that connects a socket engine to a session (ZMTP or STREAM raw
+// mode) or, on inproc, to another socket's engine.
 //
 // Each direction has its own high-water mark. A positive HWM is the capacity
 // of a plain buffered channel. HWM 0 means unlimited: the direction is a
@@ -455,7 +455,7 @@ func (e *End) Pending() bool { return e.recv.pending() }
 
 // SendDrained returns a channel closed once the peer has received every
 // message this end sent, or either end closed. It is the linger-drain
-// signal for an inproc direct pipe, whose peer is another live socket that
+// signal for an inproc pipe, whose peer is another live socket that
 // may never close its end. Call it only once this end will send nothing
 // more (after engine.Close).
 func (e *End) SendDrained() <-chan struct{} {

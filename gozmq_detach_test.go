@@ -29,8 +29,8 @@ func waitEvent(t *testing.T, events <-chan gozmq.Event, typ gozmq.EventType) {
 
 // TestPeerDetach_QueuedMessagesSurvive: messages a sender already delivered
 // into the receiver's pipe stay receivable after the sender disconnects,
-// whether the departing pipe was the only peer (direct mode) or one of
-// several (forwarder mode). A ROUTER receiver still stamps them with the
+// whether the departing pipe was the only peer (the FairQueue's single-pipe
+// path) or one of several. A ROUTER receiver still stamps them with the
 // departed peer's identity.
 func TestPeerDetach_QueuedMessagesSurvive(t *testing.T) {
 	for _, transport := range []string{"tcp", "inproc"} {

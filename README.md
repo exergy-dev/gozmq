@@ -155,6 +155,20 @@ not from which side binds. To decide which peers are allowed, install a
 the socket's domain with `WithZAPDomain`; it vets PLAIN and CURVE servers,
 and NULL sockets that set a domain.
 
+**inproc.** `inproc://` joins two sockets of one Context with a single
+in-memory pipe pair: no framing, no copy, no goroutine. As in libzmq it runs
+no security mechanism, so a socket configured with PLAIN, CURVE or
+`WithSecurityMech` gets an `ErrEndpointInvalid` error from `Bind` or
+`Connect` on `inproc://`. A `Connect` may come before its `Bind` and waits
+for it without a time limit. Each direction queues up to the sender's send
+HWM plus the receiver's recv HWM (unlimited if either is 0).
+
+**STREAM.** A STREAM socket carries raw TCP bytes, framed as
+`[connection identity, payload]`; an empty payload closes that connection.
+It dials once and never reconnects, honours the HWMs as given (0 is
+unlimited) and `WithLinger`, and rejects every ZMTP-layer option. See the
+package documentation for the details.
+
 ## Documentation
 
 - **API reference** — [pkg.go.dev](https://pkg.go.dev/github.com/exergy-dev/gozmq).

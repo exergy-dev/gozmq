@@ -14,8 +14,12 @@ and layers a Go benchmark suite on top. It serves two audiences:
 
 ```
 perf/
-  benchmark_test.go     # BenchmarkReqRepRoundTrip_*, BenchmarkPushPullThroughput_*, BenchmarkPubSubFanout_*
+  benchmark_test.go     # BenchmarkReqRepRoundTrip_*, BenchmarkPushPullThroughput_*, BenchmarkPubSubFanout_*, ...
+  fanin_bench_test.go   # scalability: PushPullFanIn_*, RouterIdlePeers_*, PubSubFanoutWide_*, XPubSubscribeChurn_*, ConnectHandshake_TCP
+  cli_test.go           # smoke tests for the CLI tools
   main_test.go          # TestMain (goleak)
+  benchgate.sh          # benchmark gate: working tree vs a base commit
+  libzmq_thr/           # native two-process comparison against libzmq
   local_lat/main.go     # binds REP, echoes each message back
   remote_lat/main.go    # connects REQ, measures round-trip latency
   local_thr/main.go     # binds PULL, measures observed throughput
@@ -49,6 +53,23 @@ comparisons.
 
 Each benchmark's teardown is leak-checked by `go.uber.org/goleak` via
 `TestMain` → `testutil.VerifyTestMain`, matching the rest of the module.
+
+## Benchmark gate
+
+`benchgate.sh` compares the working tree (uncommitted changes included)
+against a base commit:
+
+```bash
+perf/benchgate.sh <base-commit> [bench-regex] [count]
+```
+
+It builds the `./perf` and root-package test binaries for both sides, runs
+them interleaved `count` times (default 10) with `GOMAXPROCS=8` and
+`-benchmem`, and prints benchstat tables. `ROOT_RE` picks the root-package
+benchmarks (default `Poller`; set it empty to skip them). A change to a hot
+path passes when no benchmark regresses by more than 5% (p < 0.05), no
+allocs/op rises, and B/op stays within 5%; re-run a flagged benchmark with
+`count` 16 before calling it a regression. See `REPORT.md` for recorded runs.
 
 ## Running the standalone CLI tools
 
@@ -175,5 +196,6 @@ not correctness gates.
 | PUSH/PULL throughput   | TCP loopback   | ≥ 500,000 msg/s   |
 | REQ/REP round-trip     | inproc, median | < 10 µs           |
 
-Frame pooling, `net.Buffers`-batched writes, and zero-copy inproc pipes
-are the known high-leverage optimisations still available.
+`net.Buffers`-batched writes, the opt-in receive buffer pool, and
+zero-copy inproc pipes are already in place; `REPORT.md` records what each
+bought.

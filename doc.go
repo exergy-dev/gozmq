@@ -88,6 +88,19 @@
 // error wrapping [ErrEndpointInvalid]. A Context-level ZAP handler never
 // sees inproc peers.
 //
+// # inproc
+//
+// inproc:// is built into the [Context], not a transport: a Connect and its
+// Bind are joined by one pipe pair, with no framing, no copy and no
+// goroutine. As in libzmq, a Connect may come before the Bind: it waits,
+// with no time limit, until the Bind, a [Socket.Disconnect] or Close. Each
+// direction queues up to the sender's send HWM plus the receiver's recv HWM
+// (unlimited if either is 0), both sides see each other's [WithIdentity],
+// and connecting to a bound socket of an incompatible type fails with
+// [ErrFSMViolation] (reported as [EventConnectFailed] for a waiting
+// Connect). Closing or disconnecting either side detaches both; messages
+// already queued stay receivable. STREAM sockets cannot use inproc.
+//
 // # Defaults
 //
 // Sockets constructed via [Context.NewSocket] start with these defaults. Each
@@ -132,6 +145,10 @@
 //     is returned synchronously (plus [EventConnectFailed] on the monitor
 //     channel) and a later peer disconnect is final. Reconnect supervision
 //     for raw STREAM peers is the application's responsibility;
+//     [Socket.Disconnect] closes the connection a Connect made;
+//   - honours [WithSendHWM] and [WithRecvHWM] as given (0 means unlimited)
+//     and [WithLinger]: Close flushes queued outbound data before closing
+//     each connection;
 //   - diverges from libzmq in NOT delivering synthetic [identity, empty]
 //     connect/disconnect notification messages (libzmq's ZMQ_STREAM_NOTIFY
 //     behavior). Use a monitor channel to observe STREAM peer lifecycle.
@@ -196,7 +213,8 @@
 // Use the dedicated live APIs for mutable behavior: [Socket.Monitor],
 // [Socket.Subscribe], [Socket.Unsubscribe], [Socket.Disconnect], and
 // [Socket.Unbind]. Disconnect tears down the connections to one Connect
-// target and stops its reconnect loop; Unbind stops one listener (matched
+// target and stops its reconnect loop (on inproc it also cancels a Connect
+// still waiting for its Bind); Unbind stops one listener (matched
 // against the resolved endpoint Bind produced) while leaving already-
 // accepted connections alive, matching libzmq's zmq_unbind.
 //

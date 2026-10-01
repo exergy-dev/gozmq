@@ -22,6 +22,11 @@ go test -tags interop -race ./interop/...         # needs libzmq3-dev
 GOZMQ_SOAK_DURATION=10m go test -tags soak -run TestSoak ./soak/...
 ```
 
+If the release contains performance work, record the benchmark gate
+against the previous tag in `perf/REPORT.md`
+(`perf/benchgate.sh vPREVIOUS`): nothing may regress by more than 5%, and
+allocs/op may not rise.
+
 Confirm the last **nightly** run passed — the long fuzz and repeated race
 passes only run there, and they are the checks most likely to catch what a
 single PR run misses.
@@ -42,7 +47,7 @@ type. This must print nothing:
 
 ```sh
 for p in . ./msg ./transport ./typed ./typed/codecjson ./security ./security/curve; do
-  go doc -all "$p" | grep -E "^(func|type|const|var| ) .*\b(pipe|session|socket|stream|zmqerr|zmtp|bufpool|testutil)\."
+  go doc -all "$p" | grep -E "^(func|type|const|var| ) .*\b(pipe|session|socket|zmqerr|zmtp|bufpool|testutil)\."
 done
 ```
 

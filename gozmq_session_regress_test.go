@@ -15,8 +15,8 @@ import (
 // TestLingerDrainsUnboundedQueue: Socket.Close with a positive linger must
 // flush the whole outbound queue, including an HWM-0 (unbounded) one whose
 // overflow spills past the pipe's channel. The receiving
-// side runs with an idle second PUSH peer so its FairQueue is in
-// multi-peer (forwarder) mode, which drains a detached pipe to EOF.
+// side runs with an idle second PUSH peer so its FairQueue takes the
+// multi-peer path, which drains a detached pipe to EOF.
 func TestLingerDrainsUnboundedQueue(t *testing.T) {
 	for _, tc := range []struct{ sendHWM, recvHWM int }{
 		{1000, 1000},

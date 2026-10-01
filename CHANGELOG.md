@@ -28,6 +28,10 @@ API:
   on the socket now bounds the TLS handshake.
 - `transport.Registry`, `NewRegistry` and `New` are removed; use
   `(*gozmq.Context).RegisterTransport`.
+- inproc is no longer a `transport.Transport`: `transport.NewInprocTransport`
+  and `transport.DefaultInprocQueueWindow` are removed, and
+  `RegisterTransport` panics for scheme `"inproc"`. Delete those calls;
+  every Context handles `inproc://` itself.
 - `msg.Recycle`, `(*Msg).IsPooled`, `AppendPooledFrame`, `TransferPool`,
   `Reset`, `msg.FromFramesOwned`, `MarkSubscription` and `IsSubscription` are
   removed (all but `IsSubscription` were excluded from the 1.0.0
@@ -53,14 +57,36 @@ Behaviour:
   events to notice a lost peer.
 - CURVE traffic-phase commands use the libzmq encoding, which older gozmq
   releases reject. Upgrade both ends of a gozmq↔gozmq CURVE link together.
+- `Bind`/`Connect` on `inproc://` fails with `ErrEndpointInvalid` for a
+  socket configured with PLAIN, CURVE or `WithSecurityMech`, and for STREAM
+  sockets. Use `ipc://` or `tcp://` where in-process peers must
+  authenticate.
+- An inproc `Connect` before its `Bind` waits indefinitely instead of giving
+  up after 500 ms and retrying. Bound the wait with a context on the first
+  `SendMsg`/`RecvMsg`, or cancel it with `Disconnect`.
+- An inproc direction now queues the sender's send HWM plus the receiver's
+  recv HWM (unlimited if either is 0). Lower the HWMs if memory per inproc
+  link matters.
+- Connecting to a bound inproc socket of an incompatible type returns an
+  error wrapping `ErrFSMViolation` (or `EventConnectFailed` for a waiting
+  Connect) instead of attaching. Pair compatible socket types.
+- XSUB no longer surfaces SUBSCRIBE/CANCEL commands sent by its publishers.
+  Nothing to do for libzmq or conforming peers, which never send them; send
+  ordinary messages if a publisher must talk back.
+- STREAM `WithSendHWM(0)`/`WithRecvHWM(0)` now mean unlimited, as on every
+  other socket type, instead of 1024. Set an explicit HWM to keep a bound.
 
 ### Security
 
 - PLAIN: a `WithPlainAuth` socket that connected, or a `WithPlainClient`
   socket that bound, silently used NULL and authenticated nobody. The PLAIN
-  role now follows the option; setting both is an error.
+  role now follows the option. `NewSocket` rejects `WithPlainAuth` combined
+  with `WithPlainClient`, and PLAIN options combined with CURVE options
+  (previously CURVE silently won). **Breaking.**
 - inproc: `WithSecurityMech` sockets took the direct-pipe bypass and ran no
-  handshake at all.
+  handshake at all. inproc now refuses every socket with a security
+  mechanism (PLAIN, CURVE or custom), since it runs none, as in libzmq.
+  **Breaking.**
 - CURVE: low-order public keys with bit 255 set were accepted, letting a
   client forge the INITIATE vouch without a secret key. All low-order keys
   are now rejected.
@@ -75,9 +101,6 @@ Behaviour:
   user-id is surfaced as the `User-Id` peer property, as in libzmq.
 - A ZAP policy returning an over-long metadata name no longer panics inside
   the handshake; it yields a 500 response.
-- **Breaking:** `NewSocket` rejects `WithPlainAuth` combined with
-  `WithPlainClient`, and PLAIN options combined with CURVE options
-  (previously CURVE silently won).
 - An in-process ZAP handler's error is now preserved in the handshake error
   chain.
 
@@ -96,6 +119,12 @@ Behaviour:
 - A custom mechanism may implement `IdentityFraming() bool` to opt into the
   zero-copy framing path (see Fixed).
 - `tcp://host:*` binds an ephemeral port.
+- `Disconnect` works on inproc endpoints (including a Connect still waiting
+  for its Bind) and on STREAM endpoints, which used to return
+  `ErrFSMViolation`.
+- `perf/benchgate.sh`, which compares the benchmarks of the working tree
+  against a base commit, and fan-in, idle-peer, subscribe-churn and
+  connect-handshake benchmarks.
 
 ### Changed
 
@@ -104,18 +133,18 @@ Behaviour:
   such plain messages, so existing calls are harmless and new code need not
   make them; they are reference operations only on lent messages (see
   `WithRecvBufferPool`). `Msg` grew from 48 to 64 bytes.
-- **Behaviour change — PAIR:** a peer disconnect is no longer surfaced to
-  the application. `RecvMsg` delivers any messages the old peer left
-  buffered, then blocks until the next peer attaches (libzmq semantics)
-  instead of returning `io.EOF`; a `SendMsg` racing the disconnect waits
-  for the next peer instead of returning `io.ErrClosedPipe`.
+- **Breaking — PAIR:** a peer disconnect is no longer surfaced to the
+  application. `RecvMsg` delivers any messages the old peer left buffered,
+  then blocks until the next peer attaches (libzmq semantics) instead of
+  returning `io.EOF`; a `SendMsg` racing the disconnect waits for the next
+  peer instead of returning `io.ErrClosedPipe`.
 - ROUTER/STREAM `Send` to a peer that just disconnected: ROUTER without
   `WithRouterMandatory` silently drops (counted in `Metrics.Dropped`); ROUTER
   with it and STREAM return an error wrapping `ErrRouteUnknown` instead of a
   raw `io.ErrClosedPipe`.
-- NULL consults the ZAP handler only when a ZAP domain is set, matching
-  libzmq (previously every accepting NULL socket was vetted once a handler
-  was installed).
+- **Breaking:** NULL consults the ZAP handler only when a ZAP domain is set,
+  matching libzmq (previously every accepting NULL socket was vetted once a
+  handler was installed).
 - **Breaking:** `transport.TCPTransport` read/write buffer sizes default to 0
   (OS autotuning, as libzmq does) instead of 8 MiB. TCP socket options are
   applied best-effort.
@@ -123,8 +152,6 @@ Behaviour:
   honours its context. `transport.Listener.Accept` documents its terminal
   errors (`net.ErrClosed`, ctx errors); closed-listener errors match
   `net.ErrClosed`.
-- XPUB subscription processing never blocks on the application; pending
-  events are queued without a fixed bound (previously a 16-slot buffer).
 - `typed.Receiver.Recv` and `typed.Subscriber.Recv` decode errors now wrap
   `typed.ErrDecode` (still `ErrFrameCount` where applicable); message text
   changed from "typed: unmarshal: …" to "typed: decode failed: …".
@@ -140,75 +167,73 @@ Behaviour:
   `Encode/DecodeZapRequest/Response` → `Encode/DecodeZAPRequest/Response`;
   `ZapStatus*` → `ZAPStatus*`; `ErrZapTemporary` → `ErrZAPTemporary`;
   `MechBase.ConfigureZAP` takes a `security.ZAPHandler`.
-- `WithSendHWM(0)`/`WithRecvHWM(0)` (unlimited) no longer run a relay
-  goroutine per pipe direction; an unbounded direction is a channel plus an
-  overflow slice. inproc linger completes on a signal instead of polling.
-- PUB no longer runs a watcher goroutine per subscriber, and inproc Conn
-  deadlines no longer start a goroutine per Read/Write.
 - CURVE no longer wipes its per-connection copy of the long-term secret key
   after the handshake: the socket keeps the key for later connections, so
   the wipe protected nothing. Ephemeral and cookie keys are still wiped.
+- **Goroutines.** An idle TCP connection costs 5 goroutines counting both
+  ends, down from 11: a session runs only a reader and a writer, the
+  heartbeat is a timer, handshake writes no longer each spawn a goroutine,
+  no goroutine supervises a session, and `Connect` keeps its one reconnect
+  goroutine. An inproc link costs none (was 3), a STREAM connection 2
+  (was 3), and socket engines run none. `WithSendHWM(0)`/`WithRecvHWM(0)`
+  (unlimited) no longer run a relay goroutine per pipe direction: an
+  unbounded direction is a channel plus an overflow slice. inproc linger
+  completes on a signal instead of polling.
+- **Inbound fair-queueing runs no goroutines.** PULL, DEALER, REP, ROUTER,
+  STREAM, SUB and XSUB read their peers' pipes directly, round-robin over
+  the peers that have data (libzmq `fq_t`), instead of through one forwarder
+  goroutine per peer; receive cost no longer grows with idle peers. The
+  single-peer receive path is kept (1.3×–12× on the perf suite); the
+  lock-free single-peer send path of PUSH/DEALER was removed (under 9% on
+  inproc PUSH/PULL, nothing elsewhere).
+- **PUB/XPUB apply subscriptions on the socket's next `Send`** (and, for
+  XPUB, `Recv` or poll), as in libzmq, instead of in a reader goroutine per
+  subscriber. XPUB subscribe churn is about half the cost. A PUB that never
+  sends leaves subscriptions queued, so a subscriber may back off at the
+  receive HWM until the next `Send`. XPUB subscription processing never
+  blocks on the application; its pending events are queued without a fixed
+  bound (previously a 16-slot buffer).
+- **Breaking — XSUB no longer surfaces upstream SUBSCRIBE/CANCEL commands**
+  (libzmq never does; conforming peers never send them to a subscriber).
+  The session turns ZMTP SUBSCRIBE/CANCEL commands into 0x01/0x00-prefixed
+  messages only for PUB/XPUB and drops them for every other socket type.
+  SUB/XSUB treat inbound data beginning with 0x00/0x01 as ordinary data.
+- `SocketMetrics.QueueDepth` counts the messages queued in the socket's
+  inbound pipes (PAIR and REQ included); it used to count only a one-slot
+  internal handoff and was 0 with a single peer. `SocketMetrics.Dropped` no
+  longer includes FairQueue handoff drops, which cannot happen any more: a
+  message is only taken from a pipe by the receiver that returns it.
 - ROUTER/STREAM: the routing identity now travels with the peer's pipe, so
   messages drained after a peer disconnects keep its identity without the
   1024-entry post-detach cache, which pinned up to ~16 MB of pipe buffers
   under connection churn. ROUTER `Recv` no longer takes the engine lock.
-- PUSH/DEALER send: removed the lock-free single-peer fast path (measured at
-  under 9% on inproc PUSH/PULL, nothing elsewhere). FairQueue's single-peer
-  receive path is kept (1.3×–12× on the perf suite).
-- **XSUB no longer surfaces upstream SUBSCRIBE/CANCEL commands** (libzmq
-  never does; conforming peers never send them to a subscriber). The
-  session now turns ZMTP SUBSCRIBE/CANCEL commands into 0x01/0x00-prefixed
-  messages only for PUB/XPUB and drops them for every other socket type.
-  SUB/XSUB treat inbound data beginning with 0x00/0x01 as ordinary data.
-- **Inbound fair-queueing runs no goroutines.** PULL, DEALER, REP, ROUTER,
-  STREAM, SUB and XSUB read their peers' pipes directly, round-robin over
-  the peers that have data (libzmq `fq_t`), instead of one forwarder
-  goroutine per peer. An idle TCP connection costs one goroutine less on
-  the receiving side, an inproc link one less; receive cost no longer
-  grows with idle peers.
-- `SocketMetrics.QueueDepth` now counts the messages queued in the
-  socket's inbound pipes (PAIR and REQ included); it used to count only a
-  one-slot internal handoff and was 0 with a single peer.
-- `SocketMetrics.Dropped` no longer includes FairQueue handoff drops,
-  which cannot happen any more: a message is only taken from a pipe by
-  the receiver that returns it.
-- **PUB/XPUB run no goroutine per subscriber.** Subscriptions are applied on
-  the socket's next `Send` (and, for XPUB, `Recv` or poll), as in libzmq,
-  instead of by a reader goroutine per peer. A subscriber link costs one
-  goroutine less; XPUB subscribe churn is ~43% faster. A PUB that never
-  sends leaves subscriptions queued, so a subscriber may back off at the
-  receive HWM until the next `Send`.
-- **Breaking:** `Bind`/`Connect` on `inproc://` by a socket configured with
-  PLAIN, CURVE or `WithSecurityMech` returns an error wrapping
-  `ErrEndpointInvalid`; inproc runs no handshake, as in libzmq. STREAM
-  sockets are rejected on inproc too.
-- **Breaking:** an inproc `Connect` before its `Bind` waits indefinitely
-  (until Bind, Disconnect or Close) instead of a 500 ms dial window plus
-  reconnect retries.
-- **Breaking:** inproc queue size per direction is the sender's send HWM
-  plus the receiver's recv HWM, unlimited if either is 0 (libzmq).
-- **Breaking:** connecting to a bound inproc socket of an incompatible type
-  returns an error wrapping `ErrFSMViolation`; a waiting Connect reports it
-  as `EventConnectFailed`.
-- The connecting side of an inproc link sees the binder's `WithIdentity`,
-  so ROUTER↔ROUTER can address either way. `Disconnect` works on inproc
-  endpoints; `Unbind` releases the name and keeps established links.
-- inproc emits `EventAccepted` on the binder and `EventDisconnected` on both
-  sides; links use no goroutines (was 2 per link) and are removed on
-  disconnect instead of accumulating until Close.
-- An idle TCP connection now costs 5 goroutines instead of 10 (counting both
-  ends): a session runs only a reader and a writer, the heartbeat is a timer,
-  and handshake writes no longer each spawn a goroutine. `Connect` keeps its
-  one reconnect goroutine.
+- **inproc is one pipe pair between the two sockets**, built into the
+  Context; the ZMTP-over-emulated-conn path is gone. As in libzmq:
+  - **Breaking:** `Bind`/`Connect` on `inproc://` by a socket configured
+    with PLAIN, CURVE or `WithSecurityMech` returns an error wrapping
+    `ErrEndpointInvalid`; inproc runs no handshake. STREAM sockets are
+    rejected on inproc too.
+  - **Breaking:** a `Connect` before its `Bind` waits indefinitely (until
+    Bind, Disconnect or Close) instead of a 500 ms dial window plus
+    reconnect retries.
+  - **Breaking:** the queue size per direction is the sender's send HWM
+    plus the receiver's recv HWM, unlimited if either is 0.
+  - **Breaking:** connecting to a bound socket of an incompatible type
+    returns an error wrapping `ErrFSMViolation`; a waiting Connect reports
+    it as `EventConnectFailed`.
+  - The connecting side sees the binder's `WithIdentity`, so ROUTER↔ROUTER
+    can address either way. `Unbind` releases the name and keeps
+    established links.
+  - inproc emits `EventAccepted` on the binder and `EventDisconnected` on
+    both sides; closing either side detaches both synchronously.
 - Accepted and connected sessions emit monitor events from the same code
   path; `EventHandshakeSucceeded` now always precedes `EventConnected` on the
   client.
-- STREAM connections run as raw-mode sessions: 2 goroutines per connection
-  (was 3). STREAM honours `WithSendHWM`/`WithRecvHWM` as given (0 now means
-  unlimited; it meant 1024), `Close` honours `WithLinger` (queued outbound
-  data is flushed before the connection closes; it was dropped), and
-  `Disconnect` works on STREAM endpoints (it returned `ErrFSMViolation`).
-- A STREAM `Connect` emits `EventConnected` when its session attaches, just
+- STREAM connections run as raw-mode sessions. STREAM honours
+  `WithSendHWM`/`WithRecvHWM` as given (**breaking:** 0 now means
+  unlimited; it meant 1024), and `Close` honours `WithLinger` (queued
+  outbound data is flushed before the connection closes; it was dropped).
+  A STREAM `Connect` emits `EventConnected` when its session attaches, just
   after `Connect` returns.
 
 ### Removed
@@ -229,11 +254,11 @@ Behaviour:
   `WithRecvBufferPool` is internal.
 - **Breaking:** `msg.FromFramesOwned`, `Msg.MarkSubscription` (both excluded
   from the compatibility promise in 1.0.0) and `Msg.IsSubscription`. Use
-  `msg.FromFrames`; subscription commands are
-  flagged on the internal pipe instead of the message.
+  `msg.FromFrames`; subscription commands no longer travel as flagged
+  messages.
 - **Breaking:** `transport.Registry`, `transport.NewRegistry`, `transport.New`.
   Use `(*gozmq.Context).RegisterTransport`; every Context still preloads
-  tcp, tcp6, ipc and inproc.
+  tcp, tcp6 and ipc.
 - **Breaking:** `transport.NewInprocTransport` and
   `transport.DefaultInprocQueueWindow`. inproc is built into the Context and
   is no longer a `transport.Transport`; `Context.RegisterTransport` panics
@@ -294,9 +319,9 @@ Behaviour:
   messages) per disconnected peer after `Close`.
 - Session teardown no longer sets `SO_LINGER(2)` on TCP connections, which
   made `Close` block up to 2s per connection and reset it on expiry.
-- `Socket.Close` on an inproc (direct-pipe) connection no longer waits the
-  full linger while the peer socket is alive; it returns as soon as the peer
-  has received everything sent.
+- `Socket.Close` on an inproc connection no longer waits the full linger
+  while the peer socket is alive; it returns as soon as the peer has
+  received everything sent.
 - `WithHeartbeat` timeout 0 now means 3× the interval, as documented
   (previously 2×).
 - NULL and CURVE clients report a server ERROR (e.g. ZAP denial) as
@@ -306,12 +331,16 @@ Behaviour:
   context expired while the message stayed queued.
 - A `Poller` never woke for messages sent by an inproc PAIR peer.
 - A `Poller` never reported REP, SUB or XSUB sockets as ready.
+- `Poller`: a Poll waiting for PollIn on a REP socket that owed a reply now
+  wakes when `SendMsg` makes an already-queued request receivable (it
+  previously slept until its deadline).
 - `Proxy` now returns promptly after ctx cancellation even when the capture
   socket blocks (e.g. a PUSH/DEALER with no peer); taps queued or in flight
   at shutdown may be dropped.
 - `Bind` racing `Close` no longer leaks the listener.
-- inproc: a connect racing listener close can no longer be stranded; `Dial`
-  honours ctx when the accept queue is full.
+- inproc: a Connect racing the binder's Close can no longer be stranded, and
+  a Connect no longer blocks on a full accept queue (both by the inproc
+  rewrite: there is no listener or accept queue any more).
 - ipc: a stale socket file left by a crashed process no longer blocks `Bind`;
   `Close` no longer unlinks a path another listener may have re-bound.
 - `typed.TopicMux`: a concurrent `Run` now returns `ErrTopicMuxRunning`
@@ -320,11 +349,8 @@ Behaviour:
 - STREAM sockets no longer pin a 32 KiB buffer per received chunk (small
   segments at the HWM could hold tens of MiB per peer).
 - `RecvBytes`' multipart-message error now wraps `ErrFSMViolation`.
-- `Poller`: a Poll waiting for PollIn on a REP socket that owed a reply now
-  wakes when `SendMsg` makes an already-queued request receivable (it
-  previously slept until its deadline).
-- Sockets no longer keep a link per past STREAM peer until `Close`; links of
-  every kind are dropped when their peer goes.
+- Sockets no longer keep a link per past inproc or STREAM peer until
+  `Close`; links of every kind are dropped when their peer goes.
 
 ## [1.0.0] - 2026-08-10
 

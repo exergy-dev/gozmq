@@ -72,9 +72,20 @@ anything breaking has to wait for v2. No exported signature may name a type
 from `internal/` — the contracts live in `transport`, `security`, and `msg`
 precisely so this stays true.
 
-**Performance claims need numbers.** `perf/` has both a Go benchmark suite
-and libzmq-comparable CLI tools. If a change is for speed, post before/after
-`benchstat` output. Do **not** benchmark with `-race`; it multiplies
+**Performance claims need numbers, and hot-path changes need the gate.**
+`perf/` has both a Go benchmark suite and libzmq-comparable CLI tools. If a
+change is for speed, post before/after `benchstat` output. If it touches a
+hot path (pipes, engines, sessions, the Poller), run the benchmark gate
+against the commit you started from:
+
+```sh
+perf/benchgate.sh <base-commit>                  # needs benchstat
+```
+
+No benchmark may regress by more than 5% (p < 0.05), allocs/op may not rise,
+and B/op must stay within 5%; re-run a flagged benchmark with
+`perf/benchgate.sh <base> '<regex>' 16` before calling it a regression. See
+`perf/README.md`. Do **not** benchmark with `-race`; it multiplies
 synchronisation cost by roughly 5× and makes the numbers meaningless.
 
 **Goroutine leaks fail the build.** Every package's `TestMain` calls

@@ -16,8 +16,8 @@ absent, and where behaviour differs from libzmq even when both work.
 | --- | :---: | --- |
 | `REQ` / `REP` | ✅ | Strict lock-step alternation, enforced with `ErrFSMViolation`. |
 | `DEALER` / `ROUTER` | ✅ | Synthesized identities as in libzmq; see the handover divergence below. |
-| `PUB` / `SUB` | ✅ | Refcounted subscriptions; slow subscribers dropped at HWM. |
-| `XPUB` / `XSUB` | ✅ | Subscriptions surface as messages; `WithXPubVerbose` for per-peer. Pending subscription events are queued without a bound, as in libzmq. |
+| `PUB` / `SUB` | ✅ | Refcounted subscriptions; slow subscribers dropped at HWM. PUB applies incoming subscriptions on its next `Send`, as libzmq does. |
+| `XPUB` / `XSUB` | ✅ | Subscriptions surface as messages on XPUB; `WithXPubVerbose` for per-peer. Pending subscription events are queued without a bound, as in libzmq. XSUB does not surface SUBSCRIBE/CANCEL commands from its publishers, as in libzmq. |
 | `PUSH` / `PULL` | ✅ | Round-robin out, fair-queue in. |
 | `PAIR` | ✅ | Exclusive 1:1. On disconnect, waits for the next peer (libzmq semantics). |
 | `STREAM` | ✅ | Raw TCP bridge; several divergences, see below. |
@@ -37,7 +37,7 @@ v1.0. They are the most likely post-1.0 addition if there is demand.
 | `tcp://` | ✅ | IPv4/IPv6 per the OS. |
 | `tcp6://` | ✅ | Forces IPv6. |
 | `ipc://` | ✅ | Unix domain sockets, including Linux abstract sockets. |
-| `inproc://` | ✅ | Direct pipes within a Context; no security mechanism (see below). Connect before Bind waits indefinitely, as in libzmq. |
+| `inproc://` | ✅ | One pipe pair between two sockets of a Context; no security mechanism, HWMs summed, Connect before Bind waits indefinitely, all as in libzmq (see below). |
 | `tls+tcp://` | ✅ | **gozmq-specific**, no libzmq equivalent. Opt-in via `transport.NewTLSTransport`. |
 | `pgm://` / `epgm://` | ❌ | Reliable multicast. Needs OpenPGM; not implemented. |
 | `norm://` | ❌ | Not implemented. |
@@ -212,17 +212,55 @@ context deadline.
   domain) and `WithRecvBufferPool` are **rejected** by `NewSocket` rather
   than silently ignored — accepting `WithPlainAuth` on a raw-TCP listener
   that authenticates nobody would be a security hazard.
+- STREAM cannot use `inproc://`.
 
-### inproc runs no security mechanism
+Parity notes: `WithSendHWM`/`WithRecvHWM` apply as given, with 0 meaning
+unlimited (earlier gozmq versions turned 0 into 1024); `Close` honours
+`WithLinger`, flushing queued outbound data before it closes each connection
+(it used to drop it); and `Disconnect` closes the connection a `Connect`
+made (it used to fail).
 
-`inproc://` connections are direct pipes between two sockets in the same
-Context: no ZMTP handshake, and therefore no ZAP hook. libzmq also runs no
-mechanism or ZAP check on inproc, so this matches — but it does mean a
-Context-level ZAP handler never sees inproc peers.
+### inproc
+
+`inproc://` connections are one in-memory pipe pair between two sockets in
+the same Context: no ZMTP handshake, and therefore no ZAP hook. libzmq also
+runs no mechanism or ZAP check on inproc, so this matches — but it does mean
+a Context-level ZAP handler never sees inproc peers.
 
 A socket configured with PLAIN, CURVE, or a `WithSecurityMech` mechanism
 cannot use inproc: its `Bind` or `Connect` on `inproc://` fails with
 `ErrEndpointInvalid`, rather than silently running unauthenticated.
+
+The rest matches libzmq, and is listed because earlier gozmq versions
+differed:
+
+- A `Connect` before the `Bind` waits with no time limit, until the `Bind`,
+  a `Disconnect` or `Close`. (It used to give up after 500 ms and retry.)
+- Each direction queues up to the sender's send HWM plus the receiver's
+  recv HWM, unlimited if either is 0.
+- Both sides see each other's `WithIdentity`, so ROUTER↔ROUTER can address
+  either way.
+- Connecting to a bound socket of an incompatible type fails with
+  `ErrFSMViolation`, or `EventConnectFailed` for a waiting Connect.
+- `Disconnect` works on inproc endpoints and detaches both sides; `Unbind`
+  releases the name and keeps established connections.
+
+### PUB applies subscriptions on its next send
+
+A PUB or XPUB applies the SUBSCRIBE/CANCEL commands its subscribers sent on
+its next `Send` (XPUB also on `Recv` and on a `Poller` check), as libzmq
+applies them on its next send, recv or poll. A message published right after
+a subscriber connects is filtered against the subscriptions that had arrived
+by then. A PUB that never sends leaves its subscribers' commands queued, up
+to the receive HWM.
+
+### XSUB does not surface upstream subscriptions
+
+XSUB delivers what its publishers send as data and never turns their
+SUBSCRIBE/CANCEL commands into messages; libzmq does the same, and
+conforming publishers never send them. Data that starts with `0x00` or
+`0x01` reaches SUB/XSUB applications unchanged. Earlier gozmq versions
+surfaced such commands on XSUB.
 
 ### CURVE commands in the `MESSAGE` flags
 
@@ -274,6 +312,14 @@ receiver calls `Release` when done, and the frames are valid until the last
 reference is released. `SendMsg` holds its own reference, so forwarding and
 then releasing is safe. `RecvBytes` avoids the bookkeeping entirely for
 single-frame payloads.
+
+### Socket metrics
+
+libzmq has no per-socket counters; `Socket.Metrics` is gozmq's own.
+`QueueDepth` is the number of messages waiting in the socket's inbound pipes
+(PAIR and REQ included). `Dropped` counts only PUB/XPUB fan-out drops at a
+full subscriber pipe and ROUTER sends to an unknown identity without
+`WithRouterMandatory`; nothing is dropped between a pipe and `RecvMsg`.
 
 ---
 
