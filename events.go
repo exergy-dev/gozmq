@@ -12,7 +12,8 @@ type EventType uint32
 const (
 	// EventConnected fires on a client-side socket after a dial plus
 	// ZMTP handshake completes and the session's pipe is attached to
-	// the engine. Event.Endpoint is the configured connect target.
+	// the engine; on inproc, once the Connect is joined to its Bind.
+	// Event.Endpoint is the configured connect target.
 	EventConnected EventType = 1 << iota
 
 	// EventConnectDelayed fires on the first reconnect attempt following
@@ -27,8 +28,10 @@ const (
 	EventConnectRetried
 
 	// EventConnectFailed fires when Connect fails terminally with no
-	// reconnect loop to fall back on: an unknown transport scheme, or a
-	// STREAM dial failure (STREAM dials exactly once). Event.Endpoint is
+	// reconnect loop to fall back on: an unknown transport scheme, a
+	// STREAM dial failure (STREAM dials exactly once), or an inproc
+	// Connect refused by its peer (an incompatible socket type, possibly
+	// found only when a waiting Connect meets its Bind). Event.Endpoint is
 	// the requested target; Event.Reason is the underlying error string.
 	EventConnectFailed
 
@@ -45,7 +48,9 @@ const (
 
 	// EventAccepted fires on a server-side socket when a new peer
 	// connection is accepted off the listener, before the ZMTP
-	// handshake begins. Event.Endpoint is the peer's remote endpoint.
+	// handshake begins; on inproc, when a Connect is joined to this Bind.
+	// Event.Endpoint is the peer's remote endpoint (for inproc, the bound
+	// endpoint).
 	EventAccepted
 
 	// EventAcceptFailed fires for each non-terminal accept error (EMFILE,
@@ -63,7 +68,8 @@ const (
 
 	// EventDisconnected fires when a previously-connected session is
 	// torn down — peer closed, heartbeat timeout, or local
-	// Socket.Close. Event.Endpoint is the remote peer endpoint.
+	// Socket.Close, or an inproc Disconnect on either side. Event.Endpoint
+	// is the remote peer endpoint (for inproc, the endpoint name).
 	EventDisconnected
 
 	// EventHandshakeSucceeded fires after the ZMTP greeting and

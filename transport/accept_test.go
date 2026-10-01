@@ -23,8 +23,6 @@ func listenAll(t *testing.T) map[string]Listener {
 	require.NoError(t, err)
 	ls["tls+tcp"], err = mustNewTLS(t, serverTLSConfig()).Listen(context.Background(), "tls+tcp://127.0.0.1:0")
 	require.NoError(t, err)
-	ls["inproc"], err = NewInprocTransport(0).Listen(context.Background(), "inproc://all-"+t.Name())
-	require.NoError(t, err)
 	return ls
 }
 

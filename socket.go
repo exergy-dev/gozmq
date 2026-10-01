@@ -142,7 +142,7 @@ type Socket struct {
 	listeners    []transport.Listener
 	reconnectors []reconnectEntry
 	// links holds every attached peer (server-accepted sessions, STREAM
-	// adapters, and direct inproc pipes) behind one teardown contract. Client
+	// adapters, and inproc links) behind one teardown contract. Client
 	// sessions are NOT here — they are owned by their reconnector and
 	// collected via CurrentSession() at close time.
 	links     []peerLink
@@ -195,6 +195,9 @@ func (s *Socket) Bind(endpoint string) error {
 	if s.closed.Load() {
 		return ErrSocketClosed
 	}
+	if isInproc(endpoint) {
+		return s.bindInproc(endpoint)
+	}
 	tr, err := s.ctx.lookupTransport(endpoint)
 	if err != nil {
 		s.emit(EventBindFailed, endpoint, err.Error())
@@ -206,27 +209,10 @@ func (s *Socket) Bind(endpoint string) error {
 		return err
 	}
 
-	// If the listener supports direct-pipe bypass (inproc), a second
-	// accept loop handles direct-pipe offers from connecting sockets. The
-	// regular acceptLoop is still required even for inproc — two dial
-	// paths verifiably reach it:
-	//   - a dialer with PLAIN/CURVE configured skips the direct-pipe
-	//     path in Connect and dials through transport.InprocTransport,
-	//     whose dialIn hands a conn to Listener.Accept;
-	//   - a Connect that races ahead of this Bind finds no
-	//     LookupDirectAcceptor yet and falls back to the Reconnector,
-	//     whose tr.Dial parks in the transport's pending-waiter queue
-	//     and likewise resolves through Listener.Accept.
-	// The loop runs even when this socket has security configured: a
-	// no-security dialer cannot see our config and will still offer a
-	// direct pipe, so the loop must actively REJECT (close) those offers —
-	// leaving them undrained would hang the dialer silently.
-	acceptor, direct := l.(pipe.DirectAcceptor)
-
 	// Close may have run while Listen was in flight. Re-check under s.mu,
 	// which CloseCtx takes to snapshot s.listeners: either Close sees this
 	// listener and closes it, or we see closed and close it ourselves. The
-	// acceptWG.Adds sit in the same critical section so they cannot race
+	// acceptWG.Add sits in the same critical section so it cannot race
 	// CloseCtx's acceptWG.Wait.
 	s.mu.Lock()
 	if s.closed.Load() {
@@ -238,16 +224,10 @@ func (s *Socket) Bind(endpoint string) error {
 	resolved := l.Endpoint()
 	s.lastEndpoint = resolved
 	s.acceptWG.Add(1)
-	if direct {
-		s.acceptWG.Add(1)
-	}
 	s.mu.Unlock()
 
 	s.emit(EventListening, resolved, "")
 	go s.acceptLoop(l)
-	if direct {
-		go s.acceptDirectPipeLoop(acceptor)
-	}
 	return nil
 }
 
@@ -256,6 +236,11 @@ func (s *Socket) Bind(endpoint string) error {
 // and post-handshake disconnects, with exponential backoff + jitter per
 // the configured WithReconnectInterval / WithReconnectIntervalMax.
 //
+// An inproc Connect joins the bound socket directly. Before the Bind it
+// waits, with no time limit, until the Bind, Disconnect or Close; an
+// incompatible socket type is then reported as EventConnectFailed rather
+// than returned.
+//
 // Exception: STREAM sockets dial exactly once and do NOT reconnect — a
 // dial failure is returned synchronously, and a later peer disconnect is
 // final (surfaced via EventDisconnected). Reconnect supervision for raw
@@ -263,6 +248,9 @@ func (s *Socket) Bind(endpoint string) error {
 func (s *Socket) Connect(endpoint string) error {
 	if s.closed.Load() {
 		return ErrSocketClosed
+	}
+	if isInproc(endpoint) {
+		return s.connectInproc(endpoint)
 	}
 	tr, err := s.ctx.lookupTransport(endpoint)
 	if err != nil {
@@ -273,18 +261,6 @@ func (s *Socket) Connect(endpoint string) error {
 		// STREAM does not ride on ZMTP / session, so the Reconnector
 		// (which builds sessions) is not reusable here. Dial once.
 		return s.connectStream(tr, endpoint)
-	}
-	// Direct-pipe fast path: if the transport supports it (inproc within
-	// the same Context) AND no security mechanism is configured (CURVE /
-	// PLAIN require the session layer), skip sessions entirely and wire
-	// engine pipes directly. This eliminates ZMTP greeting, handshake,
-	// codec, and reader/writer goroutines.
-	if !s.hasSecurityMech() {
-		if dpd, ok := tr.(pipe.DirectDialer); ok {
-			if acceptor := dpd.LookupDirectAcceptor(endpoint); acceptor != nil {
-				return s.connectDirectPipe(acceptor, endpoint)
-			}
-		}
 	}
 	cfg := session.ReconnectConfig{
 		Dial: func(ctx context.Context) (transport.Conn, error) {
@@ -358,6 +334,12 @@ func (s *Socket) Unbind(endpoint string) error {
 	if s.closed.Load() {
 		return ErrSocketClosed
 	}
+	if isInproc(endpoint) {
+		if !s.ctx.inproc.unbind(s, endpoint) {
+			return fmt.Errorf("gozmq: endpoint %q not bound: %w", endpoint, ErrEndpointUnknown)
+		}
+		return nil
+	}
 
 	s.mu.Lock()
 	var matched transport.Listener
@@ -386,6 +368,9 @@ func (s *Socket) Disconnect(endpoint string) error {
 	}
 	if s.socketType == Stream {
 		return fmt.Errorf("gozmq: Disconnect is not implemented for STREAM sockets: %w", ErrFSMViolation)
+	}
+	if isInproc(endpoint) {
+		return s.disconnectInproc(endpoint)
 	}
 
 	s.mu.Lock()
@@ -495,9 +480,9 @@ func (s *Socket) addLink(l peerLink) bool {
 	return true
 }
 
-// removeLink drops a previously-added link. Server sessions self-remove on
-// disconnect so long-lived bind sockets don't accumulate them; direct pipes
-// and stream adapters stay until Close (matching the original behavior).
+// removeLink drops a previously-added link. Server sessions and inproc links
+// self-remove on disconnect so long-lived sockets don't accumulate them;
+// stream adapters stay until Close.
 func (s *Socket) removeLink(l peerLink) {
 	s.mu.Lock()
 	if i := slices.Index(s.links, l); i >= 0 {

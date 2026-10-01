@@ -418,50 +418,6 @@ func TestSocketType_String(t *testing.T) {
 	}
 }
 
-// TestInproc_SecurityBinderRejectsDirectPipeOffer: a PLAIN-configured
-// binder must actively reject the inproc direct-pipe bypass offered by a
-// no-security dialer (the dialer cannot see the binder's config). Before
-// the fix the offer sat undrained in the listener's buffer: the dialer
-// emitted EventConnected and then hung silently on a pipe wired to
-// nothing. Now the binder closes the offer, so the dialer observes a
-// prompt EventDisconnected.
-func TestInproc_SecurityBinderRejectsDirectPipeOffer(t *testing.T) {
-	zctx := gozmq.NewContext()
-	defer zctx.Close()
-
-	srv, err := zctx.NewSocket(gozmq.Rep,
-		gozmq.WithPlainAuth(func(user, pass string) bool { return true }))
-	if err != nil {
-		t.Fatalf("new server: %v", err)
-	}
-	defer srv.Close()
-	const ep = "inproc://sec-binder-direct-reject"
-	if err := srv.Bind(ep); err != nil {
-		t.Fatalf("bind: %v", err)
-	}
-
-	events := make(chan gozmq.Event, 64)
-	cli, err := zctx.NewSocket(gozmq.Req, gozmq.WithMonitor(events, gozmq.EventAll))
-	if err != nil {
-		t.Fatalf("new client: %v", err)
-	}
-	defer cli.Close()
-	if err := cli.Connect(ep); err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-
-	// The binder must close the offered pipe promptly: the dialer sees a
-	// disconnect instead of hanging on a dead pipe.
-	waitForEvents(t, events, 3*time.Second, func(evts []gozmq.Event) bool {
-		for _, ev := range evts {
-			if ev.Type == gozmq.EventDisconnected {
-				return true
-			}
-		}
-		return false
-	})
-}
-
 // TestNewMsg covers the NewMsg constructor end to end: an empty message,
 // incremental frame appends, a round trip, and the always-safe Release
 // contract for caller-constructed messages.

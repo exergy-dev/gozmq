@@ -13,9 +13,9 @@ import (
 )
 
 // Context is the top-level resource owner. A Context holds the scheme to
-// transport table (including the inproc name table shared by all inproc
-// sockets on this Context) and the optional ZAP handler. Contexts share
-// nothing with each other.
+// transport table, the inproc namespace shared by all inproc sockets on
+// this Context, and the optional ZAP handler. Contexts share nothing with
+// each other.
 //
 // The zero value is NOT usable; construct via NewContext.
 type Context struct {
@@ -26,6 +26,8 @@ type Context struct {
 	trMu       sync.RWMutex
 	transports map[string]transport.Transport // by Scheme()
 	zapHandler security.ZAPHandler
+
+	inproc inprocRegistry
 
 	mu      sync.Mutex
 	sockets []*Socket
@@ -56,14 +58,18 @@ func NewContext(opts ...ContextOption) *Context {
 		ctx:        ctx,
 		cancel:     cancel,
 		transports: make(map[string]transport.Transport),
+		inproc: inprocRegistry{
+			bound:   make(map[string]*Socket),
+			names:   make(map[*Socket][]string),
+			pending: make(map[string][]*inprocLink),
+		},
 	}
 	// TLS (tls+tcp) is deliberately not preregistered: there is no
-	// reasonable default *tls.Config. A zero inproc window means the
-	// default connect-before-bind wait.
+	// reasonable default *tls.Config. inproc is built into the Context,
+	// not a transport.
 	for _, t := range []transport.Transport{
 		transport.NewTCPTransport(),
 		transport.NewTCP6Transport(),
-		transport.NewInprocTransport(0),
 		transport.NewIPCTransport(),
 	} {
 		c.transports[t.Scheme()] = t
@@ -83,8 +89,10 @@ func (c *Context) Ctx() context.Context { return c.ctx }
 // registering a transport for an already-registered scheme overwrites the
 // prior entry.
 //
-// A Context starts with tcp, tcp6, ipc, and inproc already registered, so
-// this is needed in two cases.
+// A Context starts with tcp, tcp6 and ipc already registered, so this is
+// needed in two cases. inproc:// is not a transport: the Context joins
+// inproc sockets directly, and registering a transport whose Scheme is
+// "inproc" panics (a programmer error).
 //
 // The first is a built-in transport that needs caller-supplied
 // configuration. TLS is the main one — there is no reasonable default
@@ -117,6 +125,9 @@ func (c *Context) Ctx() context.Context { return c.ctx }
 // RegisterTransport sees the updated scheme set as long as its Bind /
 // Connect call races after Register.
 func (c *Context) RegisterTransport(t transport.Transport) {
+	if t.Scheme() == "inproc" {
+		panic("gozmq: inproc is built into the Context and cannot be registered as a transport")
+	}
 	c.trMu.Lock()
 	defer c.trMu.Unlock()
 	c.transports[t.Scheme()] = t

@@ -94,7 +94,7 @@ Each layer has a narrow interface and a dedicated test suite. Layers never reach
 - **Pipe**: a bidirectional bounded queue between a socket engine and a session. Each direction has an independent HWM. Pipes are where backpressure is expressed.
 - **Session**: owns one peer connection end-to-end. Runs the ZMTP state machine, owns the security codec, translates between framed bytes on the wire and `Msg` structs on the pipe.
 - **Transport**: turns an endpoint string (`tcp://host:port`, `ipc:///run/foo.sock`, `inproc://name`) into something connection-like. Hides listener vs. dialer.
-- **Context**: a top-level object owning shared resources (the scheme → transport table, including the inproc name table, and the optional ZAP handler). Multiple Contexts can coexist; they share nothing. (The multi-socket `Poller` is a separate, caller-constructed type — not owned by the Context.)
+- **Context**: a top-level object owning shared resources (the scheme → transport table, the inproc namespace, and the optional ZAP handler). Multiple Contexts can coexist; they share nothing. (The multi-socket `Poller` is a separate, caller-constructed type — not owned by the Context.)
 
 ### 4.3 Concurrency model
 
@@ -181,16 +181,17 @@ github.com/exergy-dev/gozmq
 ├── context.go             // Context: NewContext, Close, RegisterTransport, WithZAPHandler
 ├── socket.go              // Socket: Bind/Connect/Unbind/Disconnect, Send/Recv, Subscribe, Metrics, Monitor
 ├── wiring.go              // per-session construction and security-mechanism selection
-├── directpipe.go          // inproc direct-pipe bypass + STREAM adapter wiring
+├── inproc.go              // inproc namespace and direct pipes
+├── stream.go              // STREAM adapter wiring
 ├── close.go               // LINGER teardown (Close / CloseCtx)
-├── peerlink.go            // one teardown contract for sessions, direct pipes and STREAM adapters
+├── peerlink.go            // one teardown contract for sessions, inproc links and STREAM adapters
 ├── options.go             // With* socket options, defaults, validation
 ├── errors.go              // sentinel errors (aliases of internal/zmqerr)
 ├── events.go              // monitor events
 ├── poller.go              // multi-socket readiness Poller
 ├── proxy.go               // Proxy (zmq_proxy)
 ├── msg/                   // Msg: frames, lent-frame reference counting
-├── transport/             // Transport/Conn/Listener contracts; tcp, tcp6, ipc, inproc, tls+tcp
+├── transport/             // Transport/Conn/Listener contracts; tcp, tcp6, ipc, tls+tcp
 ├── security/              // Mech contract, NULL, PLAIN, READY/metadata helpers, RFC 27 ZAP
 │   └── curve/             // CurveZMQ mechanism + Z85 key helpers
 ├── typed/                 // generic codec-backed wrappers (Sender/Receiver/…/TopicMux)
@@ -305,9 +306,14 @@ Unix domain sockets. Abstract namespace supported on Linux via `@name` syntax (m
 
 ### 7.3 inproc
 
-In-process transport. Each Context has its own inproc name table. When neither socket has a security mechanism configured, `Connect` creates a pipe pair and hands one end to the bound socket directly — no session, no ZMTP framing, no copying, no reader/writer goroutines. A socket with PLAIN, CURVE or a custom mechanism never takes that path: it dials an in-memory `transport.Conn` and runs the full session and handshake, and a security-configured binder closes direct-pipe offers from dialers that lack one. The direct pipe therefore skips ZAP, as libzmq does on inproc.
+Built into the Context rather than a `transport.Transport`. Each Context has its own inproc namespace (`inproc.go`). `Connect` to a bound name creates one pipe pair and attaches an end to each socket's engine — no session, no ZMTP framing, no copying, no goroutines. As in libzmq:
 
-libzmq accepts an inproc connect before the bind. A gozmq `Dial` waits up to `DefaultInprocQueueWindow` (500 ms) for the bind and then fails; at the socket level the reconnect loop keeps retrying, so `Connect` before `Bind` still works.
+- A `Connect` before the `Bind` waits, with no time limit, until the `Bind`, a `Disconnect` or a `Close`.
+- Each direction queues the sender's send HWM plus the receiver's recv HWM (unlimited if either is 0).
+- Both sides see each other's `WithIdentity`.
+- No security mechanism runs, so there is no ZAP check; a socket with PLAIN, CURVE or a custom mechanism cannot Bind or Connect on `inproc://` (`ErrEndpointInvalid`).
+
+An incompatible socket-type pairing fails the `Connect`, or is reported as `EventConnectFailed` when the `Connect` was waiting. Each socket records its side of a link. Closing either side (`Close`, `Disconnect`) closes the pipe and detaches both engines synchronously; messages already queued stay receivable. `Unbind` releases the name but keeps established links.
 
 ### 7.4 TLS (tls+tcp)
 
@@ -315,7 +321,7 @@ Not in ZMTP proper, but essential for modern deployments and currently requires 
 
 ### 7.5 Extensibility and deferred transports
 
-PGM/EPGM, VMCI, NORM and the others in §2.2 are not shipped. Transports are pluggable: `transport.Transport`, `Conn` and `Listener` are public interfaces naming only standard-library types, and `Context.RegisterTransport` installs an implementation for its scheme (replacing any existing entry). Every Context preloads `tcp`, `tcp6`, `ipc` and `inproc`. An out-of-tree transport (QUIC, WebSocket, a fault-injecting test harness) plugs in without forking; `gozmq_customtransport_test.go` has a working example. A `Listener.Accept` should return an error matching `net.ErrClosed` once closed; the accept loop treats every other error as per-connection and retries.
+PGM/EPGM, VMCI, NORM and the others in §2.2 are not shipped. Transports are pluggable: `transport.Transport`, `Conn` and `Listener` are public interfaces naming only standard-library types, and `Context.RegisterTransport` installs an implementation for its scheme (replacing any existing entry). Every Context preloads `tcp`, `tcp6` and `ipc`; registering a transport for `inproc` panics. An out-of-tree transport (QUIC, WebSocket, a fault-injecting test harness) plugs in without forking; `gozmq_customtransport_test.go` has a working example. A `Listener.Accept` should return an error matching `net.ErrClosed` once closed; the accept loop treats every other error as per-connection and retries.
 
 Security mechanisms are also a public interface (`security.Mech`, installed with `WithSecurityMech`), but that is a last resort: ZMTP defines NULL, PLAIN and CURVE, a fourth mechanism interoperates with nothing else, and a mistake in one is a security bug. The supported extension point for authorization is the ZAP handler (§8.4).
 

@@ -62,9 +62,11 @@ Out of scope — these are documented behaviours, not vulnerabilities:
   of the package documentation.
 - **PLAIN sends credentials in cleartext.** This is what RFC 24 specifies.
   Use it under `tls+tcp://`, or use CURVE.
-- **inproc bypasses ZAP.** Direct-pipe connections between NULL sockets in
-  one Context skip the session layer and therefore the ZAP hook, matching
-  libzmq. Documented in `docs/COMPATIBILITY.md`.
+- **inproc runs no security mechanism.** inproc connections are direct
+  pipes within one Context, with no handshake and therefore no ZAP hook,
+  matching libzmq. A socket configured with PLAIN, CURVE or
+  `WithSecurityMech` cannot Bind or Connect on `inproc://`. Documented in
+  `docs/COMPATIBILITY.md`.
 - **STREAM performs no handshake and no security.** It is a raw TCP bridge
   by definition.
 - **A custom `security.Mech` installed via `WithSecurityMech`.** You own the

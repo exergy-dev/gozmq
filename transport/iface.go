@@ -7,7 +7,8 @@ import (
 )
 
 // Transport turns an endpoint string into dial/listen operations for a
-// single scheme (tcp, ipc, inproc, tls+tcp).
+// single scheme (tcp, ipc, tls+tcp). inproc:// is not a transport: the
+// gozmq Context joins inproc sockets directly, without ZMTP.
 //
 // The implementations in this package cover every scheme gozmq ships. A
 // Transport supplied by an application is registered on a Context with
@@ -30,7 +31,7 @@ import (
 // patterns are all unaffected by the scheme underneath.
 type Transport interface {
 	// Scheme reports the URL scheme this transport handles, without the "://"
-	// suffix (e.g. "tcp", "inproc").
+	// suffix (e.g. "tcp", "ipc").
 	Scheme() string
 
 	// Dial connects to endpoint and returns a Conn ready for ZMTP framing.
@@ -55,7 +56,7 @@ type Conn interface {
 	io.Closer
 
 	// LocalEndpoint returns the local side in ZMQ string form (e.g.
-	// "tcp://127.0.0.1:5555"). May be empty for inproc.
+	// "tcp://127.0.0.1:5555").
 	LocalEndpoint() string
 	// RemoteEndpoint returns the peer in ZMQ string form.
 	RemoteEndpoint() string

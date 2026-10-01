@@ -16,7 +16,7 @@ import (
 // session goroutines are removed; never raise them.
 const (
 	maxGoroutinesPerTCPConn    = 10
-	maxGoroutinesPerInprocLink = 2
+	maxGoroutinesPerInprocLink = 0
 )
 
 const goroutineTestLinks = 16

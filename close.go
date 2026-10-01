@@ -79,10 +79,11 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 	for _, entry := range reconnectors {
 		entry.rc.Quiesce()
 	}
-	// 2. Close listeners so acceptLoop exits.
+	// 2. Close listeners so acceptLoop exits, and release inproc names.
 	for _, l := range listeners {
 		addErr(l.Close())
 	}
+	s.ctx.inproc.unbindAll(s)
 
 	// 3. Add each reconnector's current client session as a link (client
 	// sessions are owned by their reconnector, not the links slice).
@@ -96,9 +97,9 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 	//
 	//   engine.Close()  → no new engine.Sends enqueue messages
 	//   beginDrain()    → session writers drain queued messages to conn and
-	//                     exit (conn stays open); direct/stream: no-op
+	//                     exit (conn stays open); inproc/stream: no-op
 	//   drained()       → wait up to linger for each link's flush to finish
-	//                     (session WriterFlushed; direct pipe: peer received
+	//                     (session WriterFlushed; inproc: peer received
 	//                     everything; stream: immediate)
 	//   runCancel()     → cascades into reconnector ctx → loop exits
 	//   stop()          → conn.Close / pipe.Close → readers exit, Done fires
@@ -212,8 +213,7 @@ func waitChannels[T any](ctx context.Context, items []T, ch func(T) <-chan struc
 
 // watchPipeClose spawns a goroutine that waits for p to close (or the
 // socket's run context to cancel), then detaches p, runs cleanup, and
-// emits EventDisconnected. Used by startStreamAdapter, connectDirectPipe,
-// and acceptDirectPipeLoop.
+// emits EventDisconnected. Used by startStreamAdapter.
 func (s *Socket) watchPipeClose(p *pipe.End, endpoint string, cleanup func()) {
 	s.connectWG.Add(1)
 	go func() {

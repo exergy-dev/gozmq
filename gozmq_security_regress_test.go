@@ -45,14 +45,13 @@ func (*rejectMech) NextHandshake([]byte) ([]byte, bool, error) {
 func (*rejectMech) EncodeFrame(f uint8, b []byte) (uint8, []byte, error) { return f, b, nil }
 func (*rejectMech) DecodeFrame(f uint8, b []byte) (uint8, []byte, error) { return f, b, nil }
 
-// TestSecurity_CustomMechNotBypassedOnInproc: a WithSecurityMech binder must
-// not accept the inproc direct-pipe bypass from a no-security dialer.
-// Before the fix, hasSecurityMech ignored WithSecurityMech, so both sides
-// took the direct pipe and no handshake ran at all.
-func TestSecurity_CustomMechNotBypassedOnInproc(t *testing.T) {
+// TestSecurity_CustomMechNotBypassed: a WithSecurityMech socket must not
+// exchange traffic with a peer that skipped its handshake. (Over inproc,
+// which runs no handshake, such a socket cannot Bind or Connect at all.)
+func TestSecurity_CustomMechNotBypassed(t *testing.T) {
 	t.Run("xor binder, NULL dialer", func(t *testing.T) {
 		var frames atomic.Int64
-		_, srv, cli := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "inproc://sec-custom-xor",
+		_, srv, cli := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "tcp://127.0.0.1:0",
 			[]gozmq.Option{gozmq.WithSecurityMech(newXORMech(&frames))}, nil)
 		requireNoDelivery(t, cli, srv, "custom-mech binder")
 	})
@@ -60,27 +59,27 @@ func TestSecurity_CustomMechNotBypassedOnInproc(t *testing.T) {
 		opt := gozmq.WithSecurityMech(func(r security.Role, m map[string]string) (security.Mech, error) {
 			return &rejectMech{security.NewMechBase(r, m)}, nil
 		})
-		_, srv, cli := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair, "inproc://sec-custom-reject",
+		_, srv, cli := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair, "tcp://127.0.0.1:0",
 			[]gozmq.Option{opt}, nil)
 		requireNoDelivery(t, cli, srv, "rejecting binder")
 	})
 	t.Run("NULL binder, xor dialer", func(t *testing.T) {
 		var frames atomic.Int64
-		_, srv, cli := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "inproc://sec-custom-dialer",
+		_, srv, cli := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "tcp://127.0.0.1:0",
 			nil, []gozmq.Option{gozmq.WithSecurityMech(newXORMech(&frames))})
 		requireNoDelivery(t, cli, srv, "custom-mech dialer")
 	})
 	t.Run("xor both sides runs the mechanism", func(t *testing.T) {
 		var frames atomic.Int64
 		opt := gozmq.WithSecurityMech(newXORMech(&frames))
-		_, srv, cli := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "inproc://sec-custom-both",
+		_, srv, cli := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "tcp://127.0.0.1:0",
 			[]gozmq.Option{opt}, []gozmq.Option{opt})
 		ctx := testCtx(t)
 		require.NoError(t, cli.SendBytes(ctx, []byte("hello")))
 		got, err := srv.RecvBytes(ctx)
 		require.NoError(t, err)
 		require.Equal(t, "hello", string(got))
-		require.Positive(t, frames.Load(), "custom mechanism never saw a frame over inproc")
+		require.Positive(t, frames.Load(), "custom mechanism never saw a frame")
 	})
 }
 
@@ -89,49 +88,40 @@ func TestSecurity_CustomMechNotBypassedOnInproc(t *testing.T) {
 // Before the fix a WithPlainAuth socket that connected (or a WithPlainClient
 // socket that bound) fell back to NULL and authenticated nobody.
 func TestSecurity_PlainRoleFollowsOption(t *testing.T) {
-	for _, tr := range []string{"tcp", "inproc"} {
-		ep := func(name string) string {
-			if tr == "tcp" {
-				return "tcp://127.0.0.1:0"
-			}
-			return "inproc://sec-plain-role-" + name
-		}
-		t.Run(tr, func(t *testing.T) {
-			t.Run("auth socket connects to NULL peer", func(t *testing.T) {
-				var called atomic.Bool
-				_, nullSrv, authed := newSocketPairTypes(t, gozmq.Push, gozmq.Pull, ep("a"), nil,
-					[]gozmq.Option{gozmq.WithPlainAuth(func(string, string) bool { called.Store(true); return false })})
-				requireNoDelivery(t, nullSrv, authed, "WithPlainAuth connecting to NULL")
-				require.False(t, called.Load(), "NULL peer never sends HELLO")
-			})
-			t.Run("client socket binds, NULL peer connects", func(t *testing.T) {
-				_, plainCli, nullPeer := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, ep("b"),
-					[]gozmq.Option{gozmq.WithPlainClient("alice", "pw")}, nil)
-				requireNoDelivery(t, nullPeer, plainCli, "WithPlainClient binding, NULL peer")
-			})
-			t.Run("auth socket connects to client socket", func(t *testing.T) {
-				var gotUser atomic.Value
-				_, cliSide, authSide := newSocketPairTypes(t, gozmq.Push, gozmq.Pull, ep("c"),
-					[]gozmq.Option{gozmq.WithPlainClient("alice", "pw")},
-					[]gozmq.Option{gozmq.WithPlainAuth(func(u, p string) bool {
-						gotUser.Store(u)
-						return u == "alice" && p == "pw"
-					})})
-				ctx := testCtx(t)
-				require.NoError(t, cliSide.SendBytes(ctx, []byte("hi")))
-				got, err := authSide.RecvBytes(ctx)
-				require.NoError(t, err)
-				require.Equal(t, "hi", string(got))
-				require.Equal(t, "alice", gotUser.Load())
-			})
-			t.Run("auth socket connects and rejects", func(t *testing.T) {
-				_, cliSide, authSide := newSocketPairTypes(t, gozmq.Push, gozmq.Pull, ep("d"),
-					[]gozmq.Option{gozmq.WithPlainClient("alice", "wrong")},
-					[]gozmq.Option{gozmq.WithPlainAuth(func(u, p string) bool { return false })})
-				requireNoDelivery(t, cliSide, authSide, "rejected PLAIN client")
-			})
-		})
-	}
+	const ep = "tcp://127.0.0.1:0"
+	t.Run("auth socket connects to NULL peer", func(t *testing.T) {
+		var called atomic.Bool
+		_, nullSrv, authed := newSocketPairTypes(t, gozmq.Push, gozmq.Pull, ep, nil,
+			[]gozmq.Option{gozmq.WithPlainAuth(func(string, string) bool { called.Store(true); return false })})
+		requireNoDelivery(t, nullSrv, authed, "WithPlainAuth connecting to NULL")
+		require.False(t, called.Load(), "NULL peer never sends HELLO")
+	})
+	t.Run("client socket binds, NULL peer connects", func(t *testing.T) {
+		_, plainCli, nullPeer := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, ep,
+			[]gozmq.Option{gozmq.WithPlainClient("alice", "pw")}, nil)
+		requireNoDelivery(t, nullPeer, plainCli, "WithPlainClient binding, NULL peer")
+	})
+	t.Run("auth socket connects to client socket", func(t *testing.T) {
+		var gotUser atomic.Value
+		_, cliSide, authSide := newSocketPairTypes(t, gozmq.Push, gozmq.Pull, ep,
+			[]gozmq.Option{gozmq.WithPlainClient("alice", "pw")},
+			[]gozmq.Option{gozmq.WithPlainAuth(func(u, p string) bool {
+				gotUser.Store(u)
+				return u == "alice" && p == "pw"
+			})})
+		ctx := testCtx(t)
+		require.NoError(t, cliSide.SendBytes(ctx, []byte("hi")))
+		got, err := authSide.RecvBytes(ctx)
+		require.NoError(t, err)
+		require.Equal(t, "hi", string(got))
+		require.Equal(t, "alice", gotUser.Load())
+	})
+	t.Run("auth socket connects and rejects", func(t *testing.T) {
+		_, cliSide, authSide := newSocketPairTypes(t, gozmq.Push, gozmq.Pull, ep,
+			[]gozmq.Option{gozmq.WithPlainClient("alice", "wrong")},
+			[]gozmq.Option{gozmq.WithPlainAuth(func(u, p string) bool { return false })})
+		requireNoDelivery(t, cliSide, authSide, "rejected PLAIN client")
+	})
 }
 
 // TestSecurity_PreAuthAllocationBounded: an unauthenticated peer must not be

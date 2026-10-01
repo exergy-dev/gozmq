@@ -37,7 +37,7 @@ v1.0. They are the most likely post-1.0 addition if there is demand.
 | `tcp://` | ✅ | IPv4/IPv6 per the OS. |
 | `tcp6://` | ✅ | Forces IPv6. |
 | `ipc://` | ✅ | Unix domain sockets, including Linux abstract sockets. |
-| `inproc://` | ✅ | Direct-pipe bypass within a Context; see the ZAP divergence. |
+| `inproc://` | ✅ | Direct pipes within a Context; no security mechanism (see below). Connect before Bind waits indefinitely, as in libzmq. |
 | `tls+tcp://` | ✅ | **gozmq-specific**, no libzmq equivalent. Opt-in via `transport.NewTLSTransport`. |
 | `pgm://` / `epgm://` | ❌ | Reliable multicast. Needs OpenPGM; not implemented. |
 | `norm://` | ❌ | Not implemented. |
@@ -213,15 +213,16 @@ context deadline.
   than silently ignored — accepting `WithPlainAuth` on a raw-TCP listener
   that authenticates nobody would be a security hazard.
 
-### inproc bypasses ZAP
+### inproc runs no security mechanism
 
-`inproc://` connections between NULL-mechanism sockets in the same Context
-use a direct-pipe bypass that skips the session layer, and therefore the ZAP
-hook. libzmq also performs no ZAP check on inproc, so this matches — but it
-does mean a Context-level ZAP handler never sees inproc peers.
+`inproc://` connections are direct pipes between two sockets in the same
+Context: no ZMTP handshake, and therefore no ZAP hook. libzmq also runs no
+mechanism or ZAP check on inproc, so this matches — but it does mean a
+Context-level ZAP handler never sees inproc peers.
 
-Sockets with PLAIN, CURVE, or a `WithSecurityMech` mechanism never take the
-direct pipe: every inproc connection runs the full handshake.
+A socket configured with PLAIN, CURVE, or a `WithSecurityMech` mechanism
+cannot use inproc: its `Bind` or `Connect` on `inproc://` fails with
+`ErrEndpointInvalid`, rather than silently running unauthenticated.
 
 ### CURVE commands in the `MESSAGE` flags
 

@@ -81,11 +81,12 @@
 // the server side of every PLAIN and CURVE handshake, and from the accepting
 // side of NULL handshakes on sockets that set a domain.
 //
-// Note that inproc connections between NULL-mechanism sockets in the same
-// Context use a direct-pipe bypass that skips the session layer entirely —
-// including the ZAP authorization hook. This matches libzmq, which also
-// performs no ZAP check on inproc, but it means a Context-level ZAP
-// handler does not see inproc peers.
+// inproc connections are direct pipes between two sockets of one Context:
+// no handshake runs, so there is no security mechanism and no ZAP check,
+// as in libzmq. A socket configured with PLAIN, CURVE or [WithSecurityMech]
+// therefore cannot use inproc: Bind or Connect on inproc:// returns an
+// error wrapping [ErrEndpointInvalid]. A Context-level ZAP handler never
+// sees inproc peers.
 //
 // # Defaults
 //

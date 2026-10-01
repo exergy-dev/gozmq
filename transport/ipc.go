@@ -143,9 +143,8 @@ func parseIPCAddress(endpoint string) (path string, abstract bool, err error) {
 // ipcConn — Conn over a net.Conn (Unix socket).
 // --------------------------------------------------------------------------
 
-// ipcConn wraps a net.Conn and reports ipc:// endpoints. Unlike inproc
-// we are riding on a real stream, so the embedded Conn's Read/Write
-// already honor deadlines and ctx-via-deadline patterns.
+// ipcConn wraps a net.Conn and reports ipc:// endpoints. The embedded
+// Conn's Read/Write already honor deadlines and ctx-via-deadline patterns.
 type ipcConn struct {
 	net.Conn
 	local, remote string

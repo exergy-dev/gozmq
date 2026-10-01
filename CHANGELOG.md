@@ -178,6 +178,24 @@ Behaviour:
   goroutine less; XPUB subscribe churn is ~43% faster. A PUB that never
   sends leaves subscriptions queued, so a subscriber may back off at the
   receive HWM until the next `Send`.
+- **Breaking:** `Bind`/`Connect` on `inproc://` by a socket configured with
+  PLAIN, CURVE or `WithSecurityMech` returns an error wrapping
+  `ErrEndpointInvalid`; inproc runs no handshake, as in libzmq. STREAM
+  sockets are rejected on inproc too.
+- **Breaking:** an inproc `Connect` before its `Bind` waits indefinitely
+  (until Bind, Disconnect or Close) instead of a 500 ms dial window plus
+  reconnect retries.
+- **Breaking:** inproc queue size per direction is the sender's send HWM
+  plus the receiver's recv HWM, unlimited if either is 0 (libzmq).
+- **Breaking:** connecting to a bound inproc socket of an incompatible type
+  returns an error wrapping `ErrFSMViolation`; a waiting Connect reports it
+  as `EventConnectFailed`.
+- The connecting side of an inproc link sees the binder's `WithIdentity`,
+  so ROUTER↔ROUTER can address either way. `Disconnect` works on inproc
+  endpoints; `Unbind` releases the name and keeps established links.
+- inproc emits `EventAccepted` on the binder and `EventDisconnected` on both
+  sides; links use no goroutines (was 2 per link) and are removed on
+  disconnect instead of accumulating until Close.
 
 ### Removed
 
@@ -202,6 +220,10 @@ Behaviour:
 - **Breaking:** `transport.Registry`, `transport.NewRegistry`, `transport.New`.
   Use `(*gozmq.Context).RegisterTransport`; every Context still preloads
   tcp, tcp6, ipc and inproc.
+- **Breaking:** `transport.NewInprocTransport` and
+  `transport.DefaultInprocQueueWindow`. inproc is built into the Context and
+  is no longer a `transport.Transport`; `Context.RegisterTransport` panics
+  for a transport whose `Scheme()` is `"inproc"`.
 
 ### Fixed
 

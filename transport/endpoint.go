@@ -1,12 +1,14 @@
 // Package transport defines the transport-layer contracts — [Transport],
 // [Conn], and [Listener] — and provides the concrete implementations for
-// the schemes gozmq ships: tcp, tcp6, ipc, inproc, and (opt-in) tls+tcp.
+// the schemes gozmq ships: tcp, tcp6, ipc, and (opt-in) tls+tcp. inproc://
+// is not a transport: the gozmq Context joins inproc sockets with an
+// in-memory pipe and no ZMTP.
 //
 // Each transport turns an endpoint string into Dial / Listen operations and
-// adapts the underlying primitive (a net.Conn for TCP, an in-memory pipe for
-// inproc) to the Conn / Listener contracts.
+// adapts the underlying primitive (a net.Conn) to the Conn / Listener
+// contracts.
 //
-// Every gozmq.Context starts with tcp, tcp6, ipc and inproc registered.
+// Every gozmq.Context starts with tcp, tcp6 and ipc registered.
 // Two cases call for registering one yourself via
 // (*gozmq.Context).RegisterTransport:
 //

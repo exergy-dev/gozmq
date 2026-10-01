@@ -120,6 +120,10 @@ func WithSendHWM(n int) Option {
 // messages buffered per peer pipe before the reader goroutine stops
 // accepting frames from the wire and exerts TCP backpressure on the peer.
 // Default is 1000. Zero disables the limit.
+//
+// On inproc, where one pipe joins the two sockets, each direction holds the
+// sender's send HWM plus the receiver's recv HWM, and is unlimited if
+// either is zero (as in libzmq).
 func WithRecvHWM(n int) Option {
 	return newOption(func(c *socketConfig) error { c.recvHWM = n; return nil })
 }
@@ -268,8 +272,10 @@ func WithSubscribe(prefix []byte) Option {
 // It cannot be combined with [WithPlainClient] or the CURVE options.
 //
 // PLAIN credentials traverse the wire in cleartext — only use this mechanism
-// on a trusted link (inproc, ipc, loopback) or wrapped in tls+tcp://. For
-// untrusted networks prefer [WithCurveServer] / [WithCurveClient].
+// on a trusted link (ipc, loopback) or wrapped in tls+tcp://. For untrusted
+// networks prefer [WithCurveServer] / [WithCurveClient]. As in libzmq, inproc
+// runs no mechanism: Bind or Connect on inproc:// fails with
+// [ErrEndpointInvalid] for a socket with any PLAIN or CURVE option.
 func WithPlainAuth(fn func(user, pass string) bool) Option {
 	return newOption(func(c *socketConfig) error { c.plainAuth = fn; return nil })
 }
@@ -279,7 +285,8 @@ func WithPlainAuth(fn func(user, pass string) bool) Option {
 // independent of Bind/Connect: the socket is the client on every connection,
 // including those it accepts. It cannot be combined with [WithPlainAuth] or
 // the CURVE options. Credentials are sent in cleartext; wrap in tls+tcp:// or
-// switch to CURVE for any network you do not trust.
+// switch to CURVE for any network you do not trust. Like every mechanism,
+// it rules out inproc:// (see [WithPlainAuth]).
 func WithPlainClient(username, password string) Option {
 	return newOption(func(c *socketConfig) error {
 		c.plainClient = true
@@ -309,6 +316,8 @@ func WithZAPDomain(domain string) Option {
 // format). CURVE provides forward-secret AEAD encryption and mutual
 // authentication against each connecting client's long-term public key.
 // Clients must present a matching public key via [WithCurveClient].
+// inproc runs no mechanism, so a CURVE socket cannot Bind or Connect on
+// inproc:// (the call fails with [ErrEndpointInvalid]).
 func WithCurveServer(secretKey []byte) Option {
 	return newOption(func(c *socketConfig) error {
 		c.curveServer = true
@@ -324,7 +333,7 @@ func WithCurveServer(secretKey []byte) Option {
 // server uses to authenticate the client. All three arguments must be
 // 32 raw bytes each; decode from Z85 first if stored textually. The
 // resulting channel is forward-secret (ephemeral session keys) and
-// mutually authenticated.
+// mutually authenticated. As with [WithCurveServer], inproc:// is ruled out.
 func WithCurveClient(serverKey, publicKey, secretKey []byte) Option {
 	return newOption(func(c *socketConfig) error {
 		c.curveServer = false
@@ -360,8 +369,9 @@ func WithCurveClient(serverKey, publicKey, secretKey []byte) Option {
 //
 // Each inbound handshake frame is capped at 64 KiB, whatever
 // [WithMaxMessageSize] says, so an unauthenticated peer cannot make the
-// socket allocate more. A socket with a custom mechanism never takes the
-// inproc direct-pipe shortcut; every connection runs the handshake.
+// socket allocate more. inproc runs no handshake, so a socket with a
+// custom mechanism cannot Bind or Connect on inproc:// (the call fails
+// with [ErrEndpointInvalid]).
 func WithSecurityMech(newMech func(role security.Role, meta map[string]string) (security.Mech, error)) Option {
 	return newOption(func(c *socketConfig) error {
 		if newMech == nil {

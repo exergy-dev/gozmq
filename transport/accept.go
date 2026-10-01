@@ -12,9 +12,9 @@ import (
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
-// listenerClosedErr is returned by Accept (and by inproc dials) once the
-// listener is closed. It matches net.ErrClosed, the terminal condition
-// documented on Listener.Accept, as well as ErrEndpointInvalid.
+// listenerClosedErr is returned by Accept once the listener is closed. It
+// matches net.ErrClosed, the terminal condition documented on
+// Listener.Accept, as well as ErrEndpointInvalid.
 func listenerClosedErr() error {
 	return fmt.Errorf("%w: listener closed: %w", zmqerr.ErrEndpointInvalid, net.ErrClosed)
 }
