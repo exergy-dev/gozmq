@@ -66,9 +66,11 @@ differently from libzmq in any observable way, add a row to
 `docs/COMPATIBILITY.md`. An undocumented divergence is a bug even when the
 behaviour is the better one.
 
-**Public API changes.** The v1 compatibility promise covers everything
-exported outside `internal/`. Additions are fine in a minor release;
-anything breaking has to wait for v2. No exported signature may name a type
+**Public API changes.** From v1.0.0 the compatibility promise covers
+everything exported outside `internal/`: additions are fine in a minor
+release, and anything breaking has to wait for v2. Until then (0.x),
+breaking changes may land in a minor release but must be listed under
+**Breaking changes** in `CHANGELOG.md` with a migration hint. No exported signature may name a type
 from `internal/` — the contracts live in `transport`, `security`, and `msg`
 precisely so this stays true.
 

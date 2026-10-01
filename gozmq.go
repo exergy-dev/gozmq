@@ -99,7 +99,7 @@ func (t SocketType) String() string { return socketTypeName(t) }
 // Release (see that option and the msg package's "Lent frames").
 //
 // Msg is an alias for [msg.Msg]; see that package for the full method
-// set and for which methods the compatibility promise covers. There is
+// set. There is
 // no need to import it — the alias makes every method reachable as
 // gozmq.Msg, and the NewMsg* constructors below cover construction.
 type Msg = msg.Msg

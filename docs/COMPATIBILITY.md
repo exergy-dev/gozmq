@@ -28,7 +28,7 @@ absent, and where behaviour differs from libzmq even when both work.
 
 The draft types are unstable in libzmq itself (they require
 `--enable-drafts` and change between releases), so they are out of scope for
-v1.0. They are the most likely post-1.0 addition if there is demand.
+now. They are the most likely future addition if there is demand.
 
 ## Transports
 
@@ -124,7 +124,7 @@ by `WithHandshakeTimeout`.
 
 ### Not implemented
 
-Each is a deliberate v1.0 deferral, not an oversight. All touch engine
+Each is a deliberate deferral, not an oversight. All touch engine
 internals and none is needed for the common patterns.
 
 | libzmq option | What you lose | Workaround |
@@ -323,7 +323,7 @@ full subscriber pipe and ROUTER sends to an unknown identity without
 
 ---
 
-## Post-1.0 candidates
+## Future candidates
 
 Ordered roughly by likely demand:
 

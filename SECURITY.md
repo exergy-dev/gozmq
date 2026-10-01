@@ -32,13 +32,12 @@ patched release together.
 
 | Version | Supported |
 | --- | :---: |
-| 1.x (latest minor) | ✅ |
-| 1.x (older minors) | ❌ |
-| Pre-1.0 tags | ❌ |
+| 0.x (latest minor) | ✅ |
+| 0.x (older minors) | ❌ |
 
 Security fixes land on the latest minor. There is no long-term-support
-branch; upgrading within v1 is a non-breaking change by the compatibility
-promise.
+branch. While gozmq is 0.x, a minor release may include breaking changes;
+each is listed in `CHANGELOG.md` with a migration hint.
 
 ## Scope
 

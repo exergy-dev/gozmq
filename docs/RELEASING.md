@@ -95,7 +95,7 @@ GOPROXY=proxy.golang.org go list -m github.com/exergy-dev/gozmq@vX.Y.Z
 
 Check that pkg.go.dev has rendered the new version, and specifically that
 `Msg`, `SocketMetrics`, `transport.Transport`, and `security.Mech` all show
-their full method sets and fields — the whole point of the pre-1.0 API work
+their full method sets and fields — the whole point of the earlier API cleanup
 was that none of them render as bare aliases to internal types.
 
 Then write the GitHub release notes from the CHANGELOG section.

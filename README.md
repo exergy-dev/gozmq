@@ -120,10 +120,11 @@ place behaviour differs from libzmq — see
 
 ## Stability
 
-`gozmq` follows semantic versioning. From v1.0.0, everything exported outside
-`internal/` is covered by the compatibility promise.
-
-Breaking changes wait for a major version. Additions may land in any minor.
+`gozmq` follows semantic versioning and is pre-1.0: a 0.x minor release may
+include breaking changes, each listed in `CHANGELOG.md` with a migration hint.
+From v1.0.0, everything exported outside `internal/` will be covered by the
+compatibility promise: breaking changes will wait for a major version, and
+additions may land in any minor.
 `CHANGELOG.md` records everything user-visible.
 
 ## Notes

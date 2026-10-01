@@ -553,7 +553,7 @@ The original delivery plan, kept for context.
 3. **M3 — Security (3 weeks)**: PLAIN, CURVE with test vectors, ZAP, handshake timeouts.
 4. **M4 — Operational polish (3 weeks)**: monitoring events, `Metrics()` snapshots, `slog`, TLS transport, IPC transport, STREAM socket. (`expvar`/OTel integration deferred — see §12.)
 5. **M5 — Perf (3 weeks)**: benchmark suite; performance tuning against numbers in §11.
-6. **M6 — v1.0 release (2 weeks)**: API review, doc pass, migration guide from `pebbe/zmq4` and `go-zeromq/zmq4`, tagged release.
+6. **M6 — first tagged release (2 weeks)**: API review, doc pass, migration guide from `pebbe/zmq4` and `go-zeromq/zmq4`, tagged release.
 
 Total: ~17 weeks of focused work for a single engineer, less with parallelism (security can run concurrently with core patterns once M1 lands).
 

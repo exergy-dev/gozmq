@@ -1,12 +1,14 @@
 # Changelog
 
-All notable changes to `gozmq` are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) after v1.0.0.
+All notable changes to `gozmq` are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html); while it is 0.x, a minor release may include breaking changes.
 
-## [Unreleased]
+## [0.1.0] - 2026-10-01
 
-**Breaking changes**, detailed in the sections below. No `v1.0.0` tag has
-been published yet; if 1.0.0 is tagged first, the API removals need a major
-version under the compatibility promise.
+First tagged release. As a 0.x release the public API may still change in
+minor versions; the compatibility promise starts at v1.0.0.
+
+**Breaking changes** relative to the untagged 2026-08-10 snapshot below,
+detailed in the sections that follow:
 
 API:
 
@@ -34,8 +36,8 @@ API:
   every Context handles `inproc://` itself.
 - `msg.Recycle`, `(*Msg).IsPooled`, `AppendPooledFrame`, `TransferPool`,
   `Reset`, `msg.FromFramesOwned`, `MarkSubscription` and `IsSubscription` are
-  removed (all but `IsSubscription` were excluded from the 1.0.0
-  compatibility promise). Drop the calls; use `msg.FromFrames`, and
+  removed (all but `IsSubscription` were marked "internal plumbing"
+  in the snapshot). Drop the calls; use `msg.FromFrames`, and
   `(*Msg).Derive` to re-envelope a lent message.
 
 Behaviour:
@@ -248,12 +250,12 @@ Behaviour:
   `security.ZAPHandler` (whose `ServeRequest` method serves RFC 27 wire
   requests).
 - **Breaking:** `msg.Recycle`, `(*Msg).IsPooled`, `(*Msg).AppendPooledFrame`,
-  `(*Msg).TransferPool` and `(*Msg).Reset` (marked "internal plumbing" and
-  excluded from the compatibility promise in 1.0.0), along with the default
+  `(*Msg).TransferPool` and `(*Msg).Reset` (marked "internal plumbing" in
+  the snapshot), along with the default
   frame pool and the `*Msg` finalizer. The opt-in pool behind
   `WithRecvBufferPool` is internal.
-- **Breaking:** `msg.FromFramesOwned`, `Msg.MarkSubscription` (both excluded
-  from the compatibility promise in 1.0.0) and `Msg.IsSubscription`. Use
+- **Breaking:** `msg.FromFramesOwned`, `Msg.MarkSubscription` (both marked
+  "internal plumbing" in the snapshot) and `Msg.IsSubscription`. Use
   `msg.FromFrames`; subscription commands no longer travel as flagged
   messages.
 - **Breaking:** `transport.Registry`, `transport.NewRegistry`, `transport.New`.
@@ -352,9 +354,11 @@ Behaviour:
 - Sockets no longer keep a link per past inproc or STREAM peer until
   `Close`; links of every kind are dropped when their peer goes.
 
-## [1.0.0] - 2026-08-10
+## Untagged snapshot - 2026-08-10
 
-First stable release. From this tag, everything exported outside `internal/` is covered by the compatibility promise — with one documented exception: the methods in the `msg` package marked *"Internal plumbing — NOT covered by the compatibility promise"*, which are exported only so gozmq's own packages can reach them across a package boundary.
+Never tagged or published; the first tagged release is 0.1.0 above. Kept for history: it records the state the 0.1.0 entries are
+measured against. (It described the msg methods marked *"Internal plumbing"* as
+excluded from a compatibility promise; those methods have since been removed.)
 
 ### Module path
 
@@ -362,7 +366,7 @@ First stable release. From this tag, everything exported outside `internal/` is 
 
 ### Breaking changes — public API
 
-The pre-1.0 window was the only chance to get internal types off the public surface. Four exported symbols were aliases to (or took) types under `internal/`, so pkg.go.dev rendered no method set, no struct fields, and parameter types callers could not name.
+Before any release was the only chance to get internal types off the public surface. Four exported symbols were aliases to (or took) types under `internal/`, so pkg.go.dev rendered no method set, no struct fields, and parameter types callers could not name.
 
 - **`Msg`**: `internal/msg` is now the public `msg` package. `gozmq.Msg` remains an alias, so **no application code changes** — but the method set is now documented in one place instead of hand-listed in prose. Methods exported only for cross-package internal use (`FromFramesOwned`, `Recycle`, `IsPooled`, `MarkSubscription`, `AppendPooledFrame`, `TransferPool`, `Reset`) each carry an explicit exclusion banner. The size-tiered frame pool moved to `internal/bufpool`, off the public surface entirely.
 - **`SocketMetrics`** is a concrete struct in the root package instead of an alias to `iface.SocketMetrics`; its fields now render.
