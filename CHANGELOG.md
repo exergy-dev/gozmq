@@ -203,6 +203,13 @@ Behaviour:
 - Accepted and connected sessions emit monitor events from the same code
   path; `EventHandshakeSucceeded` now always precedes `EventConnected` on the
   client.
+- STREAM connections run as raw-mode sessions: 2 goroutines per connection
+  (was 3). STREAM honours `WithSendHWM`/`WithRecvHWM` as given (0 now means
+  unlimited; it meant 1024), `Close` honours `WithLinger` (queued outbound
+  data is flushed before the connection closes; it was dropped), and
+  `Disconnect` works on STREAM endpoints (it returned `ErrFSMViolation`).
+- A STREAM `Connect` emits `EventConnected` when its session attaches, just
+  after `Connect` returns.
 
 ### Removed
 
@@ -316,6 +323,8 @@ Behaviour:
 - `Poller`: a Poll waiting for PollIn on a REP socket that owed a reply now
   wakes when `SendMsg` makes an already-queued request receivable (it
   previously slept until its deadline).
+- Sockets no longer keep a link per past STREAM peer until `Close`; links of
+  every kind are dropped when their peer goes.
 
 ## [1.0.0] - 2026-08-10
 

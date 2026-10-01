@@ -2,7 +2,9 @@ package gozmq
 
 import (
 	"context"
+	"net"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,15 +12,12 @@ import (
 	"go.uber.org/goleak"
 )
 
-// chanOf lets waitChannels wait on bare channels.
-func chanOf(c chan struct{}) <-chan struct{} { return c }
-
 func TestWaitWritersFlushed_LingerTimeoutDoesNotLeak(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	start := time.Now()
-	err := waitChannels(context.Background(), []chan struct{}{make(chan struct{})}, chanOf, 20*time.Millisecond)
-	require.NoError(t, err, "waitChannels on linger timeout")
+	err := waitDrained(context.Background(), []<-chan struct{}{make(chan struct{})}, 20*time.Millisecond)
+	require.NoError(t, err, "waitDrained on linger timeout")
 	elapsed := time.Since(start)
 	require.GreaterOrEqual(t, elapsed, 15*time.Millisecond, "returned after %v, want ~linger wait", elapsed)
 }
@@ -29,7 +28,7 @@ func TestWaitWritersFlushed_CtxCancelDoesNotLeak(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 
-	err := waitChannels(ctx, []chan struct{}{make(chan struct{})}, chanOf, -1)
+	err := waitDrained(ctx, []<-chan struct{}{make(chan struct{})}, -1)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
@@ -77,4 +76,76 @@ func TestContextTracksOpenSockets(t *testing.T) {
 
 	require.Len(t, tracked, 1)
 	require.Same(t, open, tracked[0])
+}
+
+// TestLinksReturnToBaselineAfterChurn: every kind of link leaves
+// Socket.links when its peer goes, so a long-lived socket's link count
+// returns to its baseline (none) after 1000 connect/close cycles over tcp,
+// inproc and STREAM.
+func TestLinksReturnToBaselineAfterChurn(t *testing.T) {
+	const cycles = 1000
+	requireNoLinks := func(t *testing.T, s *Socket) {
+		t.Helper()
+		require.Eventually(t, func() bool { return linkCount(s) == 0 }, 5*time.Second, time.Millisecond,
+			"%d links left", linkCount(s))
+	}
+	// A PUSH per cycle connects to a bound PULL, proves the link with a
+	// round trip, and closes.
+	zmtp := func(endpoint string) func(t *testing.T) {
+		return func(t *testing.T) {
+			zctx := newInprocContext(t)
+			pull := inprocSocket(t, zctx, Pull)
+			require.NoError(t, pull.Bind(endpoint))
+			for range cycles {
+				push, err := zctx.NewSocket(Push)
+				require.NoError(t, err)
+				require.NoError(t, push.Connect(pull.LastEndpoint()))
+				requireRoundTrip(t, push, pull, "x")
+				require.NoError(t, push.Close())
+			}
+			requireNoLinks(t, pull)
+		}
+	}
+	t.Run("tcp", zmtp("tcp://127.0.0.1:0"))
+	t.Run("inproc", zmtp("inproc://churn-baseline"))
+
+	// A raw TCP peer per cycle writes a byte the STREAM socket receives,
+	// then closes; dial is the STREAM socket's side of establishing it.
+	stream := func(t *testing.T, s *Socket, dial func() net.Conn) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		for range cycles {
+			c := dial()
+			_, err := c.Write([]byte("x"))
+			require.NoError(t, err)
+			m, err := s.RecvMsg(ctx)
+			require.NoError(t, err)
+			m.Release()
+			require.NoError(t, c.Close())
+		}
+		requireNoLinks(t, s)
+	}
+	t.Run("stream-accepted", func(t *testing.T) {
+		srv := inprocSocket(t, newInprocContext(t), Stream)
+		require.NoError(t, srv.Bind("tcp://127.0.0.1:0"))
+		addr := strings.TrimPrefix(srv.LastEndpoint(), "tcp://")
+		stream(t, srv, func() net.Conn {
+			c, err := net.Dial("tcp", addr)
+			require.NoError(t, err)
+			return c
+		})
+	})
+	t.Run("stream-connected", func(t *testing.T) {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		defer l.Close()
+		cli := inprocSocket(t, newInprocContext(t), Stream)
+		stream(t, cli, func() net.Conn {
+			require.NoError(t, cli.Connect("tcp://"+l.Addr().String()))
+			c, err := l.Accept()
+			require.NoError(t, err)
+			return c
+		})
+	})
 }

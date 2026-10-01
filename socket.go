@@ -58,6 +58,7 @@ func (c *Context) NewSocket(t SocketType, opts ...Option) (*Socket, error) {
 		cfg:        cfg,
 		engine:     engine,
 		subHandle:  subHandle,
+		links:      make(map[*link]struct{}),
 	}
 	// Transfer any monitor config set via options to the atomic pointer so
 	// emit() can read it lock-free.
@@ -139,10 +140,8 @@ type Socket struct {
 	lastEndpoint string
 	listeners    []transport.Listener
 	reconnectors []reconnectEntry
-	// links holds every attached peer (sessions, including STREAM's, and
-	// inproc links) behind one teardown contract.
-	links    []peerLink
-	acceptWG sync.WaitGroup
+	links        map[*link]struct{}
+	acceptWG     sync.WaitGroup
 }
 
 type reconnectEntry struct {
@@ -339,56 +338,46 @@ func (s *Socket) Unbind(endpoint string) error {
 	return matched.Close()
 }
 
-// Disconnect tears down every previously-established outbound connection
-// whose Connect target exactly matches endpoint and prevents future
-// reconnect attempts to that endpoint. Bind-created server-side sessions
-// are unaffected.
+// Disconnect tears down every connection made by a Connect to exactly
+// endpoint and stops reconnecting to it; an inproc Connect still waiting
+// for its Bind is cancelled. Peers that connected to this socket are
+// unaffected. Returns an error wrapping ErrEndpointUnknown when nothing
+// matches.
 func (s *Socket) Disconnect(endpoint string) error {
 	if s.closed.Load() {
 		return ErrSocketClosed
 	}
-	if isInproc(endpoint) {
-		return s.disconnectInproc(endpoint)
-	}
-
 	s.mu.Lock()
 	var (
-		matched []*session.Reconnector
-		kept    = s.reconnectors[:0]
-		streams []peerLink
+		rcs   []*session.Reconnector
+		links []*link
 	)
-	for _, entry := range s.reconnectors {
-		if entry.endpoint == endpoint {
-			matched = append(matched, entry.rc)
-			continue
-		}
-		kept = append(kept, entry)
-	}
-	s.reconnectors = kept
-	// A STREAM Connect has no reconnector, only its session.
-	s.links = slices.DeleteFunc(s.links, func(l peerLink) bool {
-		sl, ok := l.(sessionLink)
-		if ok && sl.ep == endpoint && s.socketType == Stream {
-			streams = append(streams, l)
+	s.reconnectors = slices.DeleteFunc(s.reconnectors, func(e reconnectEntry) bool {
+		if e.endpoint == endpoint {
+			rcs = append(rcs, e.rc)
 			return true
 		}
 		return false
 	})
+	for l := range s.links {
+		if l.ep != "" && l.ep == endpoint {
+			links = append(links, l)
+			delete(s.links, l)
+		}
+	}
 	s.mu.Unlock()
-	if len(matched) == 0 && len(streams) == 0 {
+	if len(rcs) == 0 && len(links) == 0 {
 		return fmt.Errorf("gozmq: endpoint %q not connected: %w", endpoint, ErrEndpointUnknown)
 	}
 
+	// Reconnectors first, so none redials; stopping their sessions again
+	// below is a no-op.
 	var errs []error
-	for _, rc := range matched {
-		if err := rc.Stop(); err != nil {
-			errs = append(errs, err)
-		}
+	for _, rc := range rcs {
+		errs = append(errs, rc.Stop())
 	}
-	for _, l := range streams {
-		if err := l.stop(); err != nil {
-			errs = append(errs, err)
-		}
+	for _, l := range links {
+		errs = append(errs, l.peer.Stop())
 	}
 	return errors.Join(errs...)
 }
@@ -431,29 +420,6 @@ func (s *Socket) acceptLoop(l transport.Listener) {
 	}
 }
 
-// addLink registers an attached peer for teardown. Returns false if the
-// socket is already closing, in which case the caller must tear the link down
-// itself.
-func (s *Socket) addLink(l peerLink) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed.Load() {
-		return false
-	}
-	s.links = append(s.links, l)
-	return true
-}
-
-// removeLink drops a previously-added link. Sessions and inproc links
-// self-remove on disconnect so long-lived sockets don't accumulate them.
-func (s *Socket) removeLink(l peerLink) {
-	s.mu.Lock()
-	if i := slices.Index(s.links, l); i >= 0 {
-		s.links = slices.Delete(s.links, i, i+1)
-	}
-	s.mu.Unlock()
-}
-
 // startSession runs a session over conn, for both the accept path and
 // the Reconnector, registered as a link so Close drains it. Its callbacks
 // attach and detach the pipe, emit the monitor events and drop the link,
@@ -467,10 +433,11 @@ func (s *Socket) startSession(conn transport.Conn, role security.Role, endpoint 
 		_ = conn.Close()
 		return nil, err
 	}
-	var (
-		link peerLink
-		p    *pipe.End
-	)
+	var p *pipe.End
+	l := &link{}
+	if role == security.RoleClient {
+		l.ep = endpoint
+	}
 	raw := cfg.Raw // capturing cfg itself would move it to the heap
 	cfg.OnReady = func(ep *pipe.End) error {
 		if !raw {
@@ -500,14 +467,11 @@ func (s *Socket) startSession(conn transport.Conn, role security.Role, endpoint 
 				"socket-type", socketTypeName(s.socketType))
 			s.emit(classifyHandshakeEvent(err), endpoint, err.Error())
 		}
-		s.removeLink(link)
+		s.removeLink(l)
 	}
 	sess := session.New(cfg)
-	link = sessionLink{sess, ""}
-	if role == security.RoleClient {
-		link = sessionLink{sess, endpoint}
-	}
-	if !s.addLink(link) {
+	l.peer = sess
+	if !s.addLink(l) {
 		_ = conn.Close()
 		return nil, ErrSocketClosed
 	}

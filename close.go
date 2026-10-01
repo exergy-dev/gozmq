@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"slices"
 	"strings"
 	"time"
 )
@@ -21,17 +20,14 @@ import (
 //  1. Quiesce reconnectors — stop re-dialing, but KEEP current sessions
 //     alive so their outbound queues can drain to the wire.
 //  2. Close listeners — no new accepts.
-//  3. Collect every live link (sessions, server-accept and client alike).
-//  4. Close each engine-facing pipe — signals session writer goroutines
-//     to drain their channel and flush to conn, then exit.
-//  5. Wait up to cfg.linger for every session's Done() to fire — writer
-//     has finished flushing to TCP.
-//  6. Stop reconnectors fully + stop any still-running sessions +
-//     close engine.
-//  7. Wait for accept/connect bookkeeping goroutines.
+//  3. Close the engine — nothing new is queued.
+//  4. Drain every link — session writers flush their queues to the conn
+//     and exit, leaving it open — and wait up to cfg.linger for them.
+//  5. Cancel the run context, then stop the reconnectors and links.
+//  6. Wait for the accept loops.
 //
 // LINGER semantics:
-//   - linger == 0: skip step 5 → queued messages may be lost.
+//   - linger == 0: skip step 4 → queued messages may be lost.
 //   - linger  > 0: bounded wait; messages dropped after deadline.
 //   - linger  < 0: wait forever for drain (matches libzmq's infinite);
 //     cancellable only via CloseCtx.
@@ -55,13 +51,11 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 		return nil
 	}
 
+	// Take everything: with closed set, nothing new can be added, and the
+	// links taken are ours to stop.
 	s.mu.Lock()
-	reconnectors := slices.Clone(s.reconnectors)
-	s.reconnectors = nil
-	listeners := s.listeners
-	s.listeners = nil
-	links := s.links
-	s.links = nil
+	reconnectors, listeners, links := s.reconnectors, s.listeners, s.links
+	s.reconnectors, s.listeners, s.links = nil, nil, nil
 	s.mu.Unlock()
 
 	var errs []error
@@ -72,62 +66,38 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 		errs = append(errs, err)
 	}
 
-	// 1. Quiesce reconnectors so loop() does not dial a new session after
-	// the current one drains.
 	for _, entry := range reconnectors {
 		entry.rc.Quiesce()
 	}
-	// 2. Close listeners so acceptLoop exits, and release inproc names.
 	for _, l := range listeners {
 		addErr(l.Close())
 	}
 	s.ctx.inproc.unbindAll(s)
 
-	// 3–5. LINGER drain (design §6.4); links include client sessions:
-	//
-	//   engine.Close()  → no new engine.Sends enqueue messages
-	//   beginDrain()    → session writers drain queued messages to conn and
-	//                     exit (conn stays open); inproc: no-op
-	//   drained()       → wait up to linger for each link's flush to finish
-	//                     (session Drain; inproc: peer received
-	//                     everything)
-	//   runCancel()     → cascades into reconnector ctx → loop exits
-	//   stop()          → conn.Close / pipe.Close → readers exit, Done fires
-	//
-	// We call engine.Close BEFORE beginDrain so any messages the engine had
-	// queued before Close are fully in the pipe channel — none can arrive
-	// after engine.Close returns.
-	//
-	// CRUCIAL: runCancel MUST NOT fire before the drain finishes. The
-	// Reconnector's ctx derives from s.runCtx, and when it cancels, the loop's
-	// `<-r.ctx.Done()` branch stops its session — which closes the conn
-	// and aborts the writer mid-drain. Holding runCancel until after the
-	// drain keeps the reconnector loop parked until the writer finishes.
+	// engine.Close comes first so everything it accepted is already in the
+	// pipes when the drains start. runCancel must wait for the drain: it
+	// stops the reconnectors' sessions, closing their conns mid-flush.
 	_ = s.engine.Close()
-
 	var ctxErr error
 	if s.cfg.linger != 0 {
-		for _, l := range links {
-			l.beginDrain()
+		drains := make([]<-chan struct{}, 0, len(links))
+		for l := range links {
+			drains = append(drains, l.peer.Drain())
 		}
-		ctxErr = waitChannels(ctx, links, peerLink.drained, s.cfg.linger)
+		ctxErr = waitDrained(ctx, drains, s.cfg.linger)
 	}
 
-	// 6. Now hard-stop: cancel the reconnector/accept context, then stop
-	// each reconnector and link. Teardown continues even if the linger
-	// drain was cancelled — callers observe a fully-closed Socket on return.
+	// Teardown goes on even if ctx cut the drain short.
 	s.runCancel()
 	for _, entry := range reconnectors {
 		addErr(entry.rc.Stop())
 	}
-	for _, l := range links {
-		addErr(l.stop())
+	for l := range links {
+		addErr(l.peer.Stop())
 	}
-
-	// 7. Wait for the accept loops.
 	s.acceptWG.Wait()
 
-	// 8. Drop the Context's reference to this socket. Without this a
+	// Drop the Context's reference to this socket. Without this a
 	// long-lived Context — the documented one-per-process pattern —
 	// accumulates every socket ever created on it, retaining each
 	// socket's config, engine, and engine-owned maps and channels for
@@ -165,13 +135,13 @@ func isExpectedTeardownErr(err error) bool {
 	return false
 }
 
-// waitChannels blocks until ch(item) fires for every item, bounded by
+// waitDrained blocks until every channel in drains closes, bounded by
 // linger and cancellable via ctx. linger < 0 waits indefinitely
 // (ctx-cancellable); linger > 0 caps the wait. Returns ctx.Err() if ctx
-// fires before drain completes, nil otherwise. A nil channel from ch
-// skips that item.
-func waitChannels[T any](ctx context.Context, items []T, ch func(T) <-chan struct{}, linger time.Duration) error {
-	if len(items) == 0 || linger == 0 {
+// fires before the drain completes, nil otherwise. Nil channels are
+// skipped.
+func waitDrained(ctx context.Context, drains []<-chan struct{}, linger time.Duration) error {
+	if len(drains) == 0 || linger == 0 {
 		return nil
 	}
 
@@ -182,8 +152,7 @@ func waitChannels[T any](ctx context.Context, items []T, ch func(T) <-chan struc
 	}
 	defer cancel()
 
-	for _, item := range items {
-		done := ch(item)
+	for _, done := range drains {
 		if done == nil {
 			continue
 		}

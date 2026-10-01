@@ -75,18 +75,11 @@ func (s *Socket) checkInproc(endpoint string) error {
 		return fmt.Errorf("%w: inproc endpoint requires a non-empty name", ErrEndpointInvalid)
 	case s.socketType == Stream:
 		return fmt.Errorf("%w: %q: STREAM sockets carry raw bytes and do not support inproc", ErrEndpointInvalid, endpoint)
-	case s.hasSecurityMech():
+	case s.cfg.securityConfigured():
 		return fmt.Errorf("%w: %q: inproc runs no security handshake, so a socket with PLAIN, CURVE or WithSecurityMech cannot use it",
 			ErrEndpointInvalid, endpoint)
 	}
 	return nil
-}
-
-// hasSecurityMech reports whether the socket is configured with PLAIN,
-// CURVE, or a WithSecurityMech mechanism.
-func (s *Socket) hasSecurityMech() bool {
-	return s.cfg.plainClient || s.cfg.plainAuth != nil ||
-		len(s.cfg.curveSecretKey) == 32 || s.cfg.newSecurityMech != nil
 }
 
 func (s *Socket) bindInproc(endpoint string) error {
@@ -121,7 +114,7 @@ func (s *Socket) bindInproc(endpoint string) error {
 
 	for _, cl := range waiting {
 		if err := wireInproc(cl, s, true); err != nil {
-			cl.s.removeLink(cl)
+			cl.s.removeLink(&cl.link)
 			if !errors.Is(err, ErrSocketClosed) {
 				cl.s.emit(EventConnectFailed, endpoint, err.Error())
 			}
@@ -137,12 +130,12 @@ func (s *Socket) connectInproc(endpoint string) error {
 		s.emit(EventConnectFailed, endpoint, err.Error())
 		return err
 	}
-	cl := &inprocLink{s: s, endpoint: endpoint, connect: true}
+	cl := newInprocLink(s, endpoint, true)
 	r := &s.ctx.inproc
 	r.mu.Lock()
 	bind := r.bound[endpoint]
 	if bind == nil {
-		ok := s.addLink(cl)
+		ok := s.addLink(&cl.link)
 		if ok {
 			r.pending[endpoint] = append(r.pending[endpoint], cl)
 		}
@@ -156,28 +149,6 @@ func (s *Socket) connectInproc(endpoint string) error {
 	if err := wireInproc(cl, bind, false); err != nil {
 		s.emit(EventConnectFailed, endpoint, err.Error())
 		return err
-	}
-	return nil
-}
-
-// disconnectInproc closes s's established and waiting Connects to endpoint.
-func (s *Socket) disconnectInproc(endpoint string) error {
-	var matched []*inprocLink
-	s.mu.Lock()
-	s.links = slices.DeleteFunc(s.links, func(pl peerLink) bool {
-		l, ok := pl.(*inprocLink)
-		if ok && l.connect && l.endpoint == endpoint {
-			matched = append(matched, l)
-			return true
-		}
-		return false
-	})
-	s.mu.Unlock()
-	if len(matched) == 0 {
-		return fmt.Errorf("gozmq: endpoint %q not connected: %w", endpoint, ErrEndpointUnknown)
-	}
-	for _, l := range matched {
-		l.close()
 	}
 	return nil
 }
@@ -220,7 +191,7 @@ func wireInproc(cl *inprocLink, bind *Socket, waiting bool) error {
 
 	// Publish the connector side first. Until then nobody else can reach
 	// the pipe, so a refusal is torn down here.
-	bl := &inprocLink{s: bind, endpoint: ep, end: be, peer: cl}
+	bl := newInprocLink(bind, ep, false)
 	if !conn.publishInproc(cl, ce, bl, waiting) {
 		_ = ce.Close()
 		_ = conn.engine.DetachPipe(ce)
@@ -241,46 +212,55 @@ func wireInproc(cl *inprocLink, bind *Socket, waiting bool) error {
 // when s is closing, the pipe is already closed, or (waiting) l has been
 // dropped by Disconnect. Checking under s.mu orders it against removeLink:
 // a close that ran first is seen here, a later one finds l.
-func (s *Socket) publishInproc(l *inprocLink, end *pipe.End, peer *inprocLink, waiting bool) bool {
+func (s *Socket) publishInproc(l *inprocLink, end *pipe.End, remote *inprocLink, waiting bool) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed.Load() || end.IsClosed() {
 		return false
 	}
-	if !waiting {
-		s.links = append(s.links, l)
-	} else if !slices.Contains(s.links, peerLink(l)) {
+	if _, ok := s.links[&l.link]; waiting && !ok {
 		return false
 	}
-	l.end, l.peer = end, peer
+	s.links[&l.link] = struct{}{}
+	l.end, l.remote = end, remote
 	return true
 }
 
 // inprocLink is one socket's side of an inproc connection. A Connect that
-// is still waiting for its Bind is a link with no pipe yet. end and peer are
+// is still waiting for its Bind is a link with no pipe yet. end and remote are
 // written under s.mu while the link is in s.links, and read only by whoever
-// then takes it from there (CloseCtx, Disconnect) or by its peer.
+// then takes it from there (CloseCtx, Disconnect) or by its remote.
 type inprocLink struct {
+	link
 	s        *Socket
 	endpoint string
-	connect  bool // the Connect side, which Disconnect closes
 	end      *pipe.End
-	peer     *inprocLink
+	remote   *inprocLink // the other socket's side
 	once     sync.Once
 }
 
-func (l *inprocLink) beginDrain() {}
+// newInprocLink returns s's side of an inproc connection to endpoint; the
+// Connect side is the one Disconnect closes.
+func newInprocLink(s *Socket, endpoint string, connect bool) *inprocLink {
+	l := &inprocLink{s: s, endpoint: endpoint}
+	if connect {
+		l.ep = endpoint
+	}
+	l.peer = l
+	return l
+}
 
-// drained fires once the peer socket has received everything this side
-// sent: the peer is usually alive and would never close its end.
-func (l *inprocLink) drained() <-chan struct{} {
+// Drain fires once the peer socket has received everything this side sent:
+// the peer is usually alive and would never close its end.
+func (l *inprocLink) Drain() <-chan struct{} {
 	if l.end == nil {
-		return alreadyClosed
+		return nil
 	}
 	return l.end.SendDrained()
 }
 
-func (l *inprocLink) stop() error { l.close(); return nil }
+// Stop closes the link.
+func (l *inprocLink) Stop() error { l.close(); return nil }
 
 // close tears the link down from this side: it closes the pipe, detaches
 // this side, then the peer's, synchronously and without holding either
@@ -288,12 +268,12 @@ func (l *inprocLink) stop() error { l.close(); return nil }
 func (l *inprocLink) close() {
 	if l.end == nil {
 		l.s.ctx.inproc.cancel(l)
-		l.s.removeLink(l)
+		l.s.removeLink(&l.link)
 		return
 	}
 	_ = l.end.Close()
 	l.detach()
-	l.peer.detach()
+	l.remote.detach()
 }
 
 // detach runs once per side. The link leaves s.links last, so a CloseCtx
@@ -303,6 +283,6 @@ func (l *inprocLink) detach() {
 	l.once.Do(func() {
 		_ = l.s.engine.DetachPipe(l.end)
 		l.s.emit(EventDisconnected, l.endpoint, "")
-		l.s.removeLink(l)
+		l.s.removeLink(&l.link)
 	})
 }

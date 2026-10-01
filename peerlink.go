@@ -1,40 +1,47 @@
 package gozmq
 
-import "github.com/exergy-dev/gozmq/internal/session"
-
-// peerLink unifies the LINGER-drain and teardown of an attached peer so the
-// Socket holds one []peerLink and runs one close path instead of typed
-// slices (sessions / inproc links) with their own loops.
+// link is one peer of a Socket — a session (accepted, a reconnector's, or a
+// STREAM Connect's) or an inproc connection, attached or still waiting for
+// its Bind — behind the one teardown contract CloseCtx and Disconnect use.
 //
-// The two-phase drain mirrors CloseCtx's design §6.4 sequence:
-//   - beginDrain signals "no more inbound; flush what's queued, keep the
-//     conn alive" (session: Drain; inproc: nothing to do).
-//   - drained fires when the outbound flush is complete (session: Drain's
-//     channel; inproc: the peer received everything we sent).
-//   - stop is the hard teardown run after the drain (session: Stop;
-//     inproc: close and detach both sides).
-type peerLink interface {
-	beginDrain()
-	drained() <-chan struct{}
-	stop() error
-}
-
-// alreadyClosed is a shared pre-closed channel for links that have no drain
-// phase (waiting inproc Connects): selecting on it returns immediately.
-var alreadyClosed = func() chan struct{} {
-	c := make(chan struct{})
-	close(c)
-	return c
-}()
-
-// sessionLink wraps a session (server-accepted, a reconnector's client
-// session, or a STREAM Connect's), registered at start and removed by its
-// OnClosed. ep is the Connect endpoint, empty for an accepted peer.
-type sessionLink struct {
-	s  *session.Session
+// Being in Socket.links is ownership: a link that ends on its own removes
+// itself, and whoever takes it out under s.mu (CloseCtx, Disconnect) must
+// stop it.
+type link struct {
+	// ep is the Connect endpoint Disconnect matches; empty for a peer that
+	// connected to us.
 	ep string
+	// peer is the *session.Session or the *inprocLink itself. An interface
+	// rather than func fields: method values would cost a session two
+	// allocations per connection.
+	peer interface {
+		// Drain starts flushing what this side has queued, keeping the
+		// connection up, and returns a channel closed once it is flushed
+		// (session: writer done; inproc: the peer has received
+		// everything). nil means nothing to wait for.
+		Drain() <-chan struct{}
+		// Stop is the hard teardown, run after the drain (session: close
+		// the conn and wait; inproc: close and detach both sides).
+		Stop() error
+	}
 }
 
-func (l sessionLink) beginDrain()              { l.s.Drain() }
-func (l sessionLink) drained() <-chan struct{} { return l.s.Drain() }
-func (l sessionLink) stop() error              { return l.s.Stop() }
+// addLink registers l for teardown. It returns false if the socket is
+// already closing, in which case the caller must tear the peer down itself.
+func (s *Socket) addLink(l *link) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed.Load() {
+		return false
+	}
+	s.links[l] = struct{}{}
+	return true
+}
+
+// removeLink drops l once its peer has gone, so long-lived sockets do not
+// accumulate links under churn. A no-op if l was already taken.
+func (s *Socket) removeLink(l *link) {
+	s.mu.Lock()
+	delete(s.links, l)
+	s.mu.Unlock()
+}

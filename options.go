@@ -428,6 +428,19 @@ func nonNeg[T int | int64 | time.Duration](name string, v T) error {
 	return nil
 }
 
+// securityConfigured reports whether any security mechanism option is set:
+// PLAIN, CURVE or WithSecurityMech. Validation keeps to at most one, STREAM
+// takes none, and inproc refuses a socket that has one.
+func (c *socketConfig) securityConfigured() bool {
+	return c.newSecurityMech != nil || c.plainConfigured() || c.curveConfigured()
+}
+
+func (c *socketConfig) plainConfigured() bool { return c.plainAuth != nil || c.plainClient }
+
+func (c *socketConfig) curveConfigured() bool {
+	return len(c.curveSecretKey) > 0 || len(c.curvePublicKey) > 0 || len(c.curveServerKey) > 0 || c.curveServer
+}
+
 func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 	for _, check := range []error{
 		nonNeg("WithSendHWM", cfg.sendHWM),
@@ -454,8 +467,7 @@ func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 	// At most one mechanism per socket: otherwise newMechanism would silently
 	// pick one (CURVE over PLAIN), or fail every session rather than NewSocket
 	// (PLAIN server plus client).
-	plainSet := cfg.plainAuth != nil || cfg.plainClient
-	curveSet := len(cfg.curveSecretKey) > 0 || len(cfg.curvePublicKey) > 0 || len(cfg.curveServerKey) > 0 || cfg.curveServer
+	plainSet, curveSet := cfg.plainConfigured(), cfg.curveConfigured()
 	switch {
 	case cfg.newSecurityMech != nil && plainSet:
 		return fmt.Errorf("gozmq: WithSecurityMech is mutually exclusive with the PLAIN options")
@@ -481,12 +493,8 @@ func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 		// options would be a security hazard (e.g. WithPlainAuth on a
 		// raw-TCP listener that authenticates nobody).
 		switch {
-		case cfg.newSecurityMech != nil:
-			return fmt.Errorf("gozmq: WithSecurityMech is not applicable to STREAM sockets (no ZMTP handshake)")
-		case plainSet:
-			return fmt.Errorf("gozmq: PLAIN security options are not applicable to STREAM sockets (no ZMTP handshake)")
-		case curveSet:
-			return fmt.Errorf("gozmq: CURVE security options are not applicable to STREAM sockets (no ZMTP handshake)")
+		case cfg.securityConfigured():
+			return fmt.Errorf("gozmq: security options (PLAIN, CURVE, WithSecurityMech) are not applicable to STREAM sockets (no ZMTP handshake)")
 		case len(cfg.identity) > 0:
 			return fmt.Errorf("gozmq: WithIdentity is not applicable to STREAM sockets (no ZMTP handshake)")
 		case cfg.heartbeatSet:
