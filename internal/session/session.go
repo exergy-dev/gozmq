@@ -1,7 +1,8 @@
 // Package session implements the ZMTP per-peer state machine. Each Session
-// wraps a single transport.Conn, drives greeting + security handshake, then
-// runs two traffic-phase goroutines (reader: wire->pipe, writer: pipe->wire)
-// plus an optional heartbeat scheduler.
+// wraps a single transport.Conn with two goroutines: the reader drives the
+// greeting and security handshake, then moves wire frames to the pipe; the
+// writer puts the handshake frames, then the pipe's messages, on the wire.
+// The optional heartbeat is a self-rearming timer, not a goroutine.
 //
 // The session consumes its collaborators through their contracts
 // (zmtp.FrameCodec, security.Mech, transport.Conn), so it can be tested
@@ -11,11 +12,8 @@ package session
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -63,6 +61,21 @@ type Config struct {
 	// PUB/XPUB; every other socket type drops the commands.
 	SubscriptionCommands bool
 
+	// OnReady runs on the reader goroutine once the handshake succeeds,
+	// with the engine-facing pipe end, before any inbound frame is read.
+	// An error (the engine refused the pipe) tears the session down
+	// unattached. nil accepts every pipe.
+	OnReady func(*pipe.End) error
+
+	// OnClosed runs exactly once, on the last session goroutine to exit,
+	// after the conn is closed and before Done closes. err is the
+	// handshake failure, nil once the handshake succeeded; attached
+	// reports whether OnReady accepted the pipe.
+	//
+	// Callbacks must never call Stop: it waits for the goroutine running
+	// them.
+	OnClosed func(err error, attached bool)
+
 	// Logger is the destination for non-fatal diagnostics (heartbeat
 	// timeout reasons, malformed-frame events). When nil, slog.Default()
 	// is used.
@@ -76,115 +89,20 @@ type Config struct {
 	Now func() int64
 }
 
-// New constructs a Session. The session is inert until Start is called.
-//
-// The returned Session owns cfg.Conn: Stop closes it. The caller retains
-// ownership of cfg.Mech and cfg.Codec, which are assumed to be safe for
-// the (single) session's use until Stop returns.
-func New(cfg Config) Session {
-	if cfg.Logger == nil {
-		cfg.Logger = slog.Default()
-	}
-	if cfg.SendHWM < 0 {
-		cfg.SendHWM = 0
-	}
-	if cfg.RecvHWM < 0 {
-		cfg.RecvHWM = 0
-	}
-	if cfg.Now == nil {
-		cfg.Now = monoNow
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	wctx, wcancel := context.WithCancel(ctx) // child of session ctx
-	encode, decode, identityMech := sessionFramePaths(cfg.Mech)
-	// directHeader is the writer hot-path fast lane: when the mechanism
-	// is an identity transform (NULL/PLAIN — encode does not rewrite
-	// body bytes) and the codec implements FrameHeaderAppender, the
-	// writer appends wire headers into a caller-owned scratch buffer
-	// with zero per-frame allocations.
-	var directHeader zmtp.FrameHeaderAppender
-	if identityMech {
-		if h, ok := cfg.Codec.(zmtp.FrameHeaderAppender); ok {
-			directHeader = h
-		}
-	}
-	// recvAlloc hands the reader pooled frame buffers (see Config.RecvBufferPool).
-	var recvAlloc func(int) []byte
-	if cfg.RecvBufferPool && identityMech {
-		recvAlloc = bufpool.Get
-	}
-	s := &sessionImpl{
-		cfg:          cfg,
-		recvAlloc:    recvAlloc,
-		ctx:          ctx,
-		cancel:       cancel,
-		reader:       sessionReader(cfg.Conn),
-		encode:       encode,
-		decode:       decode,
-		directHeader: directHeader,
-		writerCtx:    wctx,
-		writerCancel: wcancel,
-		handshaked:   make(chan struct{}),
-		stopped:      make(chan struct{}),
-		writerExited: make(chan struct{}),
-		cmdCh:        make(chan []byte, sessionCmdBacklog),
-		cmdWake:      make(chan struct{}, 1),
-	}
-	return s
-}
-
 // Session owns the ZMTP state machine for a single peer connection: it
 // drives greeting, handshake, heartbeats, and the traffic phase. It sits
-// between a transport.Conn (bytes) and a pipe (messages). New returns the
-// production implementation; the interface exists so the Reconnector can
-// be tested with a stub.
-type Session interface {
-	// Start launches the session's reader/writer goroutines. Returns
-	// immediately; handshake progress is observable via Handshaked.
-	Start()
-
-	// Stop terminates the session, closes the underlying Conn, and blocks
-	// until internal goroutines exit.
-	Stop() error
-
-	// Handshaked returns a channel closed when the handshake completes
-	// (success or failure).
-	Handshaked() <-chan struct{}
-
-	// HandshakeErr returns a non-nil error if the handshake failed. Read
-	// after Handshaked closes.
-	HandshakeErr() error
-
-	// Pipe returns the engine-facing end of the session's pipe. Valid only
-	// after Handshaked closes without error.
-	Pipe() *pipe.End
-
-	// Done returns a channel that closes when every session goroutine
-	// (reader, writer, optional heartbeat) has exited.
-	Done() <-chan struct{}
-
-	// WriterFlushed returns a channel that closes when the writer goroutine
-	// has exited — all outbound messages have been flushed to conn.
-	WriterFlushed() <-chan struct{}
-
-	// CancelWriter makes the writer flush the messages still queued and
-	// exit, without closing the conn, so in-flight writes complete. Call
-	// engine.Close first so nothing new is queued, then wait on
-	// WriterFlushed, then call Stop.
-	CancelWriter()
-}
-
-// sessionImpl is the Session implementation. The two traffic-phase
-// goroutines (reader, writer) plus the optional heartbeat goroutine
-// communicate via channels; mutable state shared between them
-// (lastInboundUnix, handshake error) uses sync/atomic to keep -race
-// happy without coarse-grained mutexes.
-type sessionImpl struct {
+// between a transport.Conn (bytes) and a pipe (messages).
+//
+// Exactly two goroutines run per session. The reader performs the
+// handshake, calls OnReady, then moves wire frames to the pipe. The writer
+// writes the handshake frames, then moves pipe messages to the wire. The
+// last of the two to exit closes the conn, calls OnClosed and closes done.
+type Session struct {
 	cfg Config
 
 	ctx    context.Context
 	cancel context.CancelFunc
-	reader io.Reader
+	reader *bufio.Reader
 	encode frameEncoder
 	decode frameDecoder
 	// directHeader enables the writer's header-only fast path (see New).
@@ -193,36 +111,33 @@ type sessionImpl struct {
 	// from the pool (see Config.RecvBufferPool).
 	recvAlloc func(int) []byte
 
-	// startOnce guards Start; stopOnce guards Stop.
-	startOnce sync.Once
-	stopOnce  sync.Once
+	// hsOut carries the greeting and encoded handshake frames from the
+	// reader to the writer, which writes them while the reader reads, so a
+	// peer on a synchronous transport that writes before it reads cannot
+	// deadlock us. The reader closes it when the handshake ends, having set
+	// the pipes on success, so the last handshake frame precedes any
+	// traffic. hsWriteErr records the writer's failure.
+	hsOut      chan []byte
+	hsWriteErr atomic.Pointer[error]
 
-	// handshaked closes when the handshake completes (success or fail).
-	// HandshakeErr returns hsErr after handshaked closes. handshakedOnce
-	// guards against concurrent close attempts from run() and Stop().
-	handshaked     chan struct{}
-	handshakedOnce sync.Once
-	hsErr          atomic.Pointer[error]
+	// hsErr is the handshake failure (nil on success). The reader sets it
+	// before it exits; the last goroutine out reads it for OnClosed.
+	hsErr    error
+	attached atomic.Bool
 
-	// stopped closes when both traffic-phase goroutines have exited.
-	stopped     chan struct{}
-	stoppedOnce sync.Once
-
-	// writerExited closes when the writer goroutine has finished flushing.
-	// writerExitedOnce guards the close: besides the writer's own defer,
-	// the handshake-failure path in run() and Stop() (covering
-	// Stop-before-Start) must also release WriterFlushed waiters or
-	// Socket.CloseCtx's linger drain would hang forever.
-	writerExited     chan struct{}
-	writerExitedOnce sync.Once
+	// live counts running session goroutines; the one that drops it to
+	// zero runs exit's teardown. done closes after OnClosed returns;
+	// writerDone when the writer has exited.
+	live       atomic.Int32
+	done       chan struct{}
+	writerDone chan struct{}
 
 	// cmdCh carries serialized ZMTP command frames (PONG from the reader,
-	// PING from the heartbeat) to the writer goroutine, which is the ONLY
-	// goroutine that performs traffic-phase wire writes. Writing inline
-	// from the reader would take writeMu on the read goroutine: if the
-	// writer is parked in conn.Write (peer not draining) the reader would
-	// stop reading and two saturated peers deadlock permanently. The
-	// channel is small and lossy by design — see enqueueCommand.
+	// PING from the heartbeat) to the writer goroutine, the ONLY goroutine
+	// that writes to the wire. Writing inline from the reader would stall
+	// reads while the writer is parked in conn.Write (peer not draining),
+	// and two saturated peers would deadlock permanently. The channel is
+	// small and lossy by design — see enqueueCommand.
 	cmdCh chan []byte
 	// cmdWake (cap 1) is armed with every queued command. It is the
 	// writer's abort channel for its blocking pipe receive; the command
@@ -230,40 +145,27 @@ type sessionImpl struct {
 	cmdWake chan struct{}
 
 	// writerCtx / writerCancel are a separate context for the writer's
-	// blocking Recv call. Cancelling writerCtx causes the writer to drain
-	// the remaining queue and exit — WITHOUT closing the conn.
-	// Socket.Close calls CancelWriter after engine.Close so the writer
-	// flushes the outbound queue while the conn stays alive for the reader.
+	// blocking Recv call. Cancelling writerCtx (Drain) makes the writer
+	// flush the remaining queue and exit — WITHOUT closing the conn.
 	writerCtx    context.Context
 	writerCancel context.CancelFunc
 
-	wg sync.WaitGroup
-
-	// writeMu serialises wire writes. Since PONG/PING are routed through
-	// cmdCh, only the writer goroutine performs traffic-phase writes, so
-	// the mutex is uncontended in practice; it is kept as a guard against
-	// future callers writing off the writer goroutine. (The underlying
-	// transport.Conn does not promise concurrent-safe Write.)
-	writeMu sync.Mutex
-
-	// enginePipe is the engine-facing end of the pair. sessionPipe is the
-	// session-facing end (we hold it; reader pushes to it, writer pulls
-	// from it). Created lazily during the handshake phase once we know
-	// the post-handshake HWMs are honored.
+	// enginePipe is the engine-facing end of the pair, handed to OnReady.
+	// sessionPipe is the session-facing end (reader pushes to it, writer
+	// pulls from it). The reader sets both before it closes hsOut.
 	enginePipe  *pipe.End
 	sessionPipe *pipe.End
 
 	// peerHeartbeats reports whether the peer's greeting indicated ZMTP
 	// 3.1+ (true) — heartbeats are only emitted when both ends agreed.
-	// Written in exchangeGreeting and read later in run(), both on the
-	// run goroutine's call chain, so a plain bool suffices.
+	// Written and read on the reader goroutine only.
 	peerHeartbeats bool
 
 	// lastInboundUnix records the monotonic nanos (relative to
 	// monoEpoch) of the last frame received during traffic phase. The
-	// heartbeat goroutine reads this to decide whether to fire a PING;
-	// the reader writes to it on every first inbound message frame and
-	// on command frames.
+	// heartbeat tick reads this to decide whether the peer is alive; the
+	// reader writes it on every first inbound message frame and on
+	// command frames.
 	lastInboundUnix atomic.Int64
 
 	// readerParked is set while the reader goroutine is blocked
@@ -273,8 +175,11 @@ type sessionImpl struct {
 	// the heartbeat timeout check skips teardown while it is set.
 	readerParked atomic.Bool
 
-	// stopErr is the cumulative error from Stop (e.g. Conn.Close failure).
-	stopErr atomic.Pointer[error]
+	// hbMu guards the heartbeat timer. A tick holds it throughout, so once
+	// stopHeartbeat returns no tick is running or will act.
+	hbMu      sync.Mutex
+	hbTimer   *time.Timer
+	hbStopped bool
 }
 
 const sessionReadBufferSize = 16 * 1024
@@ -282,6 +187,11 @@ const sessionReadBufferSize = 16 * 1024
 // sessionCmdBacklog sizes cmdCh. PING/PONG are advisory keep-alives, so
 // a small buffer suffices; enqueueCommand drops on overflow.
 const sessionCmdBacklog = 4
+
+// hsOutBacklog sizes hsOut. The handshake is lock-step, so only a frame or
+// two is ever in flight; the slack means the reader never waits on a writer
+// stalled behind a peer that is itself still writing.
+const hsOutBacklog = 4
 
 // monoEpoch is a fixed reference point captured once at package init.
 // monoNow returns time.Since(monoEpoch) as int64 nanoseconds, which
@@ -328,175 +238,117 @@ func identityDecodeFrame(flags uint8, body []byte) (uint8, []byte, error) {
 	return flags, body, nil
 }
 
-// sessionReader wraps stream transports in a bufio layer.
+// New constructs a Session around cfg.Conn; Start runs it. New lets the
+// caller register the session (for Close) before any callback can fire.
 //
-// TODO(transport): invert this — the transport layer knows whether its
-// conns benefit from userspace read buffering; sniffing endpoint URL
-// prefixes here couples the session to endpoint syntax. Behavior is
-// kept as-is for now.
-func sessionReader(conn transport.Conn) io.Reader {
-	ep := conn.RemoteEndpoint()
-	if ep == "" {
-		ep = conn.LocalEndpoint()
+// The Session owns cfg.Conn once started: it closes it on teardown. The
+// caller retains ownership of cfg.Mech and cfg.Codec, which are assumed
+// to be safe for the session's use until Done closes.
+func New(cfg Config) *Session {
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
 	}
-	switch {
-	case strings.HasPrefix(ep, "tcp://"),
-		strings.HasPrefix(ep, "tcp6://"),
-		strings.HasPrefix(ep, "tls+tcp://"),
-		strings.HasPrefix(ep, "ipc://"):
-		return bufio.NewReaderSize(conn, sessionReadBufferSize)
-	default:
-		return conn
+	if cfg.SendHWM < 0 {
+		cfg.SendHWM = 0
 	}
-}
-
-// Start launches the handshake + traffic goroutines. Subsequent calls are
-// no-ops.
-func (s *sessionImpl) Start() {
-	s.startOnce.Do(func() {
-		s.wg.Add(1)
-		go s.run()
-		// Monitor goroutine: closes `stopped` once ALL session goroutines
-		// (run itself plus reader/writer/heartbeat spawned inside run)
-		// have exited. Without this the run-level defer would close
-		// `stopped` as soon as run returns — which is right after it
-		// spawns the workers, not after they finish. Done() consumers
-		// (like Socket.Close's LINGER drain) rely on this being the true
-		// end of life.
-		go func() {
-			s.wg.Wait()
-			s.stoppedOnce.Do(func() { close(s.stopped) })
-		}()
-	})
-}
-
-// Stop tears the session down. It closes the conn (waking any blocked
-// read/write), cancels the internal context, waits for goroutines, and
-// returns the first non-nil shutdown error (if any). Stop is idempotent
-// and safe to call before Start (in which case it just signals
-// completion).
-func (s *sessionImpl) Stop() error {
-	s.stopOnce.Do(func() {
-		s.cancel()
-		// Closing the conn unblocks any in-flight Read/Write inside the
-		// reader/writer goroutines. We do this even if Start was never
-		// called so a half-constructed session releases its conn.
-		// A plain close: the kernel keeps delivering already-written data
-		// after close(2), whereas a timed SO_LINGER would block here (per
-		// session, sequentially during Socket.Close) and RST on expiry.
-		// isShutdownErr covers both the test double's io.ErrClosedPipe and
-		// the net.ErrClosed a real conn returns when shutdown() already
-		// closed it — the common teardown path must not surface a spurious
-		// "use of closed network connection".
-		if err := s.cfg.Conn.Close(); err != nil && !isShutdownErr(err) {
-			s.stopErr.CompareAndSwap(nil, &err)
+	if cfg.RecvHWM < 0 {
+		cfg.RecvHWM = 0
+	}
+	if cfg.Now == nil {
+		cfg.Now = monoNow
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	wctx, wcancel := context.WithCancel(ctx) // child of session ctx
+	encode, decode, identityMech := sessionFramePaths(cfg.Mech)
+	// directHeader is the writer hot-path fast lane: when the mechanism
+	// is an identity transform (NULL/PLAIN — encode does not rewrite
+	// body bytes) and the codec implements FrameHeaderAppender, the
+	// writer appends wire headers into a caller-owned scratch buffer
+	// with zero per-frame allocations.
+	var directHeader zmtp.FrameHeaderAppender
+	if identityMech {
+		if h, ok := cfg.Codec.(zmtp.FrameHeaderAppender); ok {
+			directHeader = h
 		}
-		// If the handshake hasn't completed yet, signal so observers
-		// (and any in-flight handshake goroutine that hasn't reached
-		// the close call) see a non-nil HandshakeErr. handshakedOnce
-		// guarantees we only close the channel once even if run() races
-		// us to it.
-		s.handshakedOnce.Do(func() {
-			err := errors.New("gozmq/session: stopped before handshake")
-			s.hsErr.CompareAndSwap(nil, &err)
-			close(s.handshaked)
-		})
-	})
-	s.wg.Wait()
-	// Every session goroutine has exited (or none ever started). If the
-	// writer never ran — Stop before Start, or a handshake that never
-	// completed — WriterFlushed waiters must still be released.
-	s.closeWriterExited()
-	// run() closes stopped on exit; if Start was never called we close
-	// it here for symmetry. stoppedOnce keeps the close exactly-once.
-	s.stoppedOnce.Do(func() { close(s.stopped) })
-	if e := s.stopErr.Load(); e != nil {
-		return *e
 	}
-	return nil
+	// recvAlloc hands the reader pooled frame buffers (see Config.RecvBufferPool).
+	var recvAlloc func(int) []byte
+	if cfg.RecvBufferPool && identityMech {
+		recvAlloc = bufpool.Get
+	}
+	return &Session{
+		cfg:          cfg,
+		recvAlloc:    recvAlloc,
+		ctx:          ctx,
+		cancel:       cancel,
+		reader:       bufio.NewReaderSize(cfg.Conn, sessionReadBufferSize),
+		encode:       encode,
+		decode:       decode,
+		directHeader: directHeader,
+		writerCtx:    wctx,
+		writerCancel: wcancel,
+		hsOut:        make(chan []byte, hsOutBacklog),
+		done:         make(chan struct{}),
+		writerDone:   make(chan struct{}),
+		cmdCh:        make(chan []byte, sessionCmdBacklog),
+		cmdWake:      make(chan struct{}, 1),
+	}
 }
 
-// Handshaked returns a channel that closes once the handshake completes
-// (success or failure). HandshakeErr returns the failure reason, or nil
-// on success.
-func (s *sessionImpl) Handshaked() <-chan struct{} { return s.handshaked }
-
-// HandshakeErr returns nil on a successful handshake or the wrapped
-// failure error. Read after Handshaked has closed.
-func (s *sessionImpl) HandshakeErr() error {
-	if e := s.hsErr.Load(); e != nil {
-		return *e
-	}
-	return nil
-}
-
-// Pipe returns the engine-facing end of the session's pipe. Valid only
-// after Handshaked closes without error.
-func (s *sessionImpl) Pipe() *pipe.End { return s.enginePipe }
-
-// Done returns a channel closed when every goroutine spawned by this
-// session has exited.
-func (s *sessionImpl) Done() <-chan struct{} { return s.stopped }
-
-// WriterFlushed returns a channel that closes when the writer goroutine
-// exits — the signal that all outbound messages have been flushed to conn.
-func (s *sessionImpl) WriterFlushed() <-chan struct{} { return s.writerExited }
-
-// CancelWriter cancels the writer goroutine's blocking Recv, causing it
-// to drain the remaining queue and exit. The conn stays alive
-// so in-flight conn.Write calls complete. Call before sess.Stop() to
-// implement LINGER drain without data loss.
-func (s *sessionImpl) CancelWriter() { s.writerCancel() }
-
-// run is the top-level goroutine for a session's lifecycle. It performs
-// the handshake, signals readiness, then forks the reader/writer (and
-// optional heartbeat) goroutines and waits for all to exit.
-func (s *sessionImpl) run() {
-	defer s.wg.Done()
-	// stopped is closed by the monitor goroutine in Start (or by Stop as
-	// a fallback) AFTER every spawned goroutine has wg.Done'd — NOT when
-	// run itself returns. See Start for why.
-
-	if err := s.doHandshake(); err != nil {
-		s.hsErr.CompareAndSwap(nil, &err)
-		s.handshakedOnce.Do(func() { close(s.handshaked) })
-		// No writer goroutine will ever run; release WriterFlushed
-		// waiters so a linger drain doesn't hang on a session that died
-		// during its handshake.
-		s.closeWriterExited()
-		// On handshake failure we still close the conn to release the
-		// transport. Stop(), if not yet called, will be a no-op.
-		_ = s.cfg.Conn.Close()
-		return
-	}
-
-	// Construct the pipe pair. The session-side end is consumed by the
-	// reader (Send) and writer (Recv); the engine-side end is published
-	// via Pipe().
-	peerInfo := pipe.PeerInfo{
-		Identity: identityFromMetadata(s.cfg.Mech),
-	}
-	sp, ep := pipe.NewPair(s.cfg.RecvHWM, s.cfg.SendHWM, pipe.PeerInfo{}, peerInfo)
-	s.sessionPipe, s.enginePipe = sp, ep
-	s.handshakedOnce.Do(func() { close(s.handshaked) })
-
-	// Seed the last-inbound clock so a heartbeat fired immediately
-	// after handshake doesn't trip the timeout.
-	s.lastInboundUnix.Store(s.cfg.Now())
-
-	// Reader and writer share the conn but on disjoint sides (reader
-	// only reads, writer only writes), so they don't need to
-	// coordinate beyond the shared session/pipe primitives.
-	s.wg.Add(2)
+// Start launches the reader and writer goroutines. Call it exactly once.
+func (s *Session) Start() {
+	s.live.Store(2)
 	go s.runReader()
 	go s.runWriter()
+}
 
-	// Heartbeat is optional: skip when interval is 0 or the peer
-	// negotiated ZMTP 3.0.
-	if s.cfg.HeartbeatInterval > 0 && s.peerHeartbeats {
-		s.wg.Add(1)
-		go s.runHeartbeat()
+// Stop tears the session down: it closes the conn (waking any blocked
+// read or write), cancels the session context, and blocks until Done.
+// It returns the conn's close error, if any. Idempotent; never call it
+// from OnReady or OnClosed.
+func (s *Session) Stop() error {
+	s.cancel()
+	// A plain close: the kernel keeps delivering already-written data
+	// after close(2), whereas a timed SO_LINGER would block here (per
+	// session, sequentially during Socket.Close) and RST on expiry.
+	// isShutdownErr covers both the test double's io.ErrClosedPipe and the
+	// net.ErrClosed of a conn the session already closed itself.
+	err := s.cfg.Conn.Close()
+	<-s.done
+	if err != nil && !isShutdownErr(err) {
+		return err
 	}
+	return nil
+}
+
+// Drain makes the writer flush the messages still queued and exit without
+// closing the conn, so in-flight writes complete; the returned channel
+// closes once it has. Call engine.Close first so nothing new is queued,
+// wait on the channel, then call Stop. Idempotent.
+func (s *Session) Drain() <-chan struct{} {
+	s.writerCancel()
+	return s.writerDone
+}
+
+// Done returns a channel closed once both session goroutines have exited
+// and OnClosed has returned.
+func (s *Session) Done() <-chan struct{} { return s.done }
+
+// Attached reports whether OnReady accepted the session's pipe.
+func (s *Session) Attached() bool { return s.attached.Load() }
+
+// exit runs as each session goroutine returns. The last one out closes
+// the conn (a failed handshake leaves that to it, so the writer can still
+// flush an ERROR command), reports OnClosed and closes done.
+func (s *Session) exit() {
+	if s.live.Add(-1) != 0 {
+		return
+	}
+	s.shutdown()
+	if s.cfg.OnClosed != nil {
+		s.cfg.OnClosed(s.hsErr, s.attached.Load())
+	}
+	close(s.done)
 }
 
 // identityFromMetadata pulls the ZMTP "Identity" property out of the
@@ -515,23 +367,16 @@ func identityFromMetadata(m security.Mech) []byte {
 	return nil
 }
 
-// closeWriterExited releases WriterFlushed waiters exactly once. Called
-// from the writer goroutine's defer, the handshake-failure path in run(),
-// and Stop() (covering Stop-before-Start).
-func (s *sessionImpl) closeWriterExited() {
-	s.writerExitedOnce.Do(func() { close(s.writerExited) })
-}
-
 // enqueueCommand serialises a ZMTP command (1-byte name length + name +
 // body) and hands it to the writer goroutine via cmdCh — the reader and
-// heartbeat goroutines must never write to the wire themselves (see the
-// cmdCh field doc). The body bytes are copied during serialization, so
-// callers may pass slices aliasing the reader's scratch buffer.
+// heartbeat must never write to the wire themselves (see the cmdCh field
+// doc). The body bytes are copied during serialization, so callers may
+// pass slices aliasing the reader's scratch buffer.
 //
 // If the channel is full the command is dropped: PING/PONG are advisory
 // keep-alives — the peer (or our next tick) simply retries — and
 // dropping is the price of never blocking the reader on the writer.
-func (s *sessionImpl) enqueueCommand(name string, body []byte) {
+func (s *Session) enqueueCommand(name string, body []byte) {
 	if len(name) > zmtp.MaxCommandNameLen {
 		// Same contract as zmtp.EncodeCommand, which this path
 		// deliberately open-codes to control buffer ownership: a name
@@ -554,17 +399,17 @@ func (s *sessionImpl) enqueueCommand(name string, body []byte) {
 	}
 }
 
-// shutdown is the one-stop teardown path used by reader/writer/heartbeat
-// when they detect a fatal condition. It cancels the context (waking
-// peer goroutines), closes the conn (waking blocked read/write), and
-// closes the session-side pipe (waking the engine).
-func (s *sessionImpl) shutdown() {
+// shutdown is the one-stop teardown path used by the reader and writer
+// when they detect a fatal condition, and by exit. It stops the
+// heartbeat, cancels the context (waking the other goroutine), closes the
+// conn (waking blocked read/write), and closes the session-side pipe
+// (waking the engine). Only the session goroutines call it, after the
+// reader has published sessionPipe.
+func (s *Session) shutdown() {
+	s.stopHeartbeat()
 	s.cancel()
 	_ = s.cfg.Conn.Close()
 	if s.sessionPipe != nil {
 		_ = s.sessionPipe.Close()
 	}
 }
-
-// Compile-time check.
-var _ Session = (*sessionImpl)(nil)

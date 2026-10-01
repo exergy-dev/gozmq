@@ -1,48 +1,51 @@
 package session
 
 // Reconnector is the client-side dial-and-run loop for a connected Socket.
-// It dials via a user-supplied Dial, constructs a Session with the
-// resulting Conn, runs the session until it ends (handshake failure,
-// post-handshake disconnect, or ctx cancellation), and on failure
-// reconnects with exponential backoff + jitter up to MaxBackoff.
+// It dials via a user-supplied Dial, starts a Runner (a Session) on the
+// resulting Conn, waits for it to end (handshake failure, refused attach,
+// post-handshake disconnect, or ctx cancellation), and then reconnects
+// with exponential backoff + jitter up to MaxBackoff.
 //
 // The Reconnector is intentionally decoupled from the concrete
 // session/transport/options types: it takes factory functions so the
-// Socket.Connect path (and tests) can plug in different dial/session
-// implementations.
-//
-// Session end detection uses Session.Done(): that channel closes
-// when every session goroutine has exited (reader, writer, optional
-// heartbeat, plus the run goroutine that spawns them). Because Done()
-// fires on all teardown paths — post-handshake peer disconnect,
-// heartbeat timeout, explicit Stop, or pre-pipe handshake failure — it
-// is a single, unambiguous signal that also catches sessions that never
-// reach the traffic phase.
+// Socket.Connect path (and tests) can plug in different dial/run
+// implementations. Attach, detach and monitor events belong to the
+// Session's callbacks; the loop only needs to know when a run ended and
+// whether it attached.
 
 import (
 	"context"
 	"log/slog"
 	"math/rand/v2"
-	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/transport"
 )
 
+// Runner is the Reconnector's view of a started connection; *Session
+// implements it.
+type Runner interface {
+	// Done closes when the connection has fully ended.
+	Done() <-chan struct{}
+	// Stop tears the connection down and waits for Done.
+	Stop() error
+	// Attached reports whether the connection reached the engine, which
+	// resets the backoff schedule.
+	Attached() bool
+}
+
 // ReconnectConfig bundles the inputs to StartReconnector. Dial and
-// NewSession are required; zero durations are interpreted as documented.
+// Start are required; zero durations are interpreted as documented.
 type ReconnectConfig struct {
 	// Dial opens a new Conn to the remote endpoint. Respects ctx
 	// cancellation. Called once per reconnect attempt.
 	Dial func(ctx context.Context) (transport.Conn, error)
 
-	// NewSession constructs a session around the given Conn. The
-	// Reconnector calls Start on the returned session. An error closes
-	// the conn and is treated like a dial failure: the loop backs off
-	// and retries.
-	NewSession func(conn transport.Conn) (Session, error)
+	// Start runs a connection over conn, taking ownership of it (closing
+	// it on error). An error is treated like a dial failure: the loop
+	// backs off and retries.
+	Start func(conn transport.Conn) (Runner, error)
 
 	// InitialBackoff is the base delay between reconnect attempts. Also
 	// the value the schedule resets to after a successful attach.
@@ -55,17 +58,6 @@ type ReconnectConfig struct {
 	// JitterFraction is the symmetric randomness applied to each delay,
 	// e.g. 0.2 → ±20%. Zero disables jitter.
 	JitterFraction float64
-
-	// OnAttach fires once per successful handshake with the engine-facing
-	// pipe end. The Socket engine uses it to attach the pipe. An error
-	// (the engine refused the pipe) is treated like a handshake failure:
-	// the session is stopped, the pipe closed, and the loop backs off.
-	OnAttach func(*pipe.End) error
-
-	// OnDetach fires once per session end, with the pipe that OnAttach
-	// accepted. It is NOT called for sessions that never attached — the
-	// loop just backs off and redials.
-	OnDetach func(*pipe.End)
 
 	// OnRetry fires once per backoff cycle, immediately before the
 	// loop sleeps. attempt counts 1-based consecutive failures since
@@ -87,16 +79,13 @@ type Reconnector struct {
 
 	// done closes when the loop goroutine exits, so Stop can wait.
 	done chan struct{}
-
-	// sessMu guards currentSess so Stop can tear down whichever session
-	// is live at the time.
-	sessMu      sync.Mutex
-	currentSess Session
+	// stopErr is the live Runner's Stop error when the loop was
+	// cancelled; written before done closes.
+	stopErr error
 
 	// quiesced is set by Quiesce to prevent loop() from dialing a new
-	// session after the current one detaches. Used by Socket.Close to
-	// honor LINGER: close the engine-facing pipe, let the writer drain,
-	// then hard-stop.
+	// connection after the current one ends. Used by Socket.Close to
+	// honor LINGER: the current session drains, then everything stops.
 	quiesced atomic.Bool
 }
 
@@ -140,37 +129,19 @@ func StartReconnector(parent context.Context, cfg ReconnectConfig) *Reconnector 
 	return r
 }
 
-// CurrentSession returns the session currently owned by the Reconnector,
-// or nil if none is live. Used by Socket.Close to drain outbound queues
-// before tearing the reconnector down.
-func (r *Reconnector) CurrentSession() Session {
-	r.sessMu.Lock()
-	defer r.sessMu.Unlock()
-	return r.currentSess
-}
-
-// Quiesce flips a flag so that when the current session ends, loop() does
-// not dial a new one. The current session keeps running; callers typically
-// then close its pipe and wait for Done() before hard-stopping with Stop.
-// Idempotent.
+// Quiesce flips a flag so that when the current connection ends, loop()
+// does not dial a new one. The current connection keeps running. Idempotent.
 func (r *Reconnector) Quiesce() {
 	r.quiesced.Store(true)
 }
 
-// Stop cancels the loop, tears down any live session, and blocks until
-// the loop has exited. It returns the live session's Stop error, if any.
+// Stop cancels the loop, which stops any live Runner, and blocks until
+// the loop has exited. It returns the live Runner's Stop error, if any.
 // Safe to call more than once.
 func (r *Reconnector) Stop() error {
-	// cancel() unblocks any in-flight dial or backoff sleep, and makes
-	// setSession refuse new sessions, so the one read below is the last.
-	// Session.Stop is idempotent, so racing the loop's own call is fine.
 	r.cancel()
-	var err error
-	if sess := r.CurrentSession(); sess != nil {
-		err = sess.Stop()
-	}
 	<-r.done
-	return err
+	return r.stopErr
 }
 
 // retryAfterBackoff advances the attempt counter and backoff tier, fires
@@ -191,18 +162,6 @@ func (r *Reconnector) retryAfterBackoff(attempt *int, backoff *time.Duration) bo
 	return r.sleep(thisBackoff)
 }
 
-// setSession records sess as the live session, or reports false (leaving
-// it unrecorded) if the Reconnector was stopped meanwhile.
-func (r *Reconnector) setSession(sess Session) bool {
-	r.sessMu.Lock()
-	defer r.sessMu.Unlock()
-	if sess != nil && r.ctx.Err() != nil {
-		return false
-	}
-	r.currentSess = sess
-	return true
-}
-
 // loop is the top-level dial/run/backoff goroutine. It exits when the
 // Reconnector's context is cancelled (Stop, or the parent ctx).
 func (r *Reconnector) loop() {
@@ -220,77 +179,28 @@ func (r *Reconnector) loop() {
 			return
 		}
 
-		conn, err := r.cfg.Dial(r.ctx)
-		if err != nil {
+		if conn, err := r.cfg.Dial(r.ctx); err != nil {
 			r.cfg.Logger.Debug("gozmq/reconnect: dial failed", "err", err, "backoff", backoff)
-			if !r.retryAfterBackoff(&attempt, &backoff) {
+		} else if run, err := r.cfg.Start(conn); err != nil {
+			r.cfg.Logger.Debug("gozmq/reconnect: session start failed", "err", err, "backoff", backoff)
+		} else {
+			// Done covers every way the run ends — peer disconnect,
+			// heartbeat timeout, failed handshake, refused attach; ctx
+			// covers a local Stop.
+			select {
+			case <-run.Done():
+			case <-r.ctx.Done():
+				r.stopErr = run.Stop()
 				return
 			}
-			continue
-		}
-
-		sess, err := r.cfg.NewSession(conn)
-		if err != nil {
-			_ = conn.Close()
-			r.cfg.Logger.Debug("gozmq/reconnect: session construction failed", "err", err, "backoff", backoff)
-			if !r.retryAfterBackoff(&attempt, &backoff) {
-				return
-			}
-			continue
-		}
-		if !r.setSession(sess) {
-			// Stopped while we were dialing. Drop everything and exit.
-			_ = sess.Stop() // also closes conn
-			return
-		}
-
-		sess.Start()
-
-		// Wait for handshake or ctx cancellation.
-		select {
-		case <-sess.Handshaked():
-		case <-r.ctx.Done():
-			_ = sess.Stop()
-			return
-		}
-
-		p := sess.Pipe()
-		err = sess.HandshakeErr()
-		if err == nil && r.cfg.OnAttach != nil && p != nil {
-			if err = r.cfg.OnAttach(p); err != nil {
-				_ = p.Close() // the engine never saw it
+			if run.Attached() {
+				// A successful attach resets the schedule; the redial
+				// below is a (small, jittered) delay so a peer that
+				// immediately EOFs us is not hot-looped.
+				backoff = r.cfg.InitialBackoff
+				attempt = 0
 			}
 		}
-		if err != nil {
-			r.cfg.Logger.Debug("gozmq/reconnect: handshake or attach failed", "err", err, "backoff", backoff)
-			_ = sess.Stop()
-			r.setSession(nil)
-			if !r.retryAfterBackoff(&attempt, &backoff) {
-				return
-			}
-			continue
-		}
-
-		// Attached: reset the backoff schedule and wait for detach.
-		backoff = r.cfg.InitialBackoff
-		attempt = 0
-
-		// Session.Done() closes when every session goroutine has exited,
-		// covering peer disconnects; ctx covers local Stop.
-		select {
-		case <-sess.Done():
-		case <-r.ctx.Done():
-		}
-
-		_ = sess.Stop()
-		if r.cfg.OnDetach != nil {
-			r.cfg.OnDetach(p)
-		}
-		r.setSession(nil)
-
-		// Reconnect after a (small, post-success-reset) delay with
-		// jitter. This prevents a hot-reconnect loop against a peer that
-		// immediately EOFs us.
 		if !r.retryAfterBackoff(&attempt, &backoff) {
 			return
 		}

@@ -13,9 +13,10 @@ import (
 
 // Goroutine budgets for an idle, established link, measured per connecting
 // socket including its session on both ends. Tighten these as engine and
-// session goroutines are removed; never raise them.
+// session goroutines are removed; never raise them. A TCP connection is the
+// client's reconnector plus a reader and a writer per side.
 const (
-	maxGoroutinesPerTCPConn    = 10
+	maxGoroutinesPerTCPConn    = 5
 	maxGoroutinesPerInprocLink = 0
 )
 

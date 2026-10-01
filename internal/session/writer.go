@@ -28,13 +28,14 @@ const (
 	maxBatchBytes = 2 << 20 // 2 MiB
 )
 
-// runWriter is the pipe->wire traffic-phase goroutine. It pulls *msg.Msg
-// values from the session-side pipe, splits them into ZMTP frames with
-// MORE flags applied to all but the last, encodes each body via the
-// security mechanism, and writes via the codec. It is the ONLY goroutine
-// that writes to the wire during traffic phase: PONG/PING commands from
-// the reader and heartbeat goroutines arrive via cmdCh and are written
-// here (see writerNext).
+// runWriter is the session's writing goroutine and the ONLY goroutine that
+// writes to the wire. It first writes the reader's handshake frames (see
+// writeHandshake), then runs the pipe->wire traffic phase: it pulls
+// *msg.Msg values from the session-side pipe, splits them into ZMTP frames
+// with MORE flags applied to all but the last, encodes each body via the
+// security mechanism, and writes via the codec. PONG/PING commands from
+// the reader and the heartbeat arrive via cmdCh and are written here (see
+// writerNext).
 //
 // Throughput optimization (design §11): after receiving the first
 // message, the writer tries a non-blocking Recv for additional queued
@@ -44,13 +45,16 @@ const (
 // rapid bursts.
 //
 // The writer waits on s.writerCtx (a child of s.ctx) alongside the pipe.
-// Socket.Close's LINGER drain calls CancelWriter() which cancels only
-// writerCtx. The writer then drains the rest of the queue (see
-// drainSessionPipe) and exits WITHOUT closing the conn — so in-flight writes complete before
-// sess.Stop() closes the conn.
-func (s *sessionImpl) runWriter() {
-	defer s.wg.Done()
-	defer s.closeWriterExited()
+// Socket.Close's LINGER drain calls Drain, which cancels only writerCtx.
+// The writer then drains the rest of the queue (see drainSessionPipe) and
+// exits WITHOUT closing the conn — so in-flight writes complete before
+// Stop closes the conn.
+func (s *Session) runWriter() {
+	defer s.exit()
+	defer close(s.writerDone)
+	if !s.writeHandshake() {
+		return
+	}
 
 	// Reusable batch buffers; recycled each loop iteration.
 	var batch writerBatch
@@ -61,16 +65,11 @@ func (s *sessionImpl) runWriter() {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				// writerCtx was cancelled by the socket-level linger path.
 				// Drain whatever is already queued, then exit WITHOUT
-				// tearing down the conn. Socket.Close waits on
-				// WriterFlushed, then calls sess.Stop() to close the conn
-				// in a coordinated order.
-				// No settle delay is needed here: the writer goroutine
-				// closes writerExited (via the deferred close) only after
-				// drainSessionPipe's final flushBatch has returned, and
-				// Socket.CloseCtx blocks on WriterFlushed() == writerExited
-				// before calling sess.Stop() (which closes the conn). That
-				// wait already serializes "last writev complete" before
-				// "conn.Close", so the final burst cannot race teardown.
+				// tearing down the conn. No settle delay is needed: the
+				// deferred close of writerDone (Drain's channel) follows
+				// drainSessionPipe's final flushBatch, and Socket.CloseCtx
+				// waits on it before Stop closes the conn, so the final
+				// burst cannot race teardown.
 				s.drainSessionPipe()
 			} else {
 				if !isShutdownErr(err) {
@@ -90,6 +89,26 @@ func (s *sessionImpl) runWriter() {
 	}
 }
 
+// writeHandshake writes the greeting and handshake frames the reader
+// queues on hsOut, in order, until the reader closes it. It reports
+// whether the session reached its traffic phase: false if the handshake
+// failed, or a write did, in which case the conn is closed so the reader
+// unblocks and the reader picks the recorded error up.
+func (s *Session) writeHandshake() bool {
+	failed := false
+	for b := range s.hsOut {
+		if failed {
+			continue // keep draining so the reader never blocks
+		}
+		if _, err := s.cfg.Conn.Write(b); err != nil {
+			s.hsWriteErr.Store(&err)
+			_ = s.cfg.Conn.Close()
+			failed = true
+		}
+	}
+	return !failed && s.sessionPipe != nil
+}
+
 // writerNext blocks until the writer has work: a queued user message
 // (returned), a pending PING/PONG from cmdCh (written inline; returns
 // nil, nil), writer cancellation, or pipe closure (queued messages first,
@@ -100,7 +119,7 @@ func (s *sessionImpl) runWriter() {
 // cmdCh is polled before every receive: RecvOr prefers queued data over
 // its abort channel (cmdWake), so under sustained traffic this check is
 // what keeps PING/PONG flowing.
-func (s *sessionImpl) writerNext() (*msg.Msg, error) {
+func (s *Session) writerNext() (*msg.Msg, error) {
 	select {
 	case buf := <-s.cmdCh:
 		return nil, s.writeFrame(zmtp.FlagCommand, buf)
@@ -119,7 +138,7 @@ func (s *sessionImpl) writerNext() (*msg.Msg, error) {
 // drain. On error it releases the batch, logs, and triggers a session
 // shutdown unless the error is an expected teardown artifact; the
 // caller just exits on a non-nil return.
-func (s *sessionImpl) writeBatchFrom(batch *writerBatch, first *msg.Msg) error {
+func (s *Session) writeBatchFrom(batch *writerBatch, first *msg.Msg) error {
 	batchBytes, err := batch.appendMessage(s, first, 0)
 	if err == nil {
 		for msgCount := 1; msgCount < maxBatchMessages && batchBytes < maxBatchBytes; msgCount++ {
@@ -227,7 +246,7 @@ func (b *writerBatch) release() {
 	b.buffers = b.buffers[:0]
 }
 
-func (b *writerBatch) appendMessage(s *sessionImpl, m *msg.Msg, sizeSoFar int) (int, error) {
+func (b *writerBatch) appendMessage(s *Session, m *msg.Msg, sizeSoFar int) (int, error) {
 	if m.Lent() {
 		b.lent = append(b.lent, m)
 	}
@@ -250,7 +269,7 @@ func (b *writerBatch) appendMessage(s *sessionImpl, m *msg.Msg, sizeSoFar int) (
 	return sizeSoFar, nil
 }
 
-func (b *writerBatch) appendFrame(s *sessionImpl, flags uint8, body []byte, sizeSoFar int) (int, error) {
+func (b *writerBatch) appendFrame(s *Session, flags uint8, body []byte, sizeSoFar int) (int, error) {
 	off := len(b.scratch)
 	if s.directHeader != nil {
 		newScratch, hdrLen, err := s.directHeader.AppendFrameHeader(b.scratch, flags, body)
@@ -299,18 +318,13 @@ func (b *writerBatch) materializeBuffers() {
 
 // flushBatch writes the accumulated frame blobs to the conn in a
 // single writev syscall (where supported by the underlying net.Conn).
-// The writeMu is held for the duration (see the writeMu field doc; with
-// PONG/PING routed through cmdCh it is uncontended in practice).
-//
 // net.Buffers.WriteTo preserves order and detects io.Writer shortcuts
 // for *net.TCPConn / *net.UnixConn to use writev(2); for other writers
 // it falls back to a Write loop. Either way, ordering is preserved.
-func (s *sessionImpl) flushBatch(buffers *net.Buffers) error {
+func (s *Session) flushBatch(buffers *net.Buffers) error {
 	if len(*buffers) == 0 {
 		return nil
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
 	var err error
 	if bw, ok := s.cfg.Conn.(bufferWriter); ok {
 		_, err = bw.WriteBuffers(buffers)
@@ -329,7 +343,7 @@ func (s *sessionImpl) flushBatch(buffers *net.Buffers) error {
 // errors; Stop closing the conn when the linger expires is one). Called
 // after writerCtx cancellation, which follows engine.Close, so nothing
 // more is queued and an empty TryRecv is the true end of the queue.
-func (s *sessionImpl) drainSessionPipe() {
+func (s *Session) drainSessionPipe() {
 	var batch writerBatch
 	for {
 		m, ok := s.sessionPipe.TryRecv()
@@ -342,18 +356,16 @@ func (s *sessionImpl) drainSessionPipe() {
 	}
 }
 
-// writeFrame encodes body via the mechanism, then writes via the codec
-// under the writeMu. Used by the writer goroutine for single-frame
+// writeFrame encodes body via the mechanism, then writes via the codec.
+// Used by the writer goroutine for single-frame
 // COMMAND writes (heartbeat PING, PONG reply, dequeued from cmdCh) —
 // heartbeat-rate traffic where batching/zero-copy is not worth a fast
 // path.
-func (s *sessionImpl) writeFrame(flags uint8, body []byte) error {
+func (s *Session) writeFrame(flags uint8, body []byte) error {
 	wireFlags, encoded, err := s.encode(flags, body)
 	if err != nil {
 		return fmt.Errorf("gozmq/session: encode frame: %w", err)
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
 	if err := s.cfg.Codec.WriteFrame(s.cfg.Conn, wireFlags, encoded); err != nil {
 		return fmt.Errorf("gozmq/session: write frame: %w", err)
 	}

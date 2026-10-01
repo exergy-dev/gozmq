@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/exergy-dev/gozmq"
 )
 
@@ -280,4 +282,72 @@ func TestMonitor_EventTimestampsPopulated(t *testing.T) {
 		lastTime = ev.Time
 		seen = true
 	}
+}
+
+// countType counts the events of type t.
+func countType(events []gozmq.Event, t gozmq.EventType) int {
+	n := 0
+	for _, e := range events {
+		if e.Type == t {
+			n++
+		}
+	}
+	return n
+}
+
+// TestMonitor_SessionEventsBothSides: accepted and connected sessions run
+// the same lifecycle callbacks, so each side reports one handshake
+// success and, when the link drops, one disconnect; a failed handshake is
+// reported on both sides with no success and no attach.
+func TestMonitor_SessionEventsBothSides(t *testing.T) {
+	const peerEvents = gozmq.EventHandshakeSucceeded | gozmq.EventHandshakeFailedProtocol |
+		gozmq.EventConnected | gozmq.EventDisconnected
+	t.Run("established", func(t *testing.T) {
+		srvEvents := make(chan gozmq.Event, 64)
+		cliEvents := make(chan gozmq.Event, 64)
+		_, srv, cli := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair, "tcp://127.0.0.1:0",
+			[]gozmq.Option{gozmq.WithMonitor(srvEvents, peerEvents)},
+			[]gozmq.Option{gozmq.WithMonitor(cliEvents, peerEvents)},
+		)
+		callCtx := testCtx(t)
+		require.NoError(t, cli.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("hello"))))
+		m, err := srv.RecvMsg(callCtx)
+		require.NoError(t, err)
+		m.Release()
+		require.NoError(t, cli.Close())
+
+		srvGot := waitForEvents(t, srvEvents, 3*time.Second, func(evts []gozmq.Event) bool {
+			return hasType(evts, gozmq.EventDisconnected)
+		})
+		require.Equal(t, 1, countType(srvGot, gozmq.EventHandshakeSucceeded), "server: %v", eventTypes(srvGot))
+		require.Equal(t, 1, countType(srvGot, gozmq.EventDisconnected), "server: %v", eventTypes(srvGot))
+		require.Zero(t, countType(srvGot, gozmq.EventConnected), "server: %v", eventTypes(srvGot))
+		// The client's Close returned after its session ended, so all its
+		// events are already queued.
+		var cliGot []gozmq.Event
+		for len(cliEvents) > 0 {
+			cliGot = append(cliGot, <-cliEvents)
+		}
+		require.Equal(t, 1, countType(cliGot, gozmq.EventHandshakeSucceeded), "client: %v", eventTypes(cliGot))
+		require.Equal(t, 1, countType(cliGot, gozmq.EventConnected), "client: %v", eventTypes(cliGot))
+		require.Equal(t, 1, countType(cliGot, gozmq.EventDisconnected), "client: %v", eventTypes(cliGot))
+		require.Less(t, indexOfType(cliGot, gozmq.EventHandshakeSucceeded), indexOfType(cliGot, gozmq.EventConnected),
+			"handshake success must precede the attach")
+	})
+	t.Run("mechanism mismatch", func(t *testing.T) {
+		srvEvents := make(chan gozmq.Event, 64)
+		cliEvents := make(chan gozmq.Event, 64)
+		newSocketPairTypes(t, gozmq.Pair, gozmq.Pair, "tcp://127.0.0.1:0",
+			[]gozmq.Option{gozmq.WithMonitor(srvEvents, peerEvents)},
+			[]gozmq.Option{gozmq.WithMonitor(cliEvents, peerEvents), gozmq.WithPlainClient("u", "p")},
+		)
+		failed := func(evts []gozmq.Event) bool { return hasType(evts, gozmq.EventHandshakeFailedProtocol) }
+		for side, ch := range map[string]chan gozmq.Event{"server": srvEvents, "client": cliEvents} {
+			got := waitForEvents(t, ch, 3*time.Second, failed)
+			require.True(t, failed(got), "%s: %v", side, eventTypes(got))
+			for _, typ := range []gozmq.EventType{gozmq.EventHandshakeSucceeded, gozmq.EventConnected, gozmq.EventDisconnected} {
+				require.Zero(t, countType(got, typ), "%s: %v", side, eventTypes(got))
+			}
+		}
+	})
 }

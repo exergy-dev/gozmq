@@ -141,10 +141,8 @@ type Socket struct {
 	lastEndpoint string
 	listeners    []transport.Listener
 	reconnectors []reconnectEntry
-	// links holds every attached peer (server-accepted sessions, STREAM
-	// adapters, and inproc links) behind one teardown contract. Client
-	// sessions are NOT here — they are owned by their reconnector and
-	// collected via CurrentSession() at close time.
+	// links holds every attached peer (sessions, STREAM adapters, and
+	// inproc links) behind one teardown contract.
 	links     []peerLink
 	acceptWG  sync.WaitGroup
 	connectWG sync.WaitGroup
@@ -266,35 +264,16 @@ func (s *Socket) Connect(endpoint string) error {
 		Dial: func(ctx context.Context) (transport.Conn, error) {
 			return tr.Dial(ctx, endpoint)
 		},
-		NewSession: func(conn transport.Conn) (session.Session, error) {
-			sess, err := s.buildSession(conn, security.RoleClient)
+		Start: func(conn transport.Conn) (session.Runner, error) {
+			sess, err := s.startSession(conn, security.RoleClient, endpoint)
 			if err != nil {
-				s.emit(EventHandshakeFailedProtocol, endpoint, err.Error())
 				return nil, err
 			}
-			s.watchClientHandshake(sess, endpoint)
 			return sess, nil
 		},
 		InitialBackoff: s.cfg.reconnectInterval,
 		MaxBackoff:     s.cfg.reconnectIntervalMax,
 		JitterFraction: 0.2,
-		OnAttach: func(p *pipe.End) error {
-			// A refused pipe (PAIR already has a peer, engine closed)
-			// fails the attempt: the Reconnector stops the session and
-			// backs off instead of leaving it running unattached.
-			if err := s.engine.AttachPipe(p); err != nil {
-				return err
-			}
-			// EventConnected marks the post-handshake attach on
-			// the client side (libzmq parity: Connected fires once
-			// the pipe is wired up, not at raw TCP-dial success).
-			s.emit(EventConnected, endpoint, "")
-			return nil
-		},
-		OnDetach: func(p *pipe.End) {
-			_ = s.engine.DetachPipe(p)
-			s.emit(EventDisconnected, endpoint, "")
-		},
 		OnRetry: func(attempt int, backoff time.Duration) {
 			// Convention: the first backoff after a dial/handshake
 			// failure is "delayed"; subsequent attempts are
@@ -401,30 +380,6 @@ func (s *Socket) Disconnect(endpoint string) error {
 	return errors.Join(errs...)
 }
 
-// watchClientHandshake spawns a goroutine that waits for the given
-// client-side session's handshake to complete and emits the
-// appropriate EventHandshake* event, mirroring startSession's
-// server-side behavior.
-//
-// Safe to spawn freely: each goroutine exits once Handshaked closes
-// or the Socket's run context cancels.
-func (s *Socket) watchClientHandshake(sess session.Session, endpoint string) {
-	s.connectWG.Add(1)
-	go func() {
-		defer s.connectWG.Done()
-		select {
-		case <-sess.Handshaked():
-		case <-s.runCtx.Done():
-			return
-		}
-		if err := sess.HandshakeErr(); err != nil {
-			s.emit(classifyHandshakeEvent(err), endpoint, err.Error())
-			return
-		}
-		s.emit(EventHandshakeSucceeded, endpoint, "")
-	}()
-}
-
 func (s *Socket) acceptLoop(l transport.Listener) {
 	defer s.acceptWG.Done()
 	// Retry backoff after an Accept error: a persistent failure (EMFILE,
@@ -463,7 +418,7 @@ func (s *Socket) acceptLoop(l transport.Listener) {
 			s.startStreamAdapter(conn)
 			continue
 		}
-		s.startSession(conn, security.RoleServer)
+		_, _ = s.startSession(conn, security.RoleServer, conn.RemoteEndpoint())
 	}
 }
 
@@ -491,57 +446,59 @@ func (s *Socket) removeLink(l peerLink) {
 	s.mu.Unlock()
 }
 
-// startSession is the server-accept path: wraps conn in a session, spawns
-// a handshake goroutine, attaches the pipe on handshake success, detaches
-// on pipe close. The client-side (Connect) path uses Reconnector, not
-// this helper.
-func (s *Socket) startSession(conn transport.Conn, role security.Role) {
-	remote := conn.RemoteEndpoint()
-	sess, err := s.buildSession(conn, role)
+// startSession runs a session over conn, for both the accept path and
+// the Reconnector, registered as a link so Close drains it. Its callbacks
+// attach and detach the pipe, emit the monitor events and drop the link,
+// so a session costs no goroutine beyond its own two. On error conn is
+// closed.
+func (s *Socket) startSession(conn transport.Conn, role security.Role, endpoint string) (*session.Session, error) {
+	cfg, err := s.sessionConfig(conn, role)
 	if err != nil {
-		s.logger().Debug("gozmq: session construction failed", "err", err, "remote", remote)
-		s.emit(EventHandshakeFailedProtocol, remote, err.Error())
+		s.logger().Debug("gozmq: session construction failed", "err", err, "endpoint", endpoint)
+		s.emit(EventHandshakeFailedProtocol, endpoint, err.Error())
 		_ = conn.Close()
-		return
+		return nil, err
 	}
-	link := sessionLink{sess}
+	var (
+		link peerLink
+		p    *pipe.End
+	)
+	cfg.OnReady = func(ep *pipe.End) error {
+		s.emit(EventHandshakeSucceeded, endpoint, "")
+		// A refused pipe (PAIR already has a peer, engine closed) ends
+		// the session unattached: a client backs off and redials.
+		if err := s.engine.AttachPipe(ep); err != nil {
+			return err
+		}
+		p = ep
+		// EventConnected marks the post-handshake attach on the client
+		// side (libzmq parity: not at raw TCP-dial success).
+		if role == security.RoleClient {
+			s.emit(EventConnected, endpoint, "")
+		}
+		return nil
+	}
+	cfg.OnClosed = func(err error, attached bool) {
+		switch {
+		case attached:
+			_ = s.engine.DetachPipe(p)
+			s.emit(EventDisconnected, endpoint, "")
+		case err != nil && s.runCtx.Err() == nil:
+			// A handshake cut short by Close is not a failure to report.
+			s.logger().Debug("gozmq: handshake failed", "err", err, "role", role,
+				"socket-type", socketTypeName(s.socketType))
+			s.emit(classifyHandshakeEvent(err), endpoint, err.Error())
+		}
+		s.removeLink(link)
+	}
+	sess := session.New(cfg)
+	link = sessionLink{sess}
 	if !s.addLink(link) {
 		_ = conn.Close()
-		return
+		return nil, ErrSocketClosed
 	}
-
 	sess.Start()
-
-	s.connectWG.Add(1)
-	go func() {
-		defer s.connectWG.Done()
-		defer s.removeLink(link)
-		select {
-		case <-sess.Handshaked():
-		case <-s.runCtx.Done():
-			_ = sess.Stop()
-			return
-		}
-		if err := sess.HandshakeErr(); err != nil {
-			s.logger().Debug("gozmq: server handshake failed",
-				"err", err, "role", role, "socket-type", socketTypeName(s.socketType))
-			s.emit(classifyHandshakeEvent(err), remote, err.Error())
-			_ = sess.Stop()
-			return
-		}
-		s.emit(EventHandshakeSucceeded, remote, "")
-		// A pipe the engine refused or has detached needs no further
-		// cleanup: Stop closes the session's end, and a pipe holds no
-		// goroutine, so the engine's end is simply dropped.
-		if err := s.engine.AttachPipe(sess.Pipe()); err != nil {
-			_ = sess.Stop()
-			return
-		}
-		<-sess.Pipe().Closed()
-		_ = s.engine.DetachPipe(sess.Pipe())
-		s.emit(EventDisconnected, remote, "")
-		_ = sess.Stop()
-	}()
+	return sess, nil
 }
 
 // SendMsg enqueues m for transmission per the socket's pattern policy.

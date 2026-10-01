@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -189,13 +190,47 @@ func (m *fakeMech) NextHandshake(in []byte) ([]byte, bool, error) {
 }
 
 // --------------------------------------------------------------------------
+// tSession is a started Session plus the handshake outcome its callbacks
+// report, so tests can wait for the handshake and reach the engine pipe.
+// --------------------------------------------------------------------------
+
+type tSession struct {
+	*Session
+	handshaked chan struct{} // closed by OnReady, or by OnClosed if it never ran
+	pipe       *pipe.End
+	hsErr      error
+}
+
+func startTestSession(cfg Config) *tSession {
+	ts := &tSession{handshaked: make(chan struct{})}
+	cfg.OnReady = func(p *pipe.End) error {
+		ts.pipe = p
+		close(ts.handshaked)
+		return nil
+	}
+	cfg.OnClosed = func(err error, attached bool) {
+		if !attached {
+			ts.hsErr = err
+			close(ts.handshaked)
+		}
+	}
+	ts.Session = New(cfg)
+	ts.Start()
+	return ts
+}
+
+func (ts *tSession) Handshaked() <-chan struct{} { return ts.handshaked }
+func (ts *tSession) HandshakeErr() error         { return ts.hsErr }
+func (ts *tSession) Pipe() *pipe.End             { return ts.pipe }
+
+// --------------------------------------------------------------------------
 // startPair builds a client/server pair from two caller-supplied configs
 // (Conn and Mech must be set; Codec and Role are defaulted), starts both,
 // registers t.Cleanup to stop them, and waits for both handshakes.
 // startSessionPair is the common fakeConn shorthand.
 // --------------------------------------------------------------------------
 
-func startPair(t *testing.T, cfgA, cfgB Config) (sA, sB Session) {
+func startPair(t *testing.T, cfgA, cfgB Config) (sA, sB *tSession) {
 	t.Helper()
 	if cfgA.Codec == nil {
 		cfgA.Codec = fakeCodec{}
@@ -204,10 +239,8 @@ func startPair(t *testing.T, cfgA, cfgB Config) (sA, sB Session) {
 		cfgB.Codec = fakeCodec{}
 	}
 
-	sA = New(cfgA)
-	sB = New(cfgB)
-	sA.Start()
-	sB.Start()
+	sA = startTestSession(cfgA)
+	sB = startTestSession(cfgB)
 	t.Cleanup(func() {
 		_ = sA.Stop()
 		_ = sB.Stop()
@@ -218,7 +251,7 @@ func startPair(t *testing.T, cfgA, cfgB Config) (sA, sB Session) {
 	return sA, sB
 }
 
-func startSessionPair(t *testing.T, propsA, propsB map[string]string, hwm int) (sA, sB Session, connA, connB *fakeConn) {
+func startSessionPair(t *testing.T, propsA, propsB map[string]string, hwm int) (sA, sB *tSession, connA, connB *fakeConn) {
 	t.Helper()
 	connA, connB = newFakeConnPair()
 	sA, sB = startPair(t,
@@ -241,8 +274,8 @@ func TestSession_Handshake_AndRoundTrip(t *testing.T) {
 
 	// Verify the engine-facing pipe surfaces the peer's identity from
 	// metadata the session read through Mech.PeerMetadata after the handshake.
-	mechA := sA.(*sessionImpl).cfg.Mech.(*fakeMech)
-	mechB := sB.(*sessionImpl).cfg.Mech.(*fakeMech)
+	mechA := sA.cfg.Mech.(*fakeMech)
+	mechB := sB.cfg.Mech.(*fakeMech)
 	require.Positive(t, mechA.peerMetaCalls, "A PeerMetadata calls")
 	require.Positive(t, mechB.peerMetaCalls, "B PeerMetadata calls")
 	require.Equal(t, "B", string(sA.Pipe().PeerIdentity()), "A pipe peer identity")
@@ -341,14 +374,13 @@ func TestSession_StopBeforeHandshake(t *testing.T) {
 	connA, connB := newFakeConnPair()
 	defer connB.Close() // never read/written by us; just hold to keep alive
 
-	s := New(Config{
+	s := startTestSession(Config{
 		Conn:    connA,
 		Mech:    newFakeMech("NULL", false, nil),
 		Codec:   fakeCodec{},
 		SendHWM: 1,
 		RecvHWM: 1,
 	})
-	s.Start()
 
 	// Brief delay so the handshake goroutine reaches ReadFull on the
 	// greeting (it has already written its own greeting into connB's
@@ -371,33 +403,12 @@ func TestSession_StopBeforeHandshake(t *testing.T) {
 	// the handshake aborted.
 	waitClosed(t, s.Handshaked(), time.Second, "Handshaked not closed after Stop")
 	assert.Error(t, s.HandshakeErr(), "HandshakeErr = nil after Stop-before-handshake; want non-nil")
-	// Regression (writerExited once-guard): a session stopped during a
-	// hung handshake never spawns its writer, but WriterFlushed must
-	// still close promptly or linger drains would hang forever.
-	waitClosed(t, s.WriterFlushed(), time.Second, "WriterFlushed not closed after Stop-during-handshake")
+	// A session stopped during a hung handshake never reaches traffic,
+	// but Drain must still finish promptly or linger drains would hang.
+	waitClosed(t, s.Drain(), time.Second, "Drain not finished after Stop-during-handshake")
 }
 
-// TestSession_StopWithoutStart ensures the no-Start path is leak-free
-// and idempotent.
-func TestSession_StopWithoutStart(t *testing.T) {
-	connA, connB := newFakeConnPair()
-	defer connB.Close()
-
-	s := New(Config{
-		Conn:    connA,
-		Mech:    newFakeMech("NULL", false, nil),
-		Codec:   fakeCodec{},
-		SendHWM: 1,
-		RecvHWM: 1,
-	})
-	require.NoError(t, s.Stop(), "Stop without Start")
-	require.NoError(t, s.Stop(), "Stop second call without Start")
-	// Handshaked and WriterFlushed must close so observers don't hang.
-	waitClosed(t, s.Handshaked(), time.Second, "Handshaked not closed by Stop-without-Start")
-	waitClosed(t, s.WriterFlushed(), time.Second, "WriterFlushed not closed by Stop-without-Start")
-}
-
-func TestSession_CancelWriter_DoesNotCloseConnUntilStop(t *testing.T) {
+func TestSession_Drain_DoesNotCloseConnUntilStop(t *testing.T) {
 	sA, sB, connA, _ := startSessionPair(t,
 		map[string]string{"Identity": "A"},
 		map[string]string{"Identity": "B"},
@@ -409,12 +420,11 @@ func TestSession_CancelWriter_DoesNotCloseConnUntilStop(t *testing.T) {
 		require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte(fmt.Sprintf("linger-%d", i)))), "Send[%d]", i)
 	}
 
-	sA.CancelWriter()
-	waitClosed(t, sA.WriterFlushed(), 2*time.Second, "WriterFlushed did not fire after CancelWriter")
+	waitClosed(t, sA.Drain(), 2*time.Second, "Drain did not finish")
 
 	select {
 	case <-connA.Closed():
-		require.FailNow(t, "CancelWriter closed the conn before Stop")
+		require.FailNow(t, "Drain closed the conn before Stop")
 	case <-time.After(50 * time.Millisecond):
 	}
 
@@ -533,13 +543,13 @@ func waitClosed(t *testing.T, ch <-chan struct{}, timeout time.Duration, msg str
 	}
 }
 
-func waitHandshake(t *testing.T, s Session, label string) {
+func waitHandshake(t *testing.T, s *tSession, label string) {
 	t.Helper()
 	waitClosed(t, s.Handshaked(), 2*time.Second, label+": handshake did not complete within 2s")
 	require.NoError(t, s.HandshakeErr(), "%s: HandshakeErr", label)
 }
 
-func stopAsync(s Session) <-chan error {
+func stopAsync(s *tSession) <-chan error {
 	ch := make(chan error, 1)
 	go func() { ch <- s.Stop() }()
 	return ch
@@ -554,14 +564,13 @@ func TestSession_HandshakeErr_ProtocolViolation(t *testing.T) {
 	connA, connB := newFakeConnPair()
 	defer connB.Close()
 
-	sA := New(Config{
+	sA := startTestSession(Config{
 		Conn:    connA,
 		Mech:    newFakeMech("NULL", false, nil),
 		Codec:   fakeCodec{},
 		SendHWM: 1,
 		RecvHWM: 1,
 	})
-	sA.Start()
 	defer sA.Stop()
 
 	// Writer goroutine on B's side: drain whatever A sends, then send
@@ -616,8 +625,8 @@ func TestSession_Done_FiresOnNormalStop(t *testing.T) {
 
 // TestSession_Done_FiresOnReaderEOF covers a peer disconnecting mid-
 // traffic: the reader's ReadFrame returns EOF, runReader calls shutdown,
-// which cancels ctx and closes the conn; writer exits on pipe Recv
-// cancellation; wg drains; Done closes.
+// which cancels ctx and closes the conn; the writer exits on pipe Recv
+// cancellation; the last one out closes Done.
 func TestSession_Done_FiresOnReaderEOF(t *testing.T) {
 	sA, _, _, connB := startSessionPair(t, nil, nil, 1)
 
@@ -629,17 +638,15 @@ func TestSession_Done_FiresOnReaderEOF(t *testing.T) {
 }
 
 // TestSession_Done_FiresOnHandshakeFailure verifies Done closes even
-// when the session never reached the traffic phase (no reader/writer
-// goroutines were spawned).
+// when the session never reached the traffic phase.
 func TestSession_Done_FiresOnHandshakeFailure(t *testing.T) {
 	connA, connB := newFakeConnPair()
 	defer connB.Close()
 
-	sA := New(Config{
+	sA := startTestSession(Config{
 		Conn: connA, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{},
 		SendHWM: 1, RecvHWM: 1,
 	})
-	sA.Start()
 
 	// Feed garbage to trip handshake decode.
 	go func() {
@@ -651,12 +658,12 @@ func TestSession_Done_FiresOnHandshakeFailure(t *testing.T) {
 
 	waitClosed(t, sA.Handshaked(), 2*time.Second, "handshake did not settle")
 	require.Error(t, sA.HandshakeErr(), "expected HandshakeErr, got nil")
-	// Done fires on run() exit without Stop being called; no traffic-
-	// phase goroutines were spawned, so wg drains as soon as run returns.
+	// Done fires without Stop being called: both goroutines exit once
+	// the handshake fails.
 	waitClosed(t, sA.Done(), 2*time.Second, "Done did not fire after handshake failure")
-	// WriterFlushed must close too — no writer ever ran, but linger
-	// waiters cannot be allowed to hang on a failed handshake.
-	waitClosed(t, sA.WriterFlushed(), time.Second, "WriterFlushed not closed after handshake failure")
+	// Drain must finish too — linger waiters cannot be allowed to hang on
+	// a failed handshake.
+	waitClosed(t, sA.Drain(), time.Second, "Drain not finished after handshake failure")
 	// Stop still idempotent afterwards.
 	assert.NoError(t, sA.Stop(), "Stop after handshake failure")
 }
@@ -671,29 +678,27 @@ func TestSession_Done_FiresOnStopBeforeHandshake(t *testing.T) {
 	connA, connB := newFakeConnPair()
 	defer connB.Close()
 
-	s := New(Config{
+	s := startTestSession(Config{
 		Conn: connA, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{},
 		SendHWM: 1, RecvHWM: 1,
 	})
-	s.Start()
 	// Give the run goroutine a moment to reach the blocking greeting read.
 	time.Sleep(10 * time.Millisecond)
 	require.NoError(t, s.Stop(), "Stop")
 	waitClosed(t, s.Done(), 2*time.Second, "Done did not fire after Stop-before-handshake")
 }
 
-// TestSession_Done_FiresExactlyOnce: double-Stop must not panic (which
-// would indicate a double-close of s.stopped) and Done() must remain
+// TestSession_Done_FiresExactlyOnce: repeated Stop must not panic (which
+// would indicate a double-close of done) and Done() must remain
 // readable (closed channels stay closed; a second close would panic).
 func TestSession_Done_FiresExactlyOnce(t *testing.T) {
 	connA, connB := newFakeConnPair()
 	defer connB.Close()
 
-	s := New(Config{
+	s := startTestSession(Config{
 		Conn: connA, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{},
 		SendHWM: 1, RecvHWM: 1,
 	})
-	s.Start()
 	time.Sleep(10 * time.Millisecond)
 	require.NoError(t, s.Stop(), "first Stop")
 	require.NoError(t, s.Stop(), "second Stop")
@@ -701,15 +706,6 @@ func TestSession_Done_FiresExactlyOnce(t *testing.T) {
 	require.NoError(t, s.Stop(), "third Stop")
 	// Done still closed and drainable without panic.
 	waitClosed(t, s.Done(), time.Second, "Done not closed after multiple Stops")
-	// And a Stop-without-Start session: Done must still fire.
-	connC, connD := newFakeConnPair()
-	defer connD.Close()
-	s2 := New(Config{
-		Conn: connC, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{},
-		SendHWM: 1, RecvHWM: 1,
-	})
-	require.NoError(t, s2.Stop(), "Stop-without-Start")
-	waitClosed(t, s2.Done(), time.Second, "Done not closed after Stop-without-Start")
 }
 
 // --------------------------------------------------------------------------
@@ -773,7 +769,7 @@ func TestReader_MaxMessageSize_OverLimit(t *testing.T) {
 // startZmtpPair is startPair with the real ZMTP framing codec on both
 // ends, so the reader's scratch dst handling is exercised. The mechs
 // declare IdentityFraming so decoded frames alias the read buffer.
-func startZmtpPair(t *testing.T, hwm int) (sA, sB Session) {
+func startZmtpPair(t *testing.T, hwm int) (sA, sB *tSession) {
 	t.Helper()
 	connA, connB := newFakeConnPair()
 	return startPair(t,
@@ -855,9 +851,8 @@ func TestReader_SubscriptionCommands(t *testing.T) {
 				SubscriptionCommands: enabled},
 		)
 		ctx := testCtx(t, 2*time.Second)
-		a := sA.(*sessionImpl)
-		a.enqueueCommand("SUBSCRIBE", []byte("topic"))
-		a.enqueueCommand("CANCEL", []byte("topic"))
+		sA.enqueueCommand("SUBSCRIBE", []byte("topic"))
+		sA.enqueueCommand("CANCEL", []byte("topic"))
 		require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("data1"))))
 		require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("data2"))))
 

@@ -10,15 +10,15 @@ import (
 	"github.com/exergy-dev/gozmq/transport"
 )
 
-// buildSession is the factory the Reconnector (and the acceptLoop) call
-// to wrap a Conn in a Session with the mechanism and codec configured for
-// this Socket. An error means the security mechanism could not be
+// sessionConfig builds the session configuration for conn, with the
+// mechanism and codec configured for this Socket; startSession adds the
+// callbacks. An error means the security mechanism could not be
 // constructed (e.g. ephemeral CURVE keygen failure); the connection must
 // be torn down rather than proceeding with a weaker mechanism.
-func (s *Socket) buildSession(conn transport.Conn, role security.Role) (session.Session, error) {
+func (s *Socket) sessionConfig(conn transport.Conn, role security.Role) (session.Config, error) {
 	mech, err := s.newMechanism(role)
 	if err != nil {
-		return nil, err
+		return session.Config{}, err
 	}
 	// Key ZAP off the mechanism's handshake role, not the transport role: a
 	// PLAIN or CURVE server that Connects still authorizes its peer.
@@ -28,7 +28,7 @@ func (s *Socket) buildSession(conn transport.Conn, role security.Role) (session.
 		}
 	}
 	codec := zmtp.NewFrameCodec(s.cfg.maxMessageSize)
-	return session.New(session.Config{
+	return session.Config{
 		Conn:              conn,
 		Mech:              mech,
 		Codec:             codec,
@@ -42,7 +42,7 @@ func (s *Socket) buildSession(conn transport.Conn, role security.Role) (session.
 		// Only a publisher consumes its peers' subscriptions.
 		SubscriptionCommands: s.socketType == Pub || s.socketType == XPub,
 		Logger:               s.cfg.logger,
-	}), nil
+	}, nil
 }
 
 // zapConfigurable is implemented by mechanisms that take a ZAP handler; the

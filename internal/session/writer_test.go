@@ -114,7 +114,7 @@ func (c *writevConn) WriteBuffers(bufs *net.Buffers) (int64, error) {
 // calls Recv so the pipe doesn't stall.
 // --------------------------------------------------------------------------
 
-func newWriterTestPair(t *testing.T, sendHWM, recvHWM int) (sA, sB Session, ccA *countingConn) {
+func newWriterTestPair(t *testing.T, sendHWM, recvHWM int) (sA, sB *tSession, ccA *countingConn) {
 	t.Helper()
 	connA, connB := newFakeConnPair()
 	ccA = newCountingConn(connA)
@@ -127,7 +127,7 @@ func newWriterTestPair(t *testing.T, sendHWM, recvHWM int) (sA, sB Session, ccA 
 
 // newWritevTestPair is newWriterTestPair with a writev-emulating conn on
 // the A side, for tests that observe batch coalescing or gate the wire.
-func newWritevTestPair(t *testing.T, sendHWM, recvHWM int) (sA, sB Session, wcA *writevConn) {
+func newWritevTestPair(t *testing.T, sendHWM, recvHWM int) (sA, sB *tSession, wcA *writevConn) {
 	t.Helper()
 	connA, connB := newFakeConnPair()
 	wcA = newWritevConn(connA)
@@ -172,12 +172,13 @@ func (c *consumeWritevConn) WriteBuffers(bufs *net.Buffers) (int64, error) {
 
 func TestWriter_BatchRetainsBufferCapacityAcrossFlushes(t *testing.T) {
 	connA, _ := newFakeConnPair()
+	// Never started: the test drives writeBatchFrom directly.
 	s := New(Config{
 		Conn:  &consumeWritevConn{fakeConn: connA},
 		Mech:  newFakeMech("NULL", false, nil),
 		Codec: fakeCodec{},
-	}).(*sessionImpl)
-	t.Cleanup(func() { _ = s.Stop() })
+	})
+	t.Cleanup(func() { _ = connA.Close() })
 	sp, ep := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
 	s.sessionPipe = sp
 	_ = ep
@@ -427,7 +428,7 @@ func TestWriter_BatchLingerDrain(t *testing.T) {
 	ccA.resetWriteCounters()
 
 	// Enqueue messages WITHOUT having B drain: the writer runs normally
-	// and sends them. We want them on the wire before the CancelWriter.
+	// and sends them. We want them on the wire before the Drain.
 	const N = 10
 	ctx := testCtx(t, 2*time.Second)
 	for i := 0; i < N; i++ {
@@ -442,24 +443,20 @@ func TestWriter_BatchLingerDrain(t *testing.T) {
 		assert.Equal(t, want, string(m.Bytes()), "got[%d]", i)
 	}
 
-	// Now exercise the CancelWriter linger-drain path: push a few more
-	// messages, trigger CancelWriter; drain path should flush them.
-	if cw, ok := sA.(interface{ CancelWriter() }); ok {
-		for i := 0; i < 3; i++ {
-			require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte(fmt.Sprintf("linger-%d", i)))), "linger Send[%d]", i)
-		}
-		cw.CancelWriter()
-		// Expect WriterFlushed to fire after drain completes.
-		waitClosed(t, sA.WriterFlushed(), 2*time.Second, "WriterFlushed did not close after CancelWriter")
-		// The linger messages should have been delivered to B.
-		for i := 0; i < 3; i++ {
-			recvCtx, rc := context.WithTimeout(context.Background(), time.Second)
-			m, err := sB.Pipe().Recv(recvCtx)
-			rc()
-			if assert.NoError(t, err, "linger Recv[%d]", i) {
-				want := fmt.Sprintf("linger-%d", i)
-				assert.Equal(t, want, string(m.Bytes()), "linger got[%d]", i)
-			}
+	// Now exercise the Drain linger path: push a few more messages, then
+	// Drain; the drain path should flush them.
+	for i := 0; i < 3; i++ {
+		require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte(fmt.Sprintf("linger-%d", i)))), "linger Send[%d]", i)
+	}
+	waitClosed(t, sA.Drain(), 2*time.Second, "Drain did not finish")
+	// The linger messages should have been delivered to B.
+	for i := 0; i < 3; i++ {
+		recvCtx, rc := context.WithTimeout(context.Background(), time.Second)
+		m, err := sB.Pipe().Recv(recvCtx)
+		rc()
+		if assert.NoError(t, err, "linger Recv[%d]", i) {
+			want := fmt.Sprintf("linger-%d", i)
+			assert.Equal(t, want, string(m.Bytes()), "linger got[%d]", i)
 		}
 	}
 }
@@ -522,7 +519,7 @@ func TestWriter_MultipartBatched(t *testing.T) {
 // --------------------------------------------------------------------------
 // TestReader_HandlesPingWhileWriterBlocked: regression for the
 // reader-writes-PONG-inline deadlock. With the writer goroutine wedged
-// in a conn write (peer not draining) and holding writeMu, an incoming
+// in a conn write (peer not draining), an incoming
 // PING must NOT stall the reader — the PONG is routed to the writer via
 // the command channel and the reader keeps reading.
 // --------------------------------------------------------------------------
@@ -530,18 +527,17 @@ func TestWriter_MultipartBatched(t *testing.T) {
 func TestReader_HandlesPingWhileWriterBlocked(t *testing.T) {
 	connA, connB := newFakeConnPair()
 	wcA := newWritevConn(connA)
-	sA := New(Config{
+	sA := startTestSession(Config{
 		Conn: wcA, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{},
 		SendHWM: 8, RecvHWM: 8,
 	})
-	sA.Start()
 	t.Cleanup(func() { _ = sA.Stop() })
 	peer := newManualPeer(t, connB, nil)
 	waitHandshake(t, sA, "A")
 	frames := peer.startReadLoop()
 
 	// Wedge the writer: gate traffic-phase writevs, then send a user
-	// message so the writer parks inside WriteBuffers holding writeMu.
+	// message so the writer parks inside WriteBuffers.
 	gate := make(chan struct{})
 	wcA.setGate(gate)
 	ctx := testCtx(t, 2*time.Second)
@@ -550,7 +546,7 @@ func TestReader_HandlesPingWhileWriterBlocked(t *testing.T) {
 		2*time.Second, time.Millisecond, "writer did not park in the gated writev")
 
 	// A PING arriving now must not block the reader (pre-fix, the inline
-	// PONG write would deadlock on writeMu) ...
+	// PONG write would wait behind the wedged writer) ...
 	peer.sendPing(0, []byte("ctx1"))
 	// ... proven by data sent AFTER the PING still flowing to the engine.
 	peer.sendData([]byte("after-ping"))
@@ -594,8 +590,7 @@ func TestWriter_LingerDrainUnboundedQueue(t *testing.T) {
 			for i := 0; i < N; i++ {
 				require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("x"))), "Send[%d]", i)
 			}
-			sA.CancelWriter()
-			waitClosed(t, sA.WriterFlushed(), 5*time.Second, "WriterFlushed did not close after CancelWriter")
+			waitClosed(t, sA.Drain(), 5*time.Second, "Drain did not finish")
 			require.Equal(t, N, <-got, "messages delivered by the linger drain")
 		})
 	}

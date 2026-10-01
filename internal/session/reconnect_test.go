@@ -12,85 +12,49 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/transport"
 )
 
 // --------------------------------------------------------------------------
 // Reconnect test doubles. We don't exercise the real Session machinery
-// here — the goal is to verify Reconnector's state flow (dial → handshake
-// → attach → detach → backoff → reconnect) in isolation. Interop tests
-// exercise reconnection end-to-end against a real peer.
+// here — the goal is to verify Reconnector's state flow (dial → start →
+// run ends → backoff → reconnect) in isolation. Interop tests exercise
+// reconnection end-to-end against a real peer.
 // --------------------------------------------------------------------------
 
-// stubSession is an Session stub whose lifecycle is driven by test
-// code rather than a real ZMTP FSM.
-type stubSession struct {
-	handshaked chan struct{}
-	done       chan struct{}
-	doneOnce   sync.Once
-	hsErr      error
-	enginePipe *pipe.End
-	sessionEnd *pipe.End // pipe end we close to simulate peer EOF
-	stopOnce   sync.Once
+// stubRunner is a Runner whose lifecycle is driven by test code: end()
+// simulates the connection ending on its own, Stop a local teardown.
+type stubRunner struct {
+	attached bool
+	done     chan struct{}
+	once     sync.Once
+	stops    atomic.Int32
+	stopErr  error
 }
 
-func newStubSession(hsErr error) *stubSession {
-	s := &stubSession{
-		handshaked: make(chan struct{}),
-		done:       make(chan struct{}),
-		hsErr:      hsErr,
-	}
-	if hsErr == nil {
-		a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
-		s.enginePipe = a
-		s.sessionEnd = b
-	}
-	return s
+func newStubRunner(attached bool) *stubRunner {
+	return &stubRunner{attached: attached, done: make(chan struct{})}
 }
 
-// closeDone closes done exactly once. Called by Stop AND by the pipe-
-// watcher goroutine launched in Start — so externally closing the
-// enginePipe (to simulate peer EOF) fires Done() the same way the real
-// sessionImpl does on reader/writer teardown.
-func (s *stubSession) closeDone() {
-	s.doneOnce.Do(func() { close(s.done) })
+func (r *stubRunner) end()                  { r.once.Do(func() { close(r.done) }) }
+func (r *stubRunner) Done() <-chan struct{} { return r.done }
+func (r *stubRunner) Attached() bool        { return r.attached }
+func (r *stubRunner) Stop() error {
+	r.stops.Add(1)
+	r.end()
+	return r.stopErr
 }
 
-func (s *stubSession) Start() {
-	// Immediately signal handshake outcome.
-	close(s.handshaked)
-	// Mirror the real session: if the pipe closes externally (simulating
-	// peer disconnect), propagate to Done(). On handshake failure there
-	// is no pipe, so we don't launch the watcher.
-	if s.hsErr == nil && s.enginePipe != nil {
-		go func() {
-			<-s.enginePipe.Closed()
-			s.closeDone()
-		}()
-	}
+// endedRunner returns a stub that has already ended, unattached — a failed
+// handshake or a refused attach, as the Reconnector sees them.
+func endedRunner() *stubRunner {
+	r := newStubRunner(false)
+	r.end()
+	return r
 }
-func (s *stubSession) Stop() error {
-	s.stopOnce.Do(func() {
-		if s.enginePipe != nil {
-			_ = s.enginePipe.Close()
-		}
-		if s.sessionEnd != nil {
-			_ = s.sessionEnd.Close()
-		}
-		s.closeDone()
-	})
-	return nil
-}
-func (s *stubSession) Handshaked() <-chan struct{}    { return s.handshaked }
-func (s *stubSession) HandshakeErr() error            { return s.hsErr }
-func (s *stubSession) Pipe() *pipe.End                { return s.enginePipe }
-func (s *stubSession) Done() <-chan struct{}          { return s.done }
-func (s *stubSession) WriterFlushed() <-chan struct{} { return s.done } // stub: same as Done
-func (s *stubSession) CancelWriter()                  {}                // stub: no-op
 
 // stubConn is a no-op transport.Conn: Reconnector never touches its data
-// methods; it just passes the value to NewSession.
+// methods; it just passes the value to Start.
 type stubConn struct{}
 
 func (stubConn) Read([]byte) (int, error)    { return 0, errors.New("stub") }
@@ -105,10 +69,9 @@ func (stubConn) SetDeadline(time.Time) error { return nil }
 // --------------------------------------------------------------------------
 
 // TestReconnector_DialRetriesThenSucceeds exercises the full
-// dial-fails-then-succeeds-then-detaches-then-reconnects cycle. We fail
-// the first two dials, succeed the third, close the pipe to simulate a
-// disconnect, then verify the loop reconnects (fourth dial, second
-// attach).
+// dial-fails-then-succeeds-then-disconnects-then-reconnects cycle. We
+// fail the first two dials, succeed the third, end that run to simulate
+// a disconnect, then verify the loop reconnects (fourth dial, second run).
 func TestReconnector_DialRetriesThenSucceeds(t *testing.T) {
 	var (
 		dialN     atomic.Int32
@@ -116,13 +79,7 @@ func TestReconnector_DialRetriesThenSucceeds(t *testing.T) {
 		dialMu    sync.Mutex
 	)
 	dialErr := errors.New("connection refused")
-
-	// Track the sessions we hand out so the test can trigger a detach.
-	var sessMu sync.Mutex
-	var sessions []*stubSession
-
-	var attaches, detaches atomic.Int32
-	attached := make(chan *pipe.End, 4)
+	started := make(chan *stubRunner, 4)
 
 	cfg := ReconnectConfig{
 		InitialBackoff: 5 * time.Millisecond,
@@ -132,43 +89,29 @@ func TestReconnector_DialRetriesThenSucceeds(t *testing.T) {
 			dialMu.Lock()
 			dialTimes = append(dialTimes, time.Now())
 			dialMu.Unlock()
-			n := dialN.Add(1)
-			if n <= 2 {
+			if dialN.Add(1) <= 2 {
 				return nil, dialErr
 			}
 			return stubConn{}, nil
 		},
-		NewSession: func(c transport.Conn) (Session, error) {
-			s := newStubSession(nil)
-			sessMu.Lock()
-			sessions = append(sessions, s)
-			sessMu.Unlock()
-			return s, nil
-		},
-		OnAttach: func(p *pipe.End) error {
-			attaches.Add(1)
-			select {
-			case attached <- p:
-			default:
-			}
-			return nil
-		},
-		OnDetach: func(p *pipe.End) {
-			detaches.Add(1)
+		Start: func(transport.Conn) (Runner, error) {
+			r := newStubRunner(true)
+			started <- r
+			return r, nil
 		},
 	}
 
 	r := StartReconnector(context.Background(), cfg)
 	defer r.Stop()
 
-	// Wait for the first successful attach (after two dial failures).
+	// Wait for the first run (after two dial failures).
+	var first *stubRunner
 	select {
-	case <-attached:
+	case first = <-started:
 	case <-time.After(2 * time.Second):
-		require.FailNow(t, "no attach after 2s", "dials=%d", dialN.Load())
+		require.FailNow(t, "no run after 2s", "dials=%d", dialN.Load())
 	}
-	require.Equal(t, int32(3), dialN.Load(), "expected 3 dials before first attach")
-	assert.Equal(t, int32(1), attaches.Load(), "attaches")
+	require.Equal(t, int32(3), dialN.Load(), "expected 3 dials before first run")
 
 	// Verify backoff grew: dial2 should happen ≥ 5ms after dial1,
 	// dial3 ≥ 10ms after dial2.
@@ -183,21 +126,14 @@ func TestReconnector_DialRetriesThenSucceeds(t *testing.T) {
 	assert.GreaterOrEqual(t, gap2, 8*time.Millisecond, "gap2")
 	assert.Greater(t, gap2, gap1/2, "backoff did not grow: gap1=%v, gap2=%v", gap1, gap2)
 
-	// Simulate peer disconnect: close the session's engine-side pipe.
-	sessMu.Lock()
-	first := sessions[0]
-	sessMu.Unlock()
-	_ = first.enginePipe.Close()
-
-	// Expect detach, then a fresh dial, then a second attach.
+	// Simulate peer disconnect; expect a fresh dial and a second run.
+	first.end()
 	select {
-	case <-attached:
+	case <-started:
 	case <-time.After(2 * time.Second):
-		require.FailNow(t, "no reconnect-attach after 2s",
-			"dials=%d attaches=%d detaches=%d", dialN.Load(), attaches.Load(), detaches.Load())
+		require.FailNow(t, "no reconnect after 2s", "dials=%d", dialN.Load())
 	}
-	assert.Equal(t, int32(2), attaches.Load(), "attaches")
-	assert.GreaterOrEqual(t, detaches.Load(), int32(1), "detaches")
+	assert.Equal(t, int32(4), dialN.Load(), "dials")
 }
 
 // TestReconnector_ContextCancellationStopsLoop verifies that an external
@@ -217,7 +153,7 @@ func TestReconnector_ContextCancellationStopsLoop(t *testing.T) {
 				return nil, errors.New("still refused")
 			}
 		},
-		NewSession: func(c transport.Conn) (Session, error) { return newStubSession(nil), nil },
+		Start: func(transport.Conn) (Runner, error) { return newStubRunner(true), nil },
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -235,9 +171,7 @@ func TestReconnector_ContextCancellationStopsLoop(t *testing.T) {
 	go func() { stopped <- r.Stop() }()
 	select {
 	case err := <-stopped:
-		if err != nil {
-			assert.ErrorIs(t, err, context.Canceled)
-		}
+		require.NoError(t, err)
 	case <-time.After(time.Second):
 		require.FailNow(t, "Stop did not return within 1s after ctx cancel")
 	}
@@ -252,7 +186,7 @@ func TestReconnector_StopWakesSleepingBackoff(t *testing.T) {
 		Dial: func(ctx context.Context) (transport.Conn, error) {
 			return nil, errors.New("always refused")
 		},
-		NewSession: func(c transport.Conn) (Session, error) { return newStubSession(nil), nil },
+		Start: func(transport.Conn) (Runner, error) { return newStubRunner(true), nil },
 	}
 
 	r := StartReconnector(context.Background(), cfg)
@@ -267,69 +201,39 @@ func TestReconnector_StopWakesSleepingBackoff(t *testing.T) {
 	assert.LessOrEqual(t, elapsed, time.Second, "Stop expected prompt wake from 10s backoff")
 }
 
-// TestReconnector_HandshakeFailureTriggersBackoff: a session whose
-// handshake reports an error is torn down, the backoff schedule advances
-// (rather than resets), and another dial happens.
-func TestReconnector_HandshakeFailureTriggersBackoff(t *testing.T) {
-	var attempts atomic.Int32
-	hsErr := errors.New("bad greeting")
-
-	done := make(chan struct{})
-	var doneOnce sync.Once
-
+// TestReconnector_StopStopsLiveRunner: Stop tears down the live run and
+// returns its Stop error.
+func TestReconnector_StopStopsLiveRunner(t *testing.T) {
+	run := newStubRunner(true)
+	run.stopErr = errors.New("close failed")
+	started := make(chan struct{})
 	cfg := ReconnectConfig{
-		InitialBackoff: 5 * time.Millisecond,
-		MaxBackoff:     20 * time.Millisecond,
-		JitterFraction: 0,
-		Dial: func(ctx context.Context) (transport.Conn, error) {
-			n := attempts.Add(1)
-			if n >= 4 {
-				doneOnce.Do(func() { close(done) })
-				// After third handshake-failure retry, return ctx-err
-				// to make the loop wait forever on next backoff; Stop
-				// will handle teardown.
-				<-ctx.Done()
-				return nil, ctx.Err()
-			}
-			return stubConn{}, nil
-		},
-		NewSession: func(c transport.Conn) (Session, error) { return newStubSession(hsErr), nil },
-		OnAttach: func(_ *pipe.End) error {
-			assert.Fail(t, "OnAttach should not fire on handshake failure")
-			return nil
+		Dial: func(context.Context) (transport.Conn, error) { return stubConn{}, nil },
+		Start: func(transport.Conn) (Runner, error) {
+			close(started)
+			return run, nil
 		},
 	}
-
 	r := StartReconnector(context.Background(), cfg)
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		require.FailNow(t, "did not see 4 dial attempts", "got %d", attempts.Load())
-	}
-	_ = r.Stop()
+	waitClosed(t, started, time.Second, "no run started")
+	require.ErrorIs(t, r.Stop(), run.stopErr)
+	require.Equal(t, int32(1), run.stops.Load(), "live run not stopped exactly once")
 }
 
-// TestReconnector_AttachFailureStopsSession: an OnAttach error (the engine
-// refused the pipe) stops that session without OnDetach, and counts as a
-// failed attempt: the attempt counter keeps advancing across redials
-// instead of resetting as it does after a successful attach.
-func TestReconnector_AttachFailureStopsSession(t *testing.T) {
-	sessions := make(chan *stubSession, 1)
+// TestReconnector_UnattachedRunAdvancesBackoff: a run that ends without
+// attaching — a failed handshake, or a pipe the engine refused — counts
+// as a failed attempt: the loop redials, and the attempt counter keeps
+// advancing instead of resetting as it does after an attached run.
+func TestReconnector_UnattachedRunAdvancesBackoff(t *testing.T) {
+	var starts atomic.Int32
 	retries := make(chan int, 16)
 	cfg := ReconnectConfig{
 		InitialBackoff: time.Millisecond,
 		Dial:           func(ctx context.Context) (transport.Conn, error) { return stubConn{}, nil },
-		NewSession: func(c transport.Conn) (Session, error) {
-			s := newStubSession(nil)
-			select {
-			case sessions <- s:
-			default:
-			}
-			return s, nil
+		Start: func(transport.Conn) (Runner, error) {
+			starts.Add(1)
+			return endedRunner(), nil
 		},
-		OnAttach: func(*pipe.End) error { return errors.New("refused") },
-		OnDetach: func(*pipe.End) { assert.Fail(t, "OnDetach after a refused attach") },
 		OnRetry: func(attempt int, _ time.Duration) {
 			select {
 			case retries <- attempt:
@@ -340,14 +244,54 @@ func TestReconnector_AttachFailureStopsSession(t *testing.T) {
 	r := StartReconnector(context.Background(), cfg)
 	defer r.Stop()
 
-	first := <-sessions
-	waitClosed(t, first.done, time.Second, "refused session was not stopped")
 	for want := 1; want <= 3; want++ {
 		select {
 		case got := <-retries:
-			require.Equal(t, want, got, "attempt counter reset by a refused attach")
+			require.Equal(t, want, got, "attempt counter reset by an unattached run")
 		case <-time.After(time.Second):
-			require.FailNow(t, "no retry after refused attach", "want attempt %d", want)
+			require.FailNow(t, "no retry after unattached run", "want attempt %d", want)
+		}
+	}
+	require.GreaterOrEqual(t, starts.Load(), int32(3), "loop did not redial")
+}
+
+// TestReconnector_AttachedRunResetsBackoff: after an attached run ends,
+// the next retry is attempt 1 at the initial backoff again.
+func TestReconnector_AttachedRunResetsBackoff(t *testing.T) {
+	var starts atomic.Int32
+	type retry struct {
+		attempt int
+		backoff time.Duration
+	}
+	retries := make(chan retry, 16)
+	cfg := ReconnectConfig{
+		InitialBackoff: time.Millisecond,
+		Dial:           func(ctx context.Context) (transport.Conn, error) { return stubConn{}, nil },
+		Start: func(transport.Conn) (Runner, error) {
+			// Two failed runs, then one that attached, then failures.
+			if starts.Add(1) == 3 {
+				r := newStubRunner(true)
+				r.end()
+				return r, nil
+			}
+			return endedRunner(), nil
+		},
+		OnRetry: func(attempt int, backoff time.Duration) {
+			select {
+			case retries <- retry{attempt, backoff}:
+			default:
+			}
+		},
+	}
+	r := StartReconnector(context.Background(), cfg)
+	defer r.Stop()
+
+	for _, want := range []retry{{1, time.Millisecond}, {2, 2 * time.Millisecond}, {1, time.Millisecond}} {
+		select {
+		case got := <-retries:
+			require.Equal(t, want, got)
+		case <-time.After(time.Second):
+			require.FailNow(t, "no retry", "want %+v", want)
 		}
 	}
 }
@@ -369,10 +313,9 @@ func TestReconnector_QuiesceDuringDialBackoff(t *testing.T) {
 			}
 			return nil, errors.New("refused")
 		},
-		NewSession: func(c transport.Conn) (Session, error) { return newStubSession(nil), nil },
-		OnAttach: func(_ *pipe.End) error {
-			assert.Fail(t, "OnAttach must not fire after Quiesce")
-			return nil
+		Start: func(transport.Conn) (Runner, error) {
+			assert.Fail(t, "Start must not run after Quiesce")
+			return endedRunner(), nil
 		},
 	}
 

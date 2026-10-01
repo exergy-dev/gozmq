@@ -84,7 +84,7 @@ func TestValidateSocketTypeCompatibility(t *testing.T) {
 func TestSession_HandshakeRejectsIncompatibleSocketTypes(t *testing.T) {
 	connA, connB := newFakeConnPair()
 
-	sA := New(Config{
+	sA := startTestSession(Config{
 		Conn: connA,
 		Mech: newFakeMech("NULL", false, map[string]string{
 			"Socket-Type": "REQ",
@@ -94,7 +94,7 @@ func TestSession_HandshakeRejectsIncompatibleSocketTypes(t *testing.T) {
 		SendHWM: 1,
 		RecvHWM: 1,
 	})
-	sB := New(Config{
+	sB := startTestSession(Config{
 		Conn: connB,
 		Mech: newFakeMech("NULL", true, map[string]string{
 			"Socket-Type": "REQ",
@@ -105,8 +105,6 @@ func TestSession_HandshakeRejectsIncompatibleSocketTypes(t *testing.T) {
 		RecvHWM: 1,
 	})
 
-	sA.Start()
-	sB.Start()
 	defer func() {
 		_ = sA.Stop()
 		_ = sB.Stop()
@@ -115,8 +113,8 @@ func TestSession_HandshakeRejectsIncompatibleSocketTypes(t *testing.T) {
 	waitHandshakeFailure(t, sA, "A")
 	waitHandshakeFailure(t, sB, "B")
 
-	mechA := sA.(*sessionImpl).cfg.Mech.(*fakeMech)
-	mechB := sB.(*sessionImpl).cfg.Mech.(*fakeMech)
+	mechA := sA.cfg.Mech.(*fakeMech)
+	mechB := sB.cfg.Mech.(*fakeMech)
 	require.Positive(t, mechA.peerMetaCalls, "A PeerMetadata calls")
 	require.Positive(t, mechB.peerMetaCalls, "B PeerMetadata calls")
 	require.Equal(t, "REQ", mechA.PeerMetadata()["Socket-Type"], "A peer socket type")
@@ -125,7 +123,7 @@ func TestSession_HandshakeRejectsIncompatibleSocketTypes(t *testing.T) {
 	require.Nil(t, sB.Pipe(), "B Pipe() = non-nil after handshake rejection, want nil")
 }
 
-func waitHandshakeFailure(t *testing.T, s Session, label string) {
+func waitHandshakeFailure(t *testing.T, s *tSession, label string) {
 	t.Helper()
 	waitClosed(t, s.Handshaked(), 2*time.Second, label+": handshake did not complete within 2s")
 	err := s.HandshakeErr()

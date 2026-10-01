@@ -11,9 +11,9 @@ import (
 //
 // The two-phase drain mirrors CloseCtx's design §6.4 sequence:
 //   - beginDrain signals "no more inbound; flush what's queued, keep the
-//     conn alive" (session: CancelWriter; inproc/stream: nothing to do).
-//   - drained fires when the outbound flush is complete (session:
-//     WriterFlushed; inproc: the peer received everything we sent;
+//     conn alive" (session: Drain; inproc/stream: nothing to do).
+//   - drained fires when the outbound flush is complete (session: Drain's
+//     channel; inproc: the peer received everything we sent;
 //     stream: never linger-drained, so a pre-closed channel).
 //   - stop is the hard teardown run after the drain (session: Stop;
 //     inproc: close and detach both sides; stream: adapter.Close).
@@ -32,12 +32,12 @@ var alreadyClosed = func() chan struct{} {
 	return c
 }()
 
-// sessionLink wraps an session.Session (server-accepted, or a reconnector's
-// current client session collected at close time).
-type sessionLink struct{ s session.Session }
+// sessionLink wraps a session (server-accepted or a reconnector's client
+// session), registered at start and removed by its OnClosed.
+type sessionLink struct{ s *session.Session }
 
-func (l sessionLink) beginDrain()              { l.s.CancelWriter() }
-func (l sessionLink) drained() <-chan struct{} { return l.s.WriterFlushed() }
+func (l sessionLink) beginDrain()              { l.s.Drain() }
+func (l sessionLink) drained() <-chan struct{} { return l.s.Drain() }
 func (l sessionLink) stop() error              { return l.s.Stop() }
 
 // streamLink wraps a raw-bytes STREAM adapter. STREAM is not linger-drained

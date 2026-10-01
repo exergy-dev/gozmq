@@ -23,7 +23,7 @@ import (
 //  1. Quiesce reconnectors — stop re-dialing, but KEEP current sessions
 //     alive so their outbound queues can drain to the wire.
 //  2. Close listeners — no new accepts.
-//  3. Collect every live session pipe (server-accept and client-reconnect).
+//  3. Collect every live link (sessions, server-accept and client alike).
 //  4. Close each engine-facing pipe — signals session writer goroutines
 //     to drain their channel and flush to conn, then exit.
 //  5. Wait up to cfg.linger for every session's Done() to fire — writer
@@ -85,21 +85,13 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 	}
 	s.ctx.inproc.unbindAll(s)
 
-	// 3. Add each reconnector's current client session as a link (client
-	// sessions are owned by their reconnector, not the links slice).
-	for _, entry := range reconnectors {
-		if sess := entry.rc.CurrentSession(); sess != nil {
-			links = append(links, sessionLink{sess})
-		}
-	}
-
-	// 4–5. LINGER drain (design §6.4):
+	// 3–5. LINGER drain (design §6.4); links include client sessions:
 	//
 	//   engine.Close()  → no new engine.Sends enqueue messages
 	//   beginDrain()    → session writers drain queued messages to conn and
 	//                     exit (conn stays open); inproc/stream: no-op
 	//   drained()       → wait up to linger for each link's flush to finish
-	//                     (session WriterFlushed; inproc: peer received
+	//                     (session Drain; inproc: peer received
 	//                     everything; stream: immediate)
 	//   runCancel()     → cascades into reconnector ctx → loop exits
 	//   stop()          → conn.Close / pipe.Close → readers exit, Done fires
@@ -110,7 +102,7 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 	//
 	// CRUCIAL: runCancel MUST NOT fire before the drain finishes. The
 	// Reconnector's ctx derives from s.runCtx, and when it cancels, the loop's
-	// `<-r.ctx.Done()` branch calls sess.Stop() — which closes the conn
+	// `<-r.ctx.Done()` branch stops its session — which closes the conn
 	// and aborts the writer mid-drain. Holding runCancel until after the
 	// drain keeps the reconnector loop parked until the writer finishes.
 	_ = s.engine.Close()
@@ -134,8 +126,7 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 		addErr(l.stop())
 	}
 
-	// 7. Wait on bookkeeping goroutines (accept loops, server-side
-	// attach watchers in startSession).
+	// 7. Wait on bookkeeping goroutines (accept loops, pipe watchers).
 	s.acceptWG.Wait()
 	s.connectWG.Wait()
 

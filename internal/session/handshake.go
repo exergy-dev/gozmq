@@ -33,88 +33,67 @@ const (
 // hundred bytes.
 const handshakeMaxFrame = 64 << 10
 
-// doHandshake drives greeting + security handshake under HandshakeTimeout.
-// On any failure it returns an error wrapping zmqerr.ErrHandshakeTimeout
-// (for timeouts) or the underlying cause; callers stash the error and
-// close handshaked.
-func (s *sessionImpl) doHandshake() error {
-	// Apply the deadline if configured. We clear the deadline once the
-	// handshake completes so traffic-phase reads/writes block forever
-	// (the heartbeat path manages its own timeout).
+// handshake drives greeting + security handshake on the reader goroutine
+// under HandshakeTimeout, queueing outbound bytes on hsOut for the writer.
+// On failure it returns an error wrapping zmqerr.ErrHandshakeTimeout (for
+// timeouts) or the underlying cause, preferring the writer's error when a
+// write failed, since the read error that follows is only its echo.
+func (s *Session) handshake() error {
+	err := s.runHandshake()
+	if err != nil {
+		if werr := s.hsWriteErr.Load(); werr != nil {
+			err = fmt.Errorf("gozmq/session: write handshake: %w", *werr)
+		}
+		// net.Error timeouts (the SetDeadline path) report Timeout()=true.
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			err = fmt.Errorf("%w: %w", zmqerr.ErrHandshakeTimeout, err)
+		}
+	}
+	return err
+}
+
+func (s *Session) runHandshake() error {
 	if s.cfg.HandshakeTimeout > 0 {
 		deadline := time.Now().Add(s.cfg.HandshakeTimeout)
 		if err := s.cfg.Conn.SetDeadline(deadline); err != nil {
 			return fmt.Errorf("gozmq/session: set handshake deadline: %w", err)
 		}
-		defer func() {
-			// Reset to no-deadline. If this fails the caller is about
-			// to bail anyway; ignore.
-			_ = s.cfg.Conn.SetDeadline(time.Time{})
-		}()
 	}
-
 	if err := s.exchangeGreeting(); err != nil {
-		return s.classifyHandshakeErr(err)
+		return err
 	}
-
 	if err := s.runSecurityHandshake(); err != nil {
-		return s.classifyHandshakeErr(err)
+		return err
 	}
-
 	if err := s.finalizePeerMetadata(); err != nil {
-		return s.classifyHandshakeErr(err)
+		return err
 	}
-
+	// Traffic-phase I/O blocks indefinitely (the heartbeat polices
+	// liveness). A failed handshake keeps the deadline so the writer's
+	// last frames, such as an ERROR command, cannot hang.
+	if s.cfg.HandshakeTimeout > 0 {
+		_ = s.cfg.Conn.SetDeadline(time.Time{})
+	}
 	return nil
 }
 
-// classifyHandshakeErr promotes timeouts to ErrHandshakeTimeout while
-// preserving the underlying cause for diagnostics.
-func (s *sessionImpl) classifyHandshakeErr(err error) error {
-	if err == nil {
-		return nil
-	}
-	// net.Error timeouts (the SetDeadline path) report Timeout()=true.
-	var ne net.Error
-	if errors.As(err, &ne) && ne.Timeout() {
-		return fmt.Errorf("%w: %w", zmqerr.ErrHandshakeTimeout, err)
-	}
-	return err
-}
-
-// exchangeGreeting writes our greeting, reads the peer's, validates it,
+// exchangeGreeting queues our greeting, reads the peer's, validates it,
 // and records peer-side capabilities (heartbeat support, mechanism name
-// match) on the sessionImpl.
-//
-// The write happens concurrently with the read because some transports
-// (notably synchronous in-memory ones used in tests, and in principle
-// any transport whose send buffer is smaller than 64 bytes) would
-// otherwise deadlock with both peers blocked in Write before either
-// reaches Read. Real net.Conn implementations have OS buffers that
-// absorb 64 bytes trivially, so the concurrency is harmless there.
-func (s *sessionImpl) exchangeGreeting() error {
+// match) on the Session.
+func (s *Session) exchangeGreeting() error {
 	out, err := encodeGreeting(s.cfg.Mech.Name(), s.cfg.Mech.AsServer())
 	if err != nil {
 		return err
 	}
-	writeErrCh := make(chan error, 1)
-	go func() {
-		_, werr := s.cfg.Conn.Write(out)
-		writeErrCh <- werr
-	}()
+	s.hsOut <- out
 
 	var buf [greetingSize]byte
 	if _, err := io.ReadFull(s.reader, buf[:]); err != nil {
-		// Drain the write goroutine before returning so we don't leak
-		// it on a read failure.
-		<-writeErrCh
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return fmt.Errorf("%w: greeting truncated: %w", zmqerr.ErrMalformedFrame, err)
 		}
 		return fmt.Errorf("gozmq/session: read greeting: %w", err)
-	}
-	if werr := <-writeErrCh; werr != nil {
-		return fmt.Errorf("gozmq/session: write greeting: %w", werr)
 	}
 
 	mech, peerMinor, err := decodeGreeting(buf[:])
@@ -138,66 +117,39 @@ func (s *sessionImpl) exchangeGreeting() error {
 }
 
 // runSecurityHandshake drives the lock-step NextHandshake loop. Each
-// iteration: hand the previous inbound to the mechanism, write its
-// returned outbound (if any), then read the peer's next message (unless
-// the mechanism declared the handshake done).
-//
-// To avoid Write-vs-Write deadlock on synchronous transports (where
-// both peers are about to write before either is reading) we issue the
-// outbound write in a goroutine and overlap it with the inbound read.
-// Real net.Conn implementations don't need this, but it costs nothing
-// and removes a fragile assumption from the design.
+// iteration: hand the previous inbound to the mechanism, queue its
+// returned outbound (if any) for the writer, then read the peer's next
+// message (unless the mechanism declared the handshake done).
 //
 // "Message" here is whatever NextHandshake returns — it's not framed
 // in any particular way at the session level; for NULL/PLAIN it's a
 // single READY command body. Writes go through the session's FrameCodec;
 // reads use a ZMTP codec capped at handshakeMaxFrame (see there).
-func (s *sessionImpl) runSecurityHandshake() error {
+func (s *Session) runSecurityHandshake() error {
 	readCodec := zmtp.NewFrameCodec(handshakeMaxFrame)
 	var in []byte
 	for {
 		out, done, err := s.cfg.Mech.NextHandshake(in)
-		if err != nil {
-			// Mechanisms may return an encoded ERROR command alongside the
-			// failure (e.g. ZAP rejection) so the peer learns the reason
-			// instead of seeing an abrupt close. Best-effort: the session
-			// is being torn down either way.
-			if len(out) > 0 {
-				_ = s.cfg.Codec.WriteFrame(s.cfg.Conn, zmtp.FlagCommand, out)
+		// Mechanisms may return an encoded ERROR command alongside a
+		// failure (e.g. ZAP rejection) so the peer learns the reason
+		// instead of seeing an abrupt close; the writer sends it before
+		// the conn closes.
+		if len(out) > 0 {
+			var frame bytes.Buffer
+			if werr := s.cfg.Codec.WriteFrame(&frame, zmtp.FlagCommand, out); werr != nil {
+				return fmt.Errorf("gozmq/session: encode handshake frame: %w", werr)
 			}
+			s.hsOut <- frame.Bytes()
+		}
+		if err != nil {
 			return fmt.Errorf("gozmq/session: security handshake: %w", err)
 		}
-
-		// Kick off the outbound write (if any) in the background so we
-		// can begin reading the peer's response immediately. For the
-		// final step (done=true) we still need to wait for the write
-		// to drain before returning — otherwise the writer goroutine
-		// might race traffic-phase frames in front of our trailing
-		// handshake bytes.
-		writeErrCh := make(chan error, 1)
-		if len(out) > 0 {
-			go func() {
-				werr := s.cfg.Codec.WriteFrame(s.cfg.Conn, zmtp.FlagCommand, out)
-				writeErrCh <- werr
-			}()
-		} else {
-			writeErrCh <- nil
-		}
-
 		if done {
-			if werr := <-writeErrCh; werr != nil {
-				return fmt.Errorf("gozmq/session: write handshake frame: %w", werr)
-			}
 			return nil
 		}
 
 		// Read the peer's next handshake message.
 		flags, body, rerr := readCodec.ReadFrame(s.reader, nil, nil)
-		// Always reap the writer before propagating either error.
-		werr := <-writeErrCh
-		if werr != nil {
-			return fmt.Errorf("gozmq/session: write handshake frame: %w", werr)
-		}
 		if rerr != nil {
 			return fmt.Errorf("gozmq/session: read handshake frame: %w", rerr)
 		}
@@ -213,7 +165,7 @@ func (s *sessionImpl) runSecurityHandshake() error {
 	}
 }
 
-func (s *sessionImpl) finalizePeerMetadata() error {
+func (s *Session) finalizePeerMetadata() error {
 	props, err := peerMetadataFromMechanism(s.cfg.Mech)
 	if err != nil {
 		return err

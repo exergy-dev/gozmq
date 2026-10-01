@@ -43,15 +43,13 @@ func TestDecodeGreeting_RejectsWrongMajor(t *testing.T) {
 // mechanism's parser.
 func TestHandshake_RejectsMechanismMismatch(t *testing.T) {
 	connA, connB := newFakeConnPair()
-	sA := New(Config{Conn: connA, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{}, SendHWM: 1, RecvHWM: 1})
-	sB := New(Config{Conn: connB, Mech: newFakeMech("PLAIN", true, nil), Codec: fakeCodec{}, SendHWM: 1, RecvHWM: 1})
-	sA.Start()
-	sB.Start()
+	sA := startTestSession(Config{Conn: connA, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{}, SendHWM: 1, RecvHWM: 1})
+	sB := startTestSession(Config{Conn: connB, Mech: newFakeMech("PLAIN", true, nil), Codec: fakeCodec{}, SendHWM: 1, RecvHWM: 1})
 	defer func() {
 		_ = sA.Stop()
 		_ = sB.Stop()
 	}()
-	for label, s := range map[string]Session{"A": sA, "B": sB} {
+	for label, s := range map[string]*tSession{"A": sA, "B": sB} {
 		waitClosed(t, s.Handshaked(), 2*time.Second, label+": handshake did not finish")
 		err := s.HandshakeErr()
 		require.Error(t, err, label)
@@ -59,7 +57,7 @@ func TestHandshake_RejectsMechanismMismatch(t *testing.T) {
 		require.NotErrorIs(t, err, zmqerr.ErrAuthFailed, label)
 		require.Nil(t, s.Pipe(), label)
 	}
-	require.Zero(t, sA.(*sessionImpl).cfg.Mech.(*fakeMech).step, "A reached the security handshake")
+	require.Zero(t, sA.cfg.Mech.(*fakeMech).step, "A reached the security handshake")
 }
 
 // TestHandshake_BoundsPreAuthFrameSize: a handshake frame announcing more
@@ -68,7 +66,7 @@ func TestHandshake_RejectsMechanismMismatch(t *testing.T) {
 func TestHandshake_BoundsPreAuthFrameSize(t *testing.T) {
 	connA, connB := newFakeConnPair()
 	defer func() { _ = connB.Close() }()
-	s := New(Config{
+	s := startTestSession(Config{
 		Conn:           connA,
 		Mech:           newFakeMech("NULL", true, nil),
 		Codec:          zmtp.NewFrameCodec(64 << 20),
@@ -76,7 +74,6 @@ func TestHandshake_BoundsPreAuthFrameSize(t *testing.T) {
 		SendHWM:        1,
 		RecvHWM:        1,
 	})
-	s.Start()
 	defer func() { _ = s.Stop() }()
 
 	go func() { _, _ = io.Copy(io.Discard, connB) }()

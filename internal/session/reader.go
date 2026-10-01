@@ -10,6 +10,7 @@ import (
 	"slices"
 
 	"github.com/exergy-dev/gozmq/internal/bufpool"
+	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
 	"github.com/exergy-dev/gozmq/msg"
@@ -22,18 +23,48 @@ import (
 // adopts without a copy.
 const readScratchSize = 4 * 1024
 
-// runReader is the wire->pipe traffic-phase goroutine. It loops reading
-// frames; user-message frames accumulate into a *msg.Msg until MORE
-// clears, at which point the message is published on the session-side
-// pipe. Command frames (PING/PONG/SUBSCRIBE/CANCEL/etc.) are handled
-// inline.
+// runReader is the session's reading goroutine. It performs the
+// handshake, builds the pipe pair, hands the engine end to OnReady and
+// starts the heartbeat, then runs the traffic-phase read loop.
 //
-// On EOF or any I/O error it triggers a session-wide shutdown so the
-// writer and heartbeat goroutines exit cleanly.
-func (s *sessionImpl) runReader() {
-	defer s.wg.Done()
-	defer s.shutdown()
+// On a failed handshake it just exits: the writer still flushes whatever
+// the handshake queued (an ERROR command, say), and the last goroutine
+// out closes the conn.
+func (s *Session) runReader() {
+	defer s.exit()
+	err := s.handshake()
+	if err == nil {
+		// Seed the last-inbound clock so a heartbeat fired immediately
+		// after handshake doesn't trip the timeout.
+		s.lastInboundUnix.Store(s.cfg.Now())
+		peerInfo := pipe.PeerInfo{Identity: identityFromMetadata(s.cfg.Mech)}
+		s.sessionPipe, s.enginePipe = pipe.NewPair(s.cfg.RecvHWM, s.cfg.SendHWM, pipe.PeerInfo{}, peerInfo)
+	}
+	close(s.hsOut) // the writer moves on to traffic, or exits on failure
+	if err != nil {
+		s.hsErr = err
+		return
+	}
 
+	defer s.shutdown()
+	if s.cfg.OnReady != nil {
+		if err := s.cfg.OnReady(s.enginePipe); err != nil {
+			s.cfg.Logger.Debug("gozmq/session: pipe refused", "err", err)
+			return
+		}
+	}
+	s.attached.Store(true)
+	s.startHeartbeat()
+	s.readLoop()
+}
+
+// readLoop is the wire->pipe traffic phase. It loops reading frames;
+// user-message frames accumulate into a *msg.Msg until MORE clears, at
+// which point the message is published on the session-side pipe.
+// Command frames (PING/PONG/SUBSCRIBE/CANCEL/etc.) are handled inline.
+// It returns on EOF or any I/O error; runReader then shuts the session
+// down so the writer exits too.
+func (s *Session) readLoop() {
 	// scratch is overwritten by every ReadFrame, so nothing aliasing it
 	// may outlive a loop iteration: handleCommand copies whatever it
 	// keeps, and user frames read into it are cloned below.
@@ -156,7 +187,7 @@ func lendFrames(frames, bufs [][]byte) *msg.Msg {
 // backpressure (no inbound stamps while we're parked here) for a dead
 // link, and re-stamps the inbound clock on resume so the idle window
 // restarts from the unpark, not from the last pre-park frame.
-func (s *sessionImpl) publishInbound(m *msg.Msg) error {
+func (s *Session) publishInbound(m *msg.Msg) error {
 	// Non-blocking fast path keeps the readerParked bookkeeping (and the
 	// extra inbound stamp) off the common no-backpressure case.
 	if s.sessionPipe.TrySend(m) {
@@ -181,7 +212,7 @@ func (s *sessionImpl) publishInbound(m *msg.Msg) error {
 // length-prefixed: 1 byte name length, name bytes, then body. We
 // decode just enough to pick PING/PONG/etc. Unknown commands are
 // dropped silently per ZMTP 3.1 §3.
-func (s *sessionImpl) handleCommand(body []byte) error {
+func (s *Session) handleCommand(body []byte) error {
 	if len(body) < 1 {
 		return fmt.Errorf("%w: empty command body", zmqerr.ErrMalformedFrame)
 	}
@@ -196,9 +227,8 @@ func (s *sessionImpl) handleCommand(body []byte) error {
 	case "PING":
 		// Echo the PING context as a PONG. PING body layout: 2-byte
 		// big-endian TTL + opaque context. PONG echoes the context (no
-		// TTL). The reply is handed to the writer goroutine via cmdCh —
-		// writing inline here would take writeMu on the read goroutine
-		// and deadlock against a writer parked in conn.Write.
+		// TTL). The reply is handed to the writer goroutine via cmdCh
+		// (see the cmdCh field doc for why the reader never writes).
 		// enqueueCommand copies ctxBytes, which may alias scratch.
 		var ctxBytes []byte
 		if len(rest) >= 2 {

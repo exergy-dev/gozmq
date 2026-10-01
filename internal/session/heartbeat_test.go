@@ -13,8 +13,8 @@ import (
 )
 
 // --------------------------------------------------------------------------
-// fakeClock: deterministic Config.Now source. The heartbeat goroutine's
-// ticker still runs on real time (we keep intervals to a few ms), but all
+// fakeClock: deterministic Config.Now source. The heartbeat timer
+// still runs on real time (we keep intervals to a few ms), but all
 // idle-time arithmetic flows through the injected clock, so tests control
 // "how long the peer has been silent" exactly.
 // --------------------------------------------------------------------------
@@ -164,10 +164,10 @@ func waitCommand(t *testing.T, frames <-chan peerFrame, name string, timeout tim
 
 // newHeartbeatSession builds a session against a manualPeer with the
 // given heartbeat settings and fake clock, and waits for the handshake.
-func newHeartbeatSession(t *testing.T, clk *fakeClock, interval, timeout time.Duration, recvHWM int) (Session, *manualPeer) {
+func newHeartbeatSession(t *testing.T, clk *fakeClock, interval, timeout time.Duration, recvHWM int) (*tSession, *manualPeer) {
 	t.Helper()
 	connA, connB := newFakeConnPair()
-	s := New(Config{
+	s := startTestSession(Config{
 		Conn:              connA,
 		Mech:              newFakeMech("NULL", false, nil),
 		Codec:             fakeCodec{},
@@ -177,7 +177,6 @@ func newHeartbeatSession(t *testing.T, clk *fakeClock, interval, timeout time.Du
 		HeartbeatTimeout:  timeout,
 		Now:               clk.Now,
 	})
-	s.Start()
 	t.Cleanup(func() { _ = s.Stop() })
 	peer := newManualPeer(t, connB, nil)
 	waitHandshake(t, s, "A")
@@ -186,7 +185,7 @@ func newHeartbeatSession(t *testing.T, clk *fakeClock, interval, timeout time.Du
 
 // requireAlive asserts the session has not torn down after a real-time
 // grace period covering several heartbeat ticks.
-func requireAlive(t *testing.T, s Session, wait time.Duration, msg string) {
+func requireAlive(t *testing.T, s *tSession, wait time.Duration, msg string) {
 	t.Helper()
 	select {
 	case <-s.Done():
@@ -269,8 +268,7 @@ func TestHeartbeat_ReaderParkedOnBackpressureIsNotTimeout(t *testing.T) {
 
 	peer.sendData([]byte("m1")) // fills the pipe's single slot
 	peer.sendData([]byte("m2")) // parks the reader in publishInbound
-	si := s.(*sessionImpl)
-	require.Eventually(t, func() bool { return si.readerParked.Load() },
+	require.Eventually(t, func() bool { return s.readerParked.Load() },
 		2*time.Second, time.Millisecond, "reader did not park on engine backpressure")
 
 	// Way past the timeout in fake time, across many real ticks: the

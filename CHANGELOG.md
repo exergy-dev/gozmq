@@ -196,6 +196,13 @@ Behaviour:
 - inproc emits `EventAccepted` on the binder and `EventDisconnected` on both
   sides; links use no goroutines (was 2 per link) and are removed on
   disconnect instead of accumulating until Close.
+- An idle TCP connection now costs 5 goroutines instead of 10 (counting both
+  ends): a session runs only a reader and a writer, the heartbeat is a timer,
+  and handshake writes no longer each spawn a goroutine. `Connect` keeps its
+  one reconnect goroutine.
+- Accepted and connected sessions emit monitor events from the same code
+  path; `EventHandshakeSucceeded` now always precedes `EventConnected` on the
+  client.
 
 ### Removed
 
