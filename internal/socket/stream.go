@@ -27,11 +27,9 @@ import (
 //
 // Zero-length-body half-close: libzmq treats an outbound Msg whose body
 // concatenates to zero bytes as "close this peer." The engine forwards an empty
-// Msg down the target pipe; the transport adapter translates that into
-// conn.Close.
+// Msg down the target pipe; the session translates that into conn.Close.
 //
-// STREAM cannot ride the normal internal/session layer (that layer applies ZMTP
-// framing); it attaches raw Pipes sourced from internal/stream.Adapter, which
+// STREAM peers run internal/session in raw mode (no ZMTP framing), which
 // pumps conn.Read bytes into the pipe and drains outbound Msgs to conn.Write.
 //
 // DIVERGENCE from libzmq: ZMQ_STREAM_NOTIFY (default-on in libzmq) makes a

@@ -107,10 +107,8 @@ func newEngineFor(t SocketType, cfg *socketConfig) (socket.Engine, *socket.SubEn
 		eng, sub := socket.NewXSubEngine()
 		return eng, sub, nil
 	case Stream:
-		// STREAM bypasses ZMTP on the wire: the engine receives raw
-		// bytes from the transport via an internal/stream.Adapter
-		// rather than internal/session.Session. See Socket.Bind /
-		// Socket.Connect for the dispatch.
+		// STREAM bypasses ZMTP on the wire: its sessions run in raw
+		// mode (see sessionConfig).
 		return socket.NewStreamEngine(), nil, nil
 	}
 	return nil, nil, fmt.Errorf("gozmq: unknown socket type %d", t)
@@ -141,11 +139,10 @@ type Socket struct {
 	lastEndpoint string
 	listeners    []transport.Listener
 	reconnectors []reconnectEntry
-	// links holds every attached peer (sessions, STREAM adapters, and
+	// links holds every attached peer (sessions, including STREAM's, and
 	// inproc links) behind one teardown contract.
-	links     []peerLink
-	acceptWG  sync.WaitGroup
-	connectWG sync.WaitGroup
+	links    []peerLink
+	acceptWG sync.WaitGroup
 }
 
 type reconnectEntry struct {
@@ -240,9 +237,10 @@ func (s *Socket) Bind(endpoint string) error {
 // than returned.
 //
 // Exception: STREAM sockets dial exactly once and do NOT reconnect — a
-// dial failure is returned synchronously, and a later peer disconnect is
-// final (surfaced via EventDisconnected). Reconnect supervision for raw
-// STREAM peers is the application's responsibility.
+// dial failure is returned synchronously (with EventConnectFailed), and a
+// later peer disconnect is final (surfaced via EventDisconnected).
+// Reconnect supervision for raw STREAM peers is the application's
+// responsibility.
 func (s *Socket) Connect(endpoint string) error {
 	if s.closed.Load() {
 		return ErrSocketClosed
@@ -256,9 +254,13 @@ func (s *Socket) Connect(endpoint string) error {
 		return err
 	}
 	if s.socketType == Stream {
-		// STREAM does not ride on ZMTP / session, so the Reconnector
-		// (which builds sessions) is not reusable here. Dial once.
-		return s.connectStream(tr, endpoint)
+		conn, err := tr.Dial(s.runCtx, endpoint)
+		if err != nil {
+			s.emit(EventConnectFailed, endpoint, err.Error())
+			return err
+		}
+		_, err = s.startSession(conn, security.RoleClient, endpoint)
+		return err
 	}
 	cfg := session.ReconnectConfig{
 		Dial: func(ctx context.Context) (transport.Conn, error) {
@@ -339,14 +341,11 @@ func (s *Socket) Unbind(endpoint string) error {
 
 // Disconnect tears down every previously-established outbound connection
 // whose Connect target exactly matches endpoint and prevents future
-// reconnect attempts to that endpoint. It applies only to non-STREAM
-// sockets; Bind-created server-side sessions are unaffected.
+// reconnect attempts to that endpoint. Bind-created server-side sessions
+// are unaffected.
 func (s *Socket) Disconnect(endpoint string) error {
 	if s.closed.Load() {
 		return ErrSocketClosed
-	}
-	if s.socketType == Stream {
-		return fmt.Errorf("gozmq: Disconnect is not implemented for STREAM sockets: %w", ErrFSMViolation)
 	}
 	if isInproc(endpoint) {
 		return s.disconnectInproc(endpoint)
@@ -356,6 +355,7 @@ func (s *Socket) Disconnect(endpoint string) error {
 	var (
 		matched []*session.Reconnector
 		kept    = s.reconnectors[:0]
+		streams []peerLink
 	)
 	for _, entry := range s.reconnectors {
 		if entry.endpoint == endpoint {
@@ -364,16 +364,29 @@ func (s *Socket) Disconnect(endpoint string) error {
 		}
 		kept = append(kept, entry)
 	}
-	if len(matched) == 0 {
-		s.mu.Unlock()
+	s.reconnectors = kept
+	// A STREAM Connect has no reconnector, only its session.
+	s.links = slices.DeleteFunc(s.links, func(l peerLink) bool {
+		sl, ok := l.(sessionLink)
+		if ok && sl.ep == endpoint && s.socketType == Stream {
+			streams = append(streams, l)
+			return true
+		}
+		return false
+	})
+	s.mu.Unlock()
+	if len(matched) == 0 && len(streams) == 0 {
 		return fmt.Errorf("gozmq: endpoint %q not connected: %w", endpoint, ErrEndpointUnknown)
 	}
-	s.reconnectors = kept
-	s.mu.Unlock()
 
 	var errs []error
 	for _, rc := range matched {
 		if err := rc.Stop(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	for _, l := range streams {
+		if err := l.stop(); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -414,10 +427,6 @@ func (s *Socket) acceptLoop(l transport.Listener) {
 		}
 		backoff = 0
 		s.emit(EventAccepted, conn.RemoteEndpoint(), "")
-		if s.socketType == Stream {
-			s.startStreamAdapter(conn)
-			continue
-		}
 		_, _ = s.startSession(conn, security.RoleServer, conn.RemoteEndpoint())
 	}
 }
@@ -435,9 +444,8 @@ func (s *Socket) addLink(l peerLink) bool {
 	return true
 }
 
-// removeLink drops a previously-added link. Server sessions and inproc links
-// self-remove on disconnect so long-lived sockets don't accumulate them;
-// stream adapters stay until Close.
+// removeLink drops a previously-added link. Sessions and inproc links
+// self-remove on disconnect so long-lived sockets don't accumulate them.
 func (s *Socket) removeLink(l peerLink) {
 	s.mu.Lock()
 	if i := slices.Index(s.links, l); i >= 0 {
@@ -463,8 +471,11 @@ func (s *Socket) startSession(conn transport.Conn, role security.Role, endpoint 
 		link peerLink
 		p    *pipe.End
 	)
+	raw := cfg.Raw // capturing cfg itself would move it to the heap
 	cfg.OnReady = func(ep *pipe.End) error {
-		s.emit(EventHandshakeSucceeded, endpoint, "")
+		if !raw {
+			s.emit(EventHandshakeSucceeded, endpoint, "")
+		}
 		// A refused pipe (PAIR already has a peer, engine closed) ends
 		// the session unattached: a client backs off and redials.
 		if err := s.engine.AttachPipe(ep); err != nil {
@@ -492,7 +503,10 @@ func (s *Socket) startSession(conn transport.Conn, role security.Role, endpoint 
 		s.removeLink(link)
 	}
 	sess := session.New(cfg)
-	link = sessionLink{sess}
+	link = sessionLink{sess, ""}
+	if role == security.RoleClient {
+		link = sessionLink{sess, endpoint}
+	}
 	if !s.addLink(link) {
 		_ = conn.Close()
 		return nil, ErrSocketClosed

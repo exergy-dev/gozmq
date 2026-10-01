@@ -2,7 +2,8 @@
 // wraps a single transport.Conn with two goroutines: the reader drives the
 // greeting and security handshake, then moves wire frames to the pipe; the
 // writer puts the handshake frames, then the pipe's messages, on the wire.
-// The optional heartbeat is a self-rearming timer, not a goroutine.
+// The optional heartbeat is a self-rearming timer, not a goroutine. Raw
+// mode (Config.Raw, for STREAM) keeps the two goroutines but skips ZMTP.
 //
 // The session consumes its collaborators through their contracts
 // (zmtp.FrameCodec, security.Mech, transport.Conn), so it can be tested
@@ -25,8 +26,8 @@ import (
 	"github.com/exergy-dev/gozmq/transport"
 )
 
-// Config bundles the inputs to New. Conn, Mech, and Codec are
-// required. The timeout/heartbeat values are used exactly as given:
+// Config bundles the inputs to New. Conn is required, and Mech and Codec
+// unless Raw is set. The timeout/heartbeat values are used exactly as given:
 // zero disables the corresponding behavior (no handshake deadline, no
 // heartbeats, no inbound size cap). New applies no defaults to them —
 // the socket layer is responsible for supplying production values.
@@ -60,6 +61,14 @@ type Config struct {
 	// into 0x01/0x00-prefixed messages on the pipe. Set it only for
 	// PUB/XPUB; every other socket type drops the commands.
 	SubscriptionCommands bool
+
+	// Raw carries bytes with no ZMTP at all (STREAM): no greeting,
+	// handshake or heartbeat, each conn.Read is one single-frame inbound
+	// message, and each outbound message is one body frame written
+	// verbatim, an empty one closing the conn. Mech, Codec and the
+	// ZMTP-only fields are ignored. The mode is fixed at New, so the ZMTP
+	// loops carry no per-message branch for it.
+	Raw bool
 
 	// OnReady runs on the reader goroutine once the handshake succeeds,
 	// with the engine-facing pipe end, before any inbound frame is read.
@@ -152,7 +161,8 @@ type Session struct {
 
 	// enginePipe is the engine-facing end of the pair, handed to OnReady.
 	// sessionPipe is the session-facing end (reader pushes to it, writer
-	// pulls from it). The reader sets both before it closes hsOut.
+	// pulls from it). The reader sets both before it closes hsOut; in
+	// raw mode New does.
 	enginePipe  *pipe.End
 	sessionPipe *pipe.End
 
@@ -259,6 +269,20 @@ func New(cfg Config) *Session {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	wctx, wcancel := context.WithCancel(ctx) // child of session ctx
+	s := &Session{
+		cfg:          cfg,
+		ctx:          ctx,
+		cancel:       cancel,
+		writerCtx:    wctx,
+		writerCancel: wcancel,
+		done:         make(chan struct{}),
+		writerDone:   make(chan struct{}),
+	}
+	if cfg.Raw {
+		// Raw mode has no handshake: the pipes exist from the start.
+		s.sessionPipe, s.enginePipe = pipe.NewPair(cfg.RecvHWM, cfg.SendHWM, pipe.PeerInfo{}, pipe.PeerInfo{})
+		return s
+	}
 	encode, decode, identityMech := sessionFramePaths(cfg.Mech)
 	// directHeader is the writer hot-path fast lane: when the mechanism
 	// is an identity transform (NULL/PLAIN — encode does not rewrite
@@ -272,32 +296,25 @@ func New(cfg Config) *Session {
 		}
 	}
 	// recvAlloc hands the reader pooled frame buffers (see Config.RecvBufferPool).
-	var recvAlloc func(int) []byte
 	if cfg.RecvBufferPool && identityMech {
-		recvAlloc = bufpool.Get
+		s.recvAlloc = bufpool.Get
 	}
-	return &Session{
-		cfg:          cfg,
-		recvAlloc:    recvAlloc,
-		ctx:          ctx,
-		cancel:       cancel,
-		reader:       bufio.NewReaderSize(cfg.Conn, sessionReadBufferSize),
-		encode:       encode,
-		decode:       decode,
-		directHeader: directHeader,
-		writerCtx:    wctx,
-		writerCancel: wcancel,
-		hsOut:        make(chan []byte, hsOutBacklog),
-		done:         make(chan struct{}),
-		writerDone:   make(chan struct{}),
-		cmdCh:        make(chan []byte, sessionCmdBacklog),
-		cmdWake:      make(chan struct{}, 1),
-	}
+	s.reader = bufio.NewReaderSize(cfg.Conn, sessionReadBufferSize)
+	s.encode, s.decode, s.directHeader = encode, decode, directHeader
+	s.hsOut = make(chan []byte, hsOutBacklog)
+	s.cmdCh = make(chan []byte, sessionCmdBacklog)
+	s.cmdWake = make(chan struct{}, 1)
+	return s
 }
 
 // Start launches the reader and writer goroutines. Call it exactly once.
 func (s *Session) Start() {
 	s.live.Store(2)
+	if s.cfg.Raw {
+		go s.runRawReader()
+		go s.runRawWriter()
+		return
+	}
 	go s.runReader()
 	go s.runWriter()
 }

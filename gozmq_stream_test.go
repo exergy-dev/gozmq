@@ -2,17 +2,21 @@ package gozmq_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
 )
 
 // TestSocketStream_TCP_HTTPEcho validates the end-to-end STREAM wiring:
 // Context.NewSocket(Stream) constructs a functional Socket, Bind + accept
-// loop routes new TCP conns through internal/stream.Adapter, and Send/Recv
+// loop runs new TCP conns as raw-mode sessions, and Send/Recv
 // carry raw bytes between the app and a non-ZMQ TCP peer. A matching
 // STREAM client dials out via a second Socket.
 func TestSocketStream_TCP_HTTPEcho(t *testing.T) {
@@ -77,7 +81,7 @@ func TestSocketStream_TCP_HTTPEcho(t *testing.T) {
 		t.Fatalf("client got %q, want %q", buf, request)
 	}
 
-	// Half-close: identity-only Msg → adapter closes the TCP conn.
+	// Half-close: identity-only Msg → the session closes the TCP conn.
 	if err := srv.SendMsg(ctx, gozmq.NewMsgFromFrames(peerID)); err != nil {
 		t.Fatalf("srv half-close: %v", err)
 	}
@@ -135,11 +139,9 @@ func TestSocketStream_TCP_Connect(t *testing.T) {
 
 	// Send via gozmq; read raw on the other side.
 	//
-	// On the client side the adapter attaches the pipe synchronously
-	// in connectStream, so we can Send immediately. The first Msg the
-	// app receives from this conn carries the synthesized identity
-	// the engine assigned — we learn it by prompting the peer to send
-	// something first.
+	// The first Msg the app receives from this conn carries the
+	// synthesized identity the engine assigned — we learn it by
+	// prompting the peer to send something first.
 	if _, err := a.c.Write([]byte("hi from peer\n")); err != nil {
 		t.Fatalf("peer write: %v", err)
 	}
@@ -174,4 +176,97 @@ func stripScheme(ep string) string {
 		return ep[len(p):]
 	}
 	return ep
+}
+
+// streamServerPeer binds a STREAM socket with opts, dials it from a raw TCP
+// client, and returns both plus the client's routing identity, learned from
+// a first byte the client sends.
+func streamServerPeer(t *testing.T, opts ...gozmq.Option) (*gozmq.Socket, net.Conn, []byte) {
+	t.Helper()
+	_, srv := newTestSocket(t, gozmq.Stream, opts...)
+	require.NoError(t, srv.Bind("tcp://127.0.0.1:0"))
+	cli, err := net.Dial("tcp", stripScheme(srv.LastEndpoint()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cli.Close() })
+	_, err = cli.Write([]byte("x"))
+	require.NoError(t, err)
+	m, err := srv.RecvMsg(testCtx(t))
+	require.NoError(t, err)
+	return srv, cli, m.Frames()[0]
+}
+
+// TestSocketStream_SendHWMZeroUnlimited: STREAM honours WithSendHWM(0) as
+// unlimited (the old adapter substituted 1024): with the peer not reading,
+// far more than the kernel buffers can take still queues without blocking.
+func TestSocketStream_SendHWMZeroUnlimited(t *testing.T) {
+	srv, cli, id := streamServerPeer(t, gozmq.WithSendHWM(0))
+	const n, size = 2048, 16 << 10 // 32 MiB
+	chunk := bytes.Repeat([]byte("z"), size)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for i := 0; i < n; i++ {
+		require.NoError(t, srv.SendMsg(ctx, gozmq.NewMsgFromFrames(id, chunk)), "send %d", i)
+	}
+	got, err := io.CopyN(io.Discard, cli, n*size)
+	require.NoError(t, err)
+	require.EqualValues(t, n*size, got)
+}
+
+// TestSocketStream_LingerFlushes: Close drains what STREAM still has queued
+// before closing the connection (the old adapter dropped it).
+func TestSocketStream_LingerFlushes(t *testing.T) {
+	srv, cli, id := streamServerPeer(t, gozmq.WithLinger(10*time.Second))
+	const n, size = 1024, 32 << 10 // 32 MiB, well past the kernel buffers
+	read := make(chan int64, 1)
+	go func() {
+		got, _ := io.Copy(io.Discard, cli) // until the server closes
+		read <- got
+	}()
+	chunk := bytes.Repeat([]byte("q"), size)
+	ctx := testCtx(t)
+	for i := 0; i < n; i++ {
+		require.NoError(t, srv.SendMsg(ctx, gozmq.NewMsgFromFrames(id, chunk)))
+	}
+	require.NoError(t, srv.Close())
+	select {
+	case got := <-read:
+		require.EqualValues(t, n*size, got)
+	case <-time.After(10 * time.Second):
+		t.Fatal("peer never saw the connection close")
+	}
+}
+
+// TestSocketStream_Disconnect: Disconnect closes a STREAM Connect's
+// connection, and a second Disconnect finds nothing.
+func TestSocketStream_Disconnect(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer l.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, err := l.Accept()
+		if err == nil {
+			accepted <- c
+		}
+	}()
+
+	_, cli := newTestSocket(t, gozmq.Stream)
+	mon := make(chan gozmq.Event, 16)
+	require.NoError(t, cli.Monitor(mon, gozmq.EventDisconnected))
+	ep := "tcp://" + l.Addr().String()
+	require.NoError(t, cli.Connect(ep))
+	peer := <-accepted
+	defer peer.Close()
+
+	require.NoError(t, cli.Disconnect(ep))
+	require.NoError(t, peer.SetReadDeadline(time.Now().Add(5*time.Second)))
+	_, err = peer.Read(make([]byte, 1))
+	require.ErrorIs(t, err, io.EOF, "peer should see the connection close")
+	select {
+	case ev := <-mon:
+		require.Equal(t, ep, ev.Endpoint)
+	case <-time.After(5 * time.Second):
+		t.Fatal("no EventDisconnected")
+	}
+	require.ErrorIs(t, cli.Disconnect(ep), gozmq.ErrEndpointUnknown)
 }

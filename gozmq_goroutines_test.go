@@ -2,6 +2,7 @@ package gozmq_test
 
 import (
 	"context"
+	"net"
 	"runtime"
 	"testing"
 	"time"
@@ -18,6 +19,9 @@ import (
 const (
 	maxGoroutinesPerTCPConn    = 5
 	maxGoroutinesPerInprocLink = 0
+	// A STREAM connection is one raw session (reader and writer) on the
+	// STREAM side, bound or connected: STREAM never reconnects.
+	maxGoroutinesPerStreamConn = 2
 )
 
 const goroutineTestLinks = 16
@@ -58,6 +62,58 @@ func goroutinesPerLink(t *testing.T, endpoint string) float64 {
 
 	after := settledGoroutines(t)
 	return float64(after-before) / goroutineTestLinks
+}
+
+// TestGoroutinesPerStreamConnection counts the STREAM side of connections
+// with raw TCP peers, which run no goroutines of their own, both for
+// accepted connections and for Connects.
+func TestGoroutinesPerStreamConnection(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// setup returns the STREAM socket and a func that establishes one
+		// connection, returning the raw peer's end.
+		setup func(t *testing.T) (*gozmq.Socket, func() net.Conn)
+	}{
+		{"accepted", func(t *testing.T) (*gozmq.Socket, func() net.Conn) {
+			_, srv := newTestSocket(t, gozmq.Stream)
+			require.NoError(t, srv.Bind("tcp://127.0.0.1:0"))
+			return srv, func() net.Conn {
+				c, err := net.Dial("tcp", stripScheme(srv.LastEndpoint()))
+				require.NoError(t, err)
+				return c
+			}
+		}},
+		{"connected", func(t *testing.T) (*gozmq.Socket, func() net.Conn) {
+			l, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = l.Close() })
+			_, cli := newTestSocket(t, gozmq.Stream)
+			return cli, func() net.Conn {
+				require.NoError(t, cli.Connect("tcp://"+l.Addr().String()))
+				c, err := l.Accept()
+				require.NoError(t, err)
+				return c
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, link := tc.setup(t)
+			before := settledGoroutines(t)
+			callCtx := testCtx(t)
+			for i := 0; i < goroutineTestLinks; i++ {
+				c := link()
+				t.Cleanup(func() { _ = c.Close() })
+				_, err := c.Write([]byte{byte(i)})
+				require.NoError(t, err)
+				m, err := s.RecvMsg(callCtx)
+				require.NoError(t, err)
+				m.Release()
+			}
+			perLink := float64(settledGoroutines(t)-before) / goroutineTestLinks
+			t.Logf("goroutines per %s STREAM connection: %.2f (budget %d)", tc.name, perLink, maxGoroutinesPerStreamConn)
+			require.LessOrEqual(t, perLink, float64(maxGoroutinesPerStreamConn))
+		})
+	}
 }
 
 // settledGoroutines polls runtime.NumGoroutine until it reads the same

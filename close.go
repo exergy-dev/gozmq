@@ -8,8 +8,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-
-	"github.com/exergy-dev/gozmq/internal/pipe"
 )
 
 // Close tears the socket down. Idempotent: repeated calls return nil,
@@ -89,10 +87,10 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 	//
 	//   engine.Close()  → no new engine.Sends enqueue messages
 	//   beginDrain()    → session writers drain queued messages to conn and
-	//                     exit (conn stays open); inproc/stream: no-op
+	//                     exit (conn stays open); inproc: no-op
 	//   drained()       → wait up to linger for each link's flush to finish
 	//                     (session Drain; inproc: peer received
-	//                     everything; stream: immediate)
+	//                     everything)
 	//   runCancel()     → cascades into reconnector ctx → loop exits
 	//   stop()          → conn.Close / pipe.Close → readers exit, Done fires
 	//
@@ -126,9 +124,8 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 		addErr(l.stop())
 	}
 
-	// 7. Wait on bookkeeping goroutines (accept loops, pipe watchers).
+	// 7. Wait for the accept loops.
 	s.acceptWG.Wait()
-	s.connectWG.Wait()
 
 	// 8. Drop the Context's reference to this socket. Without this a
 	// long-lived Context — the documented one-per-process pattern —
@@ -200,21 +197,4 @@ func waitChannels[T any](ctx context.Context, items []T, ch func(T) <-chan struc
 		}
 	}
 	return nil
-}
-
-// watchPipeClose spawns a goroutine that waits for p to close (or the
-// socket's run context to cancel), then detaches p, runs cleanup, and
-// emits EventDisconnected. Used by startStreamAdapter.
-func (s *Socket) watchPipeClose(p *pipe.End, endpoint string, cleanup func()) {
-	s.connectWG.Add(1)
-	go func() {
-		defer s.connectWG.Done()
-		select {
-		case <-p.Closed():
-		case <-s.runCtx.Done():
-		}
-		_ = s.engine.DetachPipe(p)
-		cleanup()
-		s.emit(EventDisconnected, endpoint, "")
-	}()
 }

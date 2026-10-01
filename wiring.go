@@ -16,6 +16,16 @@ import (
 // constructed (e.g. ephemeral CURVE keygen failure); the connection must
 // be torn down rather than proceeding with a weaker mechanism.
 func (s *Socket) sessionConfig(conn transport.Conn, role security.Role) (session.Config, error) {
+	if s.socketType == Stream {
+		// STREAM peers speak no ZMTP: no mechanism, codec or heartbeat.
+		return session.Config{
+			Conn:    conn,
+			Raw:     true,
+			SendHWM: s.cfg.sendHWM,
+			RecvHWM: s.cfg.recvHWM,
+			Logger:  s.cfg.logger,
+		}, nil
+	}
 	mech, err := s.newMechanism(role)
 	if err != nil {
 		return session.Config{}, err

@@ -14,8 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/internal/session"
 	"github.com/exergy-dev/gozmq/internal/socket"
-	"github.com/exergy-dev/gozmq/internal/stream"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 	"github.com/exergy-dev/gozmq/transport"
@@ -227,17 +227,17 @@ func TestStream_CloseUnblocksRecv(t *testing.T) {
 // Round-trip / scenario tests.
 //
 // These sit at the pipe boundary rather than over a real TCP socket so the
-// engine contract can be exercised in isolation from the transport adapter
-// (internal/stream.Adapter) that drives it in production. The fixture below
-// simulates that adapter:
+// engine contract can be exercised in isolation from the raw-mode session
+// (session.Config.Raw) that drives it in production. The fixture below
+// simulates that session:
 //
 //   wire (peer side)  <-- pipe.NewPair -->  (engine side) streamEngine
 //
 // Each pipe is the in-test stand-in for a single TCP conn. Bytes written
 // on the peer end surface as a Recv on the engine (tagged with identity);
 // bytes the engine Sends to a given identity surface as a Recv on that
-// peer end. This is the exact boundary the transport adapter bridges, so
-// these tests lock in the engine contract any such adapter must honour.
+// peer end. This is the exact boundary the raw session bridges, so
+// these tests lock in the engine contract any such session must honour.
 // --------------------------------------------------------------------------
 
 // streamPeer is the test-side stand-in for one STREAM peer's TCP conn.
@@ -385,7 +385,7 @@ func TestStream_Multiplex(t *testing.T) {
 }
 
 // TestStream_PeerDisconnect models a client closing its side of the
-// connection. In a real TCP-wired STREAM socket the transport adapter
+// connection. In a real TCP-wired STREAM socket the raw session
 // would translate the conn.Read EOF into pipe.Close + engine.DetachPipe;
 // we simulate that here by closing the peer-side pipe and then calling
 // DetachPipe. Asserts:
@@ -413,7 +413,7 @@ func TestStream_PeerDisconnect(t *testing.T) {
 	require.NoError(t, err, "engine recv")
 	require.Equal(t, id, m.Frames()[0], "identity")
 
-	// 2. Client closes (simulates EOF on conn.Read → adapter closes pipe
+	// 2. Client closes (simulates EOF on conn.Read → session closes pipe
 	//    and calls DetachPipe).
 	_ = p.peer.Close()
 	require.NoError(t, eng.DetachPipe(p.engine), "detach")
@@ -434,7 +434,7 @@ func TestStream_PeerDisconnect(t *testing.T) {
 
 // TestStream_HalfCloseZeroLengthBody asserts the libzmq half-close
 // convention: the server Sends a message whose body is empty to signal
-// "close this peer." The transport-adapter contract (documented on
+// "close this peer." The raw-session contract (documented on
 // NewStreamEngine) is that it translates that empty-body frame into
 // conn.Close. Here we assert the engine's half of that contract: an
 // empty body surfaces on the target pipe as a zero-byte single-frame
@@ -479,9 +479,9 @@ func TestStream_HalfCloseZeroLengthBody(t *testing.T) {
 }
 
 // TestStream_PeerCloseDrainsInFlight asserts that when a peer's pipe
-// closes, a subsequent Recv on that pipe observes io.EOF — the adapter's
-// signal to call DetachPipe. This is a boundary test for the transport
-// adapter: it must drain the pipe until io.EOF before detaching, or
+// closes, a subsequent Recv on that pipe observes io.EOF — the signal to
+// call DetachPipe. This is a boundary test for whoever detaches the
+// pipe: it must drain the pipe until io.EOF before detaching, or
 // in-flight inbound bytes are lost.
 func TestStream_PeerCloseDrainsInFlight(t *testing.T) {
 	t.Parallel()
@@ -509,7 +509,7 @@ func TestStream_PeerCloseDrainsInFlight(t *testing.T) {
 	}
 	require.Equal(t, []string{"inflight-a", "inflight-b"}, seen, "drain order")
 
-	// Engine-side pipe.Recv should now return io.EOF — the adapter's
+	// Engine-side pipe.Recv should now return io.EOF — the session's
 	// signal to DetachPipe. Use a short-deadline read to confirm.
 	dl, dc := context.WithTimeout(context.Background(), time.Second)
 	defer dc()
@@ -518,14 +518,14 @@ func TestStream_PeerCloseDrainsInFlight(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
-// TCP-wired tests. These stand up a real TCP listener, wire both sides'
-// conns into internal/stream.Adapter instances, attach the server side's
-// adapter pipe to a streamEngine, and exercise the full raw-bytes path
-// an application sees through gozmq.Socket(Stream).
+// TCP-wired tests. These stand up a real TCP listener, run the server
+// side's conn as a raw-mode session attached to a streamEngine, and
+// exercise the full raw-bytes path an application sees through
+// gozmq.Socket(Stream).
 // --------------------------------------------------------------------------
 
 // tcpConn wraps *net.TCPConn to satisfy transport.Conn (net.Conn does not
-// expose the ZMQ endpoint-string accessors the adapter requires).
+// expose the ZMQ endpoint-string accessors the session requires).
 type tcpConn struct {
 	net.Conn
 }
@@ -570,9 +570,33 @@ func tcpPair(t *testing.T) (srv, cli transport.Conn, close func()) {
 	}
 }
 
+// startRawSession runs conn as a raw-mode session, as a STREAM socket does,
+// attaching its pipe to eng. It returns the pipe once attached; the session
+// is stopped at test end.
+func startRawSession(t *testing.T, eng socket.Engine, conn transport.Conn) *pipe.End {
+	t.Helper()
+	ready := make(chan *pipe.End, 1)
+	sess := session.New(session.Config{Conn: conn, Raw: true, OnReady: func(p *pipe.End) error {
+		if err := eng.AttachPipe(p); err != nil {
+			return err
+		}
+		ready <- p
+		return nil
+	}})
+	sess.Start()
+	t.Cleanup(func() { _ = sess.Stop() })
+	select {
+	case p := <-ready:
+		return p
+	case <-time.After(2 * time.Second):
+		require.Fail(t, "raw session did not attach")
+		return nil
+	}
+}
+
 // TestStream_TCP_HTTPEcho stands up a STREAM server over real TCP and
 // has it echo an HTTP-style request back to the client via identity-
-// based routing. End-to-end check on the adapter + engine contract.
+// based routing. End-to-end check on the session + engine contract.
 func TestStream_TCP_HTTPEcho(t *testing.T) {
 	t.Parallel()
 	srvConn, cliConn, teardown := tcpPair(t)
@@ -581,9 +605,7 @@ func TestStream_TCP_HTTPEcho(t *testing.T) {
 	eng := socket.NewStreamEngine()
 	defer eng.Close()
 
-	srvAd := stream.NewAdapter(context.Background(), srvConn, stream.Config{})
-	defer srvAd.Close()
-	mustAttach(t, eng, srvAd.EnginePipe())
+	startRawSession(t, eng, srvConn)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -616,7 +638,7 @@ func TestStream_TCP_HTTPEcho(t *testing.T) {
 }
 
 // TestStream_TCP_Multiplex runs 3 concurrent TCP clients against one
-// STREAM server (one adapter per accepted conn), asserts the server
+// STREAM server (one raw session per accepted conn), asserts the server
 // fair-queues them and can reply to each via its identity.
 func TestStream_TCP_Multiplex(t *testing.T) {
 	t.Parallel()
@@ -630,15 +652,13 @@ func TestStream_TCP_Multiplex(t *testing.T) {
 	eng := socket.NewStreamEngine()
 	defer eng.Close()
 
-	// Track adapters for cleanup.
-	var adapters []*stream.Adapter
+	// Accept side: one raw session per incoming conn.
+	var sessions []*session.Session
 	defer func() {
-		for _, ad := range adapters {
-			_ = ad.Close()
+		for _, sess := range sessions {
+			_ = sess.Stop()
 		}
 	}()
-
-	// Accept side: one adapter per incoming conn.
 	acceptDone := make(chan struct{})
 	go func() {
 		defer close(acceptDone)
@@ -647,11 +667,9 @@ func TestStream_TCP_Multiplex(t *testing.T) {
 			if err != nil {
 				return
 			}
-			ad := stream.NewAdapter(context.Background(), &tcpConn{Conn: c}, stream.Config{})
-			adapters = append(adapters, ad)
-			if err := eng.AttachPipe(ad.EnginePipe()); err != nil {
-				return
-			}
+			sess := session.New(session.Config{Conn: &tcpConn{Conn: c}, Raw: true, OnReady: eng.AttachPipe})
+			sessions = append(sessions, sess)
+			sess.Start()
 		}
 	}()
 
@@ -730,7 +748,7 @@ func TestStream_TCP_Multiplex(t *testing.T) {
 }
 
 // TestStream_TCP_PeerDisconnect asserts that a client closing its TCP
-// conn causes the server-side adapter to close its engine pipe,
+// conn causes the server-side session to close its engine pipe,
 // surfacing io.EOF on engine recv from that peer (the app-level signal
 // to DetachPipe).
 func TestStream_TCP_PeerDisconnect(t *testing.T) {
@@ -741,10 +759,7 @@ func TestStream_TCP_PeerDisconnect(t *testing.T) {
 	eng := socket.NewStreamEngine()
 	defer eng.Close()
 
-	ad := stream.NewAdapter(context.Background(), srvConn, stream.Config{})
-	defer ad.Close()
-	engPipe := ad.EnginePipe()
-	mustAttach(t, eng, engPipe)
+	engPipe := startRawSession(t, eng, srvConn)
 
 	ctx := testCtx(t)
 
@@ -756,7 +771,7 @@ func TestStream_TCP_PeerDisconnect(t *testing.T) {
 	require.Equal(t, []byte("hello\n"), m.Frames()[1])
 	peerID := m.Frames()[0]
 
-	// Close the client — adapter's reader should see EOF, close the
+	// Close the client — the session's reader should see EOF, close the
 	// pipe; engPipe.Closed() must fire.
 	_ = cliConn.Close()
 
@@ -774,7 +789,7 @@ func TestStream_TCP_PeerDisconnect(t *testing.T) {
 }
 
 // TestStream_TCP_HalfClose asserts that sending an empty-body Msg to a
-// peer's identity causes the adapter to close its conn — the far side
+// peer's identity causes the session to close its conn — the far side
 // sees EOF on subsequent Read.
 func TestStream_TCP_HalfClose(t *testing.T) {
 	t.Parallel()
@@ -784,9 +799,7 @@ func TestStream_TCP_HalfClose(t *testing.T) {
 	eng := socket.NewStreamEngine()
 	defer eng.Close()
 
-	ad := stream.NewAdapter(context.Background(), srvConn, stream.Config{})
-	defer ad.Close()
-	mustAttach(t, eng, ad.EnginePipe())
+	startRawSession(t, eng, srvConn)
 
 	ctx := testCtx(t)
 
