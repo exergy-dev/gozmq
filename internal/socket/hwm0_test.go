@@ -38,7 +38,7 @@ func sendBacklog(t *testing.T, p *pipe.End, src, n int) {
 
 func TestHWM0_FairQueueSingle(t *testing.T) {
 	t.Parallel()
-	fq := socket.NewFairQueue()
+	fq := newFQ()
 	defer fq.Close()
 	a, b := pipe.NewPair(0, 0, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
@@ -56,7 +56,7 @@ func TestHWM0_FairQueueSingle(t *testing.T) {
 
 func TestHWM0_FairQueueMulti(t *testing.T) {
 	t.Parallel()
-	fq := socket.NewFairQueue()
+	fq := newFQ()
 	defer fq.Close()
 	eng, peers := makePairs(2, 0, 0)
 	defer closePipes(append(eng, peers...)...)

@@ -73,10 +73,9 @@ type Poller struct {
 // pollSnapshot is a reusable snapshot of the registration set: the regs
 // scanned for readiness and the reflect.SelectCase slice Poll parks on.
 // cases holds one entry per registered interest channel plus a trailing
-// slot for ctx.Done, filled in per Poll call. Engines guarantee a stable
-// ready channel for their lifetime (a single level-triggered gate), so
-// the cases only need rebuilding when the registration set changes or a
-// registered socket closes.
+// slot for ctx.Done, filled in per Poll call. An engine's gates are
+// stable for its lifetime, so the cases only need rebuilding when the
+// registration set changes or a registered socket closes.
 type pollSnapshot struct {
 	gen   uint64
 	valid bool
@@ -150,7 +149,7 @@ func (p *Poller) Modify(sock *Socket, events PollEvents) {
 //
 // Cost: Poll parks via reflect.Select over the registered ready
 // channels. The reflection step is necessary because the registered set
-// is dynamic and ready channels come from heterogeneous engine types.
+// is dynamic and the gates come from heterogeneous engine types.
 // The registration snapshot and SelectCase slice are cached across Poll
 // calls (rebuilt only when the registration set changes or a registered
 // socket closes), so steady-state Poll allocates only the result slice.
@@ -174,7 +173,7 @@ func (p *Poller) Poll(ctx context.Context) ([]PollEvent, error) {
 			return ready, nil
 		}
 
-		// Block on any of the registered ready channels (or ctx).
+		// Block on any of the registered gates (or ctx).
 		if err := waitForWake(ctx, snap); err != nil {
 			return nil, err
 		}
@@ -214,27 +213,23 @@ func (p *Poller) refresh(snap *pollSnapshot) {
 	}
 	p.mu.Unlock()
 
-	// Rebuild the SelectCase set outside p.mu — it calls into engines.
-	// Ready channels are stable for an engine's lifetime, so these cases
-	// stay correct until the next registration change or socket close.
+	// Rebuild the SelectCase set outside p.mu. Gates are stable for an
+	// engine's lifetime, so these cases stay correct until the next
+	// registration change or socket close.
 	snap.cases = snap.cases[:0]
 	for _, r := range snap.regs {
-		eng := r.sock.engine
+		in, out := r.sock.engine.Gates()
 		if r.mask&PollIn != 0 {
-			if ch := eng.ReadyRecv(); ch != nil {
-				snap.cases = append(snap.cases, reflect.SelectCase{
-					Dir:  reflect.SelectRecv,
-					Chan: reflect.ValueOf(ch),
-				})
-			}
+			snap.cases = append(snap.cases, reflect.SelectCase{
+				Dir:  reflect.SelectRecv,
+				Chan: reflect.ValueOf(in),
+			})
 		}
 		if r.mask&PollOut != 0 {
-			if ch := eng.ReadyWrite(); ch != nil {
-				snap.cases = append(snap.cases, reflect.SelectCase{
-					Dir:  reflect.SelectRecv,
-					Chan: reflect.ValueOf(ch),
-				})
-			}
+			snap.cases = append(snap.cases, reflect.SelectCase{
+				Dir:  reflect.SelectRecv,
+				Chan: reflect.ValueOf(out),
+			})
 		}
 	}
 	// Trailing slot for ctx.Done, filled in per Poll call by waitForWake
@@ -271,26 +266,33 @@ func scanReady(regs []pollerReg) []PollEvent {
 	return out
 }
 
-// rearm re-arms the ready gates of the sockets Poll is about to report.
-// Each engine gate is a single-slot token: when two waiters (two Pollers,
-// or concurrent Poll calls) park on the same socket, the one that wakes
-// consumes the token and the other would sleep until ctx expired even
-// though the message is still queued. Ready{Recv,Write} arm the gate
-// whenever the direction is ready, so calling them hands the token on.
-// A stale token left behind costs a later Poll one spurious wakeup.
+// rearm puts back the gate tokens of the sockets Poll is about to report.
+// Each gate is a single-slot token: when two waiters (two Pollers,
+// concurrent Poll calls, or a Poller and a blocked Recv) park on the same
+// socket, the one that wakes consumes the token and the other would sleep
+// until ctx expired even though the direction is still ready. A stale
+// token left behind costs a later waiter one spurious wakeup.
 func rearm(ready []PollEvent) {
 	for _, ev := range ready {
-		eng := ev.Socket.engine
+		in, out := ev.Socket.engine.Gates()
 		if ev.Events&PollIn != 0 {
-			eng.ReadyRecv()
+			armGate(in)
 		}
 		if ev.Events&PollOut != 0 {
-			eng.ReadyWrite()
+			armGate(out)
 		}
 	}
 }
 
-// waitForWake parks until at least one registered ready channel fires
+// armGate puts a token in gate unless one is already there.
+func armGate(gate chan struct{}) {
+	select {
+	case gate <- struct{}{}:
+	default:
+	}
+}
+
+// waitForWake parks until at least one registered gate fires
 // or ctx cancels. Returns nil on a successful wake and ctx.Err() on
 // cancellation.
 //

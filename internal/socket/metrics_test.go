@@ -5,7 +5,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/exergy-dev/gozmq/internal/socket"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -14,7 +13,7 @@ import (
 // errors (caller already saw the failure).
 func TestLoadBalancer_SentCounter(t *testing.T) {
 	t.Parallel()
-	lb := socket.NewLoadBalancer()
+	lb := newLB()
 	defer lb.Close()
 
 	require.Equal(t, uint64(0), lb.Sent(), "initial Sent")
@@ -42,7 +41,7 @@ func TestLoadBalancer_SentCounter(t *testing.T) {
 // eventually dequeued by Recv.
 func TestFairQueue_RecvCounter(t *testing.T) {
 	t.Parallel()
-	fq := socket.NewFairQueue()
+	fq := newFQ()
 	defer fq.Close()
 
 	require.Equal(t, uint64(0), fq.Recvd(), "initial Recvd")
@@ -69,7 +68,7 @@ func TestFairQueue_RecvCounter(t *testing.T) {
 func TestFairQueue_QueueDepthGauge(t *testing.T) {
 	t.Parallel()
 	for _, n := range []int{1, 2} {
-		fq := socket.NewFairQueue()
+		fq := newFQ()
 		engineEnds, peerEnds := makePairs(n, 0, 0)
 		for _, p := range engineEnds {
 			require.NoError(t, fq.Attach(p), "attach")

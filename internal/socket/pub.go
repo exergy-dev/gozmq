@@ -104,8 +104,10 @@ type pubEngine struct {
 	// it kept m (taking over its reference). It runs under mu, never
 	// after DetachPipe(p) or Close returns. XPUB installs it to maintain
 	// its refcounts and event queue; nil for PUB.
-	onSub    func(p *pipe.End, subscribe bool, prefix []byte, m *msg.Msg) (kept bool)
-	sendGate readyGate
+	onSub func(p *pipe.End, subscribe bool, prefix []byte, m *msg.Msg) (kept bool)
+
+	// The in-gate is fq's (XPUB's events; PUB has no recv direction).
+	gates
 
 	// Metrics counters (embedded). sent increments once per Send call that
 	// has at least one frame; dropped increments per (message, peer) pair
@@ -140,11 +142,11 @@ func NewPubEngine() Engine {
 // XPUB.
 func newPubEngineBase(onSub func(*pipe.End, bool, []byte, *msg.Msg) bool) *pubEngine {
 	e := &pubEngine{
-		peers:    make(map[*pipe.End]*pubPeer),
-		onSub:    onSub,
-		sendGate: newReadyGate(),
+		peers: make(map[*pipe.End]*pubPeer),
+		onSub: onSub,
+		gates: newGates(),
 	}
-	e.fq.init()
+	e.fq.init(e.in)
 	e.snap.Store(&[]*pubPeer{})
 	return e
 }
@@ -171,7 +173,7 @@ func (e *pubEngine) AttachPipe(p *pipe.End) error {
 	}
 	e.peers[p] = &pubPeer{pipe: p, tree: NewSubTree()}
 	e.rebuildSnapLocked()
-	e.sendGate.arm()
+	e.armOut()
 	return e.fq.Attach(p)
 }
 
@@ -200,7 +202,7 @@ func (e *pubEngine) DetachPipe(p *pipe.End) error {
 
 // applyPending applies the queued subscription commands, if any, for one
 // atomic load when there are none. A false Pending is exact and leaves
-// every pipe primed to set it, and arm the FairQueue's gate, on the next
+// every pipe primed to set it, and arm the in-gate, on the next
 // command.
 func (e *pubEngine) applyPending() {
 	if e.fq.Pending() {
@@ -240,13 +242,6 @@ func (e *pubEngine) applyLocked(peer *pubPeer, m *msg.Msg) {
 	if e.onSub == nil || !e.onSub(peer.pipe, subscribe, prefix, m) {
 		m.Release()
 	}
-}
-
-// ReadyRecv: PUB has no recv direction. XPUB provides its own.
-func (e *pubEngine) ReadyRecv() <-chan struct{} { return nil }
-
-func (e *pubEngine) ReadyWrite() <-chan struct{} {
-	return e.sendGate.signal(e.CanSendNow())
 }
 
 // CanRecvNow: PUB has no recv direction. XPUB provides its own.

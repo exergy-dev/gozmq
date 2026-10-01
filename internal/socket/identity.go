@@ -55,26 +55,22 @@ type identityRouter struct {
 	// the newest claimant, so predictable identities would let a peer
 	// advertising one hijack an anonymous peer's replies.
 	nextID uint32
-	// sendGate is the Poller-facing PollOut signal, level-armed while at
-	// least one peer is attached.
-	sendGate readyGate
 
+	gates // the FairQueue arms in; AttachPipe arms out
 	counters
 }
 
 func newIdentityRouter(name string) identityRouter {
+	g := newGates()
 	return identityRouter{
-		fq:       NewFairQueue(),
-		name:     name,
-		idOf:     make(map[*pipe.End][]byte),
-		pipeOf:   make(map[string]*pipe.End),
-		nextID:   rand.Uint32(),
-		sendGate: newReadyGate(),
+		fq:     NewFairQueue(g.in),
+		name:   name,
+		idOf:   make(map[*pipe.End][]byte),
+		pipeOf: make(map[string]*pipe.End),
+		nextID: rand.Uint32(),
+		gates:  g,
 	}
 }
-
-// ReadyRecv exposes the inbound FairQueue's read-ready signal.
-func (e *identityRouter) ReadyRecv() <-chan struct{} { return e.fq.ReadyRecv() }
 
 // CanRecvNow exposes the FairQueue's pending-data level check.
 func (e *identityRouter) CanRecvNow() bool { return e.fq.CanRecv() }
@@ -84,20 +80,6 @@ func (e *identityRouter) CanSendNow() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return !e.closed && len(e.idOf) > 0
-}
-
-// ReadyWrite signals (level-armed) when at least one peer is attached.
-func (e *identityRouter) ReadyWrite() <-chan struct{} {
-	e.mu.Lock()
-	e.signalReadyWriteLocked()
-	e.mu.Unlock()
-	return e.sendGate.ch
-}
-
-func (e *identityRouter) signalReadyWriteLocked() {
-	if !e.closed && len(e.idOf) > 0 {
-		e.sendGate.arm()
-	}
 }
 
 // AttachPipe registers p, assigning it a routing identity (its PeerIdentity
@@ -123,7 +105,7 @@ func (e *identityRouter) AttachPipe(p *pipe.End) error {
 	e.idOf[p] = idCopy
 	e.pipeOf[string(idCopy)] = p
 	p.SetRoutingID(idCopy) // before fq.Attach: Recv reads it for every message
-	e.signalReadyWriteLocked()
+	e.armOut()
 	e.mu.Unlock()
 	return e.fq.Attach(p)
 }

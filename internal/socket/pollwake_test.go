@@ -11,13 +11,12 @@ import (
 	"github.com/exergy-dev/gozmq/msg"
 )
 
-// These tests pin the level-trigger contract that a root-level blocking
-// Poller.Poll depends on: a goroutine parked on the channel obtained from
-// ReadyRecv() BEFORE any data existed must wake when a message is
-// delivered — with no polling loop and no re-call of ReadyRecv. They
-// cover the paths with no forwarder goroutine between the pipe and the
-// engine: FairQueue direct mode, pairEngine, reqEngine's sticky pipe, and
-// XPUB's subscription events.
+// These tests pin the wake-up contract that a root-level blocking
+// Poller.Poll depends on: after CanRecvNow answers false, a goroutine
+// parked on the engine's in-gate must wake when the engine becomes
+// receivable — with no polling loop and no further call into the engine.
+// They cover FairQueue's single-pipe mode, pairEngine, reqEngine's sticky
+// pipe, REP's FSM and XPUB's subscription events.
 
 // parkOnGate parks a goroutine reading ch and returns a channel that
 // closes when the read completes.
@@ -48,16 +47,26 @@ func requireWake(t *testing.T, woke <-chan struct{}, what string) {
 	}
 }
 
-func TestFairQueue_ReadyRecvWakesOnDirectDelivery(t *testing.T) {
+// parkOnIn checks eng the way a Poller scan does and parks on its in-gate.
+func parkOnIn(t *testing.T, eng socket.Engine) <-chan struct{} {
+	t.Helper()
+	require.False(t, eng.CanRecvNow())
+	in, _ := eng.Gates()
+	return parkOnGate(in)
+}
+
+func TestFairQueue_GateWakesOnSinglePipeDelivery(t *testing.T) {
 	t.Parallel()
-	fq := socket.NewFairQueue()
+	gate := make(chan struct{}, 1)
+	fq := socket.NewFairQueue(gate)
 	defer fq.Close()
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
 	require.NoError(t, fq.Attach(a), "attach") // single pipe → direct mode
 
-	woke := parkOnGate(fq.ReadyRecv())
+	require.False(t, fq.CanRecv())
+	woke := parkOnGate(gate)
 	requireNoWake(t, woke)
 
 	require.NoError(t, b.Send(testCtx(t), msg.FromBytes([]byte("x"))), "peer send")
@@ -65,7 +74,7 @@ func TestFairQueue_ReadyRecvWakesOnDirectDelivery(t *testing.T) {
 	require.True(t, fq.CanRecv(), "message must still be pending (non-consuming signal)")
 }
 
-func TestPair_ReadyRecvWakesOnDelivery(t *testing.T) {
+func TestPair_InGateWakesOnDelivery(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewPairEngine()
 	defer eng.Close()
@@ -74,7 +83,7 @@ func TestPair_ReadyRecvWakesOnDelivery(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	woke := parkOnGate(eng.ReadyRecv())
+	woke := parkOnIn(t, eng)
 	requireNoWake(t, woke)
 
 	require.NoError(t, b.Send(testCtx(t), msg.FromBytes([]byte("x"))), "peer send")
@@ -82,7 +91,7 @@ func TestPair_ReadyRecvWakesOnDelivery(t *testing.T) {
 	require.True(t, eng.CanRecvNow())
 }
 
-func TestReq_ReadyRecvWakesOnReply(t *testing.T) {
+func TestReq_InGateWakesOnReply(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewReqEngine()
 	defer eng.Close()
@@ -96,7 +105,7 @@ func TestReq_ReadyRecvWakesOnReply(t *testing.T) {
 	_, err := b.Recv(ctx)
 	require.NoError(t, err, "drain request")
 
-	woke := parkOnGate(eng.ReadyRecv())
+	woke := parkOnIn(t, eng)
 	requireNoWake(t, woke)
 
 	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("reply"))), "peer reply")
@@ -104,9 +113,9 @@ func TestReq_ReadyRecvWakesOnReply(t *testing.T) {
 	require.True(t, eng.CanRecvNow())
 }
 
-// TestXPub_ReadyRecvWakesOnSubscription: a Poller parked on XPUB's PollIn
+// TestXPub_InGateWakesOnSubscription: a Poller parked on XPUB's PollIn
 // wakes when a peer subscribes, with no goroutine applying the command.
-func TestXPub_ReadyRecvWakesOnSubscription(t *testing.T) {
+func TestXPub_InGateWakesOnSubscription(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewXPubEngineV(false)
 	defer eng.Close()
@@ -116,11 +125,45 @@ func TestXPub_ReadyRecvWakesOnSubscription(t *testing.T) {
 	defer closePipes(a1, b1, a2, b2)
 	mustAttach(t, eng, a1, a2)
 
-	woke := parkOnGate(eng.ReadyRecv())
+	woke := parkOnIn(t, eng)
 	requireNoWake(t, woke)
 
 	require.NoError(t, b2.Send(testCtx(t), msg.FromBytes([]byte("\x01A"))), "peer subscribe")
 	requireWake(t, woke, "xpub subscription")
 	require.True(t, eng.CanRecvNow())
 	require.True(t, eng.CanRecvNow(), "CanRecvNow must not consume the event")
+}
+
+// TestRep_InGateWakesAfterSend: a request queued while REP owes a reply is
+// not receivable, so a Poller that wakes on its arrival finds nothing and
+// parks again. Send moving the FSM back to canRecv must wake it: nothing
+// else will arrive.
+func TestRep_InGateWakesAfterSend(t *testing.T) {
+	t.Parallel()
+	eng := socket.NewRepEngine()
+	defer eng.Close()
+
+	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(a, b)
+	mustAttach(t, eng, a)
+
+	ctx := testCtx(t)
+	for _, q := range []string{"q1", "q2"} {
+		require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte(q))), "peer request")
+	}
+	m, err := eng.Recv(ctx)
+	require.NoError(t, err)
+	m.Release()
+
+	in, _ := eng.Gates()
+	select { // the Poller took q2's token and found REP owing a reply
+	case <-in:
+	default:
+	}
+	woke := parkOnIn(t, eng)
+	requireNoWake(t, woke)
+
+	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("r1"))), "reply")
+	requireWake(t, woke, "rep canRecv")
+	require.True(t, eng.CanRecvNow())
 }

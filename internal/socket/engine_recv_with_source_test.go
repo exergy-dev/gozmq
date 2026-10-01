@@ -8,7 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
-	"github.com/exergy-dev/gozmq/internal/socket"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -17,7 +16,7 @@ import (
 // the message and the exact pipe it came from, across a 2-pipe setup.
 func TestFairQueue_RecvWithSource(t *testing.T) {
 	t.Parallel()
-	fq := socket.NewFairQueue()
+	fq := newFQ()
 	defer fq.Close()
 
 	aEng, aPeer := pipe.NewPair(4, 4,
@@ -54,7 +53,7 @@ func TestFairQueue_RecvWithSource(t *testing.T) {
 // returns ErrSocketClosed when the queue is closed with no inbound.
 func TestFairQueue_RecvWithSource_CloseError(t *testing.T) {
 	t.Parallel()
-	fq := socket.NewFairQueue()
+	fq := newFQ()
 
 	ctx := context.Background()
 	type result struct {

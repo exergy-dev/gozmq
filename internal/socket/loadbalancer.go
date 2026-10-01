@@ -31,15 +31,11 @@ import (
 type LoadBalancer struct {
 	mu   sync.Mutex
 	ring pipeRing
-	// notifyCh is a generation channel: it is closed (broadcast) and
-	// replaced with a fresh one whenever the peer set changes and on
-	// Close, so every Send parked on the old generation wakes and re-reads
-	// the set (or sees closed). A
-	// cap-1 token channel was tried first and lost wakeups: a mid-loop
-	// drain could swallow the token destined for another parked sender.
-	notifyCh chan struct{}
-	readyW   readyGate // level-armed while ring.len() > 0; Poller-facing
-	closed   bool
+	// changed wakes every parked Send when the peer set changes and on
+	// Close, so each re-reads the set (or sees closed).
+	changed broadcast
+	gate    chan struct{} // the owning engine's out-gate, armed on attach
+	closed  bool
 
 	// There is deliberately no lock-free single-peer fast path (unlike
 	// FairQueue's): measured against this locked path it was
@@ -56,23 +52,10 @@ type LoadBalancer struct {
 // dispatched. Safe to call concurrently with Send.
 func (lb *LoadBalancer) Sent() uint64 { return lb.sent.Load() }
 
-// NewLoadBalancer returns an empty LoadBalancer.
-func NewLoadBalancer() *LoadBalancer {
-	return &LoadBalancer{
-		notifyCh: make(chan struct{}),
-		readyW:   newReadyGate(),
-	}
-}
-
-// ReadyWrite returns a channel that is non-blocking-readable whenever
-// the LoadBalancer has at least one attached peer pipe. The Poller
-// uses this as the PollOut readiness signal. Reads from the channel
-// do not change LoadBalancer state; the gate is level-armed — each
-// ReadyWrite call re-arms it while peers remain attached.
-func (lb *LoadBalancer) ReadyWrite() <-chan struct{} {
-	lb.mu.Lock()
-	defer lb.mu.Unlock()
-	return lb.readyW.signal(lb.ring.len() > 0 && !lb.closed)
+// NewLoadBalancer returns an empty LoadBalancer that arms gate, a cap-1
+// channel, whenever a peer attaches.
+func NewLoadBalancer(gate chan struct{}) *LoadBalancer {
+	return &LoadBalancer{gate: gate}
 }
 
 // HasPeers reports whether at least one peer is attached. Used by the
@@ -81,14 +64,6 @@ func (lb *LoadBalancer) HasPeers() bool {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
 	return lb.ring.len() > 0 && !lb.closed
-}
-
-// signalReadyWriteLocked re-arms the write-ready gate when peers are
-// present. Caller must hold lb.mu.
-func (lb *LoadBalancer) signalReadyWriteLocked() {
-	if lb.ring.len() > 0 && !lb.closed {
-		lb.readyW.arm()
-	}
 }
 
 // Attach registers p with the dispatcher. Idempotent: re-attaching an
@@ -103,8 +78,8 @@ func (lb *LoadBalancer) Attach(p *pipe.End) error {
 	if !lb.ring.add(p) {
 		return nil
 	}
-	lb.signalLocked()
-	lb.signalReadyWriteLocked()
+	lb.changed.wake()
+	arm(lb.gate)
 	return nil
 }
 
@@ -114,8 +89,7 @@ func (lb *LoadBalancer) Detach(p *pipe.End) error {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
 	if lb.ring.remove(p) {
-		lb.signalLocked()
-		lb.signalReadyWriteLocked()
+		lb.changed.wake()
 	}
 	return nil
 }
@@ -135,7 +109,7 @@ func (lb *LoadBalancer) Send(ctx context.Context, m *msg.Msg) error {
 			return fmt.Errorf("loadbalancer send: %w", zmqerr.ErrSocketClosed)
 		}
 		if lb.ring.len() == 0 {
-			notify := lb.notifyCh
+			notify := lb.changed.wait()
 			lb.mu.Unlock()
 			select {
 			case <-notify: // attach or Close; re-check under the lock
@@ -169,7 +143,7 @@ func (lb *LoadBalancer) Send(ctx context.Context, m *msg.Msg) error {
 		// notify is closed by a peer-set change and by Close; either way
 		// the loop re-checks under the lock.
 		idx, p := lb.ring.current()
-		notify := lb.notifyCh
+		notify := lb.changed.wait()
 		lb.mu.Unlock()
 
 		switch err := p.SendOr(ctx, m, notify); {
@@ -190,16 +164,6 @@ func (lb *LoadBalancer) Send(ctx context.Context, m *msg.Msg) error {
 	}
 }
 
-// signalLocked broadcasts a peer-set change by closing the current
-// notify generation and installing a fresh one. Caller must hold lb.mu.
-// Every parked Send holds some generation and
-// wakes when it closes; senders that arrive later grab the new, open
-// generation and are unaffected.
-func (lb *LoadBalancer) signalLocked() {
-	close(lb.notifyCh)
-	lb.notifyCh = make(chan struct{})
-}
-
 // Close releases the LoadBalancer. Subsequent Attach returns
 // zmqerr.ErrSocketClosed; pending Send unblocks with the same. Idempotent.
 func (lb *LoadBalancer) Close() error {
@@ -209,6 +173,6 @@ func (lb *LoadBalancer) Close() error {
 		return nil
 	}
 	lb.closed = true
-	lb.signalLocked()
+	lb.changed.wake()
 	return nil
 }

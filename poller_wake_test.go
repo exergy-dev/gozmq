@@ -115,3 +115,106 @@ func TestPoller_RepSubXSub(t *testing.T) {
 		require.Equal(t, gozmq.PollIn, waitPoll(t, pIn, 2*time.Second)[0].Events)
 	})
 }
+
+// TestPoller_RepPollInAfterSend: a Poll parked on PollIn while REP owes a
+// reply must wake when Send makes the request already queued receivable.
+// Nothing arrives at that point, so only REP's own state change can wake it.
+func TestPoller_RepPollInAfterSend(t *testing.T) {
+	_, rep, dealer := newSocketPairTypes(t, gozmq.Rep, gozmq.Dealer, "inproc://poller-rep-send", nil, nil)
+	ctx := testCtx(t)
+	for _, q := range []string{"q1", "q2"} {
+		require.NoError(t, dealer.SendMsg(ctx, gozmq.NewMsgFromFrames([]byte{}, []byte(q))))
+	}
+	m, err := rep.RecvMsg(ctx)
+	require.NoError(t, err)
+	m.Release()
+
+	p := gozmq.NewPoller()
+	p.Add(rep, gozmq.PollIn)
+	polled := make(chan []gozmq.PollEvent, 1)
+	go func() {
+		pctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		ev, _ := p.Poll(pctx)
+		polled <- ev
+	}()
+	time.Sleep(20 * time.Millisecond) // let Poll park while a reply is owed
+	require.NoError(t, rep.SendMsg(ctx, gozmq.NewMsgFromBytes([]byte("r1"))))
+	ev := <-polled
+	require.Len(t, ev, 1, "Poll did not wake when Send made q2 receivable")
+	require.Equal(t, gozmq.PollIn, ev[0].Events)
+	// Drain both directions so neither Close lingers.
+	for _, s := range []*gozmq.Socket{rep, dealer} {
+		m, err := s.RecvMsg(ctx)
+		require.NoError(t, err)
+		m.Release()
+	}
+}
+
+// TestPoller_MixedSocketsWakeEach parks one Poller over three engine
+// kinds — PULL (FairQueue in-gate), XPUB (event queue in-gate) and an
+// unpeered PUSH (LoadBalancer out-gate) — and makes each ready in turn
+// while Poll is parked. Every Poll must wake for exactly that socket.
+func TestPoller_MixedSocketsWakeEach(t *testing.T) {
+	zctx := gozmq.NewContext()
+	t.Cleanup(func() { _ = zctx.Close() })
+	newSock := func(typ gozmq.SocketType) *gozmq.Socket {
+		s, err := zctx.NewSocket(typ)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = s.Close() })
+		return s
+	}
+	pull, xpub, push := newSock(gozmq.Pull), newSock(gozmq.XPub), newSock(gozmq.Push)
+	require.NoError(t, pull.Bind("inproc://poller-mixed-pull"))
+	require.NoError(t, xpub.Bind("inproc://poller-mixed-xpub"))
+	require.NoError(t, push.Bind("inproc://poller-mixed-push"))
+	pusher, sub, puller := newSock(gozmq.Push), newSock(gozmq.Sub), newSock(gozmq.Pull)
+	require.NoError(t, pusher.Connect("inproc://poller-mixed-pull"))
+	require.NoError(t, sub.Connect("inproc://poller-mixed-xpub"))
+
+	p := gozmq.NewPoller()
+	p.Add(pull, gozmq.PollIn)
+	p.Add(xpub, gozmq.PollIn)
+	p.Add(push, gozmq.PollOut)
+	ctx := testCtx(t)
+	for _, step := range []struct {
+		name    string
+		trigger func()
+		want    *gozmq.Socket
+		events  gozmq.PollEvents
+		consume func()
+	}{
+		{"pull", func() {
+			require.NoError(t, pusher.SendMsg(ctx, gozmq.NewMsgFromBytes([]byte("x"))))
+		}, pull, gozmq.PollIn, func() {
+			m, err := pull.RecvMsg(ctx)
+			require.NoError(t, err)
+			m.Release()
+		}},
+		{"xpub", func() {
+			require.NoError(t, sub.Subscribe([]byte("t")))
+		}, xpub, gozmq.PollIn, func() {
+			m, err := xpub.RecvMsg(ctx)
+			require.NoError(t, err)
+			m.Release()
+		}},
+		{"push", func() {
+			require.NoError(t, puller.Connect("inproc://poller-mixed-push"))
+		}, push, gozmq.PollOut, func() {}},
+	} {
+		polled := make(chan []gozmq.PollEvent, 1)
+		go func() {
+			pctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			ev, _ := p.Poll(pctx)
+			polled <- ev
+		}()
+		time.Sleep(20 * time.Millisecond) // let Poll park
+		step.trigger()
+		ev := <-polled
+		require.Len(t, ev, 1, step.name)
+		require.Equal(t, step.want, ev[0].Socket, step.name)
+		require.Equal(t, step.events, ev[0].Events, step.name)
+		step.consume()
+	}
+}

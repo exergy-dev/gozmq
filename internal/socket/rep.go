@@ -69,28 +69,22 @@ type repEngine struct {
 	envelope [][]byte
 	// closeCh is closed by Close so a Send parked at HWM unblocks.
 	closeCh chan struct{}
-	// sendGate is the Poller's write-ready gate, armed when a Recv moves
-	// the FSM to canSend. Recv readiness is the FairQueue's.
-	sendGate readyGate
 
+	// The FairQueue arms the in-gate as requests arrive; the FSM arms the
+	// in-gate on entering canRecv and the out-gate on entering canSend,
+	// since a request may already be queued while a reply is owed.
+	gates
 	counters
 }
 
 // NewRepEngine returns a new REP socket engine.
 func NewRepEngine() Engine {
-	return &repEngine{
-		fq:       NewFairQueue(),
-		closeCh:  make(chan struct{}),
-		sendGate: newReadyGate(),
-	}
+	g := newGates()
+	return &repEngine{fq: NewFairQueue(g.in), closeCh: make(chan struct{}), gates: g}
 }
 
-// ReadyRecv is the FairQueue's gate; CanRecvNow filters out the canSend
-// state, so a request arriving mid-exchange is at worst a spurious wake.
-func (e *repEngine) ReadyRecv() <-chan struct{} { return e.fq.ReadyRecv() }
-
-func (e *repEngine) ReadyWrite() <-chan struct{} { return e.sendGate.signal(e.CanSendNow()) }
-
+// CanRecvNow filters out the canSend state, so a request arriving
+// mid-exchange is at worst a spurious wake.
 func (e *repEngine) CanRecvNow() bool {
 	e.mu.Lock()
 	ok := !e.closed && e.state == repStateCanRecv
@@ -152,6 +146,7 @@ func (e *repEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 			e.mu.Lock()
 			if e.state == repStateReceiving {
 				e.state = repStateCanRecv
+				e.armIn()
 			}
 			e.mu.Unlock()
 			return nil, err
@@ -173,7 +168,7 @@ func (e *repEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		e.currentPeer = src
 		e.envelope = envelope
 		e.state = repStateCanSend
-		e.sendGate.arm()
+		e.armOut()
 		e.mu.Unlock()
 		e.recv.Add(1)
 		return body, nil
@@ -197,6 +192,7 @@ func (e *repEngine) Send(ctx context.Context, m *msg.Msg) error {
 	e.currentPeer = nil
 	e.envelope = nil
 	e.state = repStateCanRecv
+	e.armIn()
 	e.mu.Unlock()
 
 	if peer == nil {

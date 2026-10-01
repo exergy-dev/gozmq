@@ -20,7 +20,7 @@ import (
 // pipes starts no goroutine. Not parallel, so the count is not disturbed.
 func TestFairQueue_NoGoroutines(t *testing.T) {
 	before := runtime.NumGoroutine()
-	fq := socket.NewFairQueue()
+	fq := newFQ()
 	defer fq.Close()
 	const n = 64
 	engineEnds, peerEnds := makePairs(n, 4, 4)
@@ -51,7 +51,7 @@ func TestFairQueue_PerPeerFIFOConcurrentReceivers(t *testing.T) {
 	t.Parallel()
 	for _, peers := range []int{1, 4} {
 		t.Run(fmt.Sprintf("peers=%d", peers), func(t *testing.T) {
-			fq := socket.NewFairQueue()
+			fq := newFQ()
 			defer fq.Close()
 			engineEnds, peerEnds := makePairs(peers, 4, 4)
 			defer closePipes(append(engineEnds, peerEnds...)...)
@@ -107,7 +107,7 @@ func TestFairQueue_PerPeerFIFOConcurrentReceivers(t *testing.T) {
 func TestFairQueue_ClosedPipeDrainsWithoutDetach(t *testing.T) {
 	t.Parallel()
 	for _, peers := range []int{1, 2} {
-		fq := socket.NewFairQueue()
+		fq := newFQ()
 		engineEnds, peerEnds := makePairs(peers, 8, 8)
 		for _, p := range engineEnds {
 			require.NoError(t, fq.Attach(p))
@@ -138,13 +138,14 @@ func TestFairQueue_ClosedPipeDrainsWithoutDetach(t *testing.T) {
 }
 
 // TestFairQueue_PollerAndRecvShareGate: a receiver blocked in Recv and a
-// Poller parked on ReadyRecv share one wake-up token. Two messages arrive
+// Poller parked on the gate share one wake-up token. Two messages arrive
 // from one peer, which notifies once; both waiters must still be served.
 func TestFairQueue_PollerAndRecvShareGate(t *testing.T) {
 	t.Parallel()
 	for _, peers := range []int{1, 2} {
 		t.Run(fmt.Sprintf("peers=%d", peers), func(t *testing.T) {
-			fq := socket.NewFairQueue()
+			gate := make(chan struct{}, 1)
+			fq := socket.NewFairQueue(gate)
 			defer fq.Close()
 			engineEnds, peerEnds := makePairs(peers, 4, 4)
 			defer closePipes(append(engineEnds, peerEnds...)...)
@@ -164,13 +165,18 @@ func TestFairQueue_PollerAndRecvShareGate(t *testing.T) {
 			go func() { // Poller: park, re-check, hand the token on, receive
 				defer close(polled)
 				for ctx.Err() == nil {
-					select {
-					case <-fq.ReadyRecv():
-					case <-ctx.Done():
-						return
+					if !fq.CanRecv() {
+						select {
+						case <-gate:
+						case <-ctx.Done():
+							return
+						}
 					}
 					if fq.CanRecv() {
-						fq.ReadyRecv() // Poller.rearm
+						select { // Poller.rearm
+						case gate <- struct{}{}:
+						default:
+						}
 						if m, err := fq.Recv(ctx); err == nil {
 							got <- "poller"
 							m.Release()
@@ -206,7 +212,7 @@ func TestFairQueue_NoLostWakeupStress(t *testing.T) {
 	t.Parallel()
 	for _, hwm := range []int{4, 0} {
 		t.Run(fmt.Sprintf("hwm=%d", hwm), func(t *testing.T) {
-			fq := socket.NewFairQueue()
+			fq := newFQ()
 			defer fq.Close()
 			const peers, per, receivers = 8, 1250, 2
 			engineEnds, peerEnds := makePairs(peers, hwm, hwm)
@@ -252,7 +258,7 @@ func TestFairQueue_NoLostWakeupStress(t *testing.T) {
 // drained and true again when a message arrives.
 func TestFairQueue_TryRecvWithSourceAndPending(t *testing.T) {
 	t.Parallel()
-	fq := socket.NewFairQueue()
+	fq := newFQ()
 	defer fq.Close()
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)

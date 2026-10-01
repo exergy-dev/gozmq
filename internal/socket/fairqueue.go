@@ -31,8 +31,8 @@ import (
 //
 // While exactly one pipe is attached, single publishes it and Recv blocks in
 // that pipe directly without taking mu, which is what a single-peer socket
-// costs anyway. Every change of single closes the gen channel it was
-// published with: that aborts receivers blocked in the old pipe and wakes
+// costs anyway. Every change of single wakes gen, whose generation single
+// was published with: that aborts receivers blocked in the old pipe and wakes
 // receivers parked on gate, and both re-evaluate.
 type FairQueue struct {
 	mu      sync.Mutex
@@ -42,12 +42,12 @@ type FairQueue struct {
 	byPipe  map[*pipe.End]*fqEntry
 	nActive int
 	cur     int
-	gen     chan struct{} // closed and replaced whenever single changes
+	gen     broadcast // woken whenever single changes
 
-	// gate is the single wake-up token shared by receivers parked with
-	// nothing active and by the Poller (ReadyRecv). A receiver that takes a
-	// message passes the token on, since someone else may be waiting for
-	// what is left.
+	// gate is the owning engine's in-gate: the single wake-up token shared
+	// by receivers parked with nothing active and by the Poller. A
+	// receiver that takes a message passes the token on, since someone
+	// else may be waiting for what is left.
 	gate chan struct{}
 
 	single atomic.Pointer[fqSingle]
@@ -72,19 +72,19 @@ type fqSingle struct {
 	gen <-chan struct{}
 }
 
-// NewFairQueue returns an empty FairQueue.
-func NewFairQueue() *FairQueue {
+// NewFairQueue returns an empty FairQueue that arms gate, a cap-1 channel,
+// whenever a message may have become receivable.
+func NewFairQueue(gate chan struct{}) *FairQueue {
 	fq := &FairQueue{}
-	fq.init()
+	fq.init(gate)
 	return fq
 }
 
 // init readies a zero FairQueue, for owners that embed one by value.
-func (fq *FairQueue) init() {
+func (fq *FairQueue) init(gate chan struct{}) {
 	fq.closeCh = make(chan struct{})
 	fq.byPipe = make(map[*pipe.End]*fqEntry)
-	fq.gen = make(chan struct{})
-	fq.gate = make(chan struct{}, 1)
+	fq.gate = gate
 }
 
 // Recvd reports the number of messages handed to receivers.
@@ -105,25 +105,9 @@ func (fq *FairQueue) QueueDepth() uint64 {
 // false answer is exact until the next message arrives.
 func (fq *FairQueue) Pending() bool { return fq.pending.Load() }
 
-func (fq *FairQueue) armGate() {
-	select {
-	case fq.gate <- struct{}{}:
-	default:
-	}
-}
-
-// ReadyRecv returns the gate a Poller parks on, armed if a message is
-// queued. Reading it does not consume a message.
-func (fq *FairQueue) ReadyRecv() <-chan struct{} {
-	if fq.CanRecv() {
-		fq.armGate()
-	}
-	return fq.gate
-}
-
 // CanRecv reports whether a Recv would find a message right now. A false
 // answer leaves every pipe idle, so the next message arms the gate: a
-// Poller may park on ReadyRecv after it.
+// Poller may park on it after this.
 func (fq *FairQueue) CanRecv() bool {
 	fq.mu.Lock()
 	defer fq.mu.Unlock()
@@ -160,7 +144,7 @@ func (fq *FairQueue) Attach(p *pipe.End) error {
 	p.SetNotify(func() { fq.notified(e) })
 	if p.MarkIdle() {
 		fq.activateLocked(e)
-		fq.armGate()
+		arm(fq.gate)
 	}
 	fq.updateSingleLocked()
 	return nil
@@ -176,7 +160,7 @@ func (fq *FairQueue) notified(e *fqEntry) {
 	}
 	fq.mu.Unlock()
 	if live {
-		fq.armGate()
+		arm(fq.gate)
 	}
 }
 
@@ -232,7 +216,7 @@ func (fq *FairQueue) RecvWithSource(ctx context.Context) (*msg.Msg, *pipe.End, e
 			continue
 		}
 		m, p := fq.takeLocked()
-		gen := fq.gen
+		gen := fq.gen.wait()
 		fq.mu.Unlock()
 		if m != nil {
 			fq.recv.Add(1)
@@ -275,7 +259,7 @@ func (fq *FairQueue) takeLocked() (*msg.Msg, *pipe.End) {
 		e := fq.entries[fq.cur]
 		if m, ok := e.p.RecvOrIdle(); ok {
 			fq.cur++
-			fq.armGate()
+			arm(fq.gate)
 			return m, e.p
 		}
 		// Checked after RecvOrIdle marked the pipe idle, so a close that
@@ -348,12 +332,11 @@ func (fq *FairQueue) updateSingleLocked() {
 	if old == nil && p == nil || old != nil && old.p == p {
 		return
 	}
-	close(fq.gen)
-	fq.gen = make(chan struct{})
+	fq.gen.wake()
 	if p == nil {
 		fq.single.Store(nil)
 	} else {
-		fq.single.Store(&fqSingle{p: p, gen: fq.gen})
+		fq.single.Store(&fqSingle{p: p, gen: fq.gen.wait()})
 	}
 }
 
@@ -375,6 +358,6 @@ func (fq *FairQueue) Close() error {
 	fq.entries, fq.byPipe, fq.nActive = nil, nil, 0
 	fq.pending.Store(false)
 	fq.single.Store(nil)
-	close(fq.gen)
+	fq.gen.wake()
 	return nil
 }

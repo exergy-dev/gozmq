@@ -50,9 +50,9 @@ func NewXPubEngineV(verbose bool) Engine {
 // the peers' command rate against the application's Recv rate; in dedup
 // mode only prefix-presence transitions are queued.
 //
-// Blocked receivers and the Poller share the pub engine FairQueue's gate,
-// which a command arriving on an idle pipe arms, and so does every
-// enqueue here.
+// Blocked receivers and the Poller share the pub engine's in-gate (its
+// FairQueue's gate), which a command arriving on an idle pipe arms, and so
+// does every enqueue here.
 type xpubEngine struct {
 	pub     *pubEngine
 	verbose bool
@@ -97,7 +97,7 @@ func (e *xpubEngine) onSubscription(p *pipe.End, subscribe bool, prefix []byte, 
 	}
 	e.mu.Unlock()
 	if surface {
-		e.pub.fq.armGate()
+		e.pub.armIn()
 	}
 	return surface
 }
@@ -128,7 +128,7 @@ func (e *xpubEngine) DetachPipe(p *pipe.End) error {
 	delete(e.peerSubs, p)
 	e.mu.Unlock()
 	if queued {
-		e.pub.fq.armGate()
+		e.pub.armIn()
 	}
 	return err
 }
@@ -150,15 +150,8 @@ func (e *xpubEngine) Metrics() Metrics {
 	return e.pub.snapshot(e.pub.dropped.Load(), depth)
 }
 
-func (e *xpubEngine) ReadyRecv() <-chan struct{} {
-	if e.CanRecvNow() {
-		e.pub.fq.armGate()
-	}
-	return e.pub.fq.gate
-}
-
-func (e *xpubEngine) ReadyWrite() <-chan struct{} { return e.pub.ReadyWrite() }
-func (e *xpubEngine) CanSendNow() bool            { return e.pub.CanSendNow() }
+func (e *xpubEngine) Gates() (in, out chan struct{}) { return e.pub.Gates() }
+func (e *xpubEngine) CanSendNow() bool               { return e.pub.CanSendNow() }
 
 // CanRecvNow applies the queued commands and reports whether an event is
 // queued. When none is, the next command arms the gate.
@@ -173,15 +166,14 @@ func (e *xpubEngine) CanRecvNow() bool {
 // queued (all, or only prefix-presence transitions) was decided when the
 // command was applied; see onSubscription.
 func (e *xpubEngine) Recv(ctx context.Context) (*msg.Msg, error) {
-	fq := &e.pub.fq
 	for {
 		e.pub.applyPending()
 		if m, ok := e.pop(); ok {
 			return m, nil
 		}
 		select {
-		case <-fq.gate:
-		case <-fq.closeCh:
+		case <-e.pub.in:
+		case <-e.pub.fq.closeCh:
 			if m, ok := e.pop(); ok {
 				return m, nil
 			}
@@ -206,7 +198,7 @@ func (e *xpubEngine) pop() (*msg.Msg, bool) {
 	more := len(e.pending) > 0
 	e.mu.Unlock()
 	if more {
-		e.pub.fq.armGate()
+		e.pub.armIn()
 	}
 	e.pub.recv.Add(1)
 	return m, true

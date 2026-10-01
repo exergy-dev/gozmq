@@ -84,10 +84,10 @@ import (
 )
 
 // This file holds the Engine contract and the shared engine plumbing: the
-// metric counters struct and the readiness gate. The two large reusable
-// primitives live in sibling files in this package: LoadBalancer in
-// loadbalancer.go, FairQueue in fairqueue.go. The simple combinator engines
-// (PUSH/PULL/DEALER) are in combinators.go.
+// metric counters struct, the readiness gates and the broadcast helper. The
+// two large reusable primitives live in sibling files in this package:
+// LoadBalancer in loadbalancer.go, FairQueue in fairqueue.go. The simple
+// combinator engines (PUSH/PULL/DEALER) are in combinators.go.
 
 // --------------------------------------------------------------------------
 // Shared engine plumbing
@@ -128,26 +128,52 @@ func prependFrames(head [][]byte, body *msg.Msg) *msg.Msg {
 	return body.Derive(append(frames, body.Frames()...)...)
 }
 
-// readyGate is a level-triggered, single-slot readiness signal for the Poller.
-// arm makes the gate readable (idempotent, non-blocking); signal re-arms the
-// gate iff ready and returns the channel — the canonical Ready{Recv,Write}
-// body. The Poller drains the channel and the next signal/arm re-arms it.
-type readyGate struct{ ch chan struct{} }
+// gates is an engine's readiness: two cap-1 wake-up tokens, in for PollIn
+// and out for PollOut. The Poller parks on them, and so do the engine's own
+// blocked receivers where it has a FairQueue (which takes the in-gate). An
+// engine arms a gate whenever that direction may have become ready; a token
+// is only a hint, so a stale one costs a waiter one spurious re-check. A
+// waiter that takes the token and finds the direction ready puts it back,
+// since another waiter on the same socket may be parked on the same gate.
+type gates struct{ in, out chan struct{} }
 
-func newReadyGate() readyGate { return readyGate{ch: make(chan struct{}, 1)} }
+func newGates() gates {
+	return gates{in: make(chan struct{}, 1), out: make(chan struct{}, 1)}
+}
 
-func (g readyGate) arm() {
+// Gates implements Engine.
+func (g gates) Gates() (in, out chan struct{}) { return g.in, g.out }
+
+func (g gates) armIn()  { arm(g.in) }
+func (g gates) armOut() { arm(g.out) }
+
+// arm puts the token in gate unless it is already there.
+func arm(gate chan struct{}) {
 	select {
-	case g.ch <- struct{}{}:
+	case gate <- struct{}{}:
 	default:
 	}
 }
 
-func (g readyGate) signal(ready bool) <-chan struct{} {
-	if ready {
-		g.arm()
+// broadcast wakes every waiter at once: wait returns the current
+// generation's channel and wake closes it, so waiters that hold it re-check
+// while later ones start a new generation. (A cap-1 token loses wakeups
+// here: one waiter's drain can swallow the token another needed.) The zero
+// value is ready; the owner's mutex guards it.
+type broadcast struct{ ch chan struct{} }
+
+func (b *broadcast) wait() <-chan struct{} {
+	if b.ch == nil {
+		b.ch = make(chan struct{})
 	}
-	return g.ch
+	return b.ch
+}
+
+func (b *broadcast) wake() {
+	if b.ch != nil {
+		close(b.ch)
+		b.ch = nil
+	}
 }
 
 // Engine encapsulates the per-type policy (REQ lock-step, PUB fanout,
@@ -187,31 +213,23 @@ type Engine interface {
 	// goroutine, including concurrently with Send/Recv.
 	Metrics() Metrics
 
-	// The readiness methods below back the public Poller. The two
-	// channels are level-armed: a chan with a buffered value (or that is
-	// closed) means "ready right now"; a chan that blocks means "not
-	// ready". Either may be nil — the Poller skips nil channels. Engines
-	// with no recv direction (PUSH) return nil from ReadyRecv; engines
-	// with no send direction (PULL, SUB, XSUB) return nil from ReadyWrite.
-
-	// ReadyRecv returns a channel that is armed when at least one
-	// message is buffered and immediately available to Recv. Reads
-	// from the channel do not consume the message; the engine
-	// re-arms the signal as long as data remains.
-	ReadyRecv() <-chan struct{}
-	// ReadyWrite returns a channel that is armed when at least one
-	// peer is attached and a Send would not block on the peer-set
-	// being empty. (HWM-induced blocking is not surfaced; this
-	// mirrors libzmq's poll semantics where POLLOUT means "a peer
-	// exists," not "the next byte is guaranteed to land instantly.")
-	ReadyWrite() <-chan struct{}
-	// CanRecvNow is a non-consuming level check: true iff a Recv
-	// would not block on inbound queue emptiness right now. Always
-	// false for send-only engines.
+	// Gates returns the engine's two readiness gates (see gates), stable
+	// for its lifetime: in is armed when a Recv may have stopped blocking,
+	// out when a Send may have. The Poller parks on them and re-checks
+	// with CanRecvNow/CanSendNow, which answer false for a direction the
+	// engine lacks.
+	Gates() (in, out chan struct{})
+	// CanRecvNow is a non-consuming level check: true iff a Recv would
+	// not block on inbound queue emptiness right now. A false answer also
+	// registers a wake-up: the pipes it found empty are marked idle, so
+	// the next message arms the in-gate. Always false for send-only
+	// engines.
 	CanRecvNow() bool
-	// CanSendNow is a non-consuming level check: true iff a Send
-	// would not block on peer-set emptiness right now (HWM blocking
-	// is not surfaced; see ReadyWrite). Always false for recv-only.
+	// CanSendNow is a non-consuming level check: true iff a Send would
+	// not block on peer-set emptiness right now. HWM blocking is not
+	// surfaced, as in libzmq where POLLOUT means "a peer exists", not
+	// "the next message is guaranteed to land instantly". Always false
+	// for recv-only engines.
 	CanSendNow() bool
 }
 

@@ -70,15 +70,14 @@ type reqEngine struct {
 	mu       sync.Mutex
 	closed   bool
 	closeCh  chan struct{}
-	notifyCh chan struct{} // closed on attach; swapped for a fresh one after
-	recvGate readyGate
-	sendGate readyGate
+	attached broadcast // woken on attach
 	state    reqState
 	ring     pipeRing
 	// sticky is the pipe picked by the most recent Send; Recv reads its
 	// reply directly. Cleared after a successful Recv (or on detach).
 	sticky *pipe.End
 
+	gates
 	counters
 }
 
@@ -88,12 +87,7 @@ var reqDelimiter = [][]byte{{}}
 
 // NewReqEngine returns a new REQ socket engine.
 func NewReqEngine() Engine {
-	return &reqEngine{
-		closeCh:  make(chan struct{}),
-		notifyCh: make(chan struct{}),
-		recvGate: newReadyGate(),
-		sendGate: newReadyGate(),
-	}
+	return &reqEngine{closeCh: make(chan struct{}), gates: newGates()}
 }
 
 func (e *reqEngine) AttachPipe(p *pipe.End) error {
@@ -105,14 +99,13 @@ func (e *reqEngine) AttachPipe(p *pipe.End) error {
 	if !e.ring.add(p) {
 		return nil
 	}
-	// The pipe arms the Poller's recv gate itself once marked idle (see
-	// send and CanRecvNow), so a blocking Poll wakes when the reply lands.
-	p.SetNotify(e.recvGate.arm)
+	// The pipe arms the in-gate itself once marked idle (see send and
+	// CanRecvNow), so a blocking Poll wakes when the reply lands.
+	p.SetNotify(e.armIn)
 	// Wake any Send parked waiting for a peer.
-	close(e.notifyCh)
-	e.notifyCh = make(chan struct{})
+	e.attached.wake()
 	if e.state == reqStateCanSend {
-		e.sendGate.arm()
+		e.armOut()
 	}
 	return nil
 }
@@ -150,9 +143,7 @@ func (e *reqEngine) Send(ctx context.Context, m *msg.Msg) error {
 		e.mu.Lock()
 		if e.state == reqStateSending {
 			e.state = reqStateCanSend
-			if e.ring.len() > 0 {
-				e.sendGate.arm()
-			}
+			e.armOut()
 		}
 		e.mu.Unlock()
 		return err
@@ -193,7 +184,7 @@ func (e *reqEngine) send(ctx context.Context, m *msg.Msg) error {
 			return fmt.Errorf("req send: %w", zmqerr.ErrSocketClosed)
 		}
 		if e.ring.len() == 0 {
-			notify := e.notifyCh
+			notify := e.attached.wait()
 			closeCh := e.closeCh
 			e.mu.Unlock()
 			select {
@@ -254,7 +245,7 @@ func (e *reqEngine) send(ctx context.Context, m *msg.Msg) error {
 		// A Poller may have parked before this request, when REQ could
 		// not receive: mark the sticky pipe idle so the reply wakes it.
 		if p.MarkIdle() {
-			e.recvGate.arm()
+			e.armIn()
 		}
 		e.mu.Unlock()
 		m.Release()
@@ -289,9 +280,11 @@ func (e *reqEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		if e.state == reqStateReceiving {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				e.state = reqStateCanRecv
+				e.armIn() // a reply may have landed while Receiving hid it
 			} else {
 				e.state = reqStateCanSend
 				e.sticky = nil
+				e.armOut()
 			}
 		}
 		e.mu.Unlock()
@@ -305,18 +298,14 @@ func (e *reqEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		e.mu.Lock()
 		e.state = reqStateCanSend
 		e.sticky = nil
-		if e.ring.len() > 0 {
-			e.sendGate.arm()
-		}
+		e.armOut()
 		e.mu.Unlock()
 		return nil, serr
 	}
 	e.mu.Lock()
 	e.state = reqStateCanSend
 	e.sticky = nil
-	if e.ring.len() > 0 {
-		e.sendGate.arm()
-	}
+	e.armOut()
 	e.mu.Unlock()
 	e.recv.Add(1)
 	return stripped, nil
@@ -349,14 +338,6 @@ func (e *reqEngine) recvSticky(ctx context.Context, sticky *pipe.End, closeCh <-
 	default:
 		return nil, err
 	}
-}
-
-func (e *reqEngine) ReadyRecv() <-chan struct{} {
-	return e.recvGate.signal(e.CanRecvNow())
-}
-
-func (e *reqEngine) ReadyWrite() <-chan struct{} {
-	return e.sendGate.signal(e.CanSendNow())
 }
 
 func (e *reqEngine) CanRecvNow() bool {

@@ -65,9 +65,8 @@ type SubEngine struct {
 	// are dropped by Recv and we go around again.
 	fq      *FairQueue
 	surface bool // XSUB surfaces subscription commands sent by the app; SUB does not
-	// sendGate is XSUB's write-ready gate; XSUB can always take a
-	// subscription command, so it is armed whenever the engine is open.
-	sendGate readyGate
+
+	gates
 
 	// recv counts messages SUB/XSUB returned to the caller (matches the
 	// local subscription filter). Filter-mismatch drops are NOT counted
@@ -86,30 +85,26 @@ func NewSubEngine() (Engine, *SubEngine) {
 }
 
 func newSubEngineBase(surface bool) *SubEngine {
+	g := newGates()
+	if surface {
+		// XSUB can always take a subscription command, so its out-gate
+		// starts armed; a Poller hands the token on after each wake.
+		g.armOut()
+	}
 	return &SubEngine{
-		peers:    make(map[*pipe.End]struct{}),
-		tree:     NewSubTree(),
-		subs:     make(map[string]int),
-		fq:       NewFairQueue(),
-		surface:  surface,
-		sendGate: newReadyGate(),
+		peers:   make(map[*pipe.End]struct{}),
+		tree:    NewSubTree(),
+		subs:    make(map[string]int),
+		fq:      NewFairQueue(g.in),
+		surface: surface,
+		gates:   g,
 	}
 }
 
-// ReadyRecv is the FairQueue's gate. A queued message the filter then
-// drops is at worst a spurious wake (PUB peers filter upstream, so it is
-// rare).
-func (e *SubEngine) ReadyRecv() <-chan struct{} { return e.fq.ReadyRecv() }
-
+// CanRecvNow reports the FairQueue's level. A queued message the filter
+// then drops is at worst a spurious wake (PUB peers filter upstream, so it
+// is rare).
 func (e *SubEngine) CanRecvNow() bool { return e.fq.CanRecv() }
-
-// ReadyWrite is nil for SUB, which cannot send.
-func (e *SubEngine) ReadyWrite() <-chan struct{} {
-	if !e.surface {
-		return nil
-	}
-	return e.sendGate.signal(e.CanSendNow())
-}
 
 // CanSendNow reports whether XSUB can take a subscription command; SUB
 // never can.

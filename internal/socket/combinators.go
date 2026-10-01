@@ -14,12 +14,14 @@ import (
 // --------------------------------------------------------------------------
 
 type sendOnlyEngine struct {
+	gates
 	name string
 	lb   *LoadBalancer
 }
 
 func newSendOnlyEngine(name string) Engine {
-	return &sendOnlyEngine{name: name, lb: NewLoadBalancer()}
+	g := newGates()
+	return &sendOnlyEngine{gates: g, name: name, lb: NewLoadBalancer(g.out)}
 }
 
 func (e *sendOnlyEngine) AttachPipe(p *pipe.End) error { return e.lb.Attach(p) }
@@ -30,22 +32,22 @@ func (e *sendOnlyEngine) Send(ctx context.Context, m *msg.Msg) error {
 func (e *sendOnlyEngine) Recv(context.Context) (*msg.Msg, error) {
 	return nil, fmt.Errorf("%s recv: %w", e.name, zmqerr.ErrFSMViolation)
 }
-func (e *sendOnlyEngine) Close() error                { return e.lb.Close() }
-func (e *sendOnlyEngine) ReadyRecv() <-chan struct{}  { return nil }
-func (e *sendOnlyEngine) ReadyWrite() <-chan struct{} { return e.lb.ReadyWrite() }
-func (e *sendOnlyEngine) CanRecvNow() bool            { return false }
-func (e *sendOnlyEngine) CanSendNow() bool            { return e.lb.HasPeers() }
+func (e *sendOnlyEngine) Close() error     { return e.lb.Close() }
+func (e *sendOnlyEngine) CanRecvNow() bool { return false }
+func (e *sendOnlyEngine) CanSendNow() bool { return e.lb.HasPeers() }
 func (e *sendOnlyEngine) Metrics() Metrics {
 	return Metrics{Sent: e.lb.Sent()}
 }
 
 type recvOnlyEngine struct {
+	gates
 	name string
 	fq   *FairQueue
 }
 
 func newRecvOnlyEngine(name string) Engine {
-	return &recvOnlyEngine{name: name, fq: NewFairQueue()}
+	g := newGates()
+	return &recvOnlyEngine{gates: g, name: name, fq: NewFairQueue(g.in)}
 }
 
 func (e *recvOnlyEngine) AttachPipe(p *pipe.End) error { return e.fq.Attach(p) }
@@ -56,11 +58,9 @@ func (e *recvOnlyEngine) Send(context.Context, *msg.Msg) error {
 func (e *recvOnlyEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 	return e.fq.Recv(ctx)
 }
-func (e *recvOnlyEngine) Close() error                { return e.fq.Close() }
-func (e *recvOnlyEngine) ReadyRecv() <-chan struct{}  { return e.fq.ReadyRecv() }
-func (e *recvOnlyEngine) ReadyWrite() <-chan struct{} { return nil }
-func (e *recvOnlyEngine) CanRecvNow() bool            { return e.fq.CanRecv() }
-func (e *recvOnlyEngine) CanSendNow() bool            { return false }
+func (e *recvOnlyEngine) Close() error     { return e.fq.Close() }
+func (e *recvOnlyEngine) CanRecvNow() bool { return e.fq.CanRecv() }
+func (e *recvOnlyEngine) CanSendNow() bool { return false }
 func (e *recvOnlyEngine) Metrics() Metrics {
 	return Metrics{
 		Recv:       e.fq.Recvd(),
@@ -69,12 +69,14 @@ func (e *recvOnlyEngine) Metrics() Metrics {
 }
 
 type queuePairEngine struct {
+	gates
 	lb *LoadBalancer
 	fq *FairQueue
 }
 
 func newQueuePairEngine() Engine {
-	return &queuePairEngine{lb: NewLoadBalancer(), fq: NewFairQueue()}
+	g := newGates()
+	return &queuePairEngine{gates: g, lb: NewLoadBalancer(g.out), fq: NewFairQueue(g.in)}
 }
 
 func (e *queuePairEngine) AttachPipe(p *pipe.End) error {
@@ -108,10 +110,8 @@ func (e *queuePairEngine) Close() error {
 	return nil
 }
 
-func (e *queuePairEngine) ReadyRecv() <-chan struct{}  { return e.fq.ReadyRecv() }
-func (e *queuePairEngine) ReadyWrite() <-chan struct{} { return e.lb.ReadyWrite() }
-func (e *queuePairEngine) CanRecvNow() bool            { return e.fq.CanRecv() }
-func (e *queuePairEngine) CanSendNow() bool            { return e.lb.HasPeers() }
+func (e *queuePairEngine) CanRecvNow() bool { return e.fq.CanRecv() }
+func (e *queuePairEngine) CanSendNow() bool { return e.lb.HasPeers() }
 func (e *queuePairEngine) Metrics() Metrics {
 	return Metrics{
 		Sent:       e.lb.Sent(),

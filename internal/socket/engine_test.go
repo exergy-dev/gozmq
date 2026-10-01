@@ -9,7 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
-	"github.com/exergy-dev/gozmq/internal/socket"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -37,7 +36,7 @@ func closePipes(ps ...*pipe.End) {
 
 func TestLoadBalancer_RoundRobin(t *testing.T) {
 	t.Parallel()
-	lb := socket.NewLoadBalancer()
+	lb := newLB()
 	defer lb.Close()
 
 	const n = 3
@@ -79,7 +78,7 @@ func TestLoadBalancer_RoundRobin(t *testing.T) {
 
 func TestLoadBalancer_BlocksOnHWMUnblocksOnDrain(t *testing.T) {
 	t.Parallel()
-	lb := socket.NewLoadBalancer()
+	lb := newLB()
 	defer lb.Close()
 
 	// Single peer, HWM=1. First send fits in the channel; second send
@@ -117,7 +116,7 @@ func TestLoadBalancer_BlocksOnHWMUnblocksOnDrain(t *testing.T) {
 
 func TestLoadBalancer_CloseUnblocksSend(t *testing.T) {
 	t.Parallel()
-	lb := socket.NewLoadBalancer()
+	lb := newLB()
 
 	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
@@ -140,7 +139,7 @@ func TestLoadBalancer_CloseUnblocksSend(t *testing.T) {
 
 func TestLoadBalancer_CloseUnblocksWaitForPeer(t *testing.T) {
 	t.Parallel()
-	lb := socket.NewLoadBalancer()
+	lb := newLB()
 
 	// No peers attached — Send should block waiting for an Attach.
 	ctx := context.Background()
@@ -159,7 +158,7 @@ func TestLoadBalancer_CloseUnblocksWaitForPeer(t *testing.T) {
 
 func TestLoadBalancer_CtxCancelUnblocksSend(t *testing.T) {
 	t.Parallel()
-	lb := socket.NewLoadBalancer()
+	lb := newLB()
 	defer lb.Close()
 
 	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
@@ -185,7 +184,7 @@ func TestLoadBalancer_CtxCancelUnblocksSend(t *testing.T) {
 
 func TestFairQueue_FairAcrossPipes(t *testing.T) {
 	t.Parallel()
-	fq := socket.NewFairQueue()
+	fq := newFQ()
 	defer fq.Close()
 
 	const n = 3
@@ -220,7 +219,7 @@ func TestFairQueue_FairAcrossPipes(t *testing.T) {
 
 func TestFairQueue_RecvWakesOnAttach(t *testing.T) {
 	t.Parallel()
-	fq := socket.NewFairQueue()
+	fq := newFQ()
 	defer fq.Close()
 
 	ctx := testCtx(t)
@@ -259,7 +258,7 @@ func TestFairQueue_RecvWakesOnAttach(t *testing.T) {
 // TestFairQueue_DetachThenClose: Close returns promptly after a Detach.
 func TestFairQueue_DetachThenClose(t *testing.T) {
 	t.Parallel()
-	fq := socket.NewFairQueue()
+	fq := newFQ()
 
 	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
@@ -280,7 +279,7 @@ func TestFairQueue_DetachThenClose(t *testing.T) {
 
 func TestFairQueue_CloseUnblocksRecv(t *testing.T) {
 	t.Parallel()
-	fq := socket.NewFairQueue()
+	fq := newFQ()
 
 	ctx := context.Background()
 	done := make(chan error, 1)
@@ -302,7 +301,7 @@ func TestFairQueue_CloseUnblocksRecv(t *testing.T) {
 // leaves nothing running (goleak) and the pipes usable by their owners.
 func TestFairQueue_CloseWithAttachedPipes(t *testing.T) {
 	t.Parallel()
-	fq := socket.NewFairQueue()
+	fq := newFQ()
 
 	const n = 4
 	engineEnds, peerEnds := makePairs(n, 1, 1)
@@ -323,7 +322,7 @@ func TestFairQueue_CloseWithAttachedPipes(t *testing.T) {
 // is received.
 func TestFairQueue_DetachedPipeNoLongerNotifies(t *testing.T) {
 	t.Parallel()
-	fq := socket.NewFairQueue()
+	fq := newFQ()
 	defer fq.Close()
 
 	engineEnds, peerEnds := makePairs(2, 4, 4)
@@ -348,7 +347,7 @@ func TestFairQueue_DetachedPipeNoLongerNotifies(t *testing.T) {
 // they are still buffered.
 func TestFairQueue_DetachClosedDirectPipeDrains(t *testing.T) {
 	t.Parallel()
-	fq := socket.NewFairQueue()
+	fq := newFQ()
 	defer fq.Close()
 	ctx := testCtx(t)
 
@@ -388,7 +387,7 @@ func TestFairQueue_DetachClosedDirectPipeDrains(t *testing.T) {
 // message) until a replacement attaches, then receives from it.
 func TestFairQueue_SingleRecvWaitsOutClosedPipe(t *testing.T) {
 	t.Parallel()
-	fq := socket.NewFairQueue()
+	fq := newFQ()
 	defer fq.Close()
 	ctx := testCtx(t)
 
@@ -434,7 +433,7 @@ func TestFairQueue_SingleRecvWaitsOutClosedPipe(t *testing.T) {
 
 func TestLoadBalancer_DetachAdvancesCursor(t *testing.T) {
 	t.Parallel()
-	lb := socket.NewLoadBalancer()
+	lb := newLB()
 	defer lb.Close()
 
 	const n = 3
@@ -467,7 +466,7 @@ func TestLoadBalancer_DetachAdvancesCursor(t *testing.T) {
 
 func TestLoadBalancer_AttachAfterClose(t *testing.T) {
 	t.Parallel()
-	lb := socket.NewLoadBalancer()
+	lb := newLB()
 	require.NoError(t, lb.Close(), "close")
 	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
@@ -476,7 +475,7 @@ func TestLoadBalancer_AttachAfterClose(t *testing.T) {
 
 func TestFairQueue_AttachAfterClose(t *testing.T) {
 	t.Parallel()
-	fq := socket.NewFairQueue()
+	fq := newFQ()
 	require.NoError(t, fq.Close(), "close")
 	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
@@ -489,7 +488,7 @@ func TestFairQueue_AttachAfterClose(t *testing.T) {
 // is closed — broadcast — not a token one sender can swallow).
 func TestLoadBalancer_TwoParkedSendersWakeOnAttach(t *testing.T) {
 	t.Parallel()
-	lb := socket.NewLoadBalancer()
+	lb := newLB()
 	defer lb.Close()
 
 	ctx := testCtx(t)
@@ -518,7 +517,7 @@ func TestLoadBalancer_TwoParkedSendersWakeOnAttach(t *testing.T) {
 // next free peer immediately.
 func TestLoadBalancer_RotatesPastFullPeer(t *testing.T) {
 	t.Parallel()
-	lb := socket.NewLoadBalancer()
+	lb := newLB()
 	defer lb.Close()
 
 	full, fullPeer := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
@@ -546,7 +545,7 @@ func TestLoadBalancer_RotatesPastFullPeer(t *testing.T) {
 // path to the multi-pipe walk.
 func TestFairQueue_PromotionPreservesPerPeerFIFO(t *testing.T) {
 	t.Parallel()
-	fq := socket.NewFairQueue()
+	fq := newFQ()
 	defer fq.Close()
 
 	a, aPeer := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})

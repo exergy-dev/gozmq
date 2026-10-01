@@ -27,3 +27,9 @@ func mustAttach(t *testing.T, eng socket.Engine, pipes ...*pipe.End) {
 		require.NoError(t, eng.AttachPipe(p))
 	}
 }
+
+// newFQ and newLB build a FairQueue / LoadBalancer with a gate of their
+// own, for tests that do not watch it.
+func newFQ() *socket.FairQueue { return socket.NewFairQueue(make(chan struct{}, 1)) }
+
+func newLB() *socket.LoadBalancer { return socket.NewLoadBalancer(make(chan struct{}, 1)) }

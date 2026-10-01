@@ -284,6 +284,9 @@ Behaviour:
 - STREAM sockets no longer pin a 32 KiB buffer per received chunk (small
   segments at the HWM could hold tens of MiB per peer).
 - `RecvBytes`' multipart-message error now wraps `ErrFSMViolation`.
+- `Poller`: a Poll waiting for PollIn on a REP socket that owed a reply now
+  wakes when `SendMsg` makes an already-queued request receivable (it
+  previously slept until its deadline).
 
 ## [1.0.0] - 2026-08-10
 

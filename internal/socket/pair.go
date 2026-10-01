@@ -36,21 +36,15 @@ type pairEngine struct {
 	retired  []*pipe.End
 	closed   bool
 	closeCh  chan struct{}
-	notifyCh chan struct{} // closed on attach; a fresh one is made if the pipe detaches
-	recvGate readyGate
-	sendGate readyGate
+	attached broadcast // woken on attach
 
+	gates
 	counters
 }
 
 // NewPairEngine returns a new PAIR socket engine.
 func NewPairEngine() Engine {
-	return &pairEngine{
-		closeCh:  make(chan struct{}),
-		notifyCh: make(chan struct{}),
-		recvGate: newReadyGate(),
-		sendGate: newReadyGate(),
-	}
+	return &pairEngine{closeCh: make(chan struct{}), gates: newGates()}
 }
 
 func (e *pairEngine) AttachPipe(p *pipe.End) error {
@@ -71,19 +65,16 @@ func (e *pairEngine) AttachPipe(p *pipe.End) error {
 		}
 	}
 	e.pipe = p
-	// The pipe arms the Poller's recv gate itself: CanRecvNow marks it
-	// idle when it finds nothing, and the next message runs this. Start
-	// idle, so a Poller that parked while no peer was attached wakes too.
-	p.SetNotify(e.recvGate.arm)
+	// The pipe arms the in-gate itself: CanRecvNow marks it idle when it
+	// finds nothing, and the next message runs this. Start idle, so a
+	// Poller that parked while no peer was attached wakes too.
+	p.SetNotify(e.armIn)
 	if p.MarkIdle() {
-		e.recvGate.arm()
+		e.armIn()
 	}
-	// Wake any Send/Recv goroutines parked waiting for a peer. Swap the
-	// notify channel for a fresh one so a future detach/reattach cycle
-	// can wake new waiters.
-	close(e.notifyCh)
-	e.notifyCh = make(chan struct{})
-	e.sendGate.arm()
+	// Wake any Send/Recv goroutines parked waiting for a peer.
+	e.attached.wake()
+	e.armOut()
 	return nil
 }
 
@@ -137,13 +128,13 @@ func (e *pairEngine) Send(ctx context.Context, m *msg.Msg) error {
 		}
 		p := e.pipe
 		closeCh := e.closeCh
-		notifyCh := e.notifyCh
+		attached := e.attached.wait()
 		e.mu.Unlock()
 
 		if p == nil {
-			// Wait for an attach (notifyCh close), engine close, or ctx.
+			// Wait for an attach, engine close, or ctx.
 			select {
-			case <-notifyCh:
+			case <-attached:
 				continue
 			case <-closeCh:
 				return fmt.Errorf("pair send: %w", zmqerr.ErrSocketClosed)
@@ -180,7 +171,7 @@ func (e *pairEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		}
 		p := e.pipe
 		closeCh := e.closeCh
-		notifyCh := e.notifyCh
+		attached := e.attached.wait()
 		e.mu.Unlock()
 
 		if old != nil {
@@ -195,7 +186,7 @@ func (e *pairEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		}
 		if p == nil {
 			select {
-			case <-notifyCh:
+			case <-attached:
 				continue
 			case <-closeCh:
 				return nil, fmt.Errorf("pair recv: %w", zmqerr.ErrSocketClosed)
@@ -250,14 +241,6 @@ func (e *pairEngine) Close() error {
 	e.pipe = nil
 	e.retired = nil
 	return nil
-}
-
-func (e *pairEngine) ReadyRecv() <-chan struct{} {
-	return e.recvGate.signal(e.CanRecvNow())
-}
-
-func (e *pairEngine) ReadyWrite() <-chan struct{} {
-	return e.sendGate.signal(e.CanSendNow())
 }
 
 func (e *pairEngine) CanRecvNow() bool {
