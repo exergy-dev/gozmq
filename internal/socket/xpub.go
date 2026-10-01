@@ -25,8 +25,6 @@ import (
 func NewXPubEngineV(verbose bool) Engine {
 	e := &xpubEngine{
 		verbose:  verbose,
-		recvGate: newReadyGate(),
-		notify:   make(chan struct{}, 1),
 		prefRefs: make(map[string]int),
 		peerSubs: make(map[*pipe.End]map[string]int),
 	}
@@ -35,11 +33,11 @@ func NewXPubEngineV(verbose bool) Engine {
 }
 
 // xpubEngine decorates pubEngine with the XPUB-specific subscribe-event
-// surface. The embedded pub engine's peer readers apply each command to
-// the peer's SubTree (so outbound fanout filtering is always current) and
-// then hand it to onSubscription, which settles the refcounts and decides
-// right there whether the event surfaces. Surfacing events are queued for
-// Recv; the rest are released.
+// surface. The embedded pub engine applies each queued command to the
+// peer's SubTree (so outbound fanout filtering is always current) on the
+// next Send, Recv or readiness check, and then hands it to onSubscription,
+// which settles the refcounts and decides right there whether the event
+// surfaces. Surfacing events are queued for Recv; the rest are released.
 //
 // Deciding at apply time, rather than when the application reads, keeps
 // the refcounts in step with the SubTrees: a peer that subscribes and
@@ -47,18 +45,17 @@ func NewXPubEngineV(verbose bool) Engine {
 // DetachPipe emits its CANCEL and later SUBSCRIBEs are not suppressed.
 //
 // The event queue is unbounded, as in libzmq (its XPUB pending queue):
-// subscription processing never waits on the application, so a slow
-// reader cannot stall a peer's reader or leave its SubTree stale. Memory
-// is bounded by the peers' command rate against the application's Recv
-// rate; in dedup mode only prefix-presence transitions are queued.
+// Send applies commands too, so an application that publishes without
+// reading events still keeps every SubTree current. Memory is bounded by
+// the peers' command rate against the application's Recv rate; in dedup
+// mode only prefix-presence transitions are queued.
+//
+// Blocked receivers and the Poller share the pub engine FairQueue's gate,
+// which a command arriving on an idle pipe arms, and so does every
+// enqueue here.
 type xpubEngine struct {
 	pub     *pubEngine
 	verbose bool
-	// recvGate is the Poller-facing PollIn signal, armed on every enqueue.
-	recvGate readyGate
-	// notify wakes a blocked Recv; cap 1, re-signalled by Recv while
-	// events remain so concurrent receivers all make progress.
-	notify chan struct{}
 
 	mu sync.Mutex
 	// pending holds the surfaced events not yet returned by Recv.
@@ -100,18 +97,9 @@ func (e *xpubEngine) onSubscription(p *pipe.End, subscribe bool, prefix []byte, 
 	}
 	e.mu.Unlock()
 	if surface {
-		e.signal()
+		e.pub.fq.armGate()
 	}
 	return surface
-}
-
-// signal wakes a blocked Recv and arms the Poller gate.
-func (e *xpubEngine) signal() {
-	select {
-	case e.notify <- struct{}{}:
-	default:
-	}
-	e.recvGate.arm()
 }
 
 // AttachPipe delegates to the embedded pub engine.
@@ -123,8 +111,9 @@ func (e *xpubEngine) AttachPipe(p *pipe.End) error { return e.pub.AttachPipe(p) 
 // unsubscribe events so upstream proxy stages (XSUB side) can drop dead
 // topics. These CANCELs surface in both verbose and dedup mode.
 //
-// The peer's reader is stopped first, so no command from p can be
-// applied after its subscriptions are released.
+// The pub engine first applies the commands p queued and detaches it, so
+// every SUBSCRIBE from p is queued before its CANCEL and no command from
+// p can be applied after its subscriptions are released.
 func (e *xpubEngine) DetachPipe(p *pipe.End) error {
 	err := e.pub.DetachPipe(p)
 	e.mu.Lock()
@@ -139,7 +128,7 @@ func (e *xpubEngine) DetachPipe(p *pipe.End) error {
 	delete(e.peerSubs, p)
 	e.mu.Unlock()
 	if queued {
-		e.signal()
+		e.pub.fq.armGate()
 	}
 	return err
 }
@@ -161,11 +150,20 @@ func (e *xpubEngine) Metrics() Metrics {
 	return e.pub.snapshot(e.pub.dropped.Load(), depth)
 }
 
-func (e *xpubEngine) ReadyRecv() <-chan struct{}  { return e.recvGate.signal(e.CanRecvNow()) }
+func (e *xpubEngine) ReadyRecv() <-chan struct{} {
+	if e.CanRecvNow() {
+		e.pub.fq.armGate()
+	}
+	return e.pub.fq.gate
+}
+
 func (e *xpubEngine) ReadyWrite() <-chan struct{} { return e.pub.ReadyWrite() }
 func (e *xpubEngine) CanSendNow() bool            { return e.pub.CanSendNow() }
 
+// CanRecvNow applies the queued commands and reports whether an event is
+// queued. When none is, the next command arms the gate.
 func (e *xpubEngine) CanRecvNow() bool {
+	e.pub.applyPending()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return len(e.pending) > 0
@@ -175,13 +173,15 @@ func (e *xpubEngine) CanRecvNow() bool {
 // queued (all, or only prefix-presence transitions) was decided when the
 // command was applied; see onSubscription.
 func (e *xpubEngine) Recv(ctx context.Context) (*msg.Msg, error) {
+	fq := &e.pub.fq
 	for {
+		e.pub.applyPending()
 		if m, ok := e.pop(); ok {
 			return m, nil
 		}
 		select {
-		case <-e.notify:
-		case <-e.pub.closeCh:
+		case <-fq.gate:
+		case <-fq.closeCh:
 			if m, ok := e.pop(); ok {
 				return m, nil
 			}
@@ -192,7 +192,7 @@ func (e *xpubEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 	}
 }
 
-// pop dequeues the oldest pending event, re-signalling notify if more
+// pop dequeues the oldest pending event, re-arming the gate if more
 // remain so another blocked Recv can take the next one.
 func (e *xpubEngine) pop() (*msg.Msg, bool) {
 	e.mu.Lock()
@@ -206,10 +206,7 @@ func (e *xpubEngine) pop() (*msg.Msg, bool) {
 	more := len(e.pending) > 0
 	e.mu.Unlock()
 	if more {
-		select {
-		case e.notify <- struct{}{}:
-		default:
-		}
+		e.pub.fq.armGate()
 	}
 	e.pub.recv.Add(1)
 	return m, true

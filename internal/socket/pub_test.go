@@ -2,6 +2,7 @@ package socket_test
 
 import (
 	"context"
+	"runtime"
 	"testing"
 	"time"
 
@@ -28,9 +29,8 @@ func subscribeMsg(subscribe bool, prefix []byte) *msg.Msg {
 	return msg.FromBytes(buf)
 }
 
-// drainPeer returns every non-subscription message available on p until
-// ctx fires. Subscription frames (synthetic) are echoed back from the
-// PUB's peer reader if we sent them; we want only the real data frames.
+// drainPeer returns every message that arrives on p until none has for
+// 100ms or ctx fires.
 func drainPeer(ctx context.Context, p *pipe.End) []*msg.Msg {
 	var out []*msg.Msg
 	for {
@@ -184,8 +184,6 @@ func TestPub_UnsubscribeStopsDelivery(t *testing.T) {
 
 	// Unsubscribe.
 	require.NoError(t, b.Send(ctx, subscribeMsg(false, []byte("A"))), "unsubscribe")
-	// Wait for the engine to process.
-	time.Sleep(50 * time.Millisecond)
 	// Send and confirm nothing arrives.
 	require.NoError(t, eng.Send(ctx, msg.FromFrames([]byte("A"), []byte("p"))), "pub send post-unsub")
 	rc, c := context.WithTimeout(ctx, 100*time.Millisecond)
@@ -217,8 +215,6 @@ func TestPub_HWMDropsRatherThanBlocks(t *testing.T) {
 
 	ctx := testCtx(t)
 	require.NoError(t, b.Send(ctx, subscribeMsg(true, []byte{})), "subscribe all")
-	// Wait for subscription.
-	time.Sleep(50 * time.Millisecond)
 
 	// Rapid-fire 10 sends without draining. Send should return quickly
 	// each time (no block) because of the non-blocking try-send.
@@ -236,44 +232,81 @@ func TestPub_HWMDropsRatherThanBlocks(t *testing.T) {
 	require.NoError(t, err, "drain one")
 }
 
-// TestPub_CloseReleasesPeerReaders ensures Close unblocks the per-peer
-// reader goroutines and returns promptly.
-func TestPub_CloseReleasesPeerReaders(t *testing.T) {
-	t.Parallel()
-	eng := socket.NewPubEngine()
+// TestPub_NoGoroutinesPerSubscriber: PUB and XPUB apply subscriptions on
+// the application's own calls, so a full subscriber lifecycle across 64
+// peers (attach, subscribe, publish, detach, close) starts no goroutine.
+// Not parallel: it counts the process's goroutines.
+func TestPub_NoGoroutinesPerSubscriber(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		eng  func() socket.Engine
+	}{
+		{"pub", socket.NewPubEngine},
+		{"xpub", func() socket.Engine { return socket.NewXPubEngineV(false) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const n = 64
+			before := runtime.NumGoroutine()
+			eng := tc.eng()
+			engineEnds, peerEnds := makePairs(n, 4, 4)
+			defer closePipes(append(engineEnds, peerEnds...)...)
+			mustAttach(t, eng, engineEnds...)
 
-	const n = 3
-	engineEnds, peerEnds := makePairs(n, 2, 2)
-	defer closePipes(append(engineEnds, peerEnds...)...)
-	mustAttach(t, eng, engineEnds...)
+			ctx := testCtx(t)
+			for _, p := range peerEnds {
+				require.NoError(t, p.Send(ctx, subscribeMsg(true, []byte("t"))))
+			}
+			require.NoError(t, eng.Send(ctx, msg.FromFrames([]byte("t"), []byte("x"))))
+			for i, p := range peerEnds {
+				_, ok := p.TryRecv()
+				require.True(t, ok, "peer %d", i)
+			}
+			require.LessOrEqual(t, runtime.NumGoroutine(), before, "goroutines with %d peers attached", n)
 
-	done := make(chan error, 1)
-	go func() { done <- eng.Close() }()
-	select {
-	case err := <-done:
-		require.NoError(t, err, "close")
-	case <-time.After(2 * time.Second):
-		require.Fail(t, "Close did not return within 2s")
+			for _, p := range engineEnds[:n/2] {
+				require.NoError(t, eng.DetachPipe(p))
+			}
+			require.NoError(t, eng.Close())
+			require.LessOrEqual(t, runtime.NumGoroutine(), before, "goroutines after detach and close")
+		})
 	}
 }
 
-// TestPub_DetachReleasesPeerReader ensures DetachPipe drops the peer's
-// reader goroutine promptly, independent of Close.
-func TestPub_DetachReleasesPeerReader(t *testing.T) {
+// TestPub_SubscriptionAppliesAtNextSend: a SUBSCRIBE or CANCEL queued
+// before a Send filters that very Send, with no wait in between.
+func TestPub_SubscriptionAppliesAtNextSend(t *testing.T) {
 	t.Parallel()
-	eng := socket.NewPubEngine()
-	defer eng.Close()
+	for _, tc := range []struct {
+		name string
+		eng  func() socket.Engine
+	}{
+		{"pub", socket.NewPubEngine},
+		{"xpub", func() socket.Engine { return socket.NewXPubEngineV(false) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eng := tc.eng()
+			defer eng.Close()
+			// Two peers, so the FairQueue is off its single-pipe path.
+			a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+			other, otherPeer := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+			defer closePipes(a, b, other, otherPeer)
+			mustAttach(t, eng, a, other)
+			ctx := testCtx(t)
 
-	a, b := pipe.NewPair(2, 2, pipe.PeerInfo{}, pipe.PeerInfo{})
-	defer closePipes(a, b)
-	mustAttach(t, eng, a)
-	done := make(chan error, 1)
-	go func() { done <- eng.DetachPipe(a) }()
-	select {
-	case err := <-done:
-		require.NoError(t, err, "detach")
-	case <-time.After(2 * time.Second):
-		require.Fail(t, "Detach did not return within 2s")
+			require.NoError(t, b.Send(ctx, subscribeMsg(true, []byte("A"))))
+			require.NoError(t, eng.Send(ctx, msg.FromFrames([]byte("A"), []byte("1"))))
+			require.NoError(t, eng.Send(ctx, msg.FromFrames([]byte("B"), []byte("2"))))
+			m, ok := b.TryRecv()
+			require.True(t, ok, "subscribed topic not delivered")
+			require.Equal(t, "1", string(m.Frames()[1]))
+			_, ok = b.TryRecv()
+			require.False(t, ok, "unsubscribed topic delivered")
+
+			require.NoError(t, b.Send(ctx, subscribeMsg(false, []byte("A"))))
+			require.NoError(t, eng.Send(ctx, msg.FromFrames([]byte("A"), []byte("3"))))
+			_, ok = b.TryRecv()
+			require.False(t, ok, "delivered after CANCEL")
+		})
 	}
 }
 
@@ -293,7 +326,6 @@ func TestPub_SlowSubscriberDoesNotDelayOthers(t *testing.T) {
 	ctx := testCtx(t)
 	require.NoError(t, slowPeer.Send(ctx, subscribeMsg(true, []byte{})), "slow subscribe all")
 	require.NoError(t, fastPeer.Send(ctx, subscribeMsg(true, []byte{})), "fast subscribe all")
-	time.Sleep(50 * time.Millisecond) // let the peer readers apply the subs
 
 	// Saturate the slow peer, then publish a burst: with immediate
 	// drop-on-HWM the whole burst is non-blocking. The old 10ms-per-peer
@@ -328,7 +360,6 @@ func TestPub_FanoutSharesOneMessage(t *testing.T) {
 	ctx := testCtx(t)
 	require.NoError(t, b1.Send(ctx, subscribeMsg(true, []byte{})), "peer1 subscribe")
 	require.NoError(t, b2.Send(ctx, subscribeMsg(true, []byte{})), "peer2 subscribe")
-	time.Sleep(50 * time.Millisecond) // let the peer readers apply the subs
 
 	payload := make([]byte, 8*1024)
 	for i := range payload {

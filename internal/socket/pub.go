@@ -52,15 +52,10 @@ func isSubscriptionMsg(m *msg.Msg) (bool, bool, []byte) {
 	return false, false, nil
 }
 
-// pubPeer bundles a pipe with its SubTree and the goroutine reading
-// subscription commands from that peer.
+// pubPeer bundles a pipe with the SubTree its subscriptions build.
 type pubPeer struct {
 	pipe *pipe.End
 	tree *SubTree
-
-	stop     chan struct{}
-	stopOnce sync.Once
-	done     chan struct{}
 }
 
 // pubEngine implements Engine for the PUB socket type.
@@ -70,11 +65,13 @@ type pubPeer struct {
 // the first frame of the message (the topic). Subscription state is
 // maintained per-peer: incoming ZMTP SUBSCRIBE/CANCEL commands are
 // surfaced by the session layer as synthetic single-frame messages
-// (leading byte 0x01 / 0x00 + prefix) on the inbound side of the pipe,
-// and a small reader goroutine per peer feeds those commands into that
-// peer's SubTree. PUB silently drops all other inbound traffic (peers
-// have no data to send to a PUB); XPUB (see xpub.go) additionally
-// surfaces subscription events to the application via its onSub hook.
+// (leading byte 0x01 / 0x00 + prefix) on the inbound side of the pipe.
+// A FairQueue over those inbound sides flags when any are queued, and the
+// next Send applies them to the peers' SubTrees before fanning out, as
+// libzmq applies subscriptions on its next send or recv; no goroutine runs
+// per peer. PUB silently drops all other inbound traffic (peers have no
+// data to send to a PUB); XPUB (see xpub.go) additionally surfaces
+// subscription events to the application via its onSub hook.
 //
 // Send is non-blocking per-peer best-effort: if a peer's pipe is at HWM
 // the message is dropped for that peer and fan-out continues to others.
@@ -83,25 +80,31 @@ type pubPeer struct {
 // zmqerr.ErrFSMViolation (wrapped); XPUB overrides Recv to return
 // subscription events.
 type pubEngine struct {
-	mu     sync.Mutex
-	peers  map[*pipe.End]*pubPeer
-	closed bool
+	// mu guards peers and serialises subscription processing, so a peer's
+	// commands apply in order and none applies after DetachPipe(p) or
+	// Close returns.
+	mu    sync.Mutex
+	peers map[*pipe.End]*pubPeer
+	// fq holds the peers' inbound pipes; only applySubs reads it. Its
+	// Pending flag is the one atomic load Send pays for subscriptions. It
+	// is held by value so that load needs no pointer chase, which cost ~5%
+	// on XPubXSubThroughput.
+	fq FairQueue
 	// snap is a copy-on-write snapshot of the attached peers. It is
 	// rebuilt under mu whenever peer membership changes (AttachPipe /
 	// DetachPipe) and read lock-free by Send, which would otherwise pay
 	// a mutex plus a slice allocation on every message. The *pubPeer
 	// entries are immutable after construction (per-message subscription
 	// state lives in each peer's goroutine-safe SubTree), so a loaded
-	// snapshot is always safe to iterate. nil after Close — Send uses
-	// that as its closed check.
+	// snapshot is always safe to iterate. nil after Close: it is the
+	// closed flag.
 	snap atomic.Pointer[[]*pubPeer]
 	// onSub, when set, receives every subscription command from peer p
 	// right after it has been applied to p's SubTree, and reports whether
-	// it kept m (taking over its reference). It runs on p's reader
-	// goroutine, never after DetachPipe(p) or Close returns. XPUB installs
-	// it to maintain its refcounts and event queue; nil for PUB.
+	// it kept m (taking over its reference). It runs under mu, never
+	// after DetachPipe(p) or Close returns. XPUB installs it to maintain
+	// its refcounts and event queue; nil for PUB.
 	onSub    func(p *pipe.End, subscribe bool, prefix []byte, m *msg.Msg) (kept bool)
-	closeCh  chan struct{}
 	sendGate readyGate
 
 	// Metrics counters (embedded). sent increments once per Send call that
@@ -139,9 +142,9 @@ func newPubEngineBase(onSub func(*pipe.End, bool, []byte, *msg.Msg) bool) *pubEn
 	e := &pubEngine{
 		peers:    make(map[*pipe.End]*pubPeer),
 		onSub:    onSub,
-		closeCh:  make(chan struct{}),
 		sendGate: newReadyGate(),
 	}
+	e.fq.init()
 	e.snap.Store(&[]*pubPeer{})
 	return e
 }
@@ -159,86 +162,84 @@ func (e *pubEngine) rebuildSnapLocked() {
 
 func (e *pubEngine) AttachPipe(p *pipe.End) error {
 	e.mu.Lock()
-	if e.closed {
-		e.mu.Unlock()
+	defer e.mu.Unlock()
+	if e.snap.Load() == nil {
 		return fmt.Errorf("pub attach: %w", zmqerr.ErrSocketClosed)
 	}
 	if _, ok := e.peers[p]; ok {
-		e.mu.Unlock()
 		return nil
 	}
-	peer := &pubPeer{
-		pipe: p,
-		tree: NewSubTree(),
-		stop: make(chan struct{}),
-		done: make(chan struct{}),
-	}
-	e.peers[p] = peer
+	e.peers[p] = &pubPeer{pipe: p, tree: NewSubTree()}
 	e.rebuildSnapLocked()
 	e.sendGate.arm()
-	e.mu.Unlock()
-
-	go e.runPeerReader(peer)
-	return nil
+	return e.fq.Attach(p)
 }
 
+// DetachPipe removes p. The commands p queued before leaving are applied
+// first, so XPUB sees every SUBSCRIBE its DetachPipe then CANCELs.
 func (e *pubEngine) DetachPipe(p *pipe.End) error {
 	e.mu.Lock()
+	defer e.mu.Unlock()
 	peer, ok := e.peers[p]
 	if !ok {
-		e.mu.Unlock()
 		return nil
+	}
+	// Bounded by the backlog on entry (exact once p is closed), so a peer
+	// still flooding an open pipe cannot keep DetachPipe here.
+	for n := p.Len(); n > 0; n-- {
+		m, ok := p.TryRecv()
+		if !ok {
+			break
+		}
+		e.applyLocked(peer, m)
 	}
 	delete(e.peers, p)
 	e.rebuildSnapLocked()
-	e.mu.Unlock()
-	peer.stopOnce.Do(func() { close(peer.stop) })
-	<-peer.done
-	return nil
+	return e.fq.Detach(p)
 }
 
-// runPeerReader consumes messages from a single peer pipe, applying
-// subscription commands to the peer's SubTree and dropping everything
-// else (PUB doesn't read data from peers). It never blocks on the
-// application: XPUB's onSub hook only queues. Once the pipe closes, the
-// commands the peer sent before leaving are still applied, so XPUB sees
-// every SUBSCRIBE its DetachPipe will later CANCEL.
-func (e *pubEngine) runPeerReader(peer *pubPeer) {
-	defer close(peer.done)
-	// peer.stop is closed by DetachPipe and by Close. A closed pipe yields
-	// what is still queued, then EOF. RecvOr prefers queued data over
-	// abort, so stop is re-checked per message: a peer flooding commands
-	// must not keep DetachPipe waiting.
-	for {
-		m, err := peer.pipe.RecvOr(context.Background(), peer.stop)
-		if err != nil {
-			return
-		}
-		if !e.applyPeerMsg(peer, m) {
-			m.Release()
-		}
-		select {
-		case <-peer.stop:
-			return
-		default:
-		}
+// applyPending applies the queued subscription commands, if any, for one
+// atomic load when there are none. A false Pending is exact and leaves
+// every pipe primed to set it, and arm the FairQueue's gate, on the next
+// command.
+func (e *pubEngine) applyPending() {
+	if e.fq.Pending() {
+		e.applySubs()
 	}
 }
 
-// applyPeerMsg applies one inbound message from peer and reports whether
-// it was kept (see onSub). PUB/XPUB ignore non-subscription inbound
-// traffic.
-func (e *pubEngine) applyPeerMsg(peer *pubPeer, m *msg.Msg) (kept bool) {
+// applySubs applies every queued inbound message to its peer's SubTree.
+func (e *pubEngine) applySubs() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for {
+		m, p, ok := e.fq.TryRecvWithSource()
+		if !ok {
+			return
+		}
+		// A pipe detached while closed with a backlog stays in fq until
+		// drained, with no peer left to apply its messages to.
+		e.applyLocked(e.peers[p], m)
+	}
+}
+
+// applyLocked applies one inbound message from peer (nil once detached)
+// and releases it unless onSub kept it. PUB/XPUB ignore non-subscription
+// inbound traffic. Caller holds e.mu.
+func (e *pubEngine) applyLocked(peer *pubPeer, m *msg.Msg) {
 	isSub, subscribe, prefix := isSubscriptionMsg(m)
-	if !isSub {
-		return false
+	if !isSub || peer == nil {
+		m.Release()
+		return
 	}
 	if subscribe {
 		peer.tree.Add(prefix)
 	} else {
 		peer.tree.Remove(prefix)
 	}
-	return e.onSub != nil && e.onSub(peer.pipe, subscribe, prefix, m)
+	if e.onSub == nil || !e.onSub(peer.pipe, subscribe, prefix, m) {
+		m.Release()
+	}
 }
 
 // ReadyRecv: PUB has no recv direction. XPUB provides its own.
@@ -252,9 +253,8 @@ func (e *pubEngine) ReadyWrite() <-chan struct{} {
 func (e *pubEngine) CanRecvNow() bool { return false }
 
 func (e *pubEngine) CanSendNow() bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return !e.closed && len(e.peers) > 0
+	s := e.snap.Load()
+	return s != nil && len(*s) > 0
 }
 
 // Send fans out m to every attached peer whose SubTree matches the first
@@ -285,6 +285,9 @@ func (e *pubEngine) Send(ctx context.Context, m *msg.Msg) error {
 		return err
 	}
 	topic := m.Frames()[0]
+	// Subscriptions that arrived before this Send filter it. Applying them
+	// changes no peer's membership, so snap stays current.
+	e.applyPending()
 
 	// Single pass, no allocation: each peer's SubTree is goroutine-safe,
 	// and the snapshot entries are immutable, so matching needs no engine
@@ -324,25 +327,16 @@ func (e *pubEngine) Recv(context.Context) (*msg.Msg, error) {
 	return nil, fmt.Errorf("pub recv: %w", zmqerr.ErrFSMViolation)
 }
 
+// Close detaches every peer; the pipes are left to their owners. Commands
+// still queued are never applied.
 func (e *pubEngine) Close() error {
 	e.mu.Lock()
-	if e.closed {
-		e.mu.Unlock()
+	defer e.mu.Unlock()
+	if e.snap.Load() == nil {
 		return nil
 	}
-	e.closed = true
-	close(e.closeCh)
 	// nil snapshot is the lock-free closed sentinel Send checks.
 	e.snap.Store(nil)
-	peers := make([]*pubPeer, 0, len(e.peers))
-	for _, peer := range e.peers {
-		peers = append(peers, peer)
-	}
 	e.peers = nil
-	e.mu.Unlock()
-	for _, peer := range peers {
-		peer.stopOnce.Do(func() { close(peer.stop) })
-		<-peer.done
-	}
-	return nil
+	return e.fq.Close()
 }

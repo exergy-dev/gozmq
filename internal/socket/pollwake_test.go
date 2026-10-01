@@ -15,9 +15,9 @@ import (
 // Poller.Poll depends on: a goroutine parked on the channel obtained from
 // ReadyRecv() BEFORE any data existed must wake when a message is
 // delivered — with no polling loop and no re-call of ReadyRecv. They
-// cover the three paths with no forwarder goroutine between the pipe and
-// the engine: FairQueue direct mode, pairEngine, and reqEngine's sticky
-// pipe.
+// cover the paths with no forwarder goroutine between the pipe and the
+// engine: FairQueue direct mode, pairEngine, reqEngine's sticky pipe, and
+// XPUB's subscription events.
 
 // parkOnGate parks a goroutine reading ch and returns a channel that
 // closes when the read completes.
@@ -102,4 +102,25 @@ func TestReq_ReadyRecvWakesOnReply(t *testing.T) {
 	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("reply"))), "peer reply")
 	requireWake(t, woke, "req sticky pipe")
 	require.True(t, eng.CanRecvNow())
+}
+
+// TestXPub_ReadyRecvWakesOnSubscription: a Poller parked on XPUB's PollIn
+// wakes when a peer subscribes, with no goroutine applying the command.
+func TestXPub_ReadyRecvWakesOnSubscription(t *testing.T) {
+	t.Parallel()
+	eng := socket.NewXPubEngineV(false)
+	defer eng.Close()
+
+	a1, b1 := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a2, b2 := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(a1, b1, a2, b2)
+	mustAttach(t, eng, a1, a2)
+
+	woke := parkOnGate(eng.ReadyRecv())
+	requireNoWake(t, woke)
+
+	require.NoError(t, b2.Send(testCtx(t), msg.FromBytes([]byte("\x01A"))), "peer subscribe")
+	requireWake(t, woke, "xpub subscription")
+	require.True(t, eng.CanRecvNow())
+	require.True(t, eng.CanRecvNow(), "CanRecvNow must not consume the event")
 }

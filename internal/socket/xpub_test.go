@@ -351,3 +351,31 @@ func TestXPub_ForeignCancelIgnored(t *testing.T) {
 	require.NoError(t, goodPeer.Send(ctx, subscribeMsg(false, []byte("A"))))
 	requireXPubEvent(ctx, t, eng, false, "A")
 }
+
+// TestXPub_DetachAppliesQueuedCommandsFirst: DetachPipe itself applies the
+// commands a peer queued before leaving, so every SUBSCRIBE surfaces before
+// the CANCEL synthesized for it, with no Send or Recv in between.
+func TestXPub_DetachAppliesQueuedCommandsFirst(t *testing.T) {
+	t.Parallel()
+	eng := socket.NewXPubEngineV(false)
+	defer eng.Close()
+	ctx := testCtx(t)
+
+	a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	other, otherPeer := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(a, b, other, otherPeer)
+	mustAttach(t, eng, a, other)
+
+	require.NoError(t, b.Send(ctx, subscribeMsg(true, []byte("A"))))
+	require.NoError(t, b.Send(ctx, subscribeMsg(true, []byte("B"))))
+	require.NoError(t, b.Send(ctx, subscribeMsg(false, []byte("B"))))
+	require.NoError(t, b.Close())
+	require.NoError(t, eng.DetachPipe(a))
+	require.EqualValues(t, 4, eng.Metrics().QueueDepth, "events queued by DetachPipe")
+
+	requireXPubEvent(ctx, t, eng, true, "A")
+	requireXPubEvent(ctx, t, eng, true, "B")
+	requireXPubEvent(ctx, t, eng, false, "B")
+	requireXPubEvent(ctx, t, eng, false, "A")
+	require.False(t, eng.CanRecvNow())
+}

@@ -74,12 +74,17 @@ type fqSingle struct {
 
 // NewFairQueue returns an empty FairQueue.
 func NewFairQueue() *FairQueue {
-	return &FairQueue{
-		closeCh: make(chan struct{}),
-		byPipe:  make(map[*pipe.End]*fqEntry),
-		gen:     make(chan struct{}),
-		gate:    make(chan struct{}, 1),
-	}
+	fq := &FairQueue{}
+	fq.init()
+	return fq
+}
+
+// init readies a zero FairQueue, for owners that embed one by value.
+func (fq *FairQueue) init() {
+	fq.closeCh = make(chan struct{})
+	fq.byPipe = make(map[*pipe.End]*fqEntry)
+	fq.gen = make(chan struct{})
+	fq.gate = make(chan struct{}, 1)
 }
 
 // Recvd reports the number of messages handed to receivers.

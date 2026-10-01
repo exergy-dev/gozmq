@@ -172,6 +172,12 @@ Behaviour:
 - `SocketMetrics.Dropped` no longer includes FairQueue handoff drops,
   which cannot happen any more: a message is only taken from a pipe by
   the receiver that returns it.
+- **PUB/XPUB run no goroutine per subscriber.** Subscriptions are applied on
+  the socket's next `Send` (and, for XPUB, `Recv` or poll), as in libzmq,
+  instead of by a reader goroutine per peer. A subscriber link costs one
+  goroutine less; XPUB subscribe churn is ~43% faster. A PUB that never
+  sends leaves subscriptions queued, so a subscriber may back off at the
+  receive HWM until the next `Send`.
 
 ### Removed
 

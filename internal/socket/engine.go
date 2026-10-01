@@ -47,8 +47,8 @@
 // call Send and Recv concurrently, and the session layer drives
 // AttachPipe/DetachPipe from its own goroutines. Every engine therefore
 // guards its own state — with its mutex, atomics, or by delegating to
-// the goroutine-safe primitives — including against the internal
-// goroutines it spawns (pub/xpub per-peer readers).
+// the goroutine-safe primitives. Engines spawn no goroutines of their
+// own.
 //
 // LoadBalancer, FairQueue, and SubTree are themselves goroutine-safe so
 // tests and future patterns can use them directly.
