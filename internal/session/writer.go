@@ -34,16 +34,15 @@ const (
 // writeHandshake), then runs the pipe->wire traffic phase: it pulls
 // *msg.Msg values from the session-side pipe, splits them into ZMTP frames
 // with MORE flags applied to all but the last, encodes each body via the
-// security mechanism, and writes via the codec. PONG/PING commands from
-// the reader and the heartbeat arrive via cmdCh and are written here (see
+// security mechanism, and writes them. PONG/PING commands from the reader
+// and the heartbeat arrive via cmdCh and go out the same way (see
 // writerNext).
 //
-// Throughput optimization: after receiving the first
-// message, the writer tries a non-blocking Recv for additional queued
-// messages. All accumulated frame blobs are written in a single writev
-// syscall via net.Buffers — preserving the interactive single-message
-// path (no coalescing delay) while amortizing syscall overhead across
-// rapid bursts.
+// Throughput optimization: after receiving the first message, the writer
+// tries a non-blocking Recv for additional queued messages. All accumulated
+// frames are written in a single writev syscall via net.Buffers — preserving
+// the interactive single-message path (no coalescing delay) while
+// amortizing syscall overhead across rapid bursts.
 //
 // The writer waits on s.writerCtx (a child of s.ctx) alongside the pipe.
 // Socket.Close's LINGER drain calls Drain, which cancels only writerCtx.
@@ -61,7 +60,7 @@ func (s *Session) runWriter() {
 	var batch writerBatch
 
 	for {
-		m, err := s.writerNext()
+		m, cmd, err := s.writerNext()
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				// writerCtx was cancelled by the socket-level linger path.
@@ -80,11 +79,10 @@ func (s *Session) runWriter() {
 			}
 			return
 		}
-		if m == nil {
-			// writerNext serviced a PING/PONG command; nothing to batch.
-			continue
+		if m == nil && cmd == nil {
+			continue // woken for a command that the next call picks up
 		}
-		if err := s.writeBatchFrom(&batch, m); err != nil {
+		if err := s.writeBatchFrom(&batch, m, cmd); err != nil {
 			return
 		}
 	}
@@ -110,37 +108,56 @@ func (s *Session) writeHandshake() bool {
 	return !failed && s.sessionPipe != nil
 }
 
-// writerNext blocks until the writer has work: a queued user message
-// (returned), a pending PING/PONG from cmdCh (written inline; returns
-// nil, nil), writer cancellation, or pipe closure (queued messages first,
-// then io.EOF). All traffic-phase wire writes funnel through the writer
-// goroutine — see the cmdCh field doc for why the reader/heartbeat
+// writerNext blocks until the writer has work: a queued user message (m),
+// a pending PING/PONG command body from cmdCh (cmd), writer cancellation,
+// or pipe closure (queued messages first, then io.EOF). Both results nil
+// with a nil error means the receive was aborted by cmdWake; the next call
+// finds the command. All traffic-phase wire writes funnel through the
+// writer goroutine — see the cmdCh field doc for why the reader/heartbeat
 // goroutines never write directly.
 //
 // cmdCh is polled before every receive: RecvOr prefers queued data over
 // its abort channel (cmdWake), so under sustained traffic this check is
 // what keeps PING/PONG flowing.
-func (s *Session) writerNext() (*msg.Msg, error) {
+func (s *Session) writerNext() (m *msg.Msg, cmd []byte, err error) {
 	select {
-	case buf := <-s.cmdCh:
-		return nil, s.writeFrame(zmtp.FlagCommand, buf)
+	case cmd = <-s.cmdCh:
+		return nil, cmd, nil
 	default:
 	}
-	m, err := s.sessionPipe.RecvOr(s.writerCtx, s.cmdWake)
+	m, err = s.sessionPipe.RecvOr(s.writerCtx, s.cmdWake)
 	if errors.Is(err, pipe.ErrAborted) {
-		return nil, nil // a command was queued; the next call writes it
+		return nil, nil, nil
 	}
-	return m, err
+	return m, nil, err
 }
 
-// writeBatchFrom encodes first plus any immediately-queued messages
-// (bounded by maxBatchMessages/maxBatchBytes) into batch and flushes
-// them in one writev. Shared by the runWriter hot loop and the linger
-// drain. On error it releases the batch, logs, and triggers a session
-// shutdown unless the error is an expected teardown artifact; the
-// caller just exits on a non-nil return.
-func (s *Session) writeBatchFrom(batch *writerBatch, first *msg.Msg) error {
-	batchBytes, err := batch.appendMessage(s, first, 0)
+// writeBatchFrom encodes first (a user message, or when it is nil the
+// command body cmd) plus any immediately-queued messages (bounded by
+// maxBatchMessages/maxBatchBytes) into batch and flushes them in one
+// writev. Shared by the runWriter hot loop and the linger drain. On error
+// it releases the batch, logs, and triggers a session shutdown unless the
+// error is an expected teardown artifact; the caller just exits on a
+// non-nil return.
+func (s *Session) writeBatchFrom(batch *writerBatch, first *msg.Msg, cmd []byte) error {
+	var batchBytes int
+	var err error
+	if first != nil {
+		batchBytes, err = batch.appendMessage(s, first, 0)
+	} else {
+		// Every command already queued goes ahead of the data pulled
+		// below, as when commands were written one at a time.
+		batchBytes, err = batch.appendFrame(s, zmtp.FlagCommand, cmd, 0)
+		for err == nil {
+			select {
+			case c := <-s.cmdCh:
+				batchBytes, err = batch.appendFrame(s, zmtp.FlagCommand, c, batchBytes)
+				continue
+			default:
+			}
+			break
+		}
+	}
 	if err == nil {
 		for msgCount := 1; msgCount < maxBatchMessages && batchBytes < maxBatchBytes; msgCount++ {
 			next, ok := s.sessionPipe.TryRecv()
@@ -154,15 +171,11 @@ func (s *Session) writeBatchFrom(batch *writerBatch, first *msg.Msg) error {
 		}
 	}
 	if err == nil {
-		batch.materializeBuffers()
-		// Flush a COPY of the slice header: net.Buffers.WriteTo (and the
-		// tcpConn WriteBuffers writev fast path) CONSUME the header they
-		// are handed (*v = (*v)[i:] as data drains). Passing &batch.buffers
-		// directly would leave it pointing at the advanced, empty tail, so
-		// release()'s b.buffers[:0] would discard the backing array and
-		// every batch would re-grow it from zero capacity.
-		bufs := batch.buffers
-		err = s.flushBatch(&bufs)
+		// writev consumes the slice header it is handed (*v = (*v)[i:] as
+		// data drains), so it gets a copy: buffers keeps the backing
+		// array for the next batch.
+		batch.flush = batch.buffers
+		err = s.flushBatch(&batch.flush)
 	}
 	batch.release()
 	if err != nil {
@@ -179,39 +192,26 @@ type bufferWriter interface {
 	WriteBuffers(*net.Buffers) (int64, error)
 }
 
-// writerBatch coalesces multiple outbound *msg.Msg into one writev. Two
-// encode paths append into the same per-batch scratch byte slice, each
-// frame recording (off, len, body) into entries:
+// writerBatch coalesces outbound frames into one writev. Every frame
+// contributes its wire header, appended to scratch, and its body: the
+// caller's frame itself for an identity mechanism (or one whose
+// EncodeFrame returns fresh memory, as the Mech contract requires), or
+// bytes a FrameAppender mechanism sealed into scratch. Subslices of scratch
+// go into buffers as they are made; a later append that relocates scratch
+// leaves them valid, since the old array is never written again.
 //
-//   - Direct/header-only fast path (NULL/PLAIN security + a codec that
-//     implements FrameHeaderAppender): only the wire header goes into
-//     scratch; body is the caller's frame, referenced without a copy.
-//
-//   - Fallback path (CURVE / other mechanisms that rewrite body bytes):
-//     the whole encoded [header||body] frame goes into scratch and body
-//     is nil.
-//
-// At flush time materializeBuffers walks entries once, slicing scratch
-// and pairing each slice with its body. scratch is reused across batches
-// (zero allocations after warm-up); slicing it is safe because all
-// appends complete before any subslice is taken.
-//
-// release is called after every flush (writeBatchFrom). It releases the
-// batched lent messages and truncates all per-batch state to zero length while
-// preserving capacity, leaving the batch ready for the next fill.
+// release is called after every flush. It releases the batched lent
+// messages and truncates the per-batch state to zero length while keeping
+// the capacity, so a warm batch allocates nothing.
 type writerBatch struct {
 	buffers net.Buffers
-
-	// scratch must NOT be referenced by net.Buffers until the batch is
-	// fully encoded: a later append() may relocate the array.
+	flush   net.Buffers // the header writev consumes; see writeBatchFrom
 	scratch []byte
-	entries []writerEntry
 
 	// lent are the batched lent messages. Each pipe item carries a
 	// reference the writer owns; for a lent message it is released only
-	// after the flush, because the direct path hands frame bodies to
-	// writev by reference. (Release on a plain message does nothing, so
-	// those are not tracked.)
+	// after the flush, because frame bodies go to writev by reference.
+	// (Release on a plain message does nothing, so those are not tracked.)
 	lent []*msg.Msg
 }
 
@@ -220,31 +220,20 @@ type writerBatch struct {
 // the writer for the rest of the session.
 const maxRetainedScratch = 2 * maxBatchBytes
 
-// writerEntry records one frame's serialization plan: a [off, off+n)
-// slice of scratch, followed by body. The final net.Buffers is
-// materialized by walking entries after all encoding completes (scratch
-// can no longer grow).
-type writerEntry struct {
-	off  int
-	n    int
-	body []byte
-}
-
 func (b *writerBatch) release() {
 	for _, m := range b.lent {
 		m.Release()
 	}
 	clear(b.lent)
 	b.lent = b.lent[:0]
-	clear(b.entries) // drop body references so sent frames can be collected
-	b.entries = b.entries[:0]
 	if cap(b.scratch) > maxRetainedScratch {
 		b.scratch = nil
 	} else {
 		b.scratch = b.scratch[:0]
 	}
-	clear(b.buffers)
+	clear(b.buffers) // drop body references so sent frames can be collected
 	b.buffers = b.buffers[:0]
+	b.flush = nil
 }
 
 func (b *writerBatch) appendMessage(s *Session, m *msg.Msg, sizeSoFar int) (int, error) {
@@ -270,51 +259,43 @@ func (b *writerBatch) appendMessage(s *Session, m *msg.Msg, sizeSoFar int) (int,
 	return sizeSoFar, nil
 }
 
+// appendFrame adds one frame to the batch: its wire body first (when the
+// mechanism writes into scratch), then its header, then both to buffers in
+// wire order. It returns sizeSoFar plus the frame's wire size.
 func (b *writerBatch) appendFrame(s *Session, flags uint8, body []byte, sizeSoFar int) (int, error) {
+	wire, wireFlags := body, flags
 	off := len(b.scratch)
-	if s.directHeader != nil {
-		newScratch, hdrLen, err := s.directHeader.AppendFrameHeader(b.scratch, flags, body)
-		if err != nil {
-			return sizeSoFar, fmt.Errorf("gozmq/session: serialize frame: %w", err)
-		}
-		b.scratch = newScratch
-		b.entries = append(b.entries, writerEntry{off: off, n: hdrLen, body: body})
-		return sizeSoFar + hdrLen + len(body), nil
+	var err error
+	switch {
+	case s.identityMech:
+	case s.appendEncode != nil:
+		b.scratch, wireFlags, err = s.appendEncode(b.scratch, flags, body)
+		wire = nil // b.scratch[off:bodyEnd], sliced once the header is in
+	default:
+		wireFlags, wire, err = s.encode(flags, body)
 	}
-	wireFlags, encoded, err := s.encode(flags, body)
 	if err != nil {
 		return sizeSoFar, fmt.Errorf("gozmq/session: encode frame: %w", err)
 	}
-	if err := s.cfg.Codec.WriteFrame(b, wireFlags, encoded); err != nil {
+	bodyEnd := len(b.scratch)
+	n := len(wire)
+	if wire == nil {
+		n = bodyEnd - off
+	}
+	if b.scratch, err = s.cfg.Codec.AppendFrameHeader(b.scratch, wireFlags, n); err != nil {
 		return sizeSoFar, fmt.Errorf("gozmq/session: serialize frame: %w", err)
 	}
-	n := len(b.scratch) - off
-	b.entries = append(b.entries, writerEntry{off: off, n: n})
-	return sizeSoFar + n, nil
-}
-
-// Write appends p to scratch. It makes the batch the io.Writer the codec
-// serializes fallback-path frames into.
-func (b *writerBatch) Write(p []byte) (int, error) {
-	b.scratch = append(b.scratch, p...)
-	return len(p), nil
-}
-
-// materializeBuffers walks entries and appends scratch + body slices into
-// b.buffers in order. Must be called after all appendFrame calls for this
-// batch — at that point b.scratch's underlying array is stable, so the
-// subslices we hand to net.Buffers stay valid through flushBatch.
-//
-// Empty bodies are omitted from b.buffers to keep writev's iovec count
-// minimal (a frame with len(body)==0 is still wire-correct because the
-// header encodes length=0 — no body bytes follow).
-func (b *writerBatch) materializeBuffers() {
-	for _, e := range b.entries {
-		b.buffers = append(b.buffers, b.scratch[e.off:e.off+e.n])
-		if len(e.body) > 0 {
-			b.buffers = append(b.buffers, e.body)
-		}
+	hdr := b.scratch[bodyEnd:len(b.scratch):len(b.scratch)]
+	if wire == nil {
+		wire = b.scratch[off:bodyEnd:bodyEnd]
 	}
+	b.buffers = append(b.buffers, hdr)
+	if n > 0 {
+		// Empty bodies are left out to keep writev's iovec count minimal;
+		// the header already says length 0.
+		b.buffers = append(b.buffers, wire)
+	}
+	return sizeSoFar + len(hdr) + n, nil
 }
 
 // flushBatch writes the accumulated frame blobs to the conn in a
@@ -351,24 +332,8 @@ func (s *Session) drainSessionPipe() {
 		if !ok {
 			return
 		}
-		if err := s.writeBatchFrom(&batch, m); err != nil {
+		if err := s.writeBatchFrom(&batch, m, nil); err != nil {
 			return
 		}
 	}
-}
-
-// writeFrame encodes body via the mechanism, then writes via the codec.
-// Used by the writer goroutine for single-frame
-// COMMAND writes (heartbeat PING, PONG reply, dequeued from cmdCh) —
-// heartbeat-rate traffic where batching/zero-copy is not worth a fast
-// path.
-func (s *Session) writeFrame(flags uint8, body []byte) error {
-	wireFlags, encoded, err := s.encode(flags, body)
-	if err != nil {
-		return fmt.Errorf("gozmq/session: encode frame: %w", err)
-	}
-	if err := s.cfg.Codec.WriteFrame(s.cfg.Conn, wireFlags, encoded); err != nil {
-		return fmt.Errorf("gozmq/session: write frame: %w", err)
-	}
-	return nil
 }

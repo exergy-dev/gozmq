@@ -23,11 +23,11 @@ type FrameCodec interface {
 	// announces a huge frame and stalls cannot pin the whole cap.
 	ReadFrame(r io.Reader, dst []byte, pool BodyPool) (flags uint8, body []byte, err error)
 
-	// WriteFrame writes flags + length + body as one ZMTP frame. Multi-byte
-	// lengths are big-endian per the spec. Implementations may internally
-	// batch via net.Buffers; callers should not assume one write = one
-	// socket operation.
-	WriteFrame(w io.Writer, flags uint8, body []byte) error
+	// AppendFrameHeader appends the wire header (flags + length) of a frame
+	// whose body is bodyLen bytes to dst and returns the grown slice. The
+	// body itself is the caller's to write after it, so the writer can hand
+	// header and body to writev without copying the body.
+	AppendFrameHeader(dst []byte, flags uint8, bodyLen int) ([]byte, error)
 }
 
 // BodyPool supplies frame body buffers to ReadFrame. Get returns a buffer of
@@ -48,19 +48,4 @@ type BodyPool interface {
 type ScratchPool interface {
 	GetScratch(n int) []byte
 	PutScratch(b []byte)
-}
-
-// FrameHeaderAppender is the allocation-free fast path used by the writer
-// batching loop. It appends the wire-format frame header (flags + length)
-// for a body of len(body) bytes onto scratch and returns the grown scratch.
-// Callers materialize net.Buffers entries from scratch + body slices after
-// the entire batch has been encoded — by that point scratch's underlying
-// array is stable, so subslices referencing scratch[off:off+hdrLen] do not
-// race with further appends.
-//
-// This method allocates no closures and uses no internal sync.Pool: header
-// bytes live in caller-owned scratch storage that the caller recycles
-// across batches.
-type FrameHeaderAppender interface {
-	AppendFrameHeader(scratch []byte, flags uint8, body []byte) (newScratch []byte, headerLen int, err error)
 }

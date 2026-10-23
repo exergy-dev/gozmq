@@ -19,6 +19,7 @@ import (
 	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
 	"github.com/exergy-dev/gozmq/msg"
+	"github.com/exergy-dev/gozmq/security"
 )
 
 // --------------------------------------------------------------------------
@@ -103,17 +104,14 @@ func (fakeCodec) ReadFrame(r io.Reader, _ []byte, _ zmtp.BodyPool) (uint8, []byt
 	return flagsBuf[0], body, nil
 }
 
-func (fakeCodec) WriteFrame(w io.Writer, flags uint8, body []byte) error {
-	var hdr [1 + binary.MaxVarintLen64]byte
-	hdr[0] = flags
-	n := binary.PutUvarint(hdr[1:], uint64(len(body)))
-	if _, err := w.Write(hdr[:1+n]); err != nil {
-		return err
-	}
-	if len(body) == 0 {
-		return nil
-	}
-	_, err := w.Write(body)
+func (fakeCodec) AppendFrameHeader(dst []byte, flags uint8, bodyLen int) ([]byte, error) {
+	return binary.AppendUvarint(append(dst, flags), uint64(bodyLen)), nil
+}
+
+// WriteFrame is the test peers' helper for writing one fake frame.
+func (c fakeCodec) WriteFrame(w io.Writer, flags uint8, body []byte) error {
+	hdr, _ := c.AppendFrameHeader(nil, flags, len(body))
+	_, err := w.Write(append(hdr, body...))
 	return err
 }
 
@@ -469,6 +467,17 @@ type identityFramingMech struct{ *fakeMech }
 
 func (identityFramingMech) IdentityFraming() bool { return true }
 
+// appendMech is a fakeMech that also implements security.FrameAppender, so
+// the writer seals its bodies into the batch scratch.
+type appendMech struct{ *fakeMech }
+
+func (appendMech) AppendEncodeFrame(dst []byte, flags uint8, plain []byte) ([]byte, uint8, error) {
+	return append(dst, plain...), flags, nil
+}
+
+// isIdentity reports how New classifies mech's framing.
+func isIdentity(mech security.Mech) bool { return New(Config{Mech: mech}).identityMech }
+
 // TestSession_FramePathsIgnoreMechName: a mechanism named "PLAIN" (or
 // "NULL") that transforms frame bodies must still have its EncodeFrame/
 // DecodeFrame applied; only a mechanism that declares IdentityFraming
@@ -486,7 +495,7 @@ func TestSession_FramePathsIgnoreMechName(t *testing.T) {
 				// transform, so it sees the raw wire bytes A produced.
 				Config{Conn: connB, Mech: newFakeMech(name, true, nil), SendHWM: 4, RecvHWM: 4},
 			)
-			_, _, identity := sessionFramePaths(xorMech{newFakeMech(name, false, nil)})
+			identity := isIdentity(xorMech{newFakeMech(name, false, nil)})
 			require.False(t, identity, "name alone must not select identity framing")
 			ctx := testutil.Ctx(t, 2*time.Second)
 			require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("hello"))))
@@ -502,9 +511,9 @@ func TestSession_FramePathsIgnoreMechName(t *testing.T) {
 		})
 	}
 
-	_, _, identity := sessionFramePaths(identityFramingMech{newFakeMech("CUSTOM", false, nil)})
+	identity := isIdentity(identityFramingMech{newFakeMech("CUSTOM", false, nil)})
 	require.True(t, identity, "IdentityFraming() true must select identity framing")
-	_, _, identity = sessionFramePaths(newFakeMech("NULL", false, nil))
+	identity = isIdentity(newFakeMech("NULL", false, nil))
 	require.False(t, identity, "a mech without IdentityFraming takes the generic path")
 }
 

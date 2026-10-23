@@ -144,11 +144,11 @@ func (s *Session) runSecurityHandshake() error {
 			// Handshake frames are bounded by handshakeMaxFrame on both
 			// sides, independent of the data cap: a small
 			// WithMaxMessageSize must not break a CURVE INITIATE.
-			var frame bytes.Buffer
-			if werr := readCodec.WriteFrame(&frame, zmtp.FlagCommand, out); werr != nil {
+			frame, werr := readCodec.AppendFrameHeader(nil, zmtp.FlagCommand, len(out))
+			if werr != nil {
 				return fmt.Errorf("gozmq/session: encode handshake frame: %w", werr)
 			}
-			s.hsOut <- frame.Bytes()
+			s.hsOut <- append(frame, out...)
 		}
 		if err != nil {
 			return fmt.Errorf("gozmq/session: security handshake: %w", err)

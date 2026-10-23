@@ -787,8 +787,15 @@ func (m *curveMech) parseReady(body []byte) error {
 func (m *curveMech) FrameOverhead() int { return 1 + len(cmdMessage) + 8 + 1 + boxOverhead }
 
 func (m *curveMech) EncodeFrame(flags uint8, plain []byte) (uint8, []byte, error) {
+	wire, wireFlags, err := m.AppendEncodeFrame(make([]byte, 0, m.FrameOverhead()+len(plain)), flags, plain)
+	return wireFlags, wire, err
+}
+
+// AppendEncodeFrame implements security.FrameAppender: EncodeFrame sealed
+// straight into dst.
+func (m *curveMech) AppendEncodeFrame(dst []byte, flags uint8, plain []byte) ([]byte, uint8, error) {
 	if m.state != stateDone {
-		return 0, nil, fmt.Errorf("gozmq/security/curve: EncodeFrame before handshake: %w", zmqerr.ErrFSMViolation)
+		return dst, 0, fmt.Errorf("gozmq/security/curve: EncodeFrame before handshake: %w", zmqerr.ErrFSMViolation)
 	}
 	// Guard against counter wrap BEFORE use. RFC 26 expects rekeying
 	// long before the counter exhausts; we don't implement rekey, so
@@ -796,20 +803,17 @@ func (m *curveMech) EncodeFrame(flags uint8, plain []byte) (uint8, []byte, error
 	// value itself is treated as already-exhausted so the last usable
 	// counter is MaxUint64-1 — no wrap can occur.
 	if err := checkNonceCounter(m.ourShortNonce, "send"); err != nil {
-		return 0, nil, err
+		return dst, 0, err
 	}
 	counter := m.ourShortNonce
 	m.ourShortNonce++
 	nonce := shortNonce(m.encPrefix, counter)
 
-	// Box plaintext: 1-byte flags || frame body. The shared key was precomputed in finishHandshake, so sealing is pure
-	// XSalsa20/Poly1305 — no per-frame ECDH.
-	//
-	// The inner plaintext lives in the per-mechanism scratch buffer (see
-	// the encScratch field and the concurrency contract above), and the
-	// ciphertext is sealed directly into the body's tail: Seal appends to
-	// its first argument, and body is pre-sized so no reallocation (and
-	// no second payload copy) occurs.
+	// Box plaintext: 1-byte flags || frame body. The shared key was
+	// precomputed in finishHandshake, so sealing is pure XSalsa20/Poly1305,
+	// no per-frame ECDH. The inner plaintext lives in the per-mechanism
+	// scratch buffer (see the encScratch field and the concurrency contract
+	// above); Seal appends the ciphertext to dst.
 	if cap(m.encScratch) < 1+len(plain) {
 		m.encScratch = make([]byte, 1+len(plain))
 	}
@@ -823,13 +827,11 @@ func (m *curveMech) EncodeFrame(flags uint8, plain []byte) (uint8, []byte, error
 	}
 	copy(inner[1:], plain)
 
-	const headerLen = 1 + len(cmdMessage) + 8
-	body := make([]byte, headerLen, headerLen+len(inner)+boxOverhead)
-	body[0] = byte(len(cmdMessage))
-	copy(body[1:], cmdMessage)
-	binary.BigEndian.PutUint64(body[1+len(cmdMessage):], counter)
-	body = box.SealAfterPrecomputation(body, inner, &nonce, &m.shared)
-	return flags &^ (zmtp.FlagMore | zmtp.FlagCommand), body, nil
+	dst = append(dst, byte(len(cmdMessage)))
+	dst = append(dst, cmdMessage...)
+	dst = binary.BigEndian.AppendUint64(dst, counter)
+	dst = box.SealAfterPrecomputation(dst, inner, &nonce, &m.shared)
+	return dst, flags &^ (zmtp.FlagMore | zmtp.FlagCommand), nil
 }
 
 // DecodeFrame reverses EncodeFrame. Returns ErrMalformedFrame on MAC

@@ -38,7 +38,7 @@ func TestFrameRoundTrip(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var buf bytes.Buffer
-			require.NoError(t, codec.WriteFrame(&buf, tc.flags, tc.body), "WriteFrame")
+			require.NoError(t, writeFrame(codec, &buf, tc.flags, tc.body), "WriteFrame")
 			gotFlags, gotBody, err := codec.ReadFrame(&buf, nil, nil)
 			require.NoError(t, err, "ReadFrame")
 			// LONG may be promoted by the encoder; the other bits must round-trip.
@@ -62,14 +62,14 @@ func TestFrameWireFormat(t *testing.T) {
 	codec := NewFrameCodec(MaxBodyUnlimited)
 	t.Run("short", func(t *testing.T) {
 		var buf bytes.Buffer
-		require.NoError(t, codec.WriteFrame(&buf, FlagCommand, []byte{1, 2, 3}), "WriteFrame")
+		require.NoError(t, writeFrame(codec, &buf, FlagCommand, []byte{1, 2, 3}), "WriteFrame")
 		want := []byte{FlagCommand, 0x03, 0x01, 0x02, 0x03}
 		require.Equal(t, want, buf.Bytes())
 	})
 	t.Run("long", func(t *testing.T) {
 		body := bytes.Repeat([]byte{0xAB}, 300)
 		var buf bytes.Buffer
-		require.NoError(t, codec.WriteFrame(&buf, 0, body), "WriteFrame")
+		require.NoError(t, writeFrame(codec, &buf, 0, body), "WriteFrame")
 		got := buf.Bytes()
 		require.Equal(t, FlagLong, got[0], "flags")
 		ln := binary.BigEndian.Uint64(got[1:9])
@@ -78,35 +78,38 @@ func TestFrameWireFormat(t *testing.T) {
 	})
 }
 
-func TestFrameAppendHeaderMatchesWriteFrame(t *testing.T) {
+func TestFrameAppendHeader(t *testing.T) {
 	t.Parallel()
 	codec := NewFrameCodec(MaxBodyUnlimited)
-	appender, ok := codec.(FrameHeaderAppender)
-	require.True(t, ok, "codec does not implement FrameHeaderAppender")
-
 	cases := []struct {
-		name  string
-		flags uint8
-		body  []byte
+		name    string
+		flags   uint8
+		bodyLen int
+		want    []byte
 	}{
-		{name: "short", flags: FlagCommand, body: []byte("READY")},
-		{name: "long", flags: FlagMore, body: bytes.Repeat([]byte{0xAB}, 300)},
-		{name: "empty", flags: 0, body: nil},
+		{name: "short", flags: FlagCommand, bodyLen: 5, want: []byte{FlagCommand, 5}},
+		{name: "long", flags: FlagMore, bodyLen: 300, want: []byte{FlagMore | FlagLong, 0, 0, 0, 0, 0, 0, 1, 44}},
+		{name: "empty", flags: 0, bodyLen: 0, want: []byte{0, 0}},
+		{name: "forced-long", flags: FlagLong, bodyLen: 1, want: []byte{FlagLong, 0, 0, 0, 0, 0, 0, 0, 1}},
 	}
-
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var want bytes.Buffer
-			require.NoError(t, codec.WriteFrame(&want, tc.flags, tc.body), "WriteFrame")
-
-			scratch, hdrLen, err := appender.AppendFrameHeader(nil, tc.flags, tc.body)
+			got, err := codec.AppendFrameHeader([]byte{0xEE}, tc.flags, tc.bodyLen)
 			require.NoError(t, err, "AppendFrameHeader")
-			require.Len(t, scratch, hdrLen, "returned scratch length vs header length")
-
-			got := append(append([]byte(nil), scratch...), tc.body...)
-			require.Equal(t, want.Bytes(), got, "wire mismatch")
+			require.Equal(t, append([]byte{0xEE}, tc.want...), got, "appended to dst")
 		})
 	}
+}
+
+// writeFrame encodes one frame into w the way the session writer does.
+func writeFrame(c FrameCodec, w *bytes.Buffer, flags uint8, body []byte) error {
+	hdr, err := c.AppendFrameHeader(nil, flags, len(body))
+	if err != nil {
+		return err
+	}
+	w.Write(hdr)
+	w.Write(body)
+	return nil
 }
 
 func TestFrameReuseDst(t *testing.T) {
@@ -114,7 +117,7 @@ func TestFrameReuseDst(t *testing.T) {
 	codec := NewFrameCodec(MaxBodyUnlimited)
 	body := []byte("hello-zmtp")
 	var buf bytes.Buffer
-	require.NoError(t, codec.WriteFrame(&buf, 0, body), "WriteFrame")
+	require.NoError(t, writeFrame(codec, &buf, 0, body), "WriteFrame")
 	dst := make([]byte, 0, 64)
 	_, got, err := codec.ReadFrame(&buf, dst, nil)
 	require.NoError(t, err, "ReadFrame")
@@ -122,7 +125,7 @@ func TestFrameReuseDst(t *testing.T) {
 	// Fresh allocation when capacity is insufficient.
 	var buf2 bytes.Buffer
 	big := bytes.Repeat([]byte{0xEF}, 200)
-	require.NoError(t, codec.WriteFrame(&buf2, 0, big), "WriteFrame")
+	require.NoError(t, writeFrame(codec, &buf2, 0, big), "WriteFrame")
 	small := make([]byte, 0, 8)
 	_, got2, err := codec.ReadFrame(&buf2, small, nil)
 	require.NoError(t, err, "ReadFrame")
@@ -130,7 +133,7 @@ func TestFrameReuseDst(t *testing.T) {
 
 	// A frame that does not fit dst is read into alloc's buffer.
 	var buf3 bytes.Buffer
-	require.NoError(t, codec.WriteFrame(&buf3, 0, big), "WriteFrame")
+	require.NoError(t, writeFrame(codec, &buf3, 0, big), "WriteFrame")
 	pooled := make([]byte, 256)
 	_, got3, err := codec.ReadFrame(&buf3, small, fixedPool{buf: pooled})
 	require.NoError(t, err, "ReadFrame")
@@ -144,7 +147,7 @@ func TestFrameMaxBodyEnforced(t *testing.T) {
 
 	t.Run("encode-rejects-oversize", func(t *testing.T) {
 		var buf bytes.Buffer
-		err := codec.WriteFrame(&buf, 0, bytes.Repeat([]byte{0x00}, 17))
+		err := writeFrame(codec, &buf, 0, bytes.Repeat([]byte{0x00}, 17))
 		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 	})
 
@@ -168,7 +171,8 @@ func TestFrameRejectsReservedFlags(t *testing.T) {
 	codec := NewFrameCodec(MaxBodyUnlimited)
 	_, _, err := codec.ReadFrame(bytes.NewReader([]byte{0x80, 0}), nil, nil)
 	require.ErrorIs(t, err, zmqerr.ErrMalformedFrame, "decode")
-	require.ErrorIs(t, codec.WriteFrame(io.Discard, 0xF0, nil), zmqerr.ErrMalformedFrame, "encode")
+	_, err = codec.AppendFrameHeader(nil, 0xF0, 0)
+	require.ErrorIs(t, err, zmqerr.ErrMalformedFrame, "encode")
 }
 
 func TestFrameTruncated(t *testing.T) {
@@ -229,7 +233,7 @@ func FuzzFrameDecode(f *testing.F) {
 		// Invariant: a successful decode followed by encode + decode yields
 		// the same flags and body.
 		var buf bytes.Buffer
-		require.NoError(t, codec.WriteFrame(&buf, flags, body), "re-encode failed for accepted frame")
+		require.NoError(t, writeFrame(codec, &buf, flags, body), "re-encode failed for accepted frame")
 		flags2, body2, err2 := codec.ReadFrame(&buf, nil, nil)
 		require.NoError(t, err2, "re-decode failed")
 		// LONG is always set by re-encode for the round-trip when forced; mask it.
@@ -299,7 +303,7 @@ func TestFrameReadIncrementalRoundTrip(t *testing.T) {
 			body[i] = byte(i * 7)
 		}
 		var buf bytes.Buffer
-		require.NoError(t, codec.WriteFrame(&buf, FlagMore, body))
+		require.NoError(t, writeFrame(codec, &buf, FlagMore, body))
 		wire := buf.Bytes()
 
 		// Plain allocation.
@@ -352,7 +356,7 @@ func TestFrameReadIncrementalScratchPool(t *testing.T) {
 	for _, n := range []int{1 << 20, 4<<20 + 5} {
 		body := bytes.Repeat([]byte{0xA5}, n)
 		var buf bytes.Buffer
-		require.NoError(t, codec.WriteFrame(&buf, 0, body))
+		require.NoError(t, writeFrame(codec, &buf, 0, body))
 		wire := buf.Bytes()
 		commit := (n + G - 1) / G
 

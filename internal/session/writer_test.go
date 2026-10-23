@@ -169,7 +169,7 @@ func TestWriter_BatchRetainsBufferCapacityAcrossFlushes(t *testing.T) {
 	// Never started: the test drives writeBatchFrom directly.
 	s := New(Config{
 		Conn:  &consumeWritevConn{fakeConn: connA},
-		Mech:  newFakeMech("NULL", false, nil),
+		Mech:  appendMech{newFakeMech("NULL", false, nil)},
 		Codec: fakeCodec{},
 	})
 	t.Cleanup(func() { _ = connA.Close() })
@@ -178,21 +178,21 @@ func TestWriter_BatchRetainsBufferCapacityAcrossFlushes(t *testing.T) {
 	_ = ep
 
 	var batch writerBatch
-	require.NoError(t, s.writeBatchFrom(&batch, msg.FromBytes([]byte("first"))), "flush[0]")
+	require.NoError(t, s.writeBatchFrom(&batch, msg.FromBytes([]byte("first")), nil), "flush[0]")
 	capAfterFirst := cap(batch.buffers)
 	require.Greater(t, capAfterFirst, 0,
 		"batch.buffers lost its backing array after a flush (consumed slice header leaked into the batch)")
 	for i := 1; i <= 4; i++ {
-		require.NoError(t, s.writeBatchFrom(&batch, msg.FromBytes([]byte("again"))), "flush[%d]", i)
+		require.NoError(t, s.writeBatchFrom(&batch, msg.FromBytes([]byte("again")), nil), "flush[%d]", i)
 		require.GreaterOrEqual(t, cap(batch.buffers), capAfterFirst,
 			"batch.buffers capacity eroded on flush %d", i)
 	}
-	// The fallback path (this mech is not identity-framing) serializes
-	// whole frames into scratch; that capacity is kept too...
-	require.Positive(t, cap(batch.scratch), "fallback scratch not reused")
+	// Headers (and, for an appending mech like this one, bodies) go into
+	// scratch; that capacity is kept too...
+	require.Positive(t, cap(batch.scratch), "scratch not reused")
 	// ...unless one oversized message grew it past the retention cap.
 	big := make([]byte, maxRetainedScratch)
-	require.NoError(t, s.writeBatchFrom(&batch, msg.FromBytes(big)), "flush(big)")
+	require.NoError(t, s.writeBatchFrom(&batch, msg.FromBytes(big), nil), "flush(big)")
 	require.Zero(t, cap(batch.scratch), "oversized scratch retained after flush")
 }
 
