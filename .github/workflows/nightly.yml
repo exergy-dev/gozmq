@@ -24,7 +24,7 @@ jobs:
       - run: .github/fuzz.sh 10m
       - name: Upload any crashers
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-corpus
           path: |
