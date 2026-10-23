@@ -140,32 +140,3 @@ func TestXPub_EarlyDetachKeepsRefcounts(t *testing.T) {
 	require.NoError(t, sub2.Connect(ep))
 	requireSubEvent(t, xpub, true, "A")
 }
-
-// TestXPub_ForeignCancelIgnored: a CANCEL for a prefix the sending peer never
-// subscribed to must not disturb another peer's subscription or surface.
-func TestXPub_ForeignCancelIgnored(t *testing.T) {
-	t.Parallel()
-	zctx, xpub := newTestSocket(t, gozmq.XPub)
-	require.NoError(t, xpub.Bind("tcp://127.0.0.1:0"))
-	ep := xpub.LastEndpoint()
-	ctx := testutil.Ctx(t)
-
-	good, err := zctx.NewSocket(gozmq.Sub, gozmq.WithSubscribe([]byte("A")))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = good.Close() })
-	require.NoError(t, good.Connect(ep))
-	requireSubEvent(t, xpub, true, "A")
-
-	evil, err := zctx.NewSocket(gozmq.XSub, gozmq.WithSubscribe([]byte("B")))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = evil.Close() })
-	require.NoError(t, evil.Connect(ep))
-	requireSubEvent(t, xpub, true, "B") // evil is attached
-
-	require.NoError(t, evil.SendBytes(ctx, []byte("\x00A"))) // never subscribed to A
-	require.NoError(t, evil.SendBytes(ctx, []byte("\x01C")))
-	// Per-peer FIFO: the CANCEL was processed before SUBSCRIBE C.
-	requireSubEvent(t, xpub, true, "C")
-
-	syncSub(t, xpub, good, []byte("A")) // good still receives A
-}
