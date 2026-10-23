@@ -41,7 +41,7 @@ import (
 // uses to implement WithSubscribe and dynamic
 // Subscribe/Unsubscribe calls. Internally the two returned values point
 // to the same object — the split keeps subscription controls out of the
-// frozen Engine interface.
+// Engine interface.
 type SubEngine struct {
 	mu     sync.Mutex
 	closed bool

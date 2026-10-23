@@ -14,8 +14,7 @@ import (
 	"github.com/exergy-dev/gozmq/security"
 )
 
-// Greeting layout constants, mirroring zmtp/greeting.go. The byte layout
-// is fixed by ZMTP 3.1 §2.1 and will not drift.
+// Greeting layout constants (ZMTP 3.1 §2.1).
 const (
 	greetingSize        = 64
 	greetingMechOff     = 12
