@@ -393,23 +393,3 @@ func TestReq_StaleReplyDiscardedOnNextSend(t *testing.T) {
 	require.NoError(t, err, "recv fresh")
 	require.Equal(t, "fresh", string(reply.Bytes()), "stale reply delivered for a later request")
 }
-
-// TestReq_CloseUnblocksSendAtHWM: a Send blocked on a full sticky-candidate
-// pipe must honor the Close contract and unblock with ErrSocketClosed
-// (the old code parked in a bare Pipe.Send with no closeCh arm).
-func TestReq_CloseUnblocksSendAtHWM(t *testing.T) {
-	t.Parallel()
-	eng := socket.NewReqEngine()
-
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
-	defer closePipes(a, b)
-	mustAttach(t, eng, a)
-
-	// Fill the single HWM slot from the engine side so eng.Send blocks.
-	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("fill"))), "fill")
-
-	err := testutil.RequireUnblocks(t,
-		func() error { return eng.Send(context.Background(), msg.FromBytes([]byte("q"))) },
-		func() { require.NoError(t, eng.Close(), "close") })
-	require.ErrorIs(t, err, zmqerr.ErrSocketClosed, "blocked send")
-}

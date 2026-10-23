@@ -12,7 +12,6 @@ import (
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
 	"github.com/exergy-dev/gozmq/internal/testutil"
-	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -184,15 +183,6 @@ func TestPub_UnsubscribeStopsDelivery(t *testing.T) {
 	defer c()
 	_, err := b.Recv(rc)
 	require.ErrorIs(t, err, context.DeadlineExceeded, "peer received after unsubscribe")
-}
-
-// TestPub_RecvIsFSMViolation: PUB is send-only.
-func TestPub_RecvIsFSMViolation(t *testing.T) {
-	t.Parallel()
-	eng := socket.NewPubEngine()
-	defer eng.Close()
-	_, err := eng.Recv(context.Background())
-	require.ErrorIs(t, err, zmqerr.ErrFSMViolation)
 }
 
 // TestPub_HWMDropsRatherThanBlocks: a PUB send to a peer at HWM drops

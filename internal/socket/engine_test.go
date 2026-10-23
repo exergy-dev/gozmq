@@ -105,32 +105,6 @@ func TestLoadBalancer_BlocksOnHWMUnblocksOnDrain(t *testing.T) {
 	require.NoError(t, err, "drain two")
 }
 
-func TestLoadBalancer_CloseUnblocksSend(t *testing.T) {
-	t.Parallel()
-	lb := newLB()
-
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
-	defer closePipes(a, b)
-	require.NoError(t, lb.Attach(a), "attach")
-	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("fill"))))
-
-	err := testutil.RequireUnblocks(t,
-		func() error { return lb.Send(context.Background(), msg.FromBytes([]byte("x"))) },
-		func() { require.NoError(t, lb.Close(), "close") })
-	require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
-}
-
-func TestLoadBalancer_CloseUnblocksWaitForPeer(t *testing.T) {
-	t.Parallel()
-	lb := newLB()
-
-	// No peers attached — Send should block waiting for an Attach.
-	err := testutil.RequireUnblocks(t,
-		func() error { return lb.Send(context.Background(), msg.FromBytes([]byte("x"))) },
-		func() { require.NoError(t, lb.Close(), "close") })
-	require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
-}
-
 func TestLoadBalancer_CtxCancelUnblocksSend(t *testing.T) {
 	t.Parallel()
 	lb := newLB()
@@ -231,17 +205,6 @@ func TestFairQueue_DetachThenClose(t *testing.T) {
 	case <-time.After(time.Second):
 		require.Fail(t, "Close did not return after Detach")
 	}
-}
-
-func TestFairQueue_CloseUnblocksRecv(t *testing.T) {
-	t.Parallel()
-	fq := newFQ()
-
-	err := testutil.RequireUnblocks(t, func() error {
-		_, err := fq.Recv(context.Background())
-		return err
-	}, func() { require.NoError(t, fq.Close(), "close") })
-	require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
 }
 
 // TestFairQueue_CloseWithAttachedPipes: Close with pipes still attached

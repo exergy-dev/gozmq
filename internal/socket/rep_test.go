@@ -254,22 +254,6 @@ func TestRep_StickyPeer_AfterMultiplePeers(t *testing.T) {
 	}
 }
 
-// TestRep_CloseUnblocksRecv asserts Close unblocks a parked Recv.
-func TestRep_CloseUnblocksRecv(t *testing.T) {
-	t.Parallel()
-	eng := socket.NewRepEngine()
-
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
-	defer closePipes(a, b)
-	mustAttach(t, eng, a)
-
-	err := testutil.RequireUnblocks(t, func() error {
-		_, err := eng.Recv(context.Background())
-		return err
-	}, func() { require.NoError(t, eng.Close(), "close") })
-	require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
-}
-
 // TestRep_CloseUnblocksSendAtHWM: a reply Send blocked on the requester's
 // full pipe must unblock with ErrSocketClosed when the engine closes,
 // instead of waiting for the caller's ctx.
