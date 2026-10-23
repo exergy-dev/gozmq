@@ -66,34 +66,47 @@ func (t *TCPTransport) Scheme() string { return t.scheme }
 
 // Dial honors ctx via net.Dialer.DialContext.
 func (t *TCPTransport) Dial(ctx context.Context, endpoint string) (Conn, error) {
-	addr, err := parseTCPEndpoint(endpoint, t.scheme, true)
+	c, _, err := t.dialRaw(ctx, endpoint, t.scheme)
 	if err != nil {
 		return nil, err
 	}
-	c, err := t.dial(ctx, addr)
-	if err != nil {
-		return nil, err
-	}
-	return t.wrap(c, t.scheme), nil
+	return newConn(c, t.scheme), nil
 }
 
-// dial and listen are the ctx-aware net.Dialer / net.ListenConfig wiring,
-// shared with TLSTransport.
-func (t *TCPTransport) dial(ctx context.Context, addr string) (net.Conn, error) {
+// dialRaw dials a scheme:// endpoint with the ctx-aware net.Dialer and the
+// socket options applied, returning the connection and the host:port it
+// dialed. TLSTransport wraps the result.
+func (t *TCPTransport) dialRaw(ctx context.Context, endpoint, scheme string) (net.Conn, string, error) {
+	addr, err := parseTCPEndpoint(endpoint, scheme, true)
+	if err != nil {
+		return nil, "", err
+	}
 	d := net.Dialer{KeepAlive: t.keepAliveSetting()}
-	return d.DialContext(ctx, t.Network, addr)
-}
-
-func (t *TCPTransport) listen(ctx context.Context, addr string) (net.Listener, error) {
-	lc := net.ListenConfig{KeepAlive: t.keepAliveSetting()}
-	return lc.Listen(ctx, t.Network, addr)
-}
-
-// wrap applies the socket options and adapts c to Conn with scheme://
-// endpoint strings.
-func (t *TCPTransport) wrap(c net.Conn, scheme string) *conn {
+	c, err := d.DialContext(ctx, t.Network, addr)
+	if err != nil {
+		return nil, "", err
+	}
 	t.applySocketOptions(c)
-	return &conn{Conn: c, scheme: scheme}
+	return c, addr, nil
+}
+
+// listenRaw binds a scheme:// endpoint with the ctx-aware net.ListenConfig.
+// wrap adapts each accepted connection, after the socket options are
+// applied to it; TLSTransport's wrap runs tls.Server.
+func (t *TCPTransport) listenRaw(ctx context.Context, endpoint, scheme string, wrap func(net.Conn) net.Conn) (Listener, error) {
+	addr, err := parseTCPEndpoint(endpoint, scheme, false)
+	if err != nil {
+		return nil, err
+	}
+	lc := net.ListenConfig{KeepAlive: t.keepAliveSetting()}
+	l, err := lc.Listen(ctx, t.Network, addr)
+	if err != nil {
+		return nil, err
+	}
+	return newNetListener(l, formatTCPEndpoint(scheme, l.Addr()), func(c net.Conn) Conn {
+		t.applySocketOptions(c)
+		return newConn(wrap(c), scheme)
+	}), nil
 }
 
 // Listen binds endpoint. For "tcp://*:port" the wildcard expands to
@@ -101,15 +114,7 @@ func (t *TCPTransport) wrap(c net.Conn, scheme string) *conn {
 // resolved address — important for ephemeral-port (port 0 or "*")
 // bindings. ctx bounds host-name resolution.
 func (t *TCPTransport) Listen(ctx context.Context, endpoint string) (Listener, error) {
-	addr, err := parseTCPEndpoint(endpoint, t.scheme, false)
-	if err != nil {
-		return nil, err
-	}
-	l, err := t.listen(ctx, addr)
-	if err != nil {
-		return nil, err
-	}
-	return newNetListener(l, formatTCPEndpoint(t.scheme, l.Addr()), func(c net.Conn) Conn { return t.wrap(c, t.scheme) }), nil
+	return t.listenRaw(ctx, endpoint, t.scheme, func(c net.Conn) net.Conn { return c })
 }
 
 func (t *TCPTransport) keepAliveSetting() time.Duration {
@@ -146,32 +151,57 @@ func (t *TCPTransport) applySocketOptions(c net.Conn) {
 	}
 }
 
-// conn adapts a net.Conn (TCP, Unix or TLS) to Conn. IPC fixes the
-// endpoint strings at construction; TCP and TLS format them from the
-// addresses on demand (they are rarely asked for, so this costs nothing
-// per connection). WriteBuffers is writev where the underlying conn
-// supports it.
+// conn adapts a net.Conn (TCP, Unix or TLS) to Conn with fixed endpoint
+// strings. WriteBuffers is writev on a TCP or Unix conn; any other conn
+// (TLS) gets the batch as one Write, since net.Buffers.WriteTo would issue
+// one Write per buffer and a *tls.Conn turns each into its own record and
+// syscall.
 type conn struct {
 	net.Conn
-	scheme        string // TCP/TLS: formats the endpoints from the addresses
-	local, remote string // IPC: fixed endpoint strings
+	local, remote string
+	vectored      bool   // the net.Conn is a *net.TCPConn or *net.UnixConn
+	wbuf          []byte // coalescing buffer when !vectored, reused
 }
 
-func (c *conn) LocalEndpoint() string {
-	if c.scheme != "" {
-		return formatTCPEndpoint(c.scheme, c.LocalAddr())
+// newConn adapts c, a TCP or TLS connection, with scheme:// endpoints.
+func newConn(c net.Conn, scheme string) *conn {
+	return &conn{
+		Conn:     c,
+		local:    formatTCPEndpoint(scheme, c.LocalAddr()),
+		remote:   formatTCPEndpoint(scheme, c.RemoteAddr()),
+		vectored: isVectored(c),
 	}
-	return c.local
 }
 
-func (c *conn) RemoteEndpoint() string {
-	if c.scheme != "" {
-		return formatTCPEndpoint(c.scheme, c.RemoteAddr())
+func isVectored(c net.Conn) bool {
+	switch c.(type) {
+	case *net.TCPConn, *net.UnixConn:
+		return true
 	}
-	return c.remote
+	return false
 }
 
-func (c *conn) WriteBuffers(buffers *net.Buffers) (int64, error) { return buffers.WriteTo(c.Conn) }
+func (c *conn) LocalEndpoint() string  { return c.local }
+func (c *conn) RemoteEndpoint() string { return c.remote }
+
+// maxRetainedWriteBuf bounds the coalescing buffer kept between writes.
+const maxRetainedWriteBuf = 1 << 20
+
+func (c *conn) WriteBuffers(buffers *net.Buffers) (int64, error) {
+	if c.vectored || len(*buffers) == 1 {
+		return buffers.WriteTo(c.Conn)
+	}
+	c.wbuf = c.wbuf[:0]
+	for _, b := range *buffers {
+		c.wbuf = append(c.wbuf, b...)
+	}
+	n, err := c.Conn.Write(c.wbuf)
+	*buffers = (*buffers)[len(*buffers):] // consumed, as WriteTo would
+	if cap(c.wbuf) > maxRetainedWriteBuf {
+		c.wbuf = nil
+	}
+	return int64(n), err
+}
 
 func formatTCPEndpoint(scheme string, a net.Addr) string {
 	if a == nil {
