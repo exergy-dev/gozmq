@@ -24,6 +24,9 @@
 # cross-implementation comparison; read the IPC libzmq column as "stock libzmq
 # perf-tool settings," not a tuned ceiling.
 #
+# GOZMQ_LOCAL_FLAGS passes extra flags to gozmq's receiver, e.g.
+# GOZMQ_LOCAL_FLAGS=-pool for the receive buffer pool (WithRecvBufferPool).
+#
 # Requires: gcc, libzmq-dev (pkg-config libzmq), a built Go toolchain.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -54,7 +57,8 @@ one_run() { # kind transport size count -> echoes msg/s (0 on failure)
     timeout "$PER_RUN_TIMEOUT" "$tmp/c_remote_thr" "$ep" "$size" "$count" >/dev/null 2>&1 || true
     wait $p 2>/dev/null || true
   else
-    timeout "$PER_RUN_TIMEOUT" "$tmp/zmqperf" local_thr  -endpoint "$ep" -size "$size" -count "$count" > "$srv" 2>/dev/null & local p=$!
+    # shellcheck disable=SC2086 # GOZMQ_LOCAL_FLAGS is a flag list
+    timeout "$PER_RUN_TIMEOUT" "$tmp/zmqperf" local_thr  -endpoint "$ep" -size "$size" -count "$count" ${GOZMQ_LOCAL_FLAGS-} > "$srv" 2>/dev/null & local p=$!
     sleep 0.5
     timeout "$PER_RUN_TIMEOUT" "$tmp/zmqperf" remote_thr -endpoint "$ep" -size "$size" -count "$count" >/dev/null 2>&1 || true
     wait $p 2>/dev/null || true
