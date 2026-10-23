@@ -46,6 +46,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
+      # .golangci.yml lints with the interop build tag, and that package is
+      # cgo against libzmq, so the linter's typecheck needs the headers too.
+      - name: Install libzmq (for typechecking the CGO interop harness)
+        run: sudo apt-get update && sudo apt-get install -y libzmq3-dev
       # Action v7+ is required for a v2 .golangci.yml; pin the linter to the
       # version the release was gated with.
       - uses: golangci/golangci-lint-action@v8
