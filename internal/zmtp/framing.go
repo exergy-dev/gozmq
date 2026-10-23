@@ -13,8 +13,8 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"sync"
 
+	"github.com/exergy-dev/gozmq/internal/bufpool"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
@@ -114,78 +114,126 @@ func (c *frameCodec) ReadFrame(r io.Reader, dst []byte, pool BodyPool) (uint8, [
 // incrementalBodyThreshold bounds what ReadFrame allocates from a frame's
 // length header alone. Longer bodies go through readBodyIncremental, so a
 // peer that announces a huge frame and stalls pins at most
-// (incrementalGrowth+1)*received + incrementalBodyThreshold bytes (the
-// buffer just filled plus the larger one it is copied into), not maxBody.
-// 128 KiB keeps a 64 KiB CURVE frame (65,569 wire bytes) on the single-read
-// path, and is below what the kernel already spends on one TCP socket.
+// (incrementalGrowth+1)*received + incrementalBodyThreshold bytes, not
+// maxBody. 128 KiB keeps a 64 KiB CURVE frame (65,569 wire bytes) on the
+// single-read path, and is below what the kernel already spends on one TCP
+// socket.
 const incrementalBodyThreshold = 128 << 10
 
-// incrementalGrowth is the buffer growth factor in readBodyIncremental and
-// therefore the memory amplification bound for a partially received body: a
-// peer must deliver at least 1/incrementalGrowth of a body before the full
-// body is allocated. 8 keeps every frame up to 1 MiB to one intermediate
-// buffer and one copy of incrementalBodyThreshold bytes; 2 would halve the
-// bound but copy almost a full body's worth on the way.
-const incrementalGrowth = 8
+// incrementalGrowth is the memory amplification bound for a partially
+// received body: a peer must deliver at least 1/incrementalGrowth of a body
+// (its commit point) before the full body is allocated, and the buffers that
+// collect those bytes grow by this factor. 16 lets the session's 16 KiB
+// bufio.Reader prove delivery for every frame up to 256 KiB without any
+// intermediate buffer (see readBodyIncremental) and caps the one copy a
+// larger frame pays at n/16 bytes.
+const incrementalGrowth = 16
+
+// peeker is the part of *bufio.Reader that readBodyIncremental uses to prove
+// a peer has delivered bytes without copying them anywhere.
+type peeker interface {
+	Peek(n int) ([]byte, error)
+	Size() int
+}
 
 // readBodyIncremental reads an n-byte body (n > incrementalBodyThreshold)
-// without trusting n up front. It reads into a threshold-sized buffer, grows
-// it by incrementalGrowth each time it fills, and switches to the final
-// n-byte buffer only once at least n/incrementalGrowth bytes have arrived.
-// Every buffer comes from pool when one is given, and intermediates go back
-// through Put, so the pooled zero-copy delivery costs no allocation here; the
-// returned body is always a pool.Get buffer, as the contract requires. A
-// frame that completes pays one copy per intermediate (under n/incrementalGrowth
-// bytes in total).
+// without trusting n up front: the n-byte buffer exists only once the peer
+// has delivered commit = ceil(n/incrementalGrowth) bytes.
+//
+// When r is a buffered reader whose buffer can hold commit bytes (the
+// session's 16 KiB bufio.Reader, for frames up to 256 KiB), Peek is that
+// proof: it blocks until the bytes are buffered and allocates nothing, and
+// the body is then read straight into the final buffer exactly as the fast
+// path does.
+//
+// Otherwise the first commit bytes are collected in intermediate buffers
+// that start at min(commit, incrementalBodyThreshold) and grow by
+// incrementalGrowth, never beyond commit. At the commit point the final
+// buffer is allocated, the collected bytes are copied once, and the rest is
+// read directly into it. Intermediates come from the pool's ScratchPool when
+// it has one, else from pool itself, else from the shared bufpool, and always
+// go back. The returned body is always a pool.Get buffer, as the contract
+// requires.
 func readBodyIncremental(r io.Reader, n int, pool BodyPool) ([]byte, error) {
-	// Intermediates never reach the caller, so without a caller pool they
-	// are recycled through the codec's own; the final buffer is the
-	// caller's (pool.Get, or a fresh make it owns outright).
-	scratch := pool
-	if scratch == nil {
-		scratch = intermediates
+	commit := (n + incrementalGrowth - 1) / incrementalGrowth
+	if br, ok := r.(peeker); ok && commit <= br.Size() {
+		if _, err := br.Peek(commit); err != nil {
+			return nil, err
+		}
+		return readBodyInto(r, reuseOrAllocate(nil, n, pool), 0, pool)
 	}
-	buf := scratch.Get(incrementalBodyThreshold)
+
+	buf := getScratch(pool, min(commit, incrementalBodyThreshold))
 	filled := 0
 	for {
 		if _, err := io.ReadFull(r, buf[filled:]); err != nil {
-			scratch.Put(buf)
+			putScratch(pool, buf)
 			return nil, err
 		}
 		filled = len(buf)
-		if filled == n {
-			return buf, nil
+		if filled >= commit {
+			break
 		}
-		var next []byte
-		switch {
-		case filled >= n/incrementalGrowth:
-			next = reuseOrAllocate(nil, n, pool)
-		default:
-			// filled < n/incrementalGrowth, so this cannot overflow and
-			// stays below n.
-			next = scratch.Get(filled * incrementalGrowth)
-		}
+		// Grow toward the commit point. filled < commit <= n, so the
+		// product stays below n+incrementalGrowth and cannot overflow.
+		next := getScratch(pool, min(filled*incrementalGrowth, commit))
 		copy(next, buf)
-		scratch.Put(buf)
+		putScratch(pool, buf)
 		buf = next
 	}
+	body := reuseOrAllocate(nil, n, pool)
+	copy(body, buf)
+	putScratch(pool, buf)
+	return readBodyInto(r, body, filled, pool)
+}
+
+// getScratch and putScratch route readBodyIncremental's intermediates: to
+// the caller's ScratchPool when it has one, else through its BodyPool, else
+// through the shared bufpool. Intermediates never reach the caller.
+func getScratch(pool BodyPool, n int) []byte {
+	switch p := pool.(type) {
+	case ScratchPool:
+		return p.GetScratch(n)
+	case nil:
+		return intermediates.Get(n)
+	default:
+		return p.Get(n)
+	}
+}
+
+func putScratch(pool BodyPool, b []byte) {
+	switch p := pool.(type) {
+	case ScratchPool:
+		p.PutScratch(b)
+	case nil:
+		intermediates.Put(b)
+	default:
+		p.Put(b)
+	}
+}
+
+// readBodyInto completes body from offset filled, returning the buffer to
+// pool (when there is one) on failure so a torn-down session leaves nothing
+// checked out.
+func readBodyInto(r io.Reader, body []byte, filled int, pool BodyPool) ([]byte, error) {
+	if _, err := io.ReadFull(r, body[filled:]); err != nil {
+		if pool != nil {
+			pool.Put(body)
+		}
+		return nil, err
+	}
+	return body, nil
 }
 
 // intermediates recycles readBodyIncremental's intermediate buffers for
-// callers without a BodyPool. A failed read leaves nothing behind: every
-// buffer taken is Put back before returning an error.
-var intermediates BodyPool = &intermediatePool{}
+// callers without a BodyPool through the shared bufpool. A failed read leaves
+// nothing behind: every buffer taken is Put back before returning an error.
+var intermediates BodyPool = bufpoolAdapter{}
 
-type intermediatePool struct{ p sync.Pool }
+type bufpoolAdapter struct{}
 
-func (ip *intermediatePool) Get(n int) []byte {
-	if b, ok := ip.p.Get().(*[]byte); ok && cap(*b) >= n {
-		return (*b)[:n]
-	}
-	return make([]byte, n)
-}
-
-func (ip *intermediatePool) Put(b []byte) { ip.p.Put(&b) }
+func (bufpoolAdapter) Get(n int) []byte { return bufpool.Get(n) }
+func (bufpoolAdapter) Put(b []byte)     { bufpool.Put(b) }
 
 // WriteFrame implements FrameCodec. It always emits the smallest legal
 // length encoding: bodies <256 bytes use the short form unless the LONG flag

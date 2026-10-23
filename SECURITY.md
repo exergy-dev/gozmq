@@ -84,7 +84,7 @@ For deployments on untrusted networks:
   not `==`. The callback you pass to `WithPlainAuth` is your code.
 - Keep `WithMaxMessageSize` at a finite value. It bounds what a completed
   message may occupy; inbound frames are allocated as their bytes arrive, so
-  a peer that announces a huge frame and stalls pins at most nine times the
+  a peer that announces a huge frame and stalls pins at most seventeen times the
   bytes it actually sent plus 128 KiB, not the cap. Setting it to 0 removes
   the ceiling for completed messages.
 - Limit concurrent connections to listeners on untrusted networks at the OS

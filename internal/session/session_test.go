@@ -875,3 +875,32 @@ func TestReader_SubscriptionCommands(t *testing.T) {
 		}
 	}
 }
+
+// TestPlainBodiesRetainsOneScratch: the unpooled reader keeps one
+// intermediate between large frames (up to the retention cap) so a stream
+// of large frames allocates only the bodies themselves.
+func TestPlainBodiesRetainsOneScratch(t *testing.T) {
+	t.Parallel()
+	var p plainBodies
+	a := p.GetScratch(64 << 10)
+	require.Len(t, a, 64<<10)
+	p.PutScratch(a)
+	b := p.GetScratch(32 << 10)
+	require.Same(t, &a[0], &b[0], "retained scratch not reused for a smaller request")
+	require.Len(t, b, 32<<10)
+	p.PutScratch(b)
+	c := p.GetScratch(65 << 10)
+	require.NotSame(t, &a[0], &c[0], "undersized scratch handed out")
+	p.PutScratch(c) // larger: replaces the retained one
+	require.Equal(t, 65<<10, cap(p.scratch))
+
+	huge := p.GetScratch(maxRetainedRecvScratch + 1)
+	p.PutScratch(huge)
+	require.Equal(t, 65<<10, cap(p.scratch), "oversized intermediate retained")
+
+	// Bodies are plain allocations the caller owns; Put is a no-op.
+	body := p.Get(10)
+	require.Len(t, body, 10)
+	p.Put(body)
+	require.Equal(t, 65<<10, cap(p.scratch))
+}

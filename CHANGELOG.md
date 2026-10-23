@@ -46,7 +46,7 @@ anyone comparing gozmq's behaviour with a ZMTP reading knows where it is
 deliberately strict:
 
 - Inbound frame bodies are allocated as their bytes arrive. A peer that
-  announces a huge frame and stalls pins at most 9× the bytes it sent plus
+  announces a huge frame and stalls pins at most 17× the bytes it sent plus
   128 KiB per connection, not `WithMaxMessageSize` (64 MiB by default).
   Handshake frames are capped at 64 KiB on both sides, independent of the
   data cap.

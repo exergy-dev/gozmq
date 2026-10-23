@@ -40,6 +40,16 @@ type BodyPool interface {
 	Put(b []byte)
 }
 
+// ScratchPool is optionally implemented by a BodyPool to supply the
+// intermediate buffers ReadFrame collects a large body's first bytes in,
+// separately from the body buffers Get hands to the caller. A caller whose
+// bodies are plain allocations (no Put ever reaches it) can still recycle
+// intermediates this way; a BodyPool without it lends them through Get/Put.
+type ScratchPool interface {
+	GetScratch(n int) []byte
+	PutScratch(b []byte)
+}
+
 // FrameHeaderAppender is the allocation-free fast path used by the writer
 // batching loop. It appends the wire-format frame header (flags + length)
 // for a body of len(body) bytes onto scratch and returns the grown scratch.

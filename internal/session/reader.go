@@ -133,10 +133,10 @@ func (s *Session) readLoop() {
 			// always does for NULL/PLAIN), so copy the frame out before
 			// the next ReadFrame overwrites it.
 			frame = bytes.Clone(decoded)
-		case s.recvPool != nil:
-			// recvPool is only set for identity framing, so frame is body,
-			// the pool buffer: the codec guarantees that the body it returns
-			// came from pool.Get even when it was read incrementally.
+		case s.pooledRecv:
+			// Pooled bodies exist only for identity framing, so frame is
+			// body, the pool buffer: the codec guarantees that the body it
+			// returns came from pool.Get even when it was read incrementally.
 			lent = append(lent, body)
 		}
 		frames = append(frames, frame)
