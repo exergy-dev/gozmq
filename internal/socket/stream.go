@@ -81,10 +81,16 @@ func (e *streamEngine) Send(ctx context.Context, m *msg.Msg) error {
 		return fmt.Errorf("stream send: identity %q: %w", id, zmqerr.ErrRouteUnknown)
 	}
 
-	// Concatenate body frames into one byte run (matching libzmq's coalescing
-	// of multipart STREAM sends). An empty result is the half-close sentinel,
-	// still handed down as a well-formed Msg for the writer to act on.
-	out := msg.FromBytes(bytes.Join(body, nil))
+	// Body frames go down as one byte run (matching libzmq's coalescing of
+	// multipart STREAM sends); the usual single frame is passed on without
+	// a copy. An empty result is the half-close sentinel, still handed down
+	// as a well-formed Msg for the writer to act on.
+	var out *msg.Msg
+	if len(body) == 1 {
+		out = m.Derive(body[0])
+	} else {
+		out = msg.FromBytes(bytes.Join(body, nil))
+	}
 	if err := p.SendOr(ctx, out, e.closeCh); err != nil {
 		if errors.Is(err, pipe.ErrAborted) {
 			return fmt.Errorf("stream send: %w", zmqerr.ErrSocketClosed)
@@ -94,14 +100,13 @@ func (e *streamEngine) Send(ctx context.Context, m *msg.Msg) error {
 		}
 		return err
 	}
-	m.Release() // out is a copy
+	m.Release() // out holds its own reference
 	e.sent.Add(1)
 	return nil
 }
 
-// Metrics reports the STREAM counters. Dropped delegates entirely to the
-// FairQueue (ctx-cancel/close drops); STREAM never drops on Send (unknown
-// identities surface as errors).
+// Metrics reports the STREAM counters. STREAM never drops on Send (unknown
+// identities surface as errors), so Dropped is zero.
 func (e *streamEngine) Metrics() Metrics {
 	return e.metrics(0)
 }

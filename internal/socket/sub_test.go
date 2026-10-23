@@ -17,7 +17,8 @@ import (
 // inbound messages whose first frame doesn't have the prefix.
 func TestSub_FilterDropsNonMatching(t *testing.T) {
 	t.Parallel()
-	eng, sub := socket.NewSubEngine()
+	sub := socket.NewSubEngine()
+	eng := socket.Engine(sub)
 	defer eng.Close()
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
@@ -53,7 +54,8 @@ func TestSub_FilterDropsNonMatching(t *testing.T) {
 // all topics.
 func TestSub_EmptySubscriptionAcceptsEverything(t *testing.T) {
 	t.Parallel()
-	eng, sub := socket.NewSubEngine()
+	sub := socket.NewSubEngine()
+	eng := socket.Engine(sub)
 	defer eng.Close()
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
@@ -78,7 +80,8 @@ func TestSub_EmptySubscriptionAcceptsEverything(t *testing.T) {
 // synthetic SUBSCRIBE message to every current peer.
 func TestSub_ForwardsSubscriptionToAttachedPeer(t *testing.T) {
 	t.Parallel()
-	eng, sub := socket.NewSubEngine()
+	sub := socket.NewSubEngine()
+	eng := socket.Engine(sub)
 	defer eng.Close()
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
@@ -102,7 +105,8 @@ func TestSub_ForwardsSubscriptionToAttachedPeer(t *testing.T) {
 // Subscribe, all current subscriptions are replayed to that peer.
 func TestSub_ReplaysSubscriptionsOnAttach(t *testing.T) {
 	t.Parallel()
-	eng, sub := socket.NewSubEngine()
+	sub := socket.NewSubEngine()
+	eng := socket.Engine(sub)
 	defer eng.Close()
 
 	// Subscribe before any peer is attached.
@@ -130,7 +134,8 @@ func TestSub_ReplaysSubscriptionsOnAttach(t *testing.T) {
 // one SUBSCRIBE, and require two Unsubscribes before CANCEL forwards.
 func TestSub_RefcountedSubscribe(t *testing.T) {
 	t.Parallel()
-	eng, sub := socket.NewSubEngine()
+	sub := socket.NewSubEngine()
+	eng := socket.Engine(sub)
 	defer eng.Close()
 
 	a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})

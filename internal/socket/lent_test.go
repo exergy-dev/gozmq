@@ -116,7 +116,8 @@ func TestRouter_LentSendDerives(t *testing.T) {
 // TestSub_LentFilterMissReleased: a message SUB filters out is released.
 func TestSub_LentFilterMissReleased(t *testing.T) {
 	t.Parallel()
-	eng, sub := socket.NewSubEngine()
+	sub := socket.NewSubEngine()
+	eng := socket.Engine(sub)
 	defer eng.Close()
 	require.NoError(t, sub.Subscribe([]byte("A")))
 	engineEnds, peerEnds := makePairs(1, 4, 4)

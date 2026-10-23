@@ -60,8 +60,7 @@ func (r *pipeRing) remove(p *pipe.End) bool {
 // current returns the index and pipe the cursor points at. Callers must
 // ensure len() > 0.
 func (r *pipeRing) current() (int, *pipe.End) {
-	idx := r.cursor % len(r.pipes)
-	return idx, r.pipes[idx]
+	return r.cursor, r.pipes[r.cursor]
 }
 
 // advancePast steps the cursor to the peer after idx, but only if the pipe
@@ -69,6 +68,9 @@ func (r *pipeRing) current() (int, *pipe.End) {
 // shifted the set while the caller had the lock released.
 func (r *pipeRing) advancePast(idx int, p *pipe.End) {
 	if idx < len(r.pipes) && r.pipes[idx] == p {
-		r.cursor = (idx + 1) % len(r.pipes)
+		r.cursor = idx + 1
+		if r.cursor == len(r.pipes) {
+			r.cursor = 0
+		}
 	}
 }

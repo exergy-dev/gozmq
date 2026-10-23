@@ -130,15 +130,10 @@ func (e *pairEngine) Send(ctx context.Context, m *msg.Msg) error {
 		e.mu.Unlock()
 
 		if p == nil {
-			// Wait for an attach, engine close, or ctx.
-			select {
-			case <-attached:
-				continue
-			case <-closeCh:
-				return fmt.Errorf("pair send: %w", zmqerr.ErrSocketClosed)
-			case <-ctx.Done():
-				return ctx.Err()
+			if err := awaitPeer(ctx, attached, closeCh); err != nil {
+				return fmt.Errorf("pair send: %w", err)
 			}
+			continue
 		}
 		// SendOr refuses a closed pipe even if it has room, so the message
 		// waits for the next peer instead of vanishing into it.
@@ -183,14 +178,10 @@ func (e *pairEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 			continue
 		}
 		if p == nil {
-			select {
-			case <-attached:
-				continue
-			case <-closeCh:
-				return nil, fmt.Errorf("pair recv: %w", zmqerr.ErrSocketClosed)
-			case <-ctx.Done():
-				return nil, ctx.Err()
+			if err := awaitPeer(ctx, attached, closeCh); err != nil {
+				return nil, fmt.Errorf("pair recv: %w", err)
 			}
+			continue
 		}
 		// On peer loss (EOF: closed and empty) the pipe is retired.
 		switch rm, err := p.RecvOr(ctx, closeCh); {

@@ -24,8 +24,8 @@ import (
 // pipe).
 func TestEngineConformance(t *testing.T) {
 	t.Parallel()
-	mkSub := func() socket.Engine { e, _ := socket.NewSubEngine(); return e }
-	mkXSub := func() socket.Engine { e, _ := socket.NewXSubEngine(); return e }
+	mkSub := func() socket.Engine { return socket.NewSubEngine() }
+	mkXSub := func() socket.Engine { return socket.NewXSubEngine() }
 	routed := func() *msg.Msg { return msg.FromFrames([]byte("id"), []byte("x")) }
 	plain := func() *msg.Msg { return msg.FromBytes([]byte("x")) }
 

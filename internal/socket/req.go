@@ -187,12 +187,8 @@ func (e *reqEngine) send(ctx context.Context, m *msg.Msg) error {
 			notify := e.attached.wait()
 			closeCh := e.closeCh
 			e.mu.Unlock()
-			select {
-			case <-notify:
-			case <-closeCh:
-				return fmt.Errorf("req send: %w", zmqerr.ErrSocketClosed)
-			case <-ctx.Done():
-				return ctx.Err()
+			if err := awaitPeer(ctx, notify, closeCh); err != nil {
+				return fmt.Errorf("req send: %w", err)
 			}
 			continue
 		}

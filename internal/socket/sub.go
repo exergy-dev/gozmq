@@ -36,12 +36,9 @@ import (
 // (see xsub.go) overrides Send to treat the message as a subscription
 // command from the application.
 //
-// NewSubEngine returns both the opaque Engine (plumbed into
-// the Socket layer) and a *SubEngine handle the public gozmq package
-// uses to implement WithSubscribe and dynamic
-// Subscribe/Unsubscribe calls. Internally the two returned values point
-// to the same object — the split keeps subscription controls out of the
-// Engine interface.
+// *SubEngine implements Engine; the public gozmq package type-asserts it
+// back to reach Subscribe and Unsubscribe, which stay out of the Engine
+// interface.
 type SubEngine struct {
 	mu     sync.Mutex
 	closed bool
@@ -75,10 +72,7 @@ type SubEngine struct {
 
 // NewSubEngine returns a new SUB socket engine and a handle for driving
 // subscriptions.
-func NewSubEngine() (Engine, *SubEngine) {
-	e := newSubEngineBase(false)
-	return e, e
-}
+func NewSubEngine() *SubEngine { return newSubEngineBase(false) }
 
 func newSubEngineBase(surface bool) *SubEngine {
 	g := newGates()
@@ -291,3 +285,5 @@ func (e *SubEngine) Close() error {
 	e.mu.Unlock()
 	return e.fq.Close()
 }
+
+var _ Engine = (*SubEngine)(nil)
