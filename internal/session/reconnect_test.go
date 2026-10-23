@@ -72,6 +72,9 @@ func (stubConn) SetDeadline(time.Time) error { return nil }
 // dial-fails-then-succeeds-then-disconnects-then-reconnects cycle. We
 // fail the first two dials, succeed the third, end that run to simulate
 // a disconnect, then verify the loop reconnects (fourth dial, second run).
+//
+// Not parallel: it compares real backoff gaps (gap2 > gap1/2), which a
+// loaded scheduler can invert.
 func TestReconnector_DialRetriesThenSucceeds(t *testing.T) {
 	var (
 		dialN     atomic.Int32
@@ -139,6 +142,7 @@ func TestReconnector_DialRetriesThenSucceeds(t *testing.T) {
 // TestReconnector_ContextCancellationStopsLoop verifies that an external
 // ctx cancel surfaces promptly and the loop exits.
 func TestReconnector_ContextCancellationStopsLoop(t *testing.T) {
+	t.Parallel()
 	dialCh := make(chan struct{}, 16)
 	cfg := ReconnectConfig{
 		InitialBackoff: time.Millisecond,
@@ -180,6 +184,7 @@ func TestReconnector_ContextCancellationStopsLoop(t *testing.T) {
 // TestReconnector_StopWakesSleepingBackoff: force a long backoff, then
 // Stop and assert return is far under the backoff interval.
 func TestReconnector_StopWakesSleepingBackoff(t *testing.T) {
+	t.Parallel()
 	cfg := ReconnectConfig{
 		InitialBackoff: 10 * time.Second, // huge — Stop must wake this
 		JitterFraction: 0,
@@ -204,6 +209,7 @@ func TestReconnector_StopWakesSleepingBackoff(t *testing.T) {
 // TestReconnector_StopStopsLiveRunner: Stop tears down the live run and
 // returns its Stop error.
 func TestReconnector_StopStopsLiveRunner(t *testing.T) {
+	t.Parallel()
 	run := newStubRunner(true)
 	run.stopErr = errors.New("close failed")
 	started := make(chan struct{})
@@ -225,6 +231,7 @@ func TestReconnector_StopStopsLiveRunner(t *testing.T) {
 // as a failed attempt: the loop redials, and the attempt counter keeps
 // advancing instead of resetting as it does after an attached run.
 func TestReconnector_UnattachedRunAdvancesBackoff(t *testing.T) {
+	t.Parallel()
 	var starts atomic.Int32
 	retries := make(chan int, 16)
 	cfg := ReconnectConfig{
@@ -258,6 +265,7 @@ func TestReconnector_UnattachedRunAdvancesBackoff(t *testing.T) {
 // TestReconnector_AttachedRunResetsBackoff: after an attached run ends,
 // the next retry is attempt 1 at the initial backoff again.
 func TestReconnector_AttachedRunResetsBackoff(t *testing.T) {
+	t.Parallel()
 	var starts atomic.Int32
 	type retry struct {
 		attempt int
@@ -300,6 +308,7 @@ func TestReconnector_AttachedRunResetsBackoff(t *testing.T) {
 // loop sleeps off a dial failure must prevent the NEXT dial attempt —
 // otherwise a closing socket would get a brand-new session attached.
 func TestReconnector_QuiesceDuringDialBackoff(t *testing.T) {
+	t.Parallel()
 	var dials atomic.Int32
 	dialed := make(chan struct{}, 16)
 	cfg := ReconnectConfig{
@@ -337,6 +346,7 @@ func TestReconnector_QuiesceDuringDialBackoff(t *testing.T) {
 // TestApplyJitter_WithinBand samples the jitter helper many times and
 // asserts results land inside the expected symmetric window.
 func TestApplyJitter_WithinBand(t *testing.T) {
+	t.Parallel()
 	base := 100 * time.Millisecond
 	frac := 0.2
 	const N = 4096
@@ -377,6 +387,7 @@ func TestApplyJitter_WithinBand(t *testing.T) {
 
 // TestApplyJitter_ZeroFractionIsIdentity: frac=0 must return base as-is.
 func TestApplyJitter_ZeroFractionIsIdentity(t *testing.T) {
+	t.Parallel()
 	base := 250 * time.Millisecond
 	for i := 0; i < 16; i++ {
 		assert.Equal(t, base, applyJitter(base, 0), "applyJitter(base, 0)")
@@ -391,6 +402,7 @@ func TestApplyJitter_ZeroFractionIsIdentity(t *testing.T) {
 // need the clamped fraction value — standing up a full Reconnector would
 // pull in Dial/NewSession stubs for no benefit.
 func TestApplyJitter_ClampedExtreme(t *testing.T) {
+	t.Parallel()
 	cfg := ReconnectConfig{JitterFraction: 5.0}
 	cfg.normalize()
 	require.Equal(t, 1.0, cfg.JitterFraction, "normalize clamped fraction")
@@ -413,6 +425,7 @@ func TestApplyJitter_ClampedExtreme(t *testing.T) {
 // across 10k samples. Exercises the integer-arithmetic boundary where
 // the float-based formula was prone to return small negatives.
 func TestApplyJitter_NeverNegative(t *testing.T) {
+	t.Parallel()
 	base := time.Duration(1) // 1 ns, smallest meaningful positive base
 	const N = 10000
 	for i := 0; i < N; i++ {
@@ -440,6 +453,7 @@ func TestApplyJitter_NeverNegative(t *testing.T) {
 // all land in [80ms, 120ms]. Verifies the integer-arithmetic window is
 // correct.
 func TestApplyJitter_InRange(t *testing.T) {
+	t.Parallel()
 	base := 100 * time.Millisecond
 	frac := 0.2
 	lo := base - time.Duration(float64(base)*frac) // 80ms
@@ -465,6 +479,7 @@ func TestApplyJitter_InRange(t *testing.T) {
 
 // TestNextBackoff covers the exponential-doubling and cap logic.
 func TestNextBackoff(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name     string
 		base     time.Duration
@@ -478,6 +493,7 @@ func TestNextBackoff(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got := nextBackoff(tc.base, tc.maxCap)
 			assert.Equal(t, tc.wantNext, got, "nextBackoff(%v,%v)", tc.base, tc.maxCap)
 		})

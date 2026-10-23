@@ -26,6 +26,7 @@ func listenLoopback(t *testing.T) (*TCPTransport, Listener) {
 }
 
 func TestTCP_RoundTrip_Bytes(t *testing.T) {
+	t.Parallel()
 	tr, l := listenLoopback(t)
 	defer l.Close()
 
@@ -77,6 +78,7 @@ func TestTCP_RoundTrip_Bytes(t *testing.T) {
 // TestTCP_Wildcard_And_Ephemeral_Port covers the "tcp://*:0" → resolved
 // endpoint flow that Socket.LastEndpoint() relies on.
 func TestTCP_Wildcard_And_Ephemeral_Port(t *testing.T) {
+	t.Parallel()
 	tr := NewTCPTransport()
 	l, err := tr.Listen(context.Background(), "tcp://*:0")
 	require.NoError(t, err, "Listen")
@@ -124,47 +126,34 @@ func TestTCP_Wildcard_And_Ephemeral_Port(t *testing.T) {
 // TestTCP_Listener_Close_Wakes_Accept is the core "no indefinite hang"
 // guarantee.
 func TestTCP_Listener_Close_Wakes_Accept(t *testing.T) {
+	t.Parallel()
 	_, l := listenLoopback(t)
 
-	errCh := make(chan error, 1)
-	go func() {
+	err := testutil.RequireUnblocks(t, func() error {
 		_, err := l.Accept(context.Background())
-		errCh <- err
-	}()
-
-	// Brief settle so Accept is parked.
-	time.Sleep(50 * time.Millisecond)
-
-	require.NoError(t, l.Close(), "Close")
-	select {
-	case err := <-errCh:
-		require.ErrorIs(t, err, zmqerr.ErrEndpointInvalid)
-	case <-time.After(2 * time.Second):
-		require.Fail(t, "Accept did not wake within 2s of Close")
-	}
+		return err
+	}, func() { require.NoError(t, l.Close(), "Close") })
+	require.ErrorIs(t, err, zmqerr.ErrEndpointInvalid)
 }
 
 // TestTCP_Accept_Honors_Ctx asserts ctx cancellation wakes Accept.
 func TestTCP_Accept_Honors_Ctx(t *testing.T) {
+	t.Parallel()
 	_, l := listenLoopback(t)
 	defer l.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() { _, err := l.Accept(ctx); errCh <- err }()
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-	select {
-	case err := <-errCh:
-		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(2 * time.Second):
-		require.Fail(t, "Accept did not honor ctx within 2s")
-	}
+	err := testutil.RequireUnblocks(t, func() error {
+		_, err := l.Accept(ctx)
+		return err
+	}, cancel)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 // TestTCP_Dial_Honors_Ctx_Cancellation. Dial to an unroutable address with
 // a short deadline; ctx must error within the deadline window.
 func TestTCP_Dial_Honors_Ctx_Cancellation(t *testing.T) {
+	t.Parallel()
 	tr := NewTCPTransport()
 	// 240.0.0.1 is reserved; connect attempts hang or RST quickly. Use ctx
 	// to bound.
@@ -175,6 +164,7 @@ func TestTCP_Dial_Honors_Ctx_Cancellation(t *testing.T) {
 
 // TestTCP_BadEndpoint covers the parse path.
 func TestTCP_BadEndpoint(t *testing.T) {
+	t.Parallel()
 	tr := NewTCPTransport()
 	cases := []string{
 		"tcp://*:5555",   // wildcard not allowed for Dial
@@ -194,6 +184,7 @@ func TestTCP_BadEndpoint(t *testing.T) {
 // TestTCP_Conn_Endpoints checks LocalEndpoint / RemoteEndpoint round-trip
 // through the Conn adapter.
 func TestTCP_Conn_Endpoints(t *testing.T) {
+	t.Parallel()
 	tr, l := listenLoopback(t)
 	defer l.Close()
 	endpoint := l.Endpoint()
@@ -236,6 +227,7 @@ func TestTCP_Conn_Endpoints(t *testing.T) {
 // so this is a behavioral smoke that toggling the field surfaces in the
 // exposed configuration.
 func TestTCP_NoDelay_KeepAlive_Defaults(t *testing.T) {
+	t.Parallel()
 	tr := NewTCPTransport()
 	assert.True(t, tr.KeepAlive, "default KeepAlive should be true")
 	assert.True(t, tr.NoDelay, "default NoDelay should be true")
@@ -250,6 +242,7 @@ func TestTCP_NoDelay_KeepAlive_Defaults(t *testing.T) {
 // it: bind on the IPv6 loopback, dial back, write a byte. If the host has
 // no IPv6 stack we skip rather than fail.
 func TestTCP_TCP6_Scheme(t *testing.T) {
+	t.Parallel()
 	tr := NewTCP6Transport()
 	l, err := tr.Listen(context.Background(), "tcp6://[::1]:0")
 	if err != nil {

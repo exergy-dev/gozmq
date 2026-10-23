@@ -17,6 +17,7 @@ import (
 // TestIPC_StaleSocketFileIsReclaimed: a socket file left behind by a crashed
 // process (nothing listening) must not make Bind fail with EADDRINUSE.
 func TestIPC_StaleSocketFileIsReclaimed(t *testing.T) {
+	t.Parallel()
 	path := tmpSock(t, "stale.sock")
 	crashed, err := net.Listen("unix", path)
 	require.NoError(t, err)
@@ -44,6 +45,7 @@ func TestIPC_StaleSocketFileIsReclaimed(t *testing.T) {
 // TestIPC_LiveSocketFileIsNotReclaimed: the stale-file recovery must never
 // steal an endpoint that someone is still listening on.
 func TestIPC_LiveSocketFileIsNotReclaimed(t *testing.T) {
+	t.Parallel()
 	path := tmpSock(t, "live.sock")
 	tr := NewIPCTransport()
 	live, err := tr.Listen(context.Background(), "ipc://"+path)
@@ -67,6 +69,7 @@ func TestIPC_LiveSocketFileIsNotReclaimed(t *testing.T) {
 // TestIPC_NonSocketFileIsNotRemoved: a regular file at the path is not ours
 // to delete.
 func TestIPC_NonSocketFileIsNotRemoved(t *testing.T) {
+	t.Parallel()
 	path := tmpSock(t, "regular")
 	require.NoError(t, os.WriteFile(path, []byte("keep"), 0o600))
 	_, err := NewIPCTransport().Listen(context.Background(), "ipc://"+path)
@@ -82,6 +85,7 @@ func TestIPC_NonSocketFileIsNotRemoved(t *testing.T) {
 // created at the same path in between. Simulated here by disabling the
 // inner unlink and rebinding the path before Close.
 func TestIPC_CloseRemovesOnlyItsOwnFile(t *testing.T) {
+	t.Parallel()
 	path := tmpSock(t, "own.sock")
 	tr := NewIPCTransport()
 	l1, err := tr.Listen(context.Background(), "ipc://"+path)
@@ -105,6 +109,7 @@ func TestIPC_CloseRemovesOnlyItsOwnFile(t *testing.T) {
 // (syscall.SockaddrUnix on Linux) binds in the abstract namespace: the
 // kernel lists it with a leading '@' and no file appears.
 func TestIPC_AbstractNamespaceIsAbstract(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("abstract namespace is Linux-only")
 	}

@@ -536,6 +536,7 @@ func TestRouter_IdentityStableUnderDetachChurn(t *testing.T) {
 // it left, received after DetachPipe, carry that peer's routing identity,
 // not a replacement peer's, both as the sole peer and among several.
 func TestRouter_RecvAfterDetachKeepsIdentity(t *testing.T) {
+	t.Parallel()
 	for _, extraPeer := range []bool{false, true} {
 		t.Run(fmt.Sprintf("extraPeer=%v", extraPeer), func(t *testing.T) {
 			t.Parallel()

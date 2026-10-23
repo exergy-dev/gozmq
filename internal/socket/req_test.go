@@ -297,19 +297,11 @@ func TestReq_Close_UnblocksRecv(t *testing.T) {
 	_, err := b.Recv(ctx)
 	require.NoError(t, err, "drain")
 
-	recvDone := make(chan error, 1)
-	go func() {
+	err = testutil.RequireUnblocks(t, func() error {
 		_, err := eng.Recv(ctx)
-		recvDone <- err
-	}()
-	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, eng.Close(), "close")
-	select {
-	case err := <-recvDone:
-		require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
-	case <-time.After(time.Second):
-		require.Fail(t, "recv did not unblock on close")
-	}
+		return err
+	}, func() { require.NoError(t, eng.Close(), "close") })
+	require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
 }
 
 // TestReq_Send_WaitsForPeer asserts that Send parks when no peer is
@@ -320,28 +312,15 @@ func TestReq_Send_WaitsForPeer(t *testing.T) {
 	defer eng.Close()
 
 	ctx := testutil.Ctx(t)
-
-	sendDone := make(chan error, 1)
-	go func() {
-		sendDone <- eng.Send(ctx, msg.FromBytes([]byte("q")))
-	}()
-	select {
-	case err := <-sendDone:
-		require.Fail(t, "send returned early", "%v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
-
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	mustAttach(t, eng, a)
-	select {
-	case err := <-sendDone:
-		require.NoError(t, err, "send")
-	case <-time.After(time.Second):
-		require.Fail(t, "send did not unblock on attach")
-	}
+
+	err := testutil.RequireUnblocks(t,
+		func() error { return eng.Send(ctx, msg.FromBytes([]byte("q"))) },
+		func() { mustAttach(t, eng, a) })
+	require.NoError(t, err, "send")
 	// Drain the request so the pipe doesn't hold a message at close.
-	_, err := b.Recv(ctx)
+	_, err = b.Recv(ctx)
 	require.NoError(t, err, "drain")
 }
 
@@ -429,19 +408,8 @@ func TestReq_CloseUnblocksSendAtHWM(t *testing.T) {
 	// Fill the single HWM slot from the engine side so eng.Send blocks.
 	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("fill"))), "fill")
 
-	sendDone := make(chan error, 1)
-	go func() { sendDone <- eng.Send(context.Background(), msg.FromBytes([]byte("q"))) }()
-	select {
-	case err := <-sendDone:
-		require.Fail(t, "send returned before close", "%v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	require.NoError(t, eng.Close(), "close")
-	select {
-	case err := <-sendDone:
-		require.ErrorIs(t, err, zmqerr.ErrSocketClosed, "blocked send")
-	case <-time.After(time.Second):
-		require.Fail(t, "send at HWM did not unblock on close")
-	}
+	err := testutil.RequireUnblocks(t,
+		func() error { return eng.Send(context.Background(), msg.FromBytes([]byte("q"))) },
+		func() { require.NoError(t, eng.Close(), "close") })
+	require.ErrorIs(t, err, zmqerr.ErrSocketClosed, "blocked send")
 }

@@ -82,6 +82,7 @@ func TestValidateSocketTypeCompatibility(t *testing.T) {
 }
 
 func TestSession_HandshakeRejectsIncompatibleSocketTypes(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 
 	sA := startTestSession(Config{

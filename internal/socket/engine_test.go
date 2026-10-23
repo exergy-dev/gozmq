@@ -91,26 +91,16 @@ func TestLoadBalancer_BlocksOnHWMUnblocksOnDrain(t *testing.T) {
 	ctx := testutil.Ctx(t)
 	require.NoError(t, lb.Send(ctx, msg.FromBytes([]byte("one"))), "first send")
 
-	// Second send must block.
-	sendDone := make(chan error, 1)
-	go func() { sendDone <- lb.Send(ctx, msg.FromBytes([]byte("two"))) }()
-	select {
-	case err := <-sendDone:
-		require.Fail(t, "second send completed early", "%v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	// Drain peer. Drains "one"; then second send completes; then we drain "two".
+	// Second send must block until the peer drains "one"; then we drain "two".
 	drainCtx, dc := context.WithTimeout(context.Background(), time.Second)
 	defer dc()
-	_, err := b.Recv(drainCtx)
-	require.NoError(t, err, "drain one")
-	select {
-	case err := <-sendDone:
-		require.NoError(t, err, "second send")
-	case <-time.After(time.Second):
-		require.Fail(t, "second send did not unblock after peer drained")
-	}
+	err := testutil.RequireUnblocks(t,
+		func() error { return lb.Send(ctx, msg.FromBytes([]byte("two"))) },
+		func() {
+			_, err := b.Recv(drainCtx)
+			require.NoError(t, err, "drain one")
+		})
+	require.NoError(t, err, "second send")
 	_, err = b.Recv(drainCtx)
 	require.NoError(t, err, "drain two")
 }
@@ -124,18 +114,10 @@ func TestLoadBalancer_CloseUnblocksSend(t *testing.T) {
 	require.NoError(t, lb.Attach(a), "attach")
 	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("fill"))))
 
-	ctx := context.Background()
-	sendErr := make(chan error, 1)
-	go func() { sendErr <- lb.Send(ctx, msg.FromBytes([]byte("x"))) }()
-
-	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, lb.Close(), "close")
-	select {
-	case err := <-sendErr:
-		require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
-	case <-time.After(time.Second):
-		require.Fail(t, "send did not unblock on close")
-	}
+	err := testutil.RequireUnblocks(t,
+		func() error { return lb.Send(context.Background(), msg.FromBytes([]byte("x"))) },
+		func() { require.NoError(t, lb.Close(), "close") })
+	require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
 }
 
 func TestLoadBalancer_CloseUnblocksWaitForPeer(t *testing.T) {
@@ -143,18 +125,10 @@ func TestLoadBalancer_CloseUnblocksWaitForPeer(t *testing.T) {
 	lb := newLB()
 
 	// No peers attached — Send should block waiting for an Attach.
-	ctx := context.Background()
-	sendErr := make(chan error, 1)
-	go func() { sendErr <- lb.Send(ctx, msg.FromBytes([]byte("x"))) }()
-
-	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, lb.Close(), "close")
-	select {
-	case err := <-sendErr:
-		require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
-	case <-time.After(time.Second):
-		require.Fail(t, "send did not unblock on close")
-	}
+	err := testutil.RequireUnblocks(t,
+		func() error { return lb.Send(context.Background(), msg.FromBytes([]byte("x"))) },
+		func() { require.NoError(t, lb.Close(), "close") })
+	require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
 }
 
 func TestLoadBalancer_CtxCancelUnblocksSend(t *testing.T) {
@@ -168,17 +142,10 @@ func TestLoadBalancer_CtxCancelUnblocksSend(t *testing.T) {
 	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("fill"))))
 
 	ctx, cancel := context.WithCancel(context.Background())
-	sendErr := make(chan error, 1)
-	go func() { sendErr <- lb.Send(ctx, msg.FromBytes([]byte("x"))) }()
-
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-	select {
-	case err := <-sendErr:
-		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(time.Second):
-		require.Fail(t, "send did not unblock on ctx cancel")
-	}
+	err := testutil.RequireUnblocks(t,
+		func() error { return lb.Send(ctx, msg.FromBytes([]byte("x"))) },
+		cancel)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 // ---------------------- FairQueue ----------------------
@@ -229,31 +196,19 @@ func TestFairQueue_RecvWakesOnAttach(t *testing.T) {
 		m   *msg.Msg
 		err error
 	}
-	done := make(chan result, 1)
-	go func() {
-		m, err := fq.Recv(ctx)
-		done <- result{m: m, err: err}
-	}()
-
-	// Recv must block until we attach a pipe with a message available.
-	select {
-	case <-done:
-		require.Fail(t, "recv returned before any pipe attached")
-	case <-time.After(50 * time.Millisecond):
-	}
-
 	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	require.NoError(t, b.Send(ctx, msg.FromBytes([]byte("hello"))), "peer send")
-	require.NoError(t, fq.Attach(a), "attach")
 
-	select {
-	case r := <-done:
-		require.NoError(t, r.err, "recv")
-		require.Equal(t, "hello", string(r.m.Bytes()))
-	case <-time.After(time.Second):
-		require.Fail(t, "recv did not wake on attach")
-	}
+	// Recv must block until we attach a pipe with a message available.
+	r := testutil.RequireUnblocks(t, func() result {
+		m, err := fq.Recv(ctx)
+		return result{m: m, err: err}
+	}, func() {
+		require.NoError(t, b.Send(ctx, msg.FromBytes([]byte("hello"))), "peer send")
+		require.NoError(t, fq.Attach(a), "attach")
+	})
+	require.NoError(t, r.err, "recv")
+	require.Equal(t, "hello", string(r.m.Bytes()))
 }
 
 // TestFairQueue_DetachThenClose: Close returns promptly after a Detach.
@@ -282,20 +237,11 @@ func TestFairQueue_CloseUnblocksRecv(t *testing.T) {
 	t.Parallel()
 	fq := newFQ()
 
-	ctx := context.Background()
-	done := make(chan error, 1)
-	go func() {
-		_, err := fq.Recv(ctx)
-		done <- err
-	}()
-	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, fq.Close(), "close")
-	select {
-	case err := <-done:
-		require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
-	case <-time.After(time.Second):
-		require.Fail(t, "recv did not unblock on close")
-	}
+	err := testutil.RequireUnblocks(t, func() error {
+		_, err := fq.Recv(context.Background())
+		return err
+	}, func() { require.NoError(t, fq.Close(), "close") })
+	require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
 }
 
 // TestFairQueue_CloseWithAttachedPipes: Close with pipes still attached
@@ -402,32 +348,22 @@ func TestFairQueue_SingleRecvWaitsOutClosedPipe(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "last", string(m.Bytes()), "backlog survives the close")
 
-	got := make(chan string, 1)
-	go func() {
-		m, err := fq.Recv(ctx)
-		if err != nil {
-			got <- "error: " + err.Error()
-			return
-		}
-		got <- string(m.Bytes())
-	}()
-	select {
-	case s := <-got:
-		require.Fail(t, "recv returned on a closed, empty, still-attached pipe", s)
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	require.NoError(t, fq.Detach(a), "detach")
 	c, d := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(c, d)
-	require.NoError(t, fq.Attach(c), "attach replacement")
-	require.NoError(t, d.Send(ctx, msg.FromBytes([]byte("next"))))
-	select {
-	case s := <-got:
-		require.Equal(t, "next", s)
-	case <-ctx.Done():
-		require.Fail(t, "parked recv never reached the replacement pipe")
-	}
+	// Recv stays parked on the closed, empty, still-attached pipe until a
+	// replacement is attached and delivers.
+	got := testutil.RequireUnblocks(t, func() string {
+		m, err := fq.Recv(ctx)
+		if err != nil {
+			return "error: " + err.Error()
+		}
+		return string(m.Bytes())
+	}, func() {
+		require.NoError(t, fq.Detach(a), "detach")
+		require.NoError(t, fq.Attach(c), "attach replacement")
+		require.NoError(t, d.Send(ctx, msg.FromBytes([]byte("next"))))
+	})
+	require.Equal(t, "next", got)
 }
 
 // ---------------------- shared sanity ----------------------

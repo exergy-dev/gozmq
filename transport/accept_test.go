@@ -32,23 +32,17 @@ func listenAll(t *testing.T) map[string]Listener {
 // or new) returns an error matching net.ErrClosed, which is how the socket
 // accept loop tells "stop" from "retry".
 func TestAccept_ClosedErrorWrapsNetErrClosed(t *testing.T) {
+	t.Parallel()
 	for scheme, l := range listenAll(t) {
 		t.Run(scheme, func(t *testing.T) {
-			errCh := make(chan error, 1)
-			go func() {
+			t.Parallel()
+			err := testutil.RequireUnblocks(t, func() error {
 				_, err := l.Accept(context.Background())
-				errCh <- err
-			}()
-			time.Sleep(20 * time.Millisecond)
-			require.NoError(t, l.Close())
-			select {
-			case err := <-errCh:
-				require.ErrorIs(t, err, net.ErrClosed, "parked Accept")
-				require.ErrorIs(t, err, zmqerr.ErrEndpointInvalid, "parked Accept")
-			case <-time.After(2 * time.Second):
-				t.Fatal("Close did not wake Accept")
-			}
-			_, err := l.Accept(context.Background())
+				return err
+			}, func() { require.NoError(t, l.Close()) })
+			require.ErrorIs(t, err, net.ErrClosed, "parked Accept")
+			require.ErrorIs(t, err, zmqerr.ErrEndpointInvalid, "parked Accept")
+			_, err = l.Accept(context.Background())
 			require.ErrorIs(t, err, net.ErrClosed, "Accept after Close")
 		})
 	}
@@ -59,6 +53,7 @@ func TestAccept_ClosedErrorWrapsNetErrClosed(t *testing.T) {
 // The old poll-in-a-goroutine implementation kept polling for up to one
 // interval after returning and closed whatever it caught.
 func TestAccept_CancelledAcceptDoesNotSwallowConn(t *testing.T) {
+	t.Parallel()
 	tr := NewTCPTransport()
 	l, err := tr.Listen(context.Background(), "tcp://127.0.0.1:0")
 	require.NoError(t, err)
@@ -84,6 +79,7 @@ func TestAccept_CancelledAcceptDoesNotSwallowConn(t *testing.T) {
 // TestAccept_ConcurrentAcceptsIndependentCtx: cancelling one Accept's ctx
 // must not fail or wedge another Accept parked on the same listener.
 func TestAccept_ConcurrentAcceptsIndependentCtx(t *testing.T) {
+	t.Parallel()
 	tr := NewTCPTransport()
 	l, err := tr.Listen(context.Background(), "tcp://127.0.0.1:0")
 	require.NoError(t, err)

@@ -267,6 +267,7 @@ func startSessionPair(t *testing.T, propsA, propsB map[string]string, hwm int) (
 // --------------------------------------------------------------------------
 
 func TestSession_Handshake_AndRoundTrip(t *testing.T) {
+	t.Parallel()
 	sA, sB, _, _ := startSessionPair(t,
 		map[string]string{"Socket-Type": "PAIR", "Identity": "A"},
 		map[string]string{"Socket-Type": "PAIR", "Identity": "B"},
@@ -370,6 +371,7 @@ func copyProps(in map[string]string) map[string]string {
 // TestSession_StopBeforeHandshake ensures Stop on a partially-started
 // session unblocks Handshaked observers and returns cleanly.
 func TestSession_StopBeforeHandshake(t *testing.T) {
+	t.Parallel()
 	// Build a session whose peer never speaks: the handshake will park
 	// in ReadFull on the greeting. Stop must wake it and exit cleanly.
 	connA, connB := newFakeConnPair()
@@ -410,6 +412,7 @@ func TestSession_StopBeforeHandshake(t *testing.T) {
 }
 
 func TestSession_Drain_DoesNotCloseConnUntilStop(t *testing.T) {
+	t.Parallel()
 	sA, sB, connA, _ := startSessionPair(t,
 		map[string]string{"Identity": "A"},
 		map[string]string{"Identity": "B"},
@@ -471,8 +474,10 @@ func (identityFramingMech) IdentityFraming() bool { return true }
 // DecodeFrame applied; only a mechanism that declares IdentityFraming
 // takes the bypass.
 func TestSession_FramePathsIgnoreMechName(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{"PLAIN", "NULL"} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			connA, connB := newFakeConnPair()
 			sA, sB := startPair(t,
 				Config{Conn: connA, Mech: xorMech{newFakeMech(name, false, nil)}, SendHWM: 4, RecvHWM: 4},
@@ -518,6 +523,7 @@ func (c *lingerRecordingConn) SetLinger(int) error {
 }
 
 func TestSession_StopDoesNotSetLinger(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	lc := &lingerRecordingConn{fakeConn: connA}
 	sA, sB := startPair(t,
@@ -561,6 +567,7 @@ func stopAsync(s *tSession) <-chan error {
 // exercised in the happy-path tests above; this guards against accidental
 // fmt.Errorf %v vs %w regressions in handshake.go.)
 func TestSession_HandshakeErr_ProtocolViolation(t *testing.T) {
+	t.Parallel()
 	// Wire A normally; B sends garbage instead of a real greeting.
 	connA, connB := newFakeConnPair()
 	defer connB.Close()
@@ -611,6 +618,7 @@ func TestSession_HandshakeErr_ProtocolViolation(t *testing.T) {
 // TestSession_Done_FiresOnNormalStop covers the happy path: handshake
 // completes, traffic flows, caller invokes Stop, Done() closes.
 func TestSession_Done_FiresOnNormalStop(t *testing.T) {
+	t.Parallel()
 	sA, _, _, _ := startSessionPair(t, nil, nil, 1)
 
 	// Done must not fire until Stop.
@@ -629,6 +637,7 @@ func TestSession_Done_FiresOnNormalStop(t *testing.T) {
 // which cancels ctx and closes the conn; the writer exits on pipe Recv
 // cancellation; the last one out closes Done.
 func TestSession_Done_FiresOnReaderEOF(t *testing.T) {
+	t.Parallel()
 	sA, _, _, connB := startSessionPair(t, nil, nil, 1)
 
 	// Kill the peer's conn out from under sA. sA's reader sees EOF
@@ -641,6 +650,7 @@ func TestSession_Done_FiresOnReaderEOF(t *testing.T) {
 // TestSession_Done_FiresOnHandshakeFailure verifies Done closes even
 // when the session never reached the traffic phase.
 func TestSession_Done_FiresOnHandshakeFailure(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	defer connB.Close()
 
@@ -676,6 +686,7 @@ func TestSession_Done_FiresOnHandshakeFailure(t *testing.T) {
 // cancellation trigger, Done must fire even when we never reached the
 // handshake-success state.
 func TestSession_Done_FiresOnStopBeforeHandshake(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	defer connB.Close()
 
@@ -693,6 +704,7 @@ func TestSession_Done_FiresOnStopBeforeHandshake(t *testing.T) {
 // would indicate a double-close of done) and Done() must remain
 // readable (closed channels stay closed; a second close would panic).
 func TestSession_Done_FiresExactlyOnce(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	defer connB.Close()
 
@@ -717,6 +729,7 @@ func TestSession_Done_FiresExactlyOnce(t *testing.T) {
 // TestReader_MaxMessageSize_UnderLimit: a multipart message at/below the
 // cap passes through untouched.
 func TestReader_MaxMessageSize_UnderLimit(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	sA, sB := startPair(t,
 		Config{Conn: connA, Mech: newFakeMech("NULL", false, nil), SendHWM: 4, RecvHWM: 4},
@@ -738,6 +751,7 @@ func TestReader_MaxMessageSize_UnderLimit(t *testing.T) {
 // size exceeds the cap, the receiving session tears down instead of
 // ballooning memory, and the peer observes the disconnect.
 func TestReader_MaxMessageSize_OverLimit(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	sA, sB := startPair(t,
 		Config{Conn: connA, Mech: newFakeMech("NULL", false, nil), SendHWM: 8, RecvHWM: 8},
@@ -786,6 +800,7 @@ func startZmtpPair(t *testing.T, hwm int) (sA, sB *tSession) {
 // adopted) are queued back to back; each must arrive intact, so no
 // delivered frame may alias scratch.
 func TestReader_ScratchSizeBoundary(t *testing.T) {
+	t.Parallel()
 	sA, sB := startZmtpPair(t, 8)
 	ctx := testutil.Ctx(t, 5*time.Second)
 
@@ -810,6 +825,7 @@ func TestReader_ScratchSizeBoundary(t *testing.T) {
 // message must own independent bytes (a clone bug would let a later frame
 // overwrite an earlier queued message).
 func TestReader_SmallFrameBurstIndependentPayloads(t *testing.T) {
+	t.Parallel()
 	const N = 64
 	sA, sB := startZmtpPair(t, N+4)
 	ctx := testutil.Ctx(t, 5*time.Second)
@@ -844,6 +860,7 @@ func TestReader_SmallFrameBurstIndependentPayloads(t *testing.T) {
 // (PUB/XPUB); any other session drops them. The commands are queued before
 // data1 is sent, so the writer puts them on the wire before data2.
 func TestReader_SubscriptionCommands(t *testing.T) {
+	t.Parallel()
 	for _, enabled := range []bool{false, true} {
 		connA, connB := newFakeConnPair()
 		sA, sB := startPair(t,

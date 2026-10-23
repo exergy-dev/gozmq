@@ -172,6 +172,7 @@ func (c *consumeWritevConn) WriteBuffers(bufs *net.Buffers) (int64, error) {
 }
 
 func TestWriter_BatchRetainsBufferCapacityAcrossFlushes(t *testing.T) {
+	t.Parallel()
 	connA, _ := newFakeConnPair()
 	// Never started: the test drives writeBatchFrom directly.
 	s := New(Config{
@@ -215,6 +216,7 @@ func TestWriter_BatchRetainsBufferCapacityAcrossFlushes(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestWriter_BatchCoalescesMultipleMessages(t *testing.T) {
+	t.Parallel()
 	const HWM = 64
 	sA, sB, wcA := newWritevTestPair(t, HWM, HWM)
 
@@ -262,6 +264,7 @@ func TestWriter_BatchCoalescesMultipleMessages(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestWriter_InteractiveSingleMessage(t *testing.T) {
+	t.Parallel()
 	sA, sB, ccA := newWriterTestPair(t, 4, 4)
 	defer func() { _ = sA.Stop(); _ = sB.Stop() }()
 
@@ -289,6 +292,7 @@ func TestWriter_InteractiveSingleMessage(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestWriter_OrderPreservation(t *testing.T) {
+	t.Parallel()
 	sA, sB, _ := newWriterTestPair(t, 64, 64)
 	defer func() { _ = sA.Stop(); _ = sB.Stop() }()
 
@@ -322,6 +326,7 @@ func TestWriter_OrderPreservation(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestWriter_Backpressure(t *testing.T) {
+	t.Parallel()
 	const HWM = 4
 	sA, sB, wcA := newWritevTestPair(t, HWM, HWM)
 	_ = sB
@@ -378,6 +383,7 @@ func TestWriter_Backpressure(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestWriter_BatchCap(t *testing.T) {
+	t.Parallel()
 	// SendHWM large enough that we can enqueue well past maxBatchMessages
 	// before the writer drains them.
 	sA, sB, ccA := newWriterTestPair(t, maxBatchMessages*4, maxBatchMessages*4)
@@ -421,6 +427,7 @@ func TestWriter_BatchCap(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestWriter_BatchLingerDrain(t *testing.T) {
+	t.Parallel()
 	sA, sB, ccA := newWriterTestPair(t, 64, 64)
 	// Note: we Stop manually below after verifying drain semantics.
 	defer func() { _ = sA.Stop(); _ = sB.Stop() }()
@@ -469,6 +476,7 @@ func TestWriter_BatchLingerDrain(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestWriter_EmptyMessageStillEmitted(t *testing.T) {
+	t.Parallel()
 	sA, sB, _ := newWriterTestPair(t, 4, 4)
 	defer func() { _ = sA.Stop(); _ = sB.Stop() }()
 
@@ -487,6 +495,7 @@ func TestWriter_EmptyMessageStillEmitted(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestWriter_MultipartBatched(t *testing.T) {
+	t.Parallel()
 	sA, sB, _ := newWriterTestPair(t, 16, 16)
 	defer func() { _ = sA.Stop(); _ = sB.Stop() }()
 
@@ -526,6 +535,7 @@ func TestWriter_MultipartBatched(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestReader_HandlesPingWhileWriterBlocked(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	wcA := newWritevConn(connA)
 	sA := startTestSession(Config{
@@ -569,8 +579,10 @@ func TestReader_HandlesPingWhileWriterBlocked(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestWriter_LingerDrainUnboundedQueue(t *testing.T) {
+	t.Parallel()
 	for _, hwm := range []int{0, 64} {
 		t.Run(fmt.Sprintf("sendHWM=%d", hwm), func(t *testing.T) {
+			t.Parallel()
 			sA, sB, _ := newWriterTestPair(t, hwm, 0)
 			const N = 5000
 			ctx := testutil.Ctx(t, 5*time.Second)

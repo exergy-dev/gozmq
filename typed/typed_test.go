@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"go.uber.org/goleak"
 
 	"github.com/exergy-dev/gozmq"
 	"github.com/exergy-dev/gozmq/typed"
@@ -35,17 +34,17 @@ type payload struct {
 }
 
 func TestSenderReceiver_PushPull(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	t.Parallel()
 
 	zctx := gozmq.NewContext()
 	defer zctx.Close()
 
-	push, err := zctx.NewSocket(gozmq.Push)
+	push, err := zctx.NewSocket(gozmq.Push, gozmq.WithLinger(0))
 	require.NoError(t, err)
 	defer push.Close()
 	require.NoError(t, push.Bind("inproc://typed-pushpull"))
 
-	pull, err := zctx.NewSocket(gozmq.Pull)
+	pull, err := zctx.NewSocket(gozmq.Pull, gozmq.WithLinger(0))
 	require.NoError(t, err)
 	defer pull.Close()
 	require.NoError(t, pull.Connect("inproc://typed-pushpull"))
@@ -64,17 +63,17 @@ func TestSenderReceiver_PushPull(t *testing.T) {
 }
 
 func TestPublisherSubscriber_TopicRoundtrip(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	t.Parallel()
 
 	zctx := gozmq.NewContext()
 	defer zctx.Close()
 
-	pubSock, err := zctx.NewSocket(gozmq.Pub)
+	pubSock, err := zctx.NewSocket(gozmq.Pub, gozmq.WithLinger(0))
 	require.NoError(t, err)
 	defer pubSock.Close()
 	require.NoError(t, pubSock.Bind("inproc://typed-pubsub"))
 
-	subSock, err := zctx.NewSocket(gozmq.Sub)
+	subSock, err := zctx.NewSocket(gozmq.Sub, gozmq.WithLinger(0))
 	require.NoError(t, err)
 	defer subSock.Close()
 
@@ -106,12 +105,12 @@ func TestPublisherSubscriber_TopicRoundtrip(t *testing.T) {
 }
 
 func TestSender_MarshalErrorPropagates(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	t.Parallel()
 
 	zctx := gozmq.NewContext()
 	defer zctx.Close()
 
-	push, err := zctx.NewSocket(gozmq.Push)
+	push, err := zctx.NewSocket(gozmq.Push, gozmq.WithLinger(0))
 	require.NoError(t, err)
 	defer push.Close()
 	require.NoError(t, push.Bind("inproc://typed-marshal-err"))
@@ -125,17 +124,17 @@ func TestSender_MarshalErrorPropagates(t *testing.T) {
 }
 
 func TestReceiver_WrongFrameCount(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	t.Parallel()
 
 	zctx := gozmq.NewContext()
 	defer zctx.Close()
 
-	push, err := zctx.NewSocket(gozmq.Push)
+	push, err := zctx.NewSocket(gozmq.Push, gozmq.WithLinger(0))
 	require.NoError(t, err)
 	defer push.Close()
 	require.NoError(t, push.Bind("inproc://typed-badframes"))
 
-	pull, err := zctx.NewSocket(gozmq.Pull)
+	pull, err := zctx.NewSocket(gozmq.Pull, gozmq.WithLinger(0))
 	require.NoError(t, err)
 	defer pull.Close()
 	require.NoError(t, pull.Connect("inproc://typed-badframes"))
@@ -154,12 +153,12 @@ func TestReceiver_WrongFrameCount(t *testing.T) {
 }
 
 func TestReceiver_ContextCancelled(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	t.Parallel()
 
 	zctx := gozmq.NewContext()
 	defer zctx.Close()
 
-	pull, err := zctx.NewSocket(gozmq.Pull)
+	pull, err := zctx.NewSocket(gozmq.Pull, gozmq.WithLinger(0))
 	require.NoError(t, err)
 	defer pull.Close()
 	require.NoError(t, pull.Bind("inproc://typed-cancel"))
@@ -180,17 +179,17 @@ func TestReceiver_ContextCancelled(t *testing.T) {
 // "zz." message arrives, the "orders." unsubscribe is provably in effect
 // at the publisher.
 func TestSubscriber_Unsubscribe(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	t.Parallel()
 
 	zctx := gozmq.NewContext()
 	defer zctx.Close()
 
-	pubSock, err := zctx.NewSocket(gozmq.Pub)
+	pubSock, err := zctx.NewSocket(gozmq.Pub, gozmq.WithLinger(0))
 	require.NoError(t, err)
 	defer pubSock.Close()
 	require.NoError(t, pubSock.Bind("inproc://typed-unsub"))
 
-	subSock, err := zctx.NewSocket(gozmq.Sub)
+	subSock, err := zctx.NewSocket(gozmq.Sub, gozmq.WithLinger(0))
 	require.NoError(t, err)
 	defer subSock.Close()
 

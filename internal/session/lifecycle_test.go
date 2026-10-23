@@ -88,6 +88,7 @@ func (m *roundsMech) NextHandshake(in []byte) ([]byte, bool, error) {
 func (m *roundsMech) PeerMetadata() map[string]string { return map[string]string{} }
 
 func TestSession_HandshakeOverSynchronousPipe(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	sA, sB := startPair(t,
 		Config{Conn: connA, Mech: &roundsMech{fakeMech: newFakeMech("NULL", false, nil), rounds: 5}, SendHWM: 4, RecvHWM: 4},
@@ -104,6 +105,7 @@ func TestSession_HandshakeOverSynchronousPipe(t *testing.T) {
 // session unattached, with OnClosed reporting no handshake error, and the
 // peer sees the connection close.
 func TestSession_OnReadyErrorTearsDown(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	var (
 		offered  *pipe.End
@@ -135,6 +137,7 @@ func TestSession_OnReadyErrorTearsDown(t *testing.T) {
 // TestSession_OnClosedReportsAttached: a session that attached reports it
 // once torn down, with no handshake error.
 func TestSession_OnClosedReportsAttached(t *testing.T) {
+	t.Parallel()
 	sA, _, _, connB := startSessionPair(t, nil, nil, 1)
 	require.True(t, sA.Attached())
 	_ = connB.Close()

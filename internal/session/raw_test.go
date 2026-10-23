@@ -43,6 +43,7 @@ func startRaw(t *testing.T, conn *fakeConn, hwm int) *rawSession {
 // TestRaw_InboundChunking: every byte the peer writes surfaces, in order,
 // as single-frame messages (the OS decides the read boundaries).
 func TestRaw_InboundChunking(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	rs := startRaw(t, connA, 0)
 	payload := bytes.Repeat([]byte("HELLO WORLD\n"), 300)
@@ -66,6 +67,7 @@ func TestRaw_InboundChunking(t *testing.T) {
 // 1-byte read does not pin the 32 KiB read buffer, and chunks do not alias
 // a reused buffer.
 func TestRaw_InboundChunkSized(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	defer connB.Close()
 	rs := startRaw(t, connA, 0)
@@ -88,6 +90,7 @@ func TestRaw_InboundChunkSized(t *testing.T) {
 // TestRaw_OutboundVerbatim: a message's body reaches the peer as is, with
 // no greeting or framing ahead of it.
 func TestRaw_OutboundVerbatim(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	defer connB.Close()
 	rs := startRaw(t, connA, 0)
@@ -104,6 +107,7 @@ func TestRaw_OutboundVerbatim(t *testing.T) {
 // queued ahead of it is written first, then the conn closes and the
 // session ends, attached.
 func TestRaw_EmptyBodyCloses(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	rs := startRaw(t, connA, 0)
 
@@ -121,6 +125,7 @@ func TestRaw_EmptyBodyCloses(t *testing.T) {
 // TestRaw_PeerEOFClosesPipe: the peer closing its end closes the engine
 // pipe (the engine's cue to detach) and ends the session.
 func TestRaw_PeerEOFClosesPipe(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	rs := startRaw(t, connA, 0)
 	_ = connB.Close()
@@ -133,6 +138,7 @@ func TestRaw_PeerEOFClosesPipe(t *testing.T) {
 // TestRaw_DrainFlushesThenKeepsConn: Drain writes everything queued and
 // leaves the conn open until Stop, as in ZMTP mode.
 func TestRaw_DrainFlushesThenKeepsConn(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	defer connB.Close()
 	rs := startRaw(t, connA, 0)
@@ -163,6 +169,7 @@ func TestRaw_DrainFlushesThenKeepsConn(t *testing.T) {
 
 // TestRaw_HWMZeroUnlimited: HWM 0 queues without bound in both directions.
 func TestRaw_HWMZeroUnlimited(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	defer connB.Close()
 	rs := startRaw(t, connA, 0)
@@ -188,6 +195,7 @@ func TestRaw_TwoGoroutines(t *testing.T) {
 // TestRaw_OnReadyErrorTearsDown: a refused pipe ends the session unattached
 // and closes the conn.
 func TestRaw_OnReadyErrorTearsDown(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	defer connB.Close()
 	attached := true
@@ -204,6 +212,7 @@ func TestRaw_OnReadyErrorTearsDown(t *testing.T) {
 
 // TestRaw_ConcurrentStop: Stop is idempotent under concurrency.
 func TestRaw_ConcurrentStop(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	defer connB.Close()
 	rs := startRaw(t, connA, 0)

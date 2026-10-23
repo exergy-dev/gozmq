@@ -67,23 +67,16 @@ func TestPush_BlocksOnHWMUnblocksOnDrain(t *testing.T) {
 
 	ctx := testutil.Ctx(t)
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("one"))), "first send")
-	done := make(chan error, 1)
-	go func() { done <- eng.Send(ctx, msg.FromBytes([]byte("two"))) }()
-	select {
-	case err := <-done:
-		require.Fail(t, "second send completed early", "%v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
 	drainCtx, dc := context.WithTimeout(context.Background(), time.Second)
 	defer dc()
-	_, err := b.Recv(drainCtx)
-	require.NoError(t, err, "drain")
-	select {
-	case err := <-done:
-		require.NoError(t, err, "second send")
-	case <-time.After(time.Second):
-		require.Fail(t, "second send did not unblock")
-	}
+	// The second send blocks at HWM until the peer drains "one".
+	err := testutil.RequireUnblocks(t,
+		func() error { return eng.Send(ctx, msg.FromBytes([]byte("two"))) },
+		func() {
+			_, err := b.Recv(drainCtx)
+			require.NoError(t, err, "drain")
+		})
+	require.NoError(t, err, "second send")
 	_, err = b.Recv(drainCtx)
 	require.NoError(t, err, "drain two")
 }
@@ -95,14 +88,8 @@ func TestPush_CloseUnblocksSend(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("fill"))))
-	done := make(chan error, 1)
-	go func() { done <- eng.Send(context.Background(), msg.FromBytes([]byte("x"))) }()
-	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, eng.Close(), "close")
-	select {
-	case err := <-done:
-		require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
-	case <-time.After(time.Second):
-		require.Fail(t, "send did not unblock on close")
-	}
+	err := testutil.RequireUnblocks(t,
+		func() error { return eng.Send(context.Background(), msg.FromBytes([]byte("x"))) },
+		func() { require.NoError(t, eng.Close(), "close") })
+	require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
 }

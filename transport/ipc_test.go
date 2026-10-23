@@ -29,6 +29,7 @@ func tmpSock(t *testing.T, name string) string {
 // TestIPC_Filesystem_RoundTrip exercises the happy path: bind, dial,
 // bidirectional write/read over a filesystem-namespace Unix socket.
 func TestIPC_Filesystem_RoundTrip(t *testing.T) {
+	t.Parallel()
 	tr := NewIPCTransport()
 	path := tmpSock(t, "rt.sock")
 	endpoint := "ipc://" + path
@@ -84,6 +85,7 @@ func TestIPC_Filesystem_RoundTrip(t *testing.T) {
 // socket file from the filesystem. Otherwise repeated Bind/Unbind cycles
 // accumulate stale inodes.
 func TestIPC_SocketFileCleanup(t *testing.T) {
+	t.Parallel()
 	tr := NewIPCTransport()
 	path := tmpSock(t, "cleanup.sock")
 	endpoint := "ipc://" + path
@@ -103,6 +105,7 @@ func TestIPC_SocketFileCleanup(t *testing.T) {
 // the requested mode. The kernel may mask a few bits (umask, sticky-ish
 // bits on some platforms); we check the low 9 permission bits exactly.
 func TestIPC_FilePerm(t *testing.T) {
+	t.Parallel()
 	// Darwin/BSD may refuse chmod on sockets in some configurations; skip
 	// on non-Linux to keep the test deterministic.
 	if runtime.GOOS != "linux" {
@@ -124,6 +127,7 @@ func TestIPC_FilePerm(t *testing.T) {
 // TestIPC_AbstractNamespace exercises the "@name" abstract-namespace
 // syntax. Linux-only; skipped elsewhere.
 func TestIPC_AbstractNamespace(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("abstract namespace is Linux-only")
 	}
@@ -171,6 +175,7 @@ func TestIPC_AbstractNamespace(t *testing.T) {
 // form does NOT create a filesystem entry. If "@x" accidentally routes
 // into the filesystem, os.Stat("@x") succeeds and we catch the bug.
 func TestIPC_AbstractNamespace_NoFile(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("abstract namespace is Linux-only")
 	}
@@ -187,6 +192,7 @@ func TestIPC_AbstractNamespace_NoFile(t *testing.T) {
 // TestIPC_AbstractNamespace_NonLinux asserts that on non-Linux platforms
 // the abstract form is rejected cleanly.
 func TestIPC_AbstractNamespace_NonLinux(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "linux" {
 		t.Skip("Linux supports abstract namespace; this test guards other OSes")
 	}
@@ -197,29 +203,23 @@ func TestIPC_AbstractNamespace_NonLinux(t *testing.T) {
 
 // TestIPC_ListenerClose_WakesAccept asserts Close wakes a parked Accept.
 func TestIPC_ListenerClose_WakesAccept(t *testing.T) {
+	t.Parallel()
 	tr := NewIPCTransport()
 	path := tmpSock(t, "close-wake.sock")
 	endpoint := "ipc://" + path
 	l, err := tr.Listen(context.Background(), endpoint)
 	require.NoError(t, err, "Listen")
 
-	errCh := make(chan error, 1)
-	go func() {
+	err = testutil.RequireUnblocks(t, func() error {
 		_, err := l.Accept(context.Background())
-		errCh <- err
-	}()
-	time.Sleep(20 * time.Millisecond)
-	require.NoError(t, l.Close())
-	select {
-	case err := <-errCh:
-		require.ErrorIs(t, err, zmqerr.ErrEndpointInvalid)
-	case <-time.After(2 * time.Second):
-		require.Fail(t, "Accept did not wake on Close")
-	}
+		return err
+	}, func() { require.NoError(t, l.Close()) })
+	require.ErrorIs(t, err, zmqerr.ErrEndpointInvalid)
 }
 
 // TestIPC_AcceptHonorsCtx asserts ctx cancellation wakes Accept.
 func TestIPC_AcceptHonorsCtx(t *testing.T) {
+	t.Parallel()
 	tr := NewIPCTransport()
 	path := tmpSock(t, "ctx.sock")
 	endpoint := "ipc://" + path
@@ -228,24 +228,17 @@ func TestIPC_AcceptHonorsCtx(t *testing.T) {
 	defer l.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() {
+	err = testutil.RequireUnblocks(t, func() error {
 		_, err := l.Accept(ctx)
-		errCh <- err
-	}()
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-	select {
-	case err := <-errCh:
-		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(2 * time.Second):
-		require.Fail(t, "Accept did not wake on ctx cancel")
-	}
+		return err
+	}, cancel)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 // TestIPC_BadEndpoint covers parse failures: wrong scheme, empty path,
 // empty abstract name.
 func TestIPC_BadEndpoint(t *testing.T) {
+	t.Parallel()
 	tr := NewIPCTransport()
 	cases := []string{
 		"tcp://x:1", // wrong scheme
@@ -268,6 +261,7 @@ func TestIPC_BadEndpoint(t *testing.T) {
 // TestIPC_ManyConcurrentDials sanity-checks the listener under a modest
 // burst of concurrent dials.
 func TestIPC_ManyConcurrentDials(t *testing.T) {
+	t.Parallel()
 	tr := NewIPCTransport()
 	path := tmpSock(t, "many.sock")
 	endpoint := "ipc://" + path

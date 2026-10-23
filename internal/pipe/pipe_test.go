@@ -2,9 +2,9 @@ package pipe
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -13,14 +13,15 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"pgregory.net/rapid"
 
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
 // TestRoundTrip_Basic is the smoke test — a Send on A surfaces on B.Recv
 // and vice versa.
 func TestRoundTrip_Basic(t *testing.T) {
+	t.Parallel()
 	a, b := NewPair(2, 2, PeerInfo{Identity: []byte("b-id")}, PeerInfo{Identity: []byte("a-id")})
 	defer a.Close()
 	defer b.Close()
@@ -40,6 +41,7 @@ func TestRoundTrip_Basic(t *testing.T) {
 // TestHWM_Blocks_Send_On_Full asserts that Send blocks once HWM buffered
 // messages are in flight, and unblocks within bounded time after Recv.
 func TestHWM_Blocks_Send_On_Full(t *testing.T) {
+	t.Parallel()
 	const hwm = 3
 	a, b := NewPair(hwm, hwm, PeerInfo{}, PeerInfo{})
 	defer a.Close()
@@ -64,6 +66,7 @@ func TestHWM_Blocks_Send_On_Full(t *testing.T) {
 }
 
 func TestHWMZero_IsUnbounded(t *testing.T) {
+	t.Parallel()
 	a, b := NewPair(0, 0, PeerInfo{}, PeerInfo{})
 	defer a.Close()
 	defer b.Close()
@@ -84,6 +87,7 @@ func TestHWMZero_IsUnbounded(t *testing.T) {
 }
 
 func TestHWMZero_MixedDirection(t *testing.T) {
+	t.Parallel()
 	a, b := NewPair(0, 1, PeerInfo{}, PeerInfo{})
 	defer a.Close()
 	defer b.Close()
@@ -103,6 +107,7 @@ func TestHWMZero_MixedDirection(t *testing.T) {
 // TestClose_Unblocks_Send asserts that closing either end wakes a Send
 // blocked on a full pipe with io.ErrClosedPipe.
 func TestClose_Unblocks_Send(t *testing.T) {
+	t.Parallel()
 	a, b := NewPair(1, 1, PeerInfo{}, PeerInfo{})
 	defer a.Close()
 	defer b.Close()
@@ -111,29 +116,16 @@ func TestClose_Unblocks_Send(t *testing.T) {
 	// Fill the single slot.
 	require.NoError(t, a.Send(ctx, msg.FromBytes([]byte{1})))
 
-	done := make(chan error, 1)
-	go func() { done <- a.Send(ctx, msg.FromBytes([]byte{2})) }()
-
-	// Brief settle; Send should be blocked.
-	time.Sleep(5 * time.Millisecond)
-	select {
-	case err := <-done:
-		require.Fail(t, "Send returned before close", "%v", err)
-	default:
-	}
-
-	require.NoError(t, b.Close(), "b.Close")
-	select {
-	case err := <-done:
-		require.ErrorIs(t, err, io.ErrClosedPipe)
-	case <-time.After(time.Second):
-		require.Fail(t, "Send did not wake within 1s of peer Close")
-	}
+	err := testutil.RequireUnblocks(t,
+		func() error { return a.Send(ctx, msg.FromBytes([]byte{2})) },
+		func() { require.NoError(t, b.Close(), "b.Close") })
+	require.ErrorIs(t, err, io.ErrClosedPipe)
 }
 
 // TestClose_Drains_Then_EOF asserts Recv drains buffered messages before
 // signaling EOF after peer close.
 func TestClose_Drains_Then_EOF(t *testing.T) {
+	t.Parallel()
 	a, b := NewPair(4, 4, PeerInfo{}, PeerInfo{})
 
 	ctx := context.Background()
@@ -153,6 +145,7 @@ func TestClose_Drains_Then_EOF(t *testing.T) {
 
 // TestCtx_Cancel_Wakes_Send asserts ctx.Err() propagates out of Send.
 func TestCtx_Cancel_Wakes_Send(t *testing.T) {
+	t.Parallel()
 	a, b := NewPair(1, 1, PeerInfo{}, PeerInfo{})
 	defer a.Close()
 	defer b.Close()
@@ -160,19 +153,14 @@ func TestCtx_Cancel_Wakes_Send(t *testing.T) {
 	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte{1})))
 
 	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() { errCh <- a.Send(ctx, msg.FromBytes([]byte{2})) }()
-	time.Sleep(5 * time.Millisecond)
-	cancel()
-	select {
-	case err := <-errCh:
-		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(time.Second):
-		require.Fail(t, "Send did not honor ctx.Cancel")
-	}
+	err := testutil.RequireUnblocks(t,
+		func() error { return a.Send(ctx, msg.FromBytes([]byte{2})) },
+		cancel)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 func TestTrySend_FastPath(t *testing.T) {
+	t.Parallel()
 	a, b := NewPair(1, 1, PeerInfo{}, PeerInfo{})
 	defer a.Close()
 	defer b.Close()
@@ -186,6 +174,7 @@ func TestTrySend_FastPath(t *testing.T) {
 
 // TestDoubleClose_Idempotent ensures Close is safe to call repeatedly.
 func TestDoubleClose_Idempotent(t *testing.T) {
+	t.Parallel()
 	a, b := NewPair(1, 1, PeerInfo{}, PeerInfo{})
 	require.NoError(t, a.Close())
 	require.NoError(t, a.Close())
@@ -194,6 +183,7 @@ func TestDoubleClose_Idempotent(t *testing.T) {
 
 // TestClosed_Channel fires once either side closes.
 func TestClosed_Channel(t *testing.T) {
+	t.Parallel()
 	a, b := NewPair(1, 1, PeerInfo{}, PeerInfo{})
 	defer a.Close()
 	defer b.Close()
@@ -214,101 +204,74 @@ func TestClosed_Channel(t *testing.T) {
 // TestProperty_HWM_Invariant is the design §10.1 invariant: the number of
 // in-flight messages on a channel never exceeds its HWM capacity.
 //
-// Strategy: drive random interleaved Send/Recv ops and track the pending
-// count. Send succeeds only when pending < HWM; Recv succeeds only when
-// pending > 0. We use a non-blocking ctx for Send to observe the HWM
-// boundary deterministically.
+// Strategy: for each HWM, drive a seeded random interleaving of TrySend
+// and TryRecv and track the pending count. The pipe is deterministic from
+// one goroutine, so the boundary is exact: TrySend succeeds iff pending <
+// HWM, TryRecv succeeds iff pending > 0, and delivery is FIFO.
 func TestProperty_HWM_Invariant(t *testing.T) {
-	rapid.Check(t, func(rt *rapid.T) {
-		hwm := rapid.IntRange(1, 8).Draw(rt, "hwm")
-		ops := rapid.IntRange(1, 200).Draw(rt, "ops")
-
+	t.Parallel()
+	rng := rand.New(rand.NewPCG(1, 2))
+	const ops = 300
+	for hwm := 1; hwm <= 8; hwm++ {
 		a, b := NewPair(hwm, hwm, PeerInfo{}, PeerInfo{})
-		defer a.Close()
-		defer b.Close()
-
-		pending := 0
-		sent := 0
-		received := 0
-
+		pending, sent, received := 0, 0, 0
 		for i := 0; i < ops; i++ {
-			op := rapid.IntRange(0, 1).Draw(rt, "op")
-			if op == 0 {
-				// Non-blocking try-send (zero-deadline ctx).
-				ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
-				err := a.Send(ctx, msg.FromBytes([]byte{byte(sent)}))
-				cancel()
-				if err == nil {
+			if rng.IntN(2) == 0 {
+				ok := a.TrySend(msg.FromBytes([]byte{byte(sent)}))
+				require.Equal(t, pending < hwm, ok, "hwm=%d op=%d: TrySend with %d pending", hwm, i, pending)
+				if ok {
 					pending++
 					sent++
-					if pending > hwm {
-						rt.Fatalf("HWM violated: pending=%d hwm=%d", pending, hwm)
-					}
-				} else if !errors.Is(err, context.DeadlineExceeded) {
-					rt.Fatalf("unexpected Send err: %v", err)
 				}
+				require.LessOrEqual(t, pending, hwm, "hwm=%d op=%d: HWM violated", hwm, i)
 			} else {
-				// Non-blocking try-recv.
-				ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
-				m, err := b.Recv(ctx)
-				cancel()
-				if err == nil {
+				m, ok := b.TryRecv()
+				require.Equal(t, pending > 0, ok, "hwm=%d op=%d: TryRecv with %d pending", hwm, i, pending)
+				if ok {
 					pending--
 					received++
-					if pending < 0 {
-						rt.Fatalf("negative pending (%d) after Recv", pending)
-					}
-					if m.Bytes()[0] != byte(received-1) {
-						rt.Fatalf("FIFO violation: got %d want %d", m.Bytes()[0], received-1)
-					}
-				} else if !errors.Is(err, context.DeadlineExceeded) {
-					rt.Fatalf("unexpected Recv err: %v", err)
+					require.GreaterOrEqual(t, pending, 0, "hwm=%d op=%d: negative pending after Recv", hwm, i)
+					require.Equal(t, byte(received-1), m.Bytes()[0], "hwm=%d op=%d: FIFO violation", hwm, i)
 				}
 			}
 		}
-	})
+		require.Equal(t, pending, b.Len(), "hwm=%d: receiver Len disagrees with the model", hwm)
+		_ = a.Close()
+		_ = b.Close()
+	}
 }
 
 // TestProperty_Bounded_Unblock asserts a blocked Send wakes within a
 // bounded window after a Recv creates space — the second design §10.1
 // invariant.
 func TestProperty_Bounded_Unblock(t *testing.T) {
-	rapid.Check(t, func(rt *rapid.T) {
-		hwm := rapid.IntRange(1, 4).Draw(rt, "hwm")
+	t.Parallel()
+	for hwm := 1; hwm <= 8; hwm++ {
 		a, b := NewPair(hwm, hwm, PeerInfo{}, PeerInfo{})
-		defer a.Close()
-		defer b.Close()
-
 		ctx := context.Background()
-		// Fill.
 		for i := 0; i < hwm; i++ {
-			if err := a.Send(ctx, msg.FromBytes([]byte{byte(i)})); err != nil {
-				rt.Fatalf("fill[%d]: %v", i, err)
-			}
+			require.NoError(t, a.Send(ctx, msg.FromBytes([]byte{byte(i)})), "hwm=%d fill[%d]", hwm, i)
 		}
 
-		// Launch a blocked Send; measure the gap between Recv and unblock.
-		var woke atomic.Int64
-		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_ = a.Send(ctx, msg.FromBytes([]byte{42}))
+		// A Send parked on the full pipe; measure the gap between the Recv
+		// that frees a slot and the Send returning.
+		var freed, woke atomic.Int64
+		err := testutil.RequireUnblocks(t, func() error {
+			err := a.Send(ctx, msg.FromBytes([]byte{42}))
 			woke.Store(time.Now().UnixNano())
-		}()
-		time.Sleep(2 * time.Millisecond) // let goroutine park on send
-
-		freed := time.Now().UnixNano()
-		if _, err := b.Recv(ctx); err != nil {
-			rt.Fatalf("drain: %v", err)
-		}
-		wg.Wait()
-
-		gap := time.Duration(woke.Load() - freed)
-		if gap < 0 || gap > 100*time.Millisecond {
-			rt.Fatalf("Send unblock gap = %v (want ≤100ms)", gap)
-		}
-	})
+			return err
+		}, func() {
+			freed.Store(time.Now().UnixNano())
+			_, err := b.Recv(ctx)
+			require.NoError(t, err, "hwm=%d drain", hwm)
+		})
+		require.NoError(t, err, "hwm=%d blocked Send", hwm)
+		gap := time.Duration(woke.Load() - freed.Load())
+		require.GreaterOrEqual(t, gap, time.Duration(0), "hwm=%d: Send woke before the Recv", hwm)
+		require.LessOrEqual(t, gap, 100*time.Millisecond, "hwm=%d: Send unblock gap", hwm)
+		_ = a.Close()
+		_ = b.Close()
+	}
 }
 
 // TestHWMZero_CloseDrainsThenEOF is the HWM-0 counterpart of
@@ -316,6 +279,7 @@ func TestProperty_Bounded_Unblock(t *testing.T) {
 // than the channel holds) are still delivered, in order, after the sender
 // closes, and EOF comes only after the last one.
 func TestHWMZero_CloseDrainsThenEOF(t *testing.T) {
+	t.Parallel()
 	a, b := NewPair(0, 0, PeerInfo{}, PeerInfo{})
 	defer b.Close()
 
@@ -370,8 +334,10 @@ func requireNotArmed(t *testing.T, gate chan struct{}, what string) {
 // after the receiver went idle, and only once; a queued message keeps
 // MarkIdle from idling; a close notifies an idle receiver. HWM 0 included.
 func TestNotify_OnlyWhenIdle(t *testing.T) {
+	t.Parallel()
 	for _, hwm := range []int{4, 0} {
 		t.Run(map[int]string{4: "hwm4", 0: "hwm0"}[hwm], func(t *testing.T) {
+			t.Parallel()
 			a, b := NewPair(hwm, hwm, PeerInfo{}, PeerInfo{})
 			defer a.Close()
 			defer b.Close()
@@ -415,6 +381,7 @@ func TestNotify_OnlyWhenIdle(t *testing.T) {
 // single message (and a close) per fresh pipe, the tightest race, and a
 // stream through blocking sends at HWM and the HWM-0 overflow.
 func TestIdleNotify_NoLostWakeup(t *testing.T) {
+	t.Parallel()
 	const iters = 10000
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -493,6 +460,7 @@ func TestIdleNotify_NoLostWakeup(t *testing.T) {
 // overflow — and only then reports empty. The session writer's linger
 // drain and PAIR's retired-pipe drain rely on this.
 func TestTryRecv_DrainsWholeQueueAfterClose(t *testing.T) {
+	t.Parallel()
 	for _, hwm := range []int{0, 500} {
 		for _, closer := range []string{"sender", "receiver"} {
 			a, b := NewPair(hwm, hwm, PeerInfo{}, PeerInfo{})
@@ -524,6 +492,7 @@ func TestTryRecv_DrainsWholeQueueAfterClose(t *testing.T) {
 // TestRecvOr_Abort: RecvOr and SendOr give up with ErrAborted when their
 // abort channel fires, leaving the pipe usable.
 func TestRecvOr_Abort(t *testing.T) {
+	t.Parallel()
 	a, b := NewPair(1, 1, PeerInfo{}, PeerInfo{})
 	defer a.Close()
 	defer b.Close()
@@ -548,6 +517,7 @@ func TestRecvOr_Abort(t *testing.T) {
 // blocking Recv must never be stranded on an empty channel while overflow
 // holds messages.
 func TestHWMZero_ConcurrentOverflow(t *testing.T) {
+	t.Parallel()
 	a, b := NewPair(0, 0, PeerInfo{}, PeerInfo{})
 	defer a.Close()
 	defer b.Close()
@@ -585,6 +555,7 @@ func TestHWMZero_ConcurrentOverflow(t *testing.T) {
 // overflow), fires once the peer has received it all, and fires when
 // either end closes.
 func TestSendDrained_FiresWhenPeerConsumed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	for _, hwm := range []int{0, 500} {
 		a, b := NewPair(hwm, hwm, PeerInfo{}, PeerInfo{})
