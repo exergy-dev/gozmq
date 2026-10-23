@@ -602,13 +602,7 @@ func (s *Socket) Metrics() SocketMetrics {
 	if s.closed.Load() {
 		return SocketMetrics{}
 	}
-	m := s.engine.Metrics()
-	return SocketMetrics{
-		Sent:       m.Sent,
-		Recv:       m.Recv,
-		Dropped:    m.Dropped,
-		QueueDepth: m.QueueDepth,
-	}
+	return SocketMetrics(s.engine.Metrics())
 }
 
 // Monitor registers ch to receive Events matching mask, replacing any

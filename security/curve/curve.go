@@ -54,11 +54,8 @@ const (
 
 	mechName = "CURVE"
 
-	// crypto_box authentication tag overhead in bytes. NaCl's Poly1305 tag
-	// is 16 bytes; golang.org/x/crypto/nacl/box does not expose this as a
-	// named constant, so we pin it locally. If nacl ever changes, the
-	// layout asserts below will surface the mismatch at construction.
-	boxOverhead = 16
+	// boxOverhead is the crypto_box Poly1305 tag, in bytes.
+	boxOverhead = box.Overhead
 
 	// Fixed body sizes for HELLO and WELCOME (the only fixed-size
 	// handshake commands). INITIATE and READY vary with metadata.
@@ -232,9 +229,7 @@ func newMech(role security.Role, ownSecret, ownPublicHint, peerLongTerm Key, loc
 	if err != nil {
 		return nil, fmt.Errorf("gozmq/security/curve: generate ephemeral key: %w", err)
 	}
-	var ephPub, ephSec Key
-	copy(ephPub[:], ephPubPtr[:])
-	copy(ephSec[:], ephSecPtr[:])
+	ephPub, ephSec := Key(*ephPubPtr), Key(*ephSecPtr)
 
 	m := &curveMech{
 		MechBase:       security.NewMechBase(role, localMeta),
@@ -277,17 +272,6 @@ func newMech(role security.Role, ownSecret, ownPublicHint, peerLongTerm Key, loc
 
 // Name is the greeting mechanism token.
 func (*curveMech) Name() string { return mechName }
-
-// PeerLongTermPublic returns the peer's long-term public key. On the client
-// side this is the server public key passed to NewCurveClient. On the
-// server side this is the client public key discovered (and vouch-verified)
-// during the INITIATE step; it is the zero Key until then.
-//
-// This is deliberate public surface: it is the only way a server can learn
-// the authenticated identity of a connected client — e.g. to key
-// post-handshake authorization decisions on the client's pinned public key
-// when not using a ZAP handler.
-func (m *curveMech) PeerLongTermPublic() Key { return m.peerPublic }
 
 // NextHandshake drives the CURVE handshake one step per call. The state
 // machine is:
@@ -412,7 +396,7 @@ func (m *curveMech) nextServer(in []byte) ([]byte, bool, error) {
 // wiped (best-effort — see wipe).
 func (m *curveMech) finishHandshake() {
 	box.Precompute(&m.shared, (*[32]byte)(&m.peerEphPublic), (*[32]byte)(&m.ourEphSecret))
-	wipe(m.ourEphSecret[:])
+	clear(m.ourEphSecret[:])
 	m.state = stateDone
 }
 
@@ -428,9 +412,6 @@ func (m *curveMech) buildHello() ([]byte, error) {
 
 	// Signature box: 64 zero bytes encrypted with c' + S.
 	sigBox := sealShort(prefixHello, counter, make([]byte, 64), &m.peerPublic, &m.ourEphSecret)
-	if err := assertLen(len(sigBox), signatureBoxSize, "HELLO signature box"); err != nil {
-		return nil, err
-	}
 
 	body := make([]byte, 0, helloBodySize)
 	body = zmtp.AppendCommandName(body, cmdHello)
@@ -439,9 +420,6 @@ func (m *curveMech) buildHello() ([]byte, error) {
 	body = append(body, m.ourEphPublic[:]...)
 	body = binary.BigEndian.AppendUint64(body, counter)
 	body = append(body, sigBox...)
-	if err := assertLen(len(body), helloBodySize, "HELLO body"); err != nil {
-		return nil, err
-	}
 	return body, nil
 }
 
@@ -527,10 +505,7 @@ func (m *curveMech) buildWelcome() ([]byte, error) {
 	cookiePlain = append(cookiePlain, m.ourEphSecret[:]...)
 	// Encrypt with server-only cookieKey via secretbox.
 	cookieCipher := secretbox.Seal(nil, cookiePlain, &cookieNonce, &m.cookieKey)
-	wipe(cookiePlain)
-	if err := assertLen(len(cookieCipher), cookieInnerSize, "cookie cipher"); err != nil {
-		return nil, err
-	}
+	clear(cookiePlain)
 	// Cookie wire form: 16-byte cookie nonce suffix || cookie cipher (80 bytes).
 	cookie := make([]byte, 0, cookieSize)
 	cookie = append(cookie, cookieNonceR[:]...)
@@ -543,18 +518,12 @@ func (m *curveMech) buildWelcome() ([]byte, error) {
 
 	// Welcome box: box(welPlain, welNonce, C', s).
 	welBox := box.Seal(nil, welPlain, &welNonce, (*[32]byte)(&m.peerEphPublic), (*[32]byte)(&m.ourSecret))
-	if err := assertLen(len(welBox), welcomeBoxSize, "welcome box"); err != nil {
-		return nil, err
-	}
 
 	// Assemble WELCOME body.
 	body := make([]byte, 0, welcomeBodySize)
 	body = zmtp.AppendCommandName(body, cmdWelcome)
 	body = append(body, welNonceR[:]...)
 	body = append(body, welBox...)
-	if err := assertLen(len(body), welcomeBodySize, "WELCOME body"); err != nil {
-		return nil, err
-	}
 	return body, nil
 }
 
@@ -618,9 +587,6 @@ func (m *curveMech) buildInitiate(cookie []byte) ([]byte, error) {
 	vouchPlain = append(vouchPlain, m.ourEphPublic[:]...)
 	vouchPlain = append(vouchPlain, m.peerPublic[:]...)
 	vouchBox := box.Seal(nil, vouchPlain, &vouchNonce, (*[32]byte)(&m.peerEphPublic), (*[32]byte)(&m.ourSecret))
-	if err := assertLen(len(vouchBox), vouchBoxSize, "vouch box"); err != nil {
-		return nil, err
-	}
 	// Vouch wire form: 16-byte random nonce suffix || 80-byte cipher.
 	vouch := make([]byte, 0, vouchSize)
 	vouch = append(vouch, vouchR[:]...)
@@ -688,10 +654,10 @@ func (m *curveMech) parseInitiate(body []byte) ([]byte, error) {
 	var cookieSprime Key
 	copy(cookieCprime[:], cookiePlain[:32])
 	copy(cookieSprime[:], cookiePlain[32:])
-	wipe(cookiePlain)
+	clear(cookiePlain)
 	cprimeOK := cookieCprime == m.peerEphPublic
 	sprimeOK := cookieSprime == m.ourEphSecret
-	wipe(cookieSprime[:])
+	clear(cookieSprime[:])
 	if !cprimeOK {
 		return nil, fmt.Errorf("gozmq/security/curve: cookie C' mismatch: %w", zmqerr.ErrAuthFailed)
 	}
@@ -771,7 +737,7 @@ func (m *curveMech) parseInitiate(body []byte) ([]byte, error) {
 	// The per-connection cookie key is no longer needed; drop it
 	// (best-effort). The long-term secret is not wiped: the socket's
 	// configuration keeps its own copy for every later connection.
-	wipe(m.cookieKey[:])
+	clear(m.cookieKey[:])
 	return nil, nil
 }
 
@@ -977,16 +943,6 @@ func openShort(prefix string, counter uint64, cipher []byte, peerPub, ourSec *Ke
 	return box.Open(nil, cipher, &nonce, (*[32]byte)(peerPub), (*[32]byte)(ourSec))
 }
 
-// assertLen is the build-time self-check used after every fixed-size seal:
-// it returns a wrapped error when a NaCl primitive produced an unexpected
-// length (which would indicate a layout-constant mismatch, not bad input).
-func assertLen(got, want int, what string) error {
-	if got != want {
-		return fmt.Errorf("gozmq/security/curve: %s length %d != %d", what, got, want)
-	}
-	return nil
-}
-
 // peerError returns an error wrapping ErrAuthFailed when body is the ERROR
 // a server sends instead of WELCOME or READY to reject the handshake, and
 // nil for any other command. An ERROR with a truncated reason is malformed.
@@ -999,16 +955,6 @@ func peerError(body []byte) error {
 		return err
 	}
 	return fmt.Errorf("gozmq/security/curve: server rejected handshake: %q: %w", reason, zmqerr.ErrAuthFailed)
-}
-
-// wipe overwrites b with zeros. Zeroization in Go is strictly best-effort:
-// the runtime may already have copied the secret during stack growth or GC,
-// and the compiler may elide stores it can prove dead. It still shortens
-// the window during which long-lived heap state retains key material.
-func wipe(b []byte) {
-	for i := range b {
-		b[i] = 0
-	}
 }
 
 // checkNonceCounter returns an error wrapping zmqerr.ErrNonceExhausted

@@ -20,7 +20,6 @@ import (
 var (
 	ErrContextClosed    = errors.New("gozmq: context closed")
 	ErrSocketClosed     = errors.New("gozmq: socket closed")
-	ErrHWM              = errors.New("gozmq: high-water-mark reached")
 	ErrFSMViolation     = errors.New("gozmq: socket state-machine violation")
 	ErrHandshakeTimeout = errors.New("gozmq: handshake timeout")
 	ErrAuthFailed       = errors.New("gozmq: authentication failed")

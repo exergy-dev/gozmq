@@ -42,9 +42,7 @@ func generateKeyPair(r io.Reader) (pub Key, priv Key, err error) {
 	if err != nil {
 		return Key{}, Key{}, fmt.Errorf("gozmq/security/curve: GenerateKeyPair: %w", err)
 	}
-	copy(pub[:], pubPtr[:])
-	copy(priv[:], privPtr[:])
-	return pub, priv, nil
+	return Key(*pubPtr), Key(*privPtr), nil
 }
 
 // --------------------------------------------------------------------------
@@ -129,10 +127,7 @@ func Z85Decode(s string) ([]byte, error) {
 		if v > 0xFFFFFFFF {
 			return nil, fmt.Errorf("%w: chunk at index %d overflows uint32", ErrInvalidZ85, i)
 		}
-		out[oi+0] = byte(v >> 24)
-		out[oi+1] = byte(v >> 16)
-		out[oi+2] = byte(v >> 8)
-		out[oi+3] = byte(v)
+		binary.BigEndian.PutUint32(out[oi:], uint32(v))
 		oi += 4
 	}
 	return out, nil

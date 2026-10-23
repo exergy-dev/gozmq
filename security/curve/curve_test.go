@@ -93,7 +93,7 @@ func TestCurveHandshakeEndToEnd(t *testing.T) {
 	require.Equal(t, serverMeta, cImpl.PeerMetadata(), "client peer meta")
 	require.Equal(t, clientMeta, sImpl.PeerMetadata(), "server peer meta")
 	// Server learned the client long-term key during INITIATE.
-	require.Equal(t, clientPub, sImpl.PeerLongTermPublic(), "server did not recover client long-term public")
+	require.Equal(t, clientPub, sImpl.peerPublic, "server did not recover client long-term public")
 
 	// Traffic phase: exchange multiple frames in both directions and
 	// assert round-trip fidelity.

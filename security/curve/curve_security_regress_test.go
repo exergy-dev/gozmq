@@ -104,7 +104,7 @@ func TestCurve_ForgedVouchLowOrderClientKey(t *testing.T) {
 	_, done, err := srv.NextHandshake(body)
 	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "server accepted a forged vouch for a low-order C")
 	require.False(t, done)
-	require.Equal(t, Key{}, srv.PeerLongTermPublic())
+	require.Equal(t, Key{}, srv.peerPublic)
 }
 
 // TestCurve_ClientReportsServerError: a server that rejects the client via

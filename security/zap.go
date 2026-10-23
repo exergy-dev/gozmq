@@ -273,11 +273,11 @@ func EncodeZAPResponse(resp *ZAPResponse) [][]byte {
 	}
 
 	return [][]byte{
-		bytes.Clone([]byte(version)),
+		[]byte(version),
 		bytes.Clone(resp.RequestID),
-		bytes.Clone([]byte(statusCode)),
-		bytes.Clone([]byte(statusText)),
-		bytes.Clone([]byte(userID)),
+		[]byte(statusCode),
+		[]byte(statusText),
+		[]byte(userID),
 		zmtp.MetadataCodec.Encode(meta),
 	}
 }

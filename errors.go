@@ -41,14 +41,6 @@ var (
 	// on repeated calls, matching Context.Close.
 	ErrSocketClosed = zmqerr.ErrSocketClosed
 
-	// ErrHWM is reserved for send paths that report high-water-mark
-	// pressure as an error rather than by blocking. Nothing in gozmq
-	// returns it today: blocking patterns wait (bounded by the call's
-	// context) until the peer drains, and PUB/XPUB drop the message for a
-	// full peer and count it in Metrics. The sentinel is kept for API
-	// stability.
-	ErrHWM = zmqerr.ErrHWM
-
 	// ErrFSMViolation is returned by socket methods called in the wrong
 	// state for the socket pattern — e.g. REQ.Send when the socket is
 	// awaiting a reply, REP.Recv when the socket is mid-response, a
