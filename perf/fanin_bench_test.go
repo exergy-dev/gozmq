@@ -246,9 +246,25 @@ func BenchmarkXPubSubscribeChurn_Inproc(b *testing.B) {
 // handshake), deliver one message and close the PUSH. The Context and the
 // PULL persist across iterations.
 func BenchmarkConnectHandshake_TCP(b *testing.B) {
+	benchConnectHandshake(b, nil, nil)
+}
+
+// BenchmarkConnectHandshake_Curve_TCP is BenchmarkConnectHandshake_TCP with
+// CURVE on both ends: dial plus the four-command handshake and its key
+// exchange.
+func BenchmarkConnectHandshake_Curve_TCP(b *testing.B) {
+	serverPub, serverSec := testutil.CurveKeys(b)
+	clientPub, clientSec := testutil.CurveKeys(b)
+	benchConnectHandshake(b,
+		[]gozmq.Option{gozmq.WithCurveServer(serverSec[:])},
+		[]gozmq.Option{gozmq.WithCurveClient(serverPub[:], clientPub[:], clientSec[:])})
+}
+
+func benchConnectHandshake(b *testing.B, pullOpts, pushOpts []gozmq.Option) {
+	b.Helper()
 	b.StopTimer()
 
-	pull := bind(b, gozmq.Pull, tcpEndpoint())
+	pull := bind(b, gozmq.Pull, tcpEndpoint(), pullOpts...)
 	ep := pull.sock.LastEndpoint()
 
 	payload := newPayload(scaleMsgSize)
@@ -257,7 +273,7 @@ func BenchmarkConnectHandshake_TCP(b *testing.B) {
 	b.ResetTimer()
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {
-		push, err := pull.ctx.NewSocket(gozmq.Push)
+		push, err := pull.ctx.NewSocket(gozmq.Push, pushOpts...)
 		if err != nil {
 			b.Fatalf("new push[%d]: %v", i, err)
 		}

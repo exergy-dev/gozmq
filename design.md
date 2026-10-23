@@ -362,16 +362,19 @@ closed; every other error is treated as per-connection and retried.
 - Plain memory by default; `WithRecvBufferPool` trades the per-frame
   allocation for the explicit `Release` contract.
 - Reads go through a 16 KiB `bufio.Reader`; the writer coalesces up to 32
-  queued messages (2 MiB) into one `net.Buffers` write, appending NULL/PLAIN
-  frame headers into a reusable scratch buffer so bodies are not copied.
+  queued messages (2 MiB) into one `net.Buffers` write, appending frame
+  headers into a reusable scratch buffer so bodies are not copied. Queued
+  PING/PONG commands open the batch. Over TLS the batch goes out as one
+  record.
 - inproc passes `*Msg` values with no framing, copy or goroutine.
 - A multi-peer receive walks only the pipes that have data; a single-peer
   receive blocks in the one pipe without a lock. Bounded channels express the
   HWM directly.
-- PUB/XPUB `Send` reads a copy-on-write snapshot of the peers: no lock, no
-  per-message slice.
-- CURVE precomputes the shared key once per session and seals into the
-  pre-sized wire buffer.
+- PUB/XPUB `Send` reads a copy-on-write snapshot of the peers, and each
+  peer's subscription tree is copy-on-write too: no lock, no per-message
+  slice.
+- CURVE precomputes each handshake key once and seals every frame straight
+  into the writer's batch; the reader adopts its plaintext without a copy.
 - A bound ROUTER costs two goroutines per TCP peer and none per inproc peer;
   shared-goroutine I/O for hundreds of thousands of peers is the open
   scaling question.
