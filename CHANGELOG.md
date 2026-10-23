@@ -8,7 +8,7 @@ migration hint.
 
 ## [Unreleased]
 
-## [0.2.0] - unreleased
+## [0.2.0] - 2026-10-23
 
 A cleanup release: the same wire behaviour and defaults as 0.1.1, with a
 smaller library, a faster test suite and shorter documentation. Breaking
