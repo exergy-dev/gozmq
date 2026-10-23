@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/exergy-dev/gozmq"
 )
 
@@ -38,9 +40,7 @@ func sendManyWithoutReceiver(t *testing.T, sock *gozmq.Socket, n int) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		err := sock.SendMsg(ctx, gozmq.NewMsgFromBytes([]byte(fmt.Sprintf("%04d", i))))
 		cancel()
-		if err != nil {
-			t.Fatalf("send[%d]: %v", i, err)
-		}
+		require.NoError(t, err, "send[%d]", i)
 	}
 }
 
@@ -50,9 +50,7 @@ func recvMany(t *testing.T, sock *gozmq.Socket, n int) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		m, err := sock.RecvMsg(ctx)
 		cancel()
-		if err != nil {
-			t.Fatalf("recv[%d]: %v", i, err)
-		}
+		require.NoError(t, err, "recv[%d]", i)
 		m.Release()
 	}
 }

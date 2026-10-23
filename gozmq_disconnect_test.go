@@ -2,9 +2,10 @@ package gozmq_test
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
 	"github.com/exergy-dev/gozmq/internal/testutil"
@@ -16,13 +17,9 @@ func TestSocketDisconnect_StopsReconnectAndDetachesPeer(t *testing.T) {
 
 	srvEvents := make(chan gozmq.Event, 64)
 	srv, err := ctxZmq.NewSocket(gozmq.Pair, gozmq.WithMonitor(srvEvents, gozmq.EventAll))
-	if err != nil {
-		t.Fatalf("new server: %v", err)
-	}
+	require.NoError(t, err, "new server")
 	defer srv.Close()
-	if err := srv.Bind("tcp://127.0.0.1:0"); err != nil {
-		t.Fatalf("bind: %v", err)
-	}
+	require.NoError(t, srv.Bind("tcp://127.0.0.1:0"), "bind")
 	ep := srv.LastEndpoint()
 
 	cliEvents := make(chan gozmq.Event, 64)
@@ -32,45 +29,33 @@ func TestSocketDisconnect_StopsReconnectAndDetachesPeer(t *testing.T) {
 		gozmq.WithReconnectInterval(10*time.Millisecond),
 		gozmq.WithReconnectIntervalMax(20*time.Millisecond),
 	)
-	if err != nil {
-		t.Fatalf("new client: %v", err)
-	}
+	require.NoError(t, err, "new client")
 	defer cli.Close()
-	if err := cli.Connect(ep); err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	require.NoError(t, cli.Connect(ep), "connect")
 
 	callCtx := testutil.Ctx(t)
-	if err := cli.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("hello"))); err != nil {
-		t.Fatalf("send: %v", err)
-	}
-	if _, err := srv.RecvMsg(callCtx); err != nil {
-		t.Fatalf("recv: %v", err)
-	}
+	require.NoError(t, cli.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("hello"))), "send")
+	_, err = srv.RecvMsg(callCtx)
+	require.NoError(t, err, "recv")
 
 	srvCollected := waitForEvents(t, srvEvents, 3*time.Second, func(evts []gozmq.Event) bool {
 		return hasType(evts, gozmq.EventAccepted) && hasType(evts, gozmq.EventHandshakeSucceeded)
 	})
-	if !hasType(srvCollected, gozmq.EventAccepted) || !hasType(srvCollected, gozmq.EventHandshakeSucceeded) {
-		t.Fatalf("initial server events = %v", eventTypes(srvCollected))
-	}
+	require.True(t, hasType(srvCollected, gozmq.EventAccepted) && hasType(srvCollected, gozmq.EventHandshakeSucceeded),
+		"initial server events = %v", eventTypes(srvCollected))
 	cliCollected := waitForEvents(t, cliEvents, 3*time.Second, func(evts []gozmq.Event) bool {
 		return hasType(evts, gozmq.EventConnected) && hasType(evts, gozmq.EventHandshakeSucceeded)
 	})
-	if !hasType(cliCollected, gozmq.EventConnected) || !hasType(cliCollected, gozmq.EventHandshakeSucceeded) {
-		t.Fatalf("initial client events = %v", eventTypes(cliCollected))
-	}
+	require.True(t, hasType(cliCollected, gozmq.EventConnected) && hasType(cliCollected, gozmq.EventHandshakeSucceeded),
+		"initial client events = %v", eventTypes(cliCollected))
 
-	if err := cli.Disconnect(ep); err != nil {
-		t.Fatalf("Disconnect: %v", err)
-	}
+	require.NoError(t, cli.Disconnect(ep), "Disconnect")
 
 	postDisconnect := waitForEvents(t, srvEvents, 2*time.Second, func(evts []gozmq.Event) bool {
 		return hasType(evts, gozmq.EventDisconnected)
 	})
-	if !hasType(postDisconnect, gozmq.EventDisconnected) {
-		t.Fatalf("server did not observe disconnect; events=%v", eventTypes(postDisconnect))
-	}
+	require.True(t, hasType(postDisconnect, gozmq.EventDisconnected),
+		"server did not observe disconnect; events=%v", eventTypes(postDisconnect))
 
 	srvQuietCtx, srvQuietCancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	srvTail := drainEvents(srvQuietCtx, srvEvents)
@@ -78,14 +63,10 @@ func TestSocketDisconnect_StopsReconnectAndDetachesPeer(t *testing.T) {
 	cliQuietCtx, cliQuietCancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	cliTail := drainEvents(cliQuietCtx, cliEvents)
 	cliQuietCancel()
-	if hasType(srvTail, gozmq.EventAccepted) {
-		t.Fatalf("server accepted a reconnect after Disconnect; tail=%v", eventTypes(srvTail))
-	}
-	if hasType(cliTail, gozmq.EventConnectDelayed) || hasType(cliTail, gozmq.EventConnectRetried) {
-		t.Fatalf("client retried after Disconnect; tail=%v", eventTypes(cliTail))
-	}
+	require.False(t, hasType(srvTail, gozmq.EventAccepted),
+		"server accepted a reconnect after Disconnect; tail=%v", eventTypes(srvTail))
+	require.False(t, hasType(cliTail, gozmq.EventConnectDelayed) || hasType(cliTail, gozmq.EventConnectRetried),
+		"client retried after Disconnect; tail=%v", eventTypes(cliTail))
 
-	if err := cli.Disconnect(ep); !errors.Is(err, gozmq.ErrEndpointUnknown) {
-		t.Fatalf("second Disconnect err = %v, want ErrEndpointUnknown", err)
-	}
+	require.ErrorIs(t, cli.Disconnect(ep), gozmq.ErrEndpointUnknown, "second Disconnect")
 }

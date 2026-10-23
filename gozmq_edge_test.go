@@ -3,12 +3,13 @@ package gozmq_test
 import (
 	"bytes"
 	"context"
-	"errors"
 	"log/slog"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
 	"github.com/exergy-dev/gozmq/internal/testutil"
@@ -19,9 +20,7 @@ import (
 // with ErrSocketClosed.
 func TestClosedSocket_AllOpsReturnErrSocketClosed(t *testing.T) {
 	_, s := newTestSocket(t, gozmq.Sub)
-	if err := s.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	require.NoError(t, s.Close(), "close")
 
 	bg := context.Background()
 	ops := []struct {
@@ -41,9 +40,7 @@ func TestClosedSocket_AllOpsReturnErrSocketClosed(t *testing.T) {
 	}
 	for _, op := range ops {
 		t.Run(op.name, func(t *testing.T) {
-			if err := op.call(); !errors.Is(err, gozmq.ErrSocketClosed) {
-				t.Fatalf("%s on closed socket = %v, want ErrSocketClosed", op.name, err)
-			}
+			require.ErrorIs(t, op.call(), gozmq.ErrSocketClosed, "%s on closed socket", op.name)
 		})
 	}
 }
@@ -64,29 +61,20 @@ func TestZeroLengthMessages(t *testing.T) {
 			callCtx := testutil.Ctx(t)
 
 			// Empty single frame.
-			if err := client.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte{})); err != nil {
-				t.Fatalf("send empty: %v", err)
-			}
+			require.NoError(t, client.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte{})), "send empty")
 			got, err := server.RecvMsg(callCtx)
-			if err != nil {
-				t.Fatalf("recv empty: %v", err)
-			}
-			if got.NumFrames() != 1 || len(got.Bytes()) != 0 {
-				t.Fatalf("empty frame: frames=%d len=%d, want 1 frame of 0 bytes", got.NumFrames(), len(got.Bytes()))
-			}
+			require.NoError(t, err, "recv empty")
+			require.Len(t, got.Frames(), 1, "empty frame: want 1 frame of 0 bytes")
+			require.Empty(t, got.Bytes(), "empty frame: want 1 frame of 0 bytes")
 			got.Release()
 
 			// [empty][empty] multipart.
-			if err := client.SendMsg(callCtx, gozmq.NewMsgFromFrames([]byte{}, []byte{})); err != nil {
-				t.Fatalf("send empty multipart: %v", err)
-			}
+			require.NoError(t, client.SendMsg(callCtx, gozmq.NewMsgFromFrames([]byte{}, []byte{})), "send empty multipart")
 			got, err = server.RecvMsg(callCtx)
-			if err != nil {
-				t.Fatalf("recv empty multipart: %v", err)
-			}
-			if got.NumFrames() != 2 || len(got.Frames()[0]) != 0 || len(got.Frames()[1]) != 0 {
-				t.Fatalf("empty multipart: got %d frames %v", got.NumFrames(), got.Frames())
-			}
+			require.NoError(t, err, "recv empty multipart")
+			require.Len(t, got.Frames(), 2, "empty multipart")
+			require.Empty(t, got.Frames()[0], "empty multipart")
+			require.Empty(t, got.Frames()[1], "empty multipart")
 			got.Release()
 		})
 	}
@@ -105,14 +93,10 @@ func TestConcurrentClose_UnblocksParkedSendAndRecv(t *testing.T) {
 
 	// Settle: reverse round-trip proves both ends are attached.
 	callCtx := testutil.Ctx(t)
-	if err := receiver.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("sync"))); err != nil {
-		t.Fatalf("settle send: %v", err)
-	}
-	if m, err := sender.RecvMsg(callCtx); err != nil {
-		t.Fatalf("settle recv: %v", err)
-	} else {
-		m.Release()
-	}
+	require.NoError(t, receiver.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("sync"))), "settle send")
+	m, err := sender.RecvMsg(callCtx)
+	require.NoError(t, err, "settle recv")
+	m.Release()
 
 	// Sender goroutine: spin SendMsg until it blocks at HWM (receiver
 	// never drains) and is finally released by Close.
@@ -143,16 +127,12 @@ func TestConcurrentClose_UnblocksParkedSendAndRecv(t *testing.T) {
 	case <-callCtx.Done():
 		t.Fatal("first send never completed")
 	}
-	if err := sender.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	require.NoError(t, sender.Close(), "close")
 
 	for name, ch := range map[string]chan error{"send": sendErr, "recv": recvErr} {
 		select {
 		case err := <-ch:
-			if !errors.Is(err, gozmq.ErrSocketClosed) {
-				t.Fatalf("parked %s unblocked with %v, want ErrSocketClosed", name, err)
-			}
+			require.ErrorIs(t, err, gozmq.ErrSocketClosed, "parked %s unblocked", name)
 		case <-time.After(5 * time.Second):
 			t.Fatalf("parked %s did not unblock within 5s of Close", name)
 		}
@@ -174,9 +154,7 @@ func TestRecvMsg_ContextCancellation(t *testing.T) {
 
 	select {
 	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("RecvMsg after cancel = %v, want context.Canceled", err)
-		}
+		require.ErrorIs(t, err, context.Canceled, "RecvMsg after cancel")
 	case <-time.After(5 * time.Second):
 		t.Fatal("RecvMsg did not return within 5s of ctx cancel")
 	}
@@ -201,23 +179,19 @@ func TestMaxMessageSize_RecvSideTeardown(t *testing.T) {
 	// per-frame cap, but the multipart accumulation (2*(limit-10) > limit)
 	// trips the message-level check.
 	frame := make([]byte, limit-10)
-	if err := sender.SendMsg(callCtx, gozmq.NewMsgFromFrames(frame, frame)); err != nil {
-		t.Fatalf("send over-limit multipart: %v", err)
-	}
+	require.NoError(t, sender.SendMsg(callCtx, gozmq.NewMsgFromFrames(frame, frame)), "send over-limit multipart")
 
 	collected := waitForEvents(t, srvEvents, 3*time.Second, func(evts []gozmq.Event) bool {
 		return hasType(evts, gozmq.EventDisconnected)
 	})
-	if !hasType(collected, gozmq.EventDisconnected) {
-		t.Fatalf("receiver did not observe EventDisconnected; events=%v", eventTypes(collected))
-	}
+	require.True(t, hasType(collected, gozmq.EventDisconnected),
+		"receiver did not observe EventDisconnected; events=%v", eventTypes(collected))
 
 	// The over-limit message must never surface.
 	recvCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	if m, err := receiver.RecvMsg(recvCtx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("RecvMsg = (%v, %v), want DeadlineExceeded (message must be dropped)", m, err)
-	}
+	m, err := receiver.RecvMsg(recvCtx)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "RecvMsg = (%v, %v): message must be dropped", m, err)
 }
 
 // TestPoller_Modify registers PollIn|PollOut, narrows the mask to PollIn
@@ -231,33 +205,28 @@ func TestPoller_Modify(t *testing.T) {
 
 	// Peer attached, nothing inbound: exactly PollOut.
 	events := waitPoll(t, p, 5*time.Second)
-	if len(events) != 1 || events[0].Socket != client || events[0].Events != gozmq.PollOut {
-		t.Fatalf("initial poll events = %+v, want client PollOut only", events)
-	}
+	require.Len(t, events, 1, "initial poll events = %+v, want client PollOut only", events)
+	require.Same(t, client, events[0].Socket, "initial poll")
+	require.Equal(t, gozmq.PollOut, events[0].Events, "initial poll: want PollOut only")
 
 	// Narrow to PollIn: writability must no longer wake Poll.
 	p.Modify(client, gozmq.PollIn)
 	shortCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	if ev, err := p.Poll(shortCtx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("post-Modify Poll = (%+v, %v), want DeadlineExceeded", ev, err)
-	}
+	ev, err := p.Poll(shortCtx)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "post-Modify Poll = (%+v, %v)", ev, err)
 
 	// Inbound data still wakes the narrowed registration — with only the
 	// PollIn bit reported even though the socket remains writable.
 	callCtx := testutil.Ctx(t)
-	if err := server.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("wake"))); err != nil {
-		t.Fatalf("send: %v", err)
-	}
+	require.NoError(t, server.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("wake"))), "send")
 	events = waitPoll(t, p, 5*time.Second)
-	if len(events) != 1 || events[0].Socket != client || events[0].Events != gozmq.PollIn {
-		t.Fatalf("post-send poll events = %+v, want client PollIn only", events)
-	}
-	if m, err := client.RecvMsg(callCtx); err != nil {
-		t.Fatalf("drain: %v", err)
-	} else {
-		m.Release()
-	}
+	require.Len(t, events, 1, "post-send poll events = %+v, want client PollIn only", events)
+	require.Same(t, client, events[0].Socket, "post-send poll")
+	require.Equal(t, gozmq.PollIn, events[0].Events, "post-send poll: want PollIn only")
+	m, err := client.RecvMsg(callCtx)
+	require.NoError(t, err, "drain")
+	m.Release()
 }
 
 // TestSocketUnbind stops the listener matched by its resolved endpoint:
@@ -269,37 +238,23 @@ func TestSocketUnbind(t *testing.T) {
 
 	// Establish the pre-existing connection with a round-trip.
 	callCtx := testutil.Ctx(t)
-	if err := pusher.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("before"))); err != nil {
-		t.Fatalf("send before unbind: %v", err)
-	}
-	if m, err := puller.RecvMsg(callCtx); err != nil {
-		t.Fatalf("recv before unbind: %v", err)
-	} else {
-		m.Release()
-	}
+	require.NoError(t, pusher.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("before"))), "send before unbind")
+	m, err := puller.RecvMsg(callCtx)
+	require.NoError(t, err, "recv before unbind")
+	m.Release()
 
 	// Unknown endpoint → ErrEndpointUnknown.
-	if err := puller.Unbind("tcp://127.0.0.1:1"); !errors.Is(err, gozmq.ErrEndpointUnknown) {
-		t.Fatalf("Unbind(unknown) = %v, want ErrEndpointUnknown", err)
-	}
+	require.ErrorIs(t, puller.Unbind("tcp://127.0.0.1:1"), gozmq.ErrEndpointUnknown, "Unbind(unknown)")
 
 	// Unbind the resolved endpoint (LastEndpoint form).
-	if err := puller.Unbind(ep); err != nil {
-		t.Fatalf("Unbind(%q): %v", ep, err)
-	}
+	require.NoError(t, puller.Unbind(ep), "Unbind(%q)", ep)
 
 	// The established connection survives.
-	if err := pusher.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("after"))); err != nil {
-		t.Fatalf("send after unbind: %v", err)
-	}
-	if m, err := puller.RecvMsg(callCtx); err != nil {
-		t.Fatalf("recv after unbind: %v", err)
-	} else {
-		if string(m.Bytes()) != "after" {
-			t.Fatalf("recv after unbind = %q, want %q", m.Bytes(), "after")
-		}
-		m.Release()
-	}
+	require.NoError(t, pusher.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("after"))), "send after unbind")
+	m, err = puller.RecvMsg(callCtx)
+	require.NoError(t, err, "recv after unbind")
+	require.Equal(t, "after", string(m.Bytes()), "recv after unbind")
+	m.Release()
 
 	// A new client can no longer be accepted: its dial is refused and the
 	// reconnector reports connect trouble instead of a handshake success.
@@ -309,22 +264,16 @@ func TestSocketUnbind(t *testing.T) {
 		gozmq.WithReconnectInterval(5*time.Millisecond),
 		gozmq.WithReconnectIntervalMax(20*time.Millisecond),
 	)
-	if err != nil {
-		t.Fatalf("new late pusher: %v", err)
-	}
+	require.NoError(t, err, "new late pusher")
 	defer late.Close()
-	if err := late.Connect(ep); err != nil {
-		t.Fatalf("late connect: %v", err)
-	}
+	require.NoError(t, late.Connect(ep), "late connect")
 	collected := waitForEvents(t, lateEvents, 3*time.Second, func(evts []gozmq.Event) bool {
 		return hasType(evts, gozmq.EventConnectDelayed) || hasType(evts, gozmq.EventConnectRetried)
 	})
-	if !hasType(collected, gozmq.EventConnectDelayed) && !hasType(collected, gozmq.EventConnectRetried) {
-		t.Fatalf("late client saw no connect-failure events; events=%v", eventTypes(collected))
-	}
-	if hasType(collected, gozmq.EventHandshakeSucceeded) {
-		t.Fatalf("late client handshook against an unbound listener; events=%v", eventTypes(collected))
-	}
+	require.True(t, hasType(collected, gozmq.EventConnectDelayed) || hasType(collected, gozmq.EventConnectRetried),
+		"late client saw no connect-failure events; events=%v", eventTypes(collected))
+	require.False(t, hasType(collected, gozmq.EventHandshakeSucceeded),
+		"late client handshook against an unbound listener; events=%v", eventTypes(collected))
 }
 
 // TestRecvBytes covers the misuse-proof single-frame receive: a
@@ -333,26 +282,15 @@ func TestRecvBytes(t *testing.T) {
 	_, server, client := newSocketPair(t, gozmq.Pair, "inproc://recv-bytes")
 	callCtx := testutil.Ctx(t)
 
-	if err := client.SendBytes(callCtx, []byte("payload")); err != nil {
-		t.Fatalf("SendBytes: %v", err)
-	}
+	require.NoError(t, client.SendBytes(callCtx, []byte("payload")), "SendBytes")
 	got, err := server.RecvBytes(callCtx)
-	if err != nil {
-		t.Fatalf("RecvBytes: %v", err)
-	}
-	if string(got) != "payload" {
-		t.Fatalf("RecvBytes = %q, want payload", got)
-	}
+	require.NoError(t, err, "RecvBytes")
+	require.Equal(t, "payload", string(got), "RecvBytes")
 
 	// Multipart → error (use RecvMsg for those).
-	if err := client.SendMsg(callCtx, gozmq.NewMsgFromFrames([]byte("a"), []byte("b"))); err != nil {
-		t.Fatalf("send multipart: %v", err)
-	}
-	if got, err := server.RecvBytes(callCtx); err == nil {
-		t.Fatalf("RecvBytes(multipart) = %q, want error", got)
-	} else if !strings.Contains(err.Error(), "multipart") {
-		t.Fatalf("RecvBytes(multipart) err = %v, want mention of multipart", err)
-	}
+	require.NoError(t, client.SendMsg(callCtx, gozmq.NewMsgFromFrames([]byte("a"), []byte("b"))), "send multipart")
+	got, err = server.RecvBytes(callCtx)
+	require.ErrorContains(t, err, "multipart", "RecvBytes(multipart) = %q", got)
 }
 
 // TestPlainAuth_WrongPassword: a PLAIN client presenting bad credentials
@@ -375,12 +313,10 @@ func TestPlainAuth_WrongPassword(t *testing.T) {
 	collected := waitForEvents(t, cliEvents, 3*time.Second, func(evts []gozmq.Event) bool {
 		return hasType(evts, gozmq.EventHandshakeFailedAuth)
 	})
-	if !hasType(collected, gozmq.EventHandshakeFailedAuth) {
-		t.Fatalf("no EventHandshakeFailedAuth; events=%v", eventTypes(collected))
-	}
-	if hasType(collected, gozmq.EventHandshakeSucceeded) {
-		t.Fatalf("handshake succeeded with wrong password; events=%v", eventTypes(collected))
-	}
+	require.True(t, hasType(collected, gozmq.EventHandshakeFailedAuth),
+		"no EventHandshakeFailedAuth; events=%v", eventTypes(collected))
+	require.False(t, hasType(collected, gozmq.EventHandshakeSucceeded),
+		"handshake succeeded with wrong password; events=%v", eventTypes(collected))
 }
 
 // TestConnect_UnknownTransportEmitsConnectFailed: Connect with an
@@ -390,19 +326,13 @@ func TestConnect_UnknownTransportEmitsConnectFailed(t *testing.T) {
 	evts := make(chan gozmq.Event, 8)
 	_, s := newTestSocket(t, gozmq.Pair, gozmq.WithMonitor(evts, gozmq.EventAll))
 
-	if err := s.Connect("bogus+scheme://x"); !errors.Is(err, gozmq.ErrTransportUnknown) {
-		t.Fatalf("Connect(bogus scheme) = %v, want ErrTransportUnknown", err)
-	}
+	require.ErrorIs(t, s.Connect("bogus+scheme://x"), gozmq.ErrTransportUnknown, "Connect(bogus scheme)")
 	// emit() runs synchronously before Connect returns, onto a buffered
 	// channel — the event is already there.
 	select {
 	case ev := <-evts:
-		if ev.Type != gozmq.EventConnectFailed {
-			t.Fatalf("event type = %v, want EventConnectFailed", ev.Type)
-		}
-		if ev.Reason == "" {
-			t.Fatal("EventConnectFailed.Reason empty, want error text")
-		}
+		require.Equal(t, gozmq.EventConnectFailed, ev.Type, "event type")
+		require.NotEmpty(t, ev.Reason, "EventConnectFailed.Reason empty, want error text")
 	default:
 		t.Fatal("no event emitted for failed Connect")
 	}
@@ -411,12 +341,8 @@ func TestConnect_UnknownTransportEmitsConnectFailed(t *testing.T) {
 // TestSocketType_String covers the Stringer including the unknown-value
 // fallback.
 func TestSocketType_String(t *testing.T) {
-	if got := gozmq.Pair.String(); got != "PAIR" {
-		t.Fatalf("Pair.String() = %q, want PAIR", got)
-	}
-	if got := gozmq.SocketType(99).String(); got != "SocketType(99)" {
-		t.Fatalf("SocketType(99).String() = %q, want SocketType(99)", got)
-	}
+	require.Equal(t, "PAIR", gozmq.Pair.String())
+	require.Equal(t, "SocketType(99)", gozmq.SocketType(99).String())
 }
 
 // TestNewMsg covers the NewMsg constructor end to end: an empty message,
@@ -424,28 +350,18 @@ func TestSocketType_String(t *testing.T) {
 // contract for caller-constructed messages.
 func TestNewMsg(t *testing.T) {
 	m := gozmq.NewMsg()
-	if m.NumFrames() != 0 {
-		t.Fatalf("NewMsg NumFrames = %d, want 0", m.NumFrames())
-	}
+	require.Equal(t, 0, m.NumFrames(), "NewMsg NumFrames")
 	m.AppendFrame([]byte("alpha"))
 	m.AppendFrame([]byte("beta"))
-	if m.NumFrames() != 2 {
-		t.Fatalf("NumFrames = %d, want 2", m.NumFrames())
-	}
+	require.Equal(t, 2, m.NumFrames(), "NumFrames")
 
 	_, server, client := newSocketPair(t, gozmq.Pair, "inproc://newmsg-roundtrip")
 	callCtx := testutil.Ctx(t)
-	if err := client.SendMsg(callCtx, m); err != nil {
-		t.Fatalf("send: %v", err)
-	}
+	require.NoError(t, client.SendMsg(callCtx, m), "send")
 	got, err := server.RecvMsg(callCtx)
-	if err != nil {
-		t.Fatalf("recv: %v", err)
-	}
+	require.NoError(t, err, "recv")
 	defer got.Release()
-	if got.NumFrames() != 2 || string(got.Frames()[0]) != "alpha" || string(got.Frames()[1]) != "beta" {
-		t.Fatalf("got frames %q", got.Frames())
-	}
+	require.Equal(t, [][]byte{[]byte("alpha"), []byte("beta")}, got.Frames())
 
 	// Release on a caller-constructed message is documented as always safe.
 	empty := gozmq.NewMsg()
@@ -474,9 +390,7 @@ func TestWithLogger(t *testing.T) {
 	defer sock.Close()
 
 	// Port 1 on loopback is essentially guaranteed to refuse.
-	if err := sock.Connect("tcp://127.0.0.1:1"); err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	require.NoError(t, sock.Connect("tcp://127.0.0.1:1"), "connect")
 
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {

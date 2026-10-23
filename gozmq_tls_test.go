@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/exergy-dev/gozmq"
 	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/transport"
@@ -26,9 +28,7 @@ import (
 func newSelfSignedTLSConfig(t *testing.T) *tls.Config {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
+	require.NoError(t, err, "generate key")
 	tmpl := x509.Certificate{
 		SerialNumber:          big.NewInt(1),
 		Subject:               pkix.Name{CommonName: "gozmq-root-tls-test"},
@@ -42,13 +42,9 @@ func newSelfSignedTLSConfig(t *testing.T) *tls.Config {
 		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1)},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, pub, priv)
-	if err != nil {
-		t.Fatalf("create certificate: %v", err)
-	}
+	require.NoError(t, err, "create certificate")
 	cert, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatalf("parse certificate: %v", err)
-	}
+	require.NoError(t, err, "parse certificate")
 	pool := x509.NewCertPool()
 	pool.AddCert(cert)
 	return &tls.Config{
@@ -69,51 +65,34 @@ func newSelfSignedTLSConfig(t *testing.T) *tls.Config {
 // round-trip in order.
 func TestTLSTransport_SocketRoundTrip(t *testing.T) {
 	tr, err := transport.NewTLSTransport(newSelfSignedTLSConfig(t))
-	if err != nil {
-		t.Fatalf("NewTLSTransport: %v", err)
-	}
+	require.NoError(t, err, "NewTLSTransport")
 
 	ctxZmq := gozmq.NewContext()
 	defer ctxZmq.Close()
 	ctxZmq.RegisterTransport(tr)
 
 	puller, err := ctxZmq.NewSocket(gozmq.Pull)
-	if err != nil {
-		t.Fatalf("new pull: %v", err)
-	}
+	require.NoError(t, err, "new pull")
 	defer puller.Close()
-	if err := puller.Bind("tls+tcp://127.0.0.1:0"); err != nil {
-		t.Fatalf("bind tls+tcp: %v", err)
-	}
+	require.NoError(t, puller.Bind("tls+tcp://127.0.0.1:0"), "bind tls+tcp")
 	ep := puller.LastEndpoint()
-	if !strings.HasPrefix(ep, "tls+tcp://127.0.0.1:") {
-		t.Fatalf("LastEndpoint = %q, want resolved tls+tcp://127.0.0.1:<port>", ep)
-	}
+	require.True(t, strings.HasPrefix(ep, "tls+tcp://127.0.0.1:"),
+		"LastEndpoint = %q, want resolved tls+tcp://127.0.0.1:<port>", ep)
 
 	pusher, err := ctxZmq.NewSocket(gozmq.Push)
-	if err != nil {
-		t.Fatalf("new push: %v", err)
-	}
+	require.NoError(t, err, "new push")
 	defer pusher.Close()
-	if err := pusher.Connect(ep); err != nil {
-		t.Fatalf("connect tls+tcp: %v", err)
-	}
+	require.NoError(t, pusher.Connect(ep), "connect tls+tcp")
 
 	callCtx := testutil.Ctx(t)
 	const n = 5
 	for i := 0; i < n; i++ {
-		if err := pusher.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte{byte(i)})); err != nil {
-			t.Fatalf("send[%d]: %v", i, err)
-		}
+		require.NoError(t, pusher.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte{byte(i)})), "send[%d]", i)
 	}
 	for i := 0; i < n; i++ {
 		m, err := puller.RecvMsg(callCtx)
-		if err != nil {
-			t.Fatalf("recv[%d]: %v", i, err)
-		}
-		if len(m.Bytes()) != 1 || m.Bytes()[0] != byte(i) {
-			t.Fatalf("recv[%d] = %x, want %x", i, m.Bytes(), byte(i))
-		}
+		require.NoError(t, err, "recv[%d]", i)
+		require.Equal(t, []byte{byte(i)}, m.Bytes(), "recv[%d]", i)
 		m.Release()
 	}
 }
