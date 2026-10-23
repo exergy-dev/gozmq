@@ -44,9 +44,13 @@ func (f contextOptionFunc) applyContext(c *Context) { f(c) }
 // the peer on the server side of every PLAIN and CURVE handshake, whether that
 // socket binds or connects (the PLAIN/CURVE role comes from the options, not
 // the transport direction), and on the accepting side of NULL handshakes on
-// sockets with a [WithZAPDomain]. It is called directly in each handshake
-// goroutine; a rejection fails the handshake with an error wrapping the
-// handler's own. A nil handler removes it.
+// sockets with a [WithZAPDomain]. It is called directly on each
+// connection's handshake goroutine, concurrently across connections, with
+// no timeout and no panic recovery: a handler that blocks holds that
+// connection (and a later Close of its socket) until it returns, one that
+// panics crashes the process, and one that calls Close on the socket being
+// handshaken deadlocks. A rejection fails the handshake with an error
+// wrapping the handler's own. A nil handler removes it.
 func WithZAPHandler(handler security.ZAPHandler) ContextOption {
 	return contextOptionFunc(func(c *Context) { c.zapHandler = handler })
 }

@@ -54,7 +54,7 @@ var (
 	// awaiting a reply, REP.Recv when the socket is mid-response, a
 	// concurrent call that would break REQ/REP lock-step,
 	// Subscribe/Unsubscribe on a non-SUB socket, RecvBytes on a multipart
-	// message, or Disconnect on a STREAM socket.
+	// message, or SendMsg with a nil message.
 	ErrFSMViolation = zmqerr.ErrFSMViolation
 
 	// ErrHandshakeTimeout is returned (or surfaced on a monitor channel
@@ -113,7 +113,8 @@ var (
 	// per-direction short-nonce counter would wrap. RFC 26 defines
 	// uint64 counters starting at 1 and expects rekeying long before
 	// wrap; gozmq does not implement rekey, so the session is torn down
-	// cleanly with this sentinel. Operators detecting this in logs or
-	// monitor events should rotate keys and/or reconnect.
+	// cleanly with this sentinel, which is logged through [WithLogger] (the
+	// EventDisconnected it causes carries no reason). Operators seeing it
+	// should rotate keys and/or reconnect.
 	ErrNonceExhausted = zmqerr.ErrNonceExhausted
 )

@@ -10,7 +10,8 @@
 // There are two pairs of wrappers:
 //
 //   - Sender[T] / Receiver[T] for non-topic patterns (PUSH/PULL, REQ/REP,
-//     DEALER/ROUTER, PAIR). The wire format is a single-frame payload.
+//     DEALER, PAIR). The wire format is a single-frame payload, so ROUTER,
+//     whose messages carry a leading identity frame, is not supported.
 //
 //   - Publisher[T] / Subscriber[T] for PUB/SUB. The wire format is a
 //     two-frame message [topic, payload], matching how ZMQ's built-in
@@ -46,7 +47,8 @@ type Sender[T any] struct {
 }
 
 // NewSender returns a Sender bound to sock. sock must be a send-capable
-// non-PUB socket (PUSH, REQ, REP, DEALER, ROUTER, PAIR).
+// single-frame socket (PUSH, REQ, REP, DEALER, PAIR); ROUTER needs the
+// identity envelope and is not supported.
 func NewSender[T any](sock *gozmq.Socket, codec Codec) *Sender[T] {
 	return &Sender[T]{sock: sock, codec: codec}
 }

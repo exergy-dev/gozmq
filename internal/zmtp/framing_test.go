@@ -1,11 +1,16 @@
 package zmtp
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"io"
+	"runtime"
 	"strings"
 	"testing"
+	"testing/iotest"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -127,7 +132,7 @@ func TestFrameReuseDst(t *testing.T) {
 	var buf3 bytes.Buffer
 	require.NoError(t, codec.WriteFrame(&buf3, 0, big), "WriteFrame")
 	pooled := make([]byte, 256)
-	_, got3, err := codec.ReadFrame(&buf3, small, func(n int) []byte { return pooled[:n] })
+	_, got3, err := codec.ReadFrame(&buf3, small, fixedPool{buf: pooled})
 	require.NoError(t, err, "ReadFrame")
 	require.Equal(t, big, got3)
 	require.True(t, &got3[0] == &pooled[0], "ReadFrame did not read into alloc's buffer")
@@ -207,7 +212,15 @@ func FuzzFrameDecode(f *testing.F) {
 	f.Add([]byte{0xFF})     // reserved flag bits
 	f.Add([]byte{FlagLong}) // truncated long header
 
-	codec := NewFrameCodec(1 << 20)
+	// A LONG header announcing ~64 MiB with two body bytes: must cost the
+	// incremental threshold, not the announced size, per iteration.
+	f.Add(append([]byte{FlagLong, 0, 0, 0, 0, 0x03, 0xFF, 0xFF, 0xFF}, 'x', 'y'))
+	// Just over the incremental threshold so the slow path is in the corpus.
+	f.Add(append(append([]byte{FlagLong}, binary.BigEndian.AppendUint64(nil, incrementalBodyThreshold+1)...),
+		bytes.Repeat([]byte{0x5A}, incrementalBodyThreshold+1)...))
+
+	// The production cap, so the fuzzer exercises the same bound sessions use.
+	codec := NewFrameCodec(64 << 20)
 	f.Fuzz(func(t *testing.T, data []byte) {
 		flags, body, err := codec.ReadFrame(bytes.NewReader(data), nil, nil)
 		if err != nil {
@@ -223,4 +236,248 @@ func FuzzFrameDecode(f *testing.F) {
 		require.Equal(t, flags & ^FlagLong, flags2 & ^FlagLong, "flags drift")
 		require.Equal(t, body, body2, "body drift")
 	})
+}
+
+// fixedPool hands out one preallocated buffer.
+type fixedPool struct{ buf []byte }
+
+func (p fixedPool) Get(n int) []byte { return p.buf[:n] }
+func (fixedPool) Put([]byte)         {}
+
+// countingPool records Get/Put traffic and keeps the last buffer handed out
+// for the final body so tests can check pointer identity.
+type countingPool struct {
+	gets, puts int
+	finalN     int
+	final      []byte
+	live       int // buffers handed out and not yet returned
+}
+
+func (p *countingPool) Get(n int) []byte {
+	p.gets++
+	p.live++
+	b := make([]byte, n)
+	p.finalN, p.final = n, b
+	return b
+}
+
+func (p *countingPool) Put([]byte) { p.puts++; p.live-- }
+
+// TestFrameReadIncrementalRoundTrip: bodies above incrementalBodyThreshold
+// take the incremental path and must arrive intact, with exactly one Get
+// for the final buffer, which is the slice returned (the session reader
+// hands that slice back to the pool), and every intermediate Put back.
+// Over a bufio.Reader whose buffer holds the commit point there is no
+// intermediate at all (the Peek proof); otherwise a frame uses one
+// intermediate until commit exceeds the threshold, then grows.
+func TestFrameReadIncrementalRoundTrip(t *testing.T) {
+	t.Parallel()
+	const T = incrementalBodyThreshold
+	const G = incrementalGrowth
+	const bufSize = 16 << 10
+	plain := func(r io.Reader) io.Reader { return r }
+	buffered := func(r io.Reader) io.Reader { return bufio.NewReaderSize(r, bufSize) }
+	codec := NewFrameCodec(MaxBodyUnlimited)
+	for _, tc := range []struct {
+		name string
+		n    int
+		wrap func(io.Reader) io.Reader
+		gets int // pool Gets: the final buffer plus intermediates
+	}{
+		{"T+1/onebyte", T + 1, func(r io.Reader) io.Reader { return iotest.OneByteReader(r) }, 2},
+		{"3T/plain", 3 * T, plain, 2},
+		{"10T+17/plain", 10*T + 17, plain, 2},
+		{"T+1/bufio", T + 1, buffered, 1},                 // commit 8 KiB+1 <= bufio: Peek path
+		{"256KiB/bufio", 256 << 10, buffered, 1},          // commit 16 KiB == bufio: Peek path
+		{"1MiB/bufio", 1 << 20, buffered, 2},              // commit 64 KiB > bufio: one intermediate
+		{"4MiB+5/plain", 4<<20 + 5, plain, 3},             // commit > T: T then grow to commit
+		{"G*bufSize+1/bufio", G*bufSize + 1, buffered, 2}, // commit = bufio+1: just misses Peek
+	} {
+		require.Equal(t, 256<<10, G*bufSize, "test assumes a 16 KiB bufio proves 256 KiB")
+		body := make([]byte, tc.n)
+		for i := range body {
+			body[i] = byte(i * 7)
+		}
+		var buf bytes.Buffer
+		require.NoError(t, codec.WriteFrame(&buf, FlagMore, body))
+		wire := buf.Bytes()
+
+		// Plain allocation.
+		flags, got, err := codec.ReadFrame(tc.wrap(bytes.NewReader(wire)), make([]byte, 0, 16), nil)
+		require.NoError(t, err, tc.name)
+		require.Equal(t, FlagMore|FlagLong, flags, tc.name)
+		require.Equal(t, body, got, tc.name)
+
+		// Pooled: the returned body is the last Get (of exactly n bytes) and
+		// every intermediate went back through Put.
+		pool := &countingPool{}
+		_, got, err = codec.ReadFrame(tc.wrap(bytes.NewReader(wire)), nil, pool)
+		require.NoError(t, err, tc.name)
+		require.Equal(t, body, got, tc.name)
+		require.Equal(t, tc.n, pool.finalN, "%s: final Get size", tc.name)
+		require.Same(t, &pool.final[0], &got[0], "%s: returned body is not the pooled buffer", tc.name)
+		require.Equal(t, tc.gets, pool.gets, "%s: Get calls", tc.name)
+		require.Equal(t, 1, pool.live, "%s: intermediates not returned to the pool (gets=%d puts=%d)", tc.name, pool.gets, pool.puts)
+	}
+}
+
+// scratchPool is a countingPool whose intermediates go through the
+// ScratchPool methods, as the session's unpooled reader supplies them.
+type scratchPool struct {
+	countingPool
+	scratchGets, scratchPuts int
+	scratchLive              int
+	scratchSizes             []int
+}
+
+func (p *scratchPool) GetScratch(n int) []byte {
+	p.scratchGets++
+	p.scratchLive++
+	p.scratchSizes = append(p.scratchSizes, n)
+	return make([]byte, n)
+}
+
+func (p *scratchPool) PutScratch([]byte) { p.scratchPuts++; p.scratchLive-- }
+
+// TestFrameReadIncrementalScratchPool: when the pool implements
+// ScratchPool, every intermediate comes from GetScratch and goes back
+// through PutScratch, the final body is the only Get, and Put is never
+// called on a successful read. On a failed read the final body is Put back
+// and no scratch is left out.
+func TestFrameReadIncrementalScratchPool(t *testing.T) {
+	t.Parallel()
+	const T = incrementalBodyThreshold
+	const G = incrementalGrowth
+	codec := NewFrameCodec(MaxBodyUnlimited)
+	for _, n := range []int{1 << 20, 4<<20 + 5} {
+		body := bytes.Repeat([]byte{0xA5}, n)
+		var buf bytes.Buffer
+		require.NoError(t, codec.WriteFrame(&buf, 0, body))
+		wire := buf.Bytes()
+		commit := (n + G - 1) / G
+
+		pool := &scratchPool{}
+		_, got, err := codec.ReadFrame(bytes.NewReader(wire), nil, pool)
+		require.NoError(t, err)
+		require.Equal(t, body, got)
+		require.Equal(t, 1, pool.gets, "n=%d: only the body comes from Get", n)
+		require.Zero(t, pool.puts, "n=%d: Put on a successful read", n)
+		require.Zero(t, pool.scratchLive, "n=%d: scratch not returned", n)
+		require.Equal(t, min(commit, T), pool.scratchSizes[0], "n=%d: first intermediate", n)
+		require.LessOrEqual(t, pool.scratchSizes[len(pool.scratchSizes)-1], commit, "n=%d: intermediate beyond the commit point", n)
+
+		// Truncate just after the commit point: the body was allocated and
+		// must go back through Put; the intermediate through PutScratch.
+		pool = &scratchPool{}
+		_, _, err = codec.ReadFrame(bytes.NewReader(wire[:9+commit+1]), nil, pool)
+		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
+		require.Equal(t, 1, pool.gets, "n=%d", n)
+		require.Equal(t, 1, pool.puts, "n=%d: failed body not returned", n)
+		require.Zero(t, pool.scratchLive, "n=%d: scratch not returned on failure", n)
+
+		// Truncate before the commit point: no body Get at all.
+		pool = &scratchPool{}
+		_, _, err = codec.ReadFrame(bytes.NewReader(wire[:9+commit/2]), nil, pool)
+		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
+		require.Zero(t, pool.gets, "n=%d: body allocated before the commit point", n)
+		require.Zero(t, pool.scratchLive, "n=%d", n)
+	}
+}
+
+// stallingReader serves a prefix, then blocks until released and fails.
+type stallingReader struct {
+	data    []byte
+	stalled chan struct{} // closed once the prefix is consumed
+	release chan struct{}
+}
+
+func (r *stallingReader) Read(p []byte) (int, error) {
+	if len(r.data) > 0 {
+		n := copy(p, r.data)
+		r.data = r.data[n:]
+		if len(r.data) == 0 {
+			close(r.stalled)
+		}
+		return n, nil
+	}
+	<-r.release
+	return 0, io.ErrUnexpectedEOF
+}
+
+// TestFrameReadStalledLargeHeaderBoundsAllocation: a peer that announces a
+// large body and then stalls must cost memory proportional to what it sent,
+// never the announced size, and must never draw the announced size from the
+// pool. Before incremental reading each such frame pinned the announced size.
+// Over a bufio.Reader that can prove the commit point (the session's case for
+// frames up to 256 KiB) nothing at all is allocated while the peer stalls.
+func TestFrameReadStalledLargeHeaderBoundsAllocation(t *testing.T) {
+	const T = incrementalBodyThreshold
+	const G = incrementalGrowth
+	codec := NewFrameCodec(64 << 20)
+	type tc struct {
+		name  string
+		n     int
+		k     int  // body bytes delivered before the stall
+		bufio bool // wrap in the session-sized bufio.Reader
+		bound int64
+		gets  int // pool Gets expected while stalled (-1: don't care)
+	}
+	var cases []tc
+	for _, k := range []int{0, 1, 100 << 10, 1 << 20} {
+		// Peak = the buffer just filled plus the up-to-G-times larger one it
+		// is copied into, so (G+1) x received, plus the first chunk.
+		bound := int64((G+1)*k + 2*T)
+		cases = append(cases,
+			tc{fmt.Sprintf("64MiB/k=%d/raw", k), 64<<20 - 1, k, false, bound, -1},
+			tc{fmt.Sprintf("64MiB/k=%d/bufio", k), 64<<20 - 1, k, true, bound, -1},
+		)
+	}
+	// 256 KiB over bufio: commit (16 KiB) fits the buffer, so a peer that
+	// sends less than that pins nothing but the bufio buffer it already had.
+	cases = append(cases, tc{"256KiB/k=8KiB/bufio", 256 << 10, 8 << 10, true, 32 << 10, 0})
+	for _, c := range cases {
+		hdr := append([]byte{FlagLong}, binary.BigEndian.AppendUint64(nil, uint64(c.n))...)
+		sr := &stallingReader{
+			data:    append(hdr, make([]byte, c.k)...),
+			stalled: make(chan struct{}),
+			release: make(chan struct{}),
+		}
+		var r io.Reader = sr
+		if c.bufio {
+			r = bufio.NewReaderSize(sr, 16<<10)
+		}
+		pool := &countingPool{}
+
+		var before runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+
+		done := make(chan error, 1)
+		go func() {
+			_, _, err := codec.ReadFrame(r, nil, pool)
+			done <- err
+		}()
+		select {
+		case <-sr.stalled:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s: reader never consumed the prefix", c.name)
+		}
+
+		var during runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&during)
+		growth := int64(during.HeapAlloc) - int64(before.HeapAlloc)
+		t.Logf("%s: HeapAlloc growth while stalled: %d KiB", c.name, growth>>10)
+		require.Less(t, growth, c.bound, "%s: allocation not proportional to bytes received", c.name)
+		close(sr.release)
+		err := <-done
+		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame, c.name)
+		// pool fields are read only after done, which the reader goroutine
+		// signals after its last Get/Put.
+		require.NotEqual(t, c.n, pool.finalN, "%s: the pool was asked for the announced size", c.name)
+		if c.gets >= 0 {
+			require.Equal(t, c.gets, pool.gets, "%s: pool Gets", c.name)
+		}
+		require.Zero(t, pool.live, "%s: buffers not returned to the pool after a failed read", c.name)
+	}
 }

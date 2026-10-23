@@ -21,7 +21,7 @@ func TestDecodeGreeting_MinorVersions(t *testing.T) {
 		require.NoError(t, err, "encodeGreeting")
 		g[11] = minor
 
-		mech, gotMinor, err := decodeGreeting(g)
+		mech, gotMinor, _, err := decodeGreeting(g)
 		require.NoError(t, err, "decodeGreeting(minor=0x%02x)", minor)
 		require.Equal(t, "NULL", mech, "mechanism (minor=0x%02x)", minor)
 		require.Equal(t, minor, gotMinor, "minor")
@@ -33,7 +33,7 @@ func TestDecodeGreeting_RejectsWrongMajor(t *testing.T) {
 	require.NoError(t, err, "encodeGreeting")
 	g[10] = 0x02 // ZMTP 2.x peer
 
-	_, _, err = decodeGreeting(g)
+	_, _, _, err = decodeGreeting(g)
 	require.ErrorIs(t, err, zmqerr.ErrProtocolVersion, "decodeGreeting(major=0x02)")
 }
 

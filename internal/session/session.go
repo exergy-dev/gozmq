@@ -116,9 +116,12 @@ type Session struct {
 	decode frameDecoder
 	// directHeader enables the writer's header-only fast path (see New).
 	directHeader zmtp.FrameHeaderAppender
-	// recvAlloc, when non-nil, supplies the reader's large frame buffers
-	// from the pool (see Config.RecvBufferPool).
-	recvAlloc func(int) []byte
+	// recvPool supplies the reader's large frame buffers: recvBufPool (the
+	// shared bufpool, bodies lent to the application) when pooledRecv is
+	// set, else a per-session plainBodies whose bodies the *Msg owns
+	// outright. See Config.RecvBufferPool.
+	recvPool   zmtp.BodyPool
+	pooledRecv bool
 
 	// hsOut carries the greeting and encoded handshake frames from the
 	// reader to the writer, which writes them while the reader reads, so a
@@ -218,6 +221,44 @@ func monoNow() int64 {
 	return int64(time.Since(monoEpoch))
 }
 
+// recvBufPool adapts the package-level bufpool to zmtp.BodyPool.
+type recvBufPool struct{}
+
+func (recvBufPool) Get(n int) []byte { return bufpool.Get(n) }
+func (recvBufPool) Put(b []byte)     { bufpool.Put(b) }
+
+// plainBodies is the reader's zmtp.BodyPool when bodies are not pooled:
+// Get is a plain allocation the *Msg adopts (Put is only reached on a failed
+// read, where the buffer is garbage anyway). The intermediate a large frame
+// is collected in before its body is allocated is kept on the session, one
+// at a time and only up to maxRetainedRecvScratch, so a stream of large frames
+// costs exactly one allocation each, the body. The reader goroutine is the
+// only user, so there is no locking.
+type plainBodies struct{ scratch []byte }
+
+// maxRetainedRecvScratch caps the intermediate a session keeps between frames;
+// it is the codec's incremental threshold, so every frame up to 2 MiB reuses
+// it and a rare larger one leaves its bigger intermediate to the GC.
+const maxRetainedRecvScratch = 128 << 10
+
+func (*plainBodies) Get(n int) []byte { return make([]byte, n) }
+func (*plainBodies) Put([]byte)       {}
+
+func (p *plainBodies) GetScratch(n int) []byte {
+	if cap(p.scratch) >= n {
+		b := p.scratch[:n]
+		p.scratch = nil
+		return b
+	}
+	return make([]byte, n)
+}
+
+func (p *plainBodies) PutScratch(b []byte) {
+	if cap(b) <= maxRetainedRecvScratch && cap(b) > cap(p.scratch) {
+		p.scratch = b[:0]
+	}
+}
+
 type frameEncoder func(flags uint8, body []byte) (uint8, []byte, error)
 type frameDecoder func(flags uint8, body []byte) (uint8, []byte, error)
 
@@ -295,9 +336,11 @@ func New(cfg Config) *Session {
 			directHeader = h
 		}
 	}
-	// recvAlloc hands the reader pooled frame buffers (see Config.RecvBufferPool).
+	// recvPool hands the reader pooled frame buffers (see Config.RecvBufferPool).
 	if cfg.RecvBufferPool && identityMech {
-		s.recvAlloc = bufpool.Get
+		s.recvPool, s.pooledRecv = recvBufPool{}, true
+	} else {
+		s.recvPool = &plainBodies{}
 	}
 	s.reader = bufio.NewReaderSize(cfg.Conn, sessionReadBufferSize)
 	s.encode, s.decode, s.directHeader = encode, decode, directHeader

@@ -159,7 +159,12 @@ func inprocHWM(send, recv int) int {
 	if send == 0 || recv == 0 {
 		return 0
 	}
-	return send + recv
+	// Both are at most MaxHWM, so the sum cannot overflow; saturate anyway
+	// so a future relaxation of the cap cannot produce a negative HWM.
+	if sum := send + recv; sum > 0 {
+		return sum
+	}
+	return 2 * MaxHWM
 }
 
 // wireInproc joins cl's socket (the connector) to bind with one pipe pair.
@@ -190,8 +195,12 @@ func wireInproc(cl *inprocLink, bind *Socket, waiting bool) error {
 	bind.emit(EventAccepted, ep, "")
 
 	// Publish the connector side first. Until then nobody else can reach
-	// the pipe, so a refusal is torn down here.
+	// the pipe, so a refusal is torn down here. The binder's end and remote
+	// are set before that publish: cl.remote (and so bl) becomes reachable
+	// only through conn.mu, which orders this write before any reader, so
+	// a connector teardown that runs bl.detach never sees a nil end.
 	bl := newInprocLink(bind, ep, false)
+	bl.end, bl.remote = be, cl
 	if !conn.publishInproc(cl, ce, bl, waiting) {
 		_ = ce.Close()
 		_ = conn.engine.DetachPipe(ce)
@@ -201,8 +210,11 @@ func wireInproc(cl *inprocLink, bind *Socket, waiting bool) error {
 		return ErrSocketClosed
 	}
 	if !bind.publishInproc(bl, be, cl, false) {
-		// The binder is closing, or the connector already closed the
-		// pipe; either way cl.close detaches both sides exactly once.
+		// The binder is closing, or the connector already closed the pipe
+		// (a Disconnect or CloseCtx raced us). Close the connector's side,
+		// which detaches both ends; each detach is once-guarded, so a
+		// concurrent connector teardown and this path together run each
+		// exactly once and be never stays attached to the binder.
 		cl.close()
 	}
 	return nil
@@ -222,14 +234,20 @@ func (s *Socket) publishInproc(l *inprocLink, end *pipe.End, remote *inprocLink,
 		return false
 	}
 	s.links[&l.link] = struct{}{}
-	l.end, l.remote = end, remote
+	if l.end == nil {
+		// The connector side is set here, under its socket's mu, which is
+		// what orders it against a Disconnect/CloseCtx that takes the link;
+		// the binder side was set by wireInproc before it became reachable.
+		l.end, l.remote = end, remote
+	}
 	return true
 }
 
 // inprocLink is one socket's side of an inproc connection. A Connect that
-// is still waiting for its Bind is a link with no pipe yet. end and remote are
-// written under s.mu while the link is in s.links, and read only by whoever
-// then takes it from there (CloseCtx, Disconnect) or by its remote.
+// is still waiting for its Bind is a link with no pipe yet. end and remote
+// are written once, before the link can be reached by anyone who reads them:
+// the connector's under its socket's mu while the link is in s.links, the
+// binder's before the connector's publish makes it reachable as a remote.
 type inprocLink struct {
 	link
 	s        *Socket

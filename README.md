@@ -18,18 +18,20 @@ only cgo in this repository is the build-tagged interop test harness that
 checks us against a real libzmq.
 
 **It talks to libzmq.** Wire compatibility is a first-class goal, not an
-aspiration. CI runs the [`interop/`](interop) suite against libzmq in both
-directions, covering every socket pattern, NULL/PLAIN/CURVE, and ZAP.
+aspiration. CI runs the [`interop/`](interop) suite against libzmq 4.3.4 in
+both directions: every socket pattern over NULL, most over PLAIN, CURVE
+and ZAP on PAIR. The exact matrix is in [`interop/README.md`](interop/README.md).
 
-**It is fast enough that the tradeoff is gone.** Measured two-process against
-libzmq 4.3.4, `gozmq` is *ahead* from 256 B through 8 KB:
+**It is fast enough that the tradeoff is gone.** Measured two-process over
+loopback against libzmq 4.3.4, `gozmq` is within about 10% of libzmq from
+256 B through 64 KB:
 
 | Message size | gozmq | libzmq 4.3.4 | ratio |
 | :--- | ---: | ---: | ---: |
 | 32 B | 5.70M msg/s | 9.96M msg/s | 0.57× |
-| 256 B | 4.43M msg/s | 4.03M msg/s | **1.10×** |
-| 1 KB | 2.26M msg/s | 2.06M msg/s | **1.10×** |
-| 8 KB | 0.51M msg/s | 0.48M msg/s | **1.06×** |
+| 256 B | 4.43M msg/s | 4.03M msg/s | 1.10× |
+| 1 KB | 2.26M msg/s | 2.06M msg/s | 1.10× |
+| 8 KB | 0.51M msg/s | 0.48M msg/s | 1.06× |
 | 64 KB | 43.2 Gb/s | 48.4 Gb/s | 0.89× |
 
 The 32 B gap is real and is scheduler-bound — goroutine wakeups, roughly 36%
@@ -38,14 +40,16 @@ your workload is tiny messages at millions per second, measure before you
 switch. Full methodology and the complete matrix are in
 [`perf/REPORT.md`](perf/REPORT.md).
 
-These figures are from the report's 2026-06-10 run, when received frames
-over 4 KiB were pooled by default. Pooling is now opt-in
-(`WithRecvBufferPool`), so the 8 KB and 64 KB rows may not match the default
-configuration until the comparison is re-run.
+Caveats: the figures are from the report's 2026-06-10 run on one WSL2
+machine; received frames over 4 KiB were pooled by default then and pooling
+is now opt-in (`WithRecvBufferPool`), so the 8 KB and 64 KB rows may not
+match the default configuration; and the gozmq tools ran with a 1,000,000
+message HWM while the libzmq tools used their default of 1000. Treat the
+table as "the same order of magnitude", and measure your own workload.
 
 ## Install
 
-Requires Go 1.22 or newer.
+Requires Go 1.25 or newer.
 
 ```sh
 go get github.com/exergy-dev/gozmq
@@ -167,8 +171,10 @@ HWM plus the receiver's recv HWM (unlimited if either is 0).
 **STREAM.** A STREAM socket carries raw TCP bytes, framed as
 `[connection identity, payload]`; an empty payload closes that connection.
 It dials once and never reconnects, honours the HWMs as given (0 is
-unlimited) and `WithLinger`, and rejects every ZMTP-layer option. See the
-package documentation for the details.
+unlimited) and `WithLinger`, rejects the ZMTP-layer options (security,
+identity, heartbeat, handshake timeout, ZAP domain, receive pool) and
+ignores `WithMaxMessageSize` and the reconnect options. See the package
+documentation for the details.
 
 ## Documentation
 

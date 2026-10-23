@@ -369,34 +369,38 @@ func TestMaxMessageSize_SendBoundary(t *testing.T) {
 	}
 }
 
-// TestSendMsg_CollectsMultipartSizeCorrectly exercises the per-frame
-// semantics of the synchronous check: it mirrors the codec's per-frame
-// body-length enforcement (zmtp/framing.go WriteFrame),
-// so a multipart message where every frame is <= MaxMessageSize passes
-// even if the sum exceeds the cap; a multipart message with any single
-// frame > MaxMessageSize is rejected.
+// TestSendMsg_CollectsMultipartSizeCorrectly: WithMaxMessageSize bounds the
+// whole logical message on both sides. The send check sums the frames (as
+// the receiving session does for a MORE chain), so a multipart message whose
+// total exceeds the cap is rejected synchronously even when every frame is
+// under it, and one whose total fits is delivered.
 func TestSendMsg_CollectsMultipartSizeCorrectly(t *testing.T) {
 	const limit = 1024
 	_, srv, cli := newSocketPair(t, gozmq.Pair, "inproc://sendmsg-multipart", gozmq.WithMaxMessageSize(limit))
 
 	callCtx := testCtx(t)
 
-	// Case A: two <=limit frames (sum > limit) — accepted.
-	// Each frame is limit bytes, total 2*limit, but the codec/SendMsg
-	// check is per-frame so this round-trips successfully.
-	a := make([]byte, limit)
-	b := make([]byte, limit)
+	// Case A1: two frames whose sum is exactly the limit — accepted.
+	a := make([]byte, limit/2)
+	b := make([]byte, limit/2)
 	if err := cli.SendMsg(callCtx, gozmq.NewMsgFromFrames(a, b)); err != nil {
-		t.Fatalf("multipart (per-frame <= limit) SendMsg: %v", err)
+		t.Fatalf("multipart (sum == limit) SendMsg: %v", err)
 	}
 	got, err := srv.RecvMsg(callCtx)
 	if err != nil {
 		t.Fatalf("recv multipart: %v", err)
 	}
-	if got.NumFrames() != 2 || len(got.Frames()[0]) != limit || len(got.Frames()[1]) != limit {
-		t.Fatalf("recv frames = %v, want 2x%d", got.Frames(), limit)
+	if got.NumFrames() != 2 || len(got.Frames()[0]) != limit/2 || len(got.Frames()[1]) != limit/2 {
+		t.Fatalf("recv frames = %v, want 2x%d", got.Frames(), limit/2)
 	}
 	got.Release()
+
+	// Case A2: two frames each under the limit but summing over it —
+	// rejected up front, so a gozmq receiver never tears the session down
+	// for a message a gozmq sender accepted.
+	if err := cli.SendMsg(callCtx, gozmq.NewMsgFromFrames(make([]byte, limit), make([]byte, 1))); !errors.Is(err, gozmq.ErrMalformedFrame) {
+		t.Fatalf("multipart (sum > limit) SendMsg err = %v, want ErrMalformedFrame", err)
+	}
 
 	// Case B: one frame > limit — rejected with ErrMalformedFrame.
 	small := []byte("ok")

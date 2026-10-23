@@ -37,7 +37,15 @@ func (s *Socket) sessionConfig(conn transport.Conn, role security.Role) (session
 			cfg.ConfigureZAP(s.ctx.zapHandler, s.cfg.zapDomain, conn.RemoteEndpoint())
 		}
 	}
-	codec := zmtp.NewFrameCodec(s.cfg.maxMessageSize)
+	// The codec caps wire frames. A mechanism that expands frames (CURVE:
+	// 33 bytes per MESSAGE) declares the overhead so that a plaintext frame
+	// of exactly MaxMessageSize, which SendMsg accepts, still fits; the
+	// session bounds the decoded message separately.
+	maxWire := s.cfg.maxMessageSize
+	if fo, ok := mech.(frameOverheader); ok && maxWire > 0 {
+		maxWire += int64(fo.FrameOverhead())
+	}
+	codec := zmtp.NewFrameCodec(maxWire)
 	return session.Config{
 		Conn:              conn,
 		Mech:              mech,
@@ -53,6 +61,12 @@ func (s *Socket) sessionConfig(conn transport.Conn, role security.Role) (session
 		SubscriptionCommands: s.socketType == Pub || s.socketType == XPub,
 		Logger:               s.cfg.logger,
 	}, nil
+}
+
+// frameOverheader is implemented by mechanisms whose EncodeFrame grows the
+// frame by a fixed number of bytes (CURVE). See sessionConfig.
+type frameOverheader interface {
+	FrameOverhead() int
 }
 
 // zapConfigurable is implemented by mechanisms that take a ZAP handler; the
@@ -112,6 +126,12 @@ func (s *Socket) newMechanism(role security.Role) (security.Mech, error) {
 		return security.NewPlainServer(s.cfg.plainAuth, meta), nil
 	case s.cfg.plainClient:
 		return security.NewPlainClient(s.cfg.plainClientUser, s.cfg.plainClientPass, meta), nil
+	}
+	if s.cfg.securityConfigured() {
+		// validateSocketConfig rejects every incomplete mechanism option, so
+		// this is unreachable; it guards against a future option that is
+		// configured but not constructible falling back to NULL.
+		return nil, fmt.Errorf("gozmq: security mechanism configured but not constructible; refusing to downgrade to NULL")
 	}
 	return security.NewNull(role, meta), nil
 }

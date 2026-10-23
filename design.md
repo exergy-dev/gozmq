@@ -212,7 +212,7 @@ Every frame starts with a flags byte:
 
 Then the length, then the body. Commands have a name-length-prefixed name followed by a body. We implement `READY`, `ERROR`, `SUBSCRIBE`, `CANCEL`, `PING`, `PONG`, and `DISCONNECT`.
 
-Under CURVE every traffic-phase frame, commands included, travels inside a `MESSAGE` box sent with outer flags `0x00`; `MORE` (`0x01`) and `COMMAND` (`0x02`) are carried in the encrypted inner flags byte, as libzmq does. On decode an outer `COMMAND` flag is still honoured, so commands from older gozmq peers are understood.
+Under CURVE every traffic-phase frame, commands included, travels inside a `MESSAGE` box sent with outer flags `0x00`; `MORE` (`0x01`) and `COMMAND` (`0x02`) are carried in the encrypted inner flags byte, as libzmq does. On decode the outer wire flags of a `MESSAGE` are ignored: they are not covered by the MAC, so honouring them would let an on-path attacker turn a data frame into a command.
 
 ### 5.3 Handshake
 

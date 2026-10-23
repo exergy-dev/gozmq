@@ -1,5 +1,3 @@
-//go:build go1.24
-
 package socket_test
 
 import (

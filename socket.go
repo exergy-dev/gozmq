@@ -117,7 +117,7 @@ func newEngineFor(t SocketType, cfg *socketConfig) (socket.Engine, *socket.SubEn
 
 // Socket is the user-facing message endpoint.
 //
-// Concurrency: Send and Recv are thread-safe (serialized by the engine).
+// Concurrency: SendMsg and RecvMsg are thread-safe (serialized by the engine).
 // The idiomatic pattern is still one goroutine per socket.
 //
 // The zero value is NOT usable; construct via Context.NewSocket.
@@ -149,8 +149,8 @@ type reconnectEntry struct {
 	rc       *session.Reconnector
 }
 
-// Subscribe adds prefix to a SUB socket's filter. Returns an error on
-// non-Sub sockets.
+// Subscribe adds prefix to a SUB or XSUB socket's filter. Returns an error
+// wrapping ErrFSMViolation on other socket types.
 func (s *Socket) Subscribe(prefix []byte) error {
 	if s.closed.Load() {
 		return ErrSocketClosed
@@ -161,7 +161,7 @@ func (s *Socket) Subscribe(prefix []byte) error {
 	return s.subHandle.Subscribe(prefix)
 }
 
-// Unsubscribe decrements the refcount for prefix on a SUB socket.
+// Unsubscribe decrements the refcount for prefix on a SUB or XSUB socket.
 func (s *Socket) Unsubscribe(prefix []byte) error {
 	if s.closed.Load() {
 		return ErrSocketClosed
@@ -499,15 +499,22 @@ func (s *Socket) SendMsg(ctx context.Context, m *Msg) error {
 	if s.closed.Load() {
 		return ErrSocketClosed
 	}
-	if maxSize := s.cfg.maxMessageSize; maxSize > 0 && m != nil {
+	if m == nil {
+		// Reject here rather than in the engines, whose handling of nil
+		// differed (REQ/REP dereferenced it after the request was sent).
+		return fmt.Errorf("gozmq: SendMsg requires a non-nil message: %w", ErrFSMViolation)
+	}
+	if maxSize := s.cfg.maxMessageSize; maxSize > 0 {
+		var total int64
 		for i, f := range m.Frames() {
-			if int64(len(f)) > maxSize {
-				return fmt.Errorf("gozmq: frame %d length %d exceeds MaxMessageSize %d: %w",
-					i, len(f), maxSize, ErrMalformedFrame)
+			total += int64(len(f))
+			if total > maxSize {
+				return fmt.Errorf("gozmq: message size %d through frame %d exceeds MaxMessageSize %d: %w",
+					total, i, maxSize, ErrMalformedFrame)
 			}
 		}
 	}
-	if m == nil || !m.Lent() {
+	if !m.Lent() {
 		return s.engine.Send(ctx, m)
 	}
 	// The engine takes over the derived reference on success; a failed
@@ -609,7 +616,9 @@ func (s *Socket) Metrics() SocketMetrics {
 // Passing a nil channel deregisters monitoring. ch must be buffered:
 // events are delivered non-blocking and dropped when the channel is
 // full, so the socket's hot path is never stalled by a slow consumer
-// (see [WithMonitor] for sizing guidance).
+// (see [WithMonitor] for sizing guidance). Never close a monitor channel:
+// an emit already in flight on a session goroutine may still send to it
+// after Monitor(nil) or Close returns. Let it be garbage collected.
 func (s *Socket) Monitor(ch chan<- Event, mask EventType) error {
 	if s.closed.Load() {
 		return ErrSocketClosed

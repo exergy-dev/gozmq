@@ -204,6 +204,7 @@ func BenchmarkPushPullLarge_TCP(b *testing.B) {
 			name string
 			n    int
 		}{
+			{"8KB", 8 << 10},
 			{"64KB", 64 << 10},
 			{"256KB", 256 << 10},
 			{"1MB", 1 << 20},

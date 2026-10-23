@@ -46,6 +46,7 @@ type socketConfig struct {
 	handshakeTimeoutSet bool
 
 	plainAuth       func(user, pass string) bool
+	plainAuthSet    bool // WithPlainAuth was applied (even with a nil func)
 	plainClientUser string
 	plainClientPass string
 	plainClient     bool
@@ -53,6 +54,7 @@ type socketConfig struct {
 	newSecurityMech func(role security.Role, meta map[string]string) (security.Mech, error)
 
 	curveServer    bool
+	curveClientSet bool // WithCurveClient was applied
 	curveServerKey []byte
 	curvePublicKey []byte
 	curveSecretKey []byte
@@ -106,8 +108,10 @@ func WithIdentity(id []byte) Option {
 
 // WithSendHWM sets the outbound high-water mark — the maximum number of
 // messages queued per peer pipe before backpressure engages. Default is
-// 1000. Zero disables the limit (unbounded growth; not recommended for
-// untrusted peers). When the HWM is reached, Send behavior depends on the
+// 1000, maximum [MaxHWM]. Zero disables the limit (unbounded growth; not
+// recommended for untrusted peers). A positive HWM is the capacity of a
+// channel allocated per peer connection, so very large values cost memory
+// up front. When the HWM is reached, Send behavior depends on the
 // socket pattern: blocking sockets (PAIR, PUSH, DEALER, REQ, REP, ROUTER)
 // wait for a Recv on the peer to drain queue space, while PUB/XPUB drop
 // the message for the full peer and continue the fan-out (the drop is
@@ -119,7 +123,8 @@ func WithSendHWM(n int) Option {
 // WithRecvHWM sets the inbound high-water mark — the maximum number of
 // messages buffered per peer pipe before the reader goroutine stops
 // accepting frames from the wire and exerts TCP backpressure on the peer.
-// Default is 1000. Zero disables the limit.
+// Default is 1000, maximum [MaxHWM]. Zero disables the limit. As with
+// [WithSendHWM], a positive HWM is allocated per peer connection.
 //
 // On inproc, where one pipe joins the two sockets, each direction holds the
 // sender's send HWM plus the receiver's recv HWM, and is unlimited if
@@ -141,9 +146,9 @@ func WithLinger(d time.Duration) Option {
 
 // WithReconnectInterval sets the base delay between reconnection attempts
 // on a client-side socket after a dial failure or post-handshake
-// disconnect. Default is 100ms. The actual delay grows exponentially and
-// is jittered by 20% before each attempt, capped by
-// [WithReconnectIntervalMax].
+// disconnect. Default is 100ms; zero selects the default rather than an
+// immediate retry. The actual delay grows exponentially and is jittered by
+// 20% before each attempt, capped by [WithReconnectIntervalMax].
 func WithReconnectInterval(d time.Duration) Option {
 	return newOption(func(c *socketConfig) error { c.reconnectInterval = d; return nil })
 }
@@ -176,22 +181,27 @@ func WithHeartbeat(interval, timeout time.Duration) Option {
 	})
 }
 
-// WithMaxMessageSize sets the per-message byte limit. Default is 64 MiB.
-// It is enforced on both directions, with different surfacing:
+// WithMaxMessageSize sets the per-message byte limit: the total length of
+// all frames of one logical message. Default is 64 MiB. (libzmq's
+// ZMQ_MAXMSGSIZE is per frame; gozmq bounds the whole message on both
+// sides so that a sender's check and a receiver's check agree.) It is
+// enforced in both directions, with different surfacing:
 //
-//   - Send side: SendMsg/SendBytes measure every frame up front and
-//     return a synchronous error wrapping [ErrMalformedFrame] on
-//     overflow; the session is NOT torn down.
-//   - Recv side: a peer whose frame — or whose accumulated multipart
-//     message — exceeds the limit has its session torn down with
-//     [ErrMalformedFrame]. The violation surfaces via a monitor
-//     EventDisconnected rather than a synchronous Recv error, because
-//     the read loop detects it asynchronously of the application's
-//     call path.
+//   - Send side: SendMsg/SendBytes sum the frames up front and return a
+//     synchronous error wrapping [ErrMalformedFrame] on overflow; the
+//     session is NOT torn down.
+//   - Recv side: a peer whose message exceeds the limit has its session
+//     torn down. The read loop detects it asynchronously of the
+//     application's call path, so it surfaces as an EventDisconnected
+//     (with no reason) and a log line through [WithLogger], not as a
+//     Recv error.
 //
-// Pass 0 to disable the limit — opt-in to unlimited size, NOT
-// recommended for untrusted peers because a hostile sender can force
-// unbounded allocation.
+// For CURVE the limit applies to the plaintext; the session allows for the
+// mechanism's per-frame overhead on the wire. Memory for an inbound frame is
+// allocated as its bytes arrive, so a peer that announces a huge frame and
+// stalls costs little; the cap bounds what a completed message may occupy.
+//
+// Pass 0 to disable the limit — NOT recommended for untrusted peers.
 func WithMaxMessageSize(n int64) Option {
 	return newOption(func(c *socketConfig) error { c.maxMessageSize = n; return nil })
 }
@@ -271,13 +281,17 @@ func WithSubscribe(prefix []byte) Option {
 // independent of Bind/Connect: the socket is the server on every connection.
 // It cannot be combined with [WithPlainClient] or the CURVE options.
 //
+// The callback runs on the connection's handshake goroutine with no timeout
+// and no panic recovery: keep it quick, never call Close on the socket from
+// it, and compare secrets in constant time.
+//
 // PLAIN credentials traverse the wire in cleartext — only use this mechanism
 // on a trusted link (ipc, loopback) or wrapped in tls+tcp://. For untrusted
 // networks prefer [WithCurveServer] / [WithCurveClient]. As in libzmq, inproc
 // runs no mechanism: Bind or Connect on inproc:// fails with
 // [ErrEndpointInvalid] for a socket with any PLAIN or CURVE option.
 func WithPlainAuth(fn func(user, pass string) bool) Option {
-	return newOption(func(c *socketConfig) error { c.plainAuth = fn; return nil })
+	return newOption(func(c *socketConfig) error { c.plainAuth = fn; c.plainAuthSet = true; return nil })
 }
 
 // WithPlainClient makes the socket the PLAIN client, presenting (username,
@@ -313,9 +327,13 @@ func WithZAPDomain(domain string) Option {
 // (CurveZMQ) handshake using secretKey as its long-term private key.
 // secretKey must be 32 raw bytes (decode from Z85 via the
 // security/curve package if you store keys in the standard textual
-// format). CURVE provides forward-secret AEAD encryption and mutual
-// authentication against each connecting client's long-term public key.
-// Clients must present a matching public key via [WithCurveClient].
+// format). CURVE provides forward-secret AEAD encryption; the client
+// authenticates the server by its pinned public key, and the handshake
+// proves that the client holds the secret half of the public key it
+// presents. Which client keys are *allowed* is not decided here: without a
+// [WithZAPHandler] on the Context every client that completes the
+// handshake is accepted. Install a ZAP handler that checks the client's
+// public key (the ZAP request's credential) to authorize clients.
 // inproc runs no mechanism, so a CURVE socket cannot Bind or Connect on
 // inproc:// (the call fails with [ErrEndpointInvalid]).
 func WithCurveServer(secretKey []byte) Option {
@@ -337,6 +355,7 @@ func WithCurveServer(secretKey []byte) Option {
 func WithCurveClient(serverKey, publicKey, secretKey []byte) Option {
 	return newOption(func(c *socketConfig) error {
 		c.curveServer = false
+		c.curveClientSet = true
 		c.curveServerKey = bytes.Clone(serverKey)
 		c.curvePublicKey = bytes.Clone(publicKey)
 		c.curveSecretKey = bytes.Clone(secretKey)
@@ -403,6 +422,9 @@ func WithHandshakeTimeout(d time.Duration) Option {
 // when the channel is full the event is dropped rather than blocking
 // the socket's hot path. A buffer of 64-256 events is recommended;
 // consumers that lag materially are responsible for their own drops.
+// Never close the channel: events are emitted from session goroutines and
+// one may still be in flight after [Socket.Monitor] (nil) or Close
+// returns. Stop reading and let it be garbage collected instead.
 func WithMonitor(ch chan<- Event, mask EventType) Option {
 	return newOption(func(c *socketConfig) error {
 		c.monitor = ch
@@ -428,6 +450,23 @@ func nonNeg[T int | int64 | time.Duration](name string, v T) error {
 	return nil
 }
 
+// MaxHWM is the largest value WithSendHWM and WithRecvHWM accept. A positive
+// HWM is the capacity of a per-peer channel allocated when the connection is
+// made (8 bytes per slot), so a cap keeps a typo from reserving gigabytes per
+// connection or overflowing the channel allocator. Use 0 for an unbounded
+// queue.
+const MaxHWM = 1 << 20
+
+func hwmInRange(name string, v int) error {
+	if v < 0 {
+		return fmt.Errorf("gozmq: %s requires n >= 0", name)
+	}
+	if v > MaxHWM {
+		return fmt.Errorf("gozmq: %s(%d) exceeds MaxHWM (%d); use 0 for an unbounded queue", name, v, MaxHWM)
+	}
+	return nil
+}
+
 // securityConfigured reports whether any security mechanism option is set:
 // PLAIN, CURVE or WithSecurityMech. Validation keeps to at most one, STREAM
 // takes none, and inproc refuses a socket that has one.
@@ -435,16 +474,14 @@ func (c *socketConfig) securityConfigured() bool {
 	return c.newSecurityMech != nil || c.plainConfigured() || c.curveConfigured()
 }
 
-func (c *socketConfig) plainConfigured() bool { return c.plainAuth != nil || c.plainClient }
+func (c *socketConfig) plainConfigured() bool { return c.plainAuthSet || c.plainClient }
 
-func (c *socketConfig) curveConfigured() bool {
-	return len(c.curveSecretKey) > 0 || len(c.curvePublicKey) > 0 || len(c.curveServerKey) > 0 || c.curveServer
-}
+func (c *socketConfig) curveConfigured() bool { return c.curveServer || c.curveClientSet }
 
 func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 	for _, check := range []error{
-		nonNeg("WithSendHWM", cfg.sendHWM),
-		nonNeg("WithRecvHWM", cfg.recvHWM),
+		hwmInRange("WithSendHWM", cfg.sendHWM),
+		hwmInRange("WithRecvHWM", cfg.recvHWM),
 		nonNeg("WithMaxMessageSize", cfg.maxMessageSize),
 		nonNeg("WithHandshakeTimeout", cfg.handshakeTimeout),
 		nonNeg("WithReconnectInterval", cfg.reconnectInterval),
@@ -468,6 +505,20 @@ func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 	// pick one (CURVE over PLAIN), or fail every session rather than NewSocket
 	// (PLAIN server plus client).
 	plainSet, curveSet := cfg.plainConfigured(), cfg.curveConfigured()
+	// A mechanism option whose arguments cannot build the mechanism must
+	// fail here. newMechanism falls back to NULL only when no mechanism is
+	// configured; an incomplete one must never reach that fallback.
+	switch {
+	case cfg.plainAuthSet && cfg.plainAuth == nil:
+		return fmt.Errorf("gozmq: WithPlainAuth requires a non-nil authenticate function")
+	case cfg.plainClient && (len(cfg.plainClientUser) > 255 || len(cfg.plainClientPass) > 255):
+		return fmt.Errorf("gozmq: WithPlainClient username and password must each be at most 255 bytes")
+	case cfg.curveServer && len(cfg.curveSecretKey) != 32:
+		return fmt.Errorf("gozmq: WithCurveServer requires a 32-byte secret key, got %d bytes", len(cfg.curveSecretKey))
+	case cfg.curveClientSet && (len(cfg.curveServerKey) != 32 || len(cfg.curvePublicKey) != 32 || len(cfg.curveSecretKey) != 32):
+		return fmt.Errorf("gozmq: WithCurveClient requires three 32-byte keys, got server=%d public=%d secret=%d bytes",
+			len(cfg.curveServerKey), len(cfg.curvePublicKey), len(cfg.curveSecretKey))
+	}
 	switch {
 	case cfg.newSecurityMech != nil && plainSet:
 		return fmt.Errorf("gozmq: WithSecurityMech is mutually exclusive with the PLAIN options")
@@ -507,34 +558,5 @@ func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 			return fmt.Errorf("gozmq: WithRecvBufferPool is not applicable to STREAM sockets (no ZMTP framing)")
 		}
 	}
-	if err := validateCurveKey("secret", cfg.curveSecretKey); err != nil {
-		return err
-	}
-	if err := validateCurveKey("public", cfg.curvePublicKey); err != nil {
-		return err
-	}
-	if err := validateCurveKey("server", cfg.curveServerKey); err != nil {
-		return err
-	}
-	if cfg.curveServer {
-		if len(cfg.curveSecretKey) != 32 {
-			return fmt.Errorf("gozmq: WithCurveServer requires a 32-byte secret key")
-		}
-	} else if len(cfg.curveSecretKey) > 0 || len(cfg.curvePublicKey) > 0 || len(cfg.curveServerKey) > 0 {
-		if len(cfg.curveSecretKey) != 32 || len(cfg.curvePublicKey) != 32 || len(cfg.curveServerKey) != 32 {
-			return fmt.Errorf("gozmq: WithCurveClient requires 32-byte server, public, and secret keys")
-		}
-	}
 	return nil
-}
-
-// validateCurveKey asserts that k is either empty (option not set) or
-// exactly 32 bytes (a complete Curve25519 key). It returns a wrapped
-// error naming which key role failed the check so callers can locate
-// the misconfigured option.
-func validateCurveKey(name string, k []byte) error {
-	if len(k) == 0 || len(k) == 32 {
-		return nil
-	}
-	return fmt.Errorf("gozmq: CURVE %s key must be 32 bytes, got %d", name, len(k))
 }

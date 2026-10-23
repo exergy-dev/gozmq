@@ -1,6 +1,6 @@
 // Package codecjson provides an encoding/json-backed implementation of
-// typed.Codec. It lives in a subpackage so callers who use a different
-// codec never pull in encoding/json transitively.
+// typed.Codec. It lives in a subpackage so that the typed package itself
+// expresses no preference for a serialization format.
 package codecjson
 
 import "encoding/json"

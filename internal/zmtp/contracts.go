@@ -16,15 +16,38 @@ const (
 type FrameCodec interface {
 	// ReadFrame reads one frame from r. Returns the flags byte and a body
 	// slice. If dst has sufficient capacity the body aliases dst[:n];
-	// otherwise it is a buffer of length n from alloc (a fresh allocation
-	// when alloc is nil) owned by the caller.
-	ReadFrame(r io.Reader, dst []byte, alloc func(n int) []byte) (flags uint8, body []byte, err error)
+	// otherwise it is a buffer of length n from pool.Get (a fresh
+	// allocation when pool is nil) owned by the caller. Implementations
+	// must not allocate the full body from the length header alone: memory
+	// for a body must grow with the bytes actually received, so a peer that
+	// announces a huge frame and stalls cannot pin the whole cap.
+	ReadFrame(r io.Reader, dst []byte, pool BodyPool) (flags uint8, body []byte, err error)
 
 	// WriteFrame writes flags + length + body as one ZMTP frame. Multi-byte
 	// lengths are big-endian per the spec. Implementations may internally
 	// batch via net.Buffers; callers should not assume one write = one
 	// socket operation.
 	WriteFrame(w io.Writer, flags uint8, body []byte) error
+}
+
+// BodyPool supplies frame body buffers to ReadFrame. Get returns a buffer of
+// length n (its contents need not be zeroed); Put takes back a buffer the
+// codec used only as an intermediate and will not return to the caller.
+// The buffer ReadFrame returns is always one from Get, so the caller can Put
+// it back once the frame is released.
+type BodyPool interface {
+	Get(n int) []byte
+	Put(b []byte)
+}
+
+// ScratchPool is optionally implemented by a BodyPool to supply the
+// intermediate buffers ReadFrame collects a large body's first bytes in,
+// separately from the body buffers Get hands to the caller. A caller whose
+// bodies are plain allocations (no Put ever reaches it) can still recycle
+// intermediates this way; a BodyPool without it lends them through Get/Put.
+type ScratchPool interface {
+	GetScratch(n int) []byte
+	PutScratch(b []byte)
 }
 
 // FrameHeaderAppender is the allocation-free fast path used by the writer

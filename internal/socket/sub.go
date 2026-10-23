@@ -37,7 +37,7 @@ import (
 //
 // NewSubEngine returns both the opaque Engine (plumbed into
 // the Socket layer) and a *SubEngine handle the public gozmq package
-// uses to implement WithSubscribe/WithUnsubscribe and dynamic
+// uses to implement WithSubscribe and dynamic
 // Subscribe/Unsubscribe calls. Internally the two returned values point
 // to the same object — the split keeps subscription controls out of the
 // frozen Engine interface.
