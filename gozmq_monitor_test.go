@@ -136,12 +136,9 @@ func TestMonitor_ServerLifecycle(t *testing.T) {
 	// Drain any pending events for up to 1s looking for EventClosed.
 	// Use separate contexts per channel so the drain of one doesn't
 	// starve the drain of the other.
-	srvDrainCtx, srvDrainCancel := context.WithTimeout(context.Background(), 1*time.Second)
-	srvTail := drainEvents(srvDrainCtx, srvEvents)
-	srvDrainCancel()
-	cliDrainCtx, cliDrainCancel := context.WithTimeout(context.Background(), 1*time.Second)
-	cliTail := drainEvents(cliDrainCtx, cliEvents)
-	cliDrainCancel()
+	closed := func(evts []gozmq.Event) bool { return hasType(evts, gozmq.EventClosed) }
+	srvTail := testutil.CollectUntil(srvEvents, 3*time.Second, closed)
+	cliTail := testutil.CollectUntil(cliEvents, 3*time.Second, closed)
 	if !hasType(srvTail, gozmq.EventClosed) {
 		t.Errorf("server: no EventClosed after Close; tail=%v", eventTypes(srvTail))
 	}
@@ -161,10 +158,7 @@ func TestMonitor_BindFailed(t *testing.T) {
 	if err := s.Bind("bogus://nothing"); err == nil {
 		t.Fatal("expected bind error for bogus scheme")
 	}
-	// Pull any events with a short wait.
-	drainCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	collected := drainEvents(drainCtx, evts)
-	cancel()
+	collected := testutil.CollectUntil(evts, 3*time.Second, func(evts []gozmq.Event) bool { return hasType(evts, gozmq.EventBindFailed) })
 	if !hasType(collected, gozmq.EventBindFailed) {
 		t.Errorf("no EventBindFailed; collected=%v", eventTypes(collected))
 	}
@@ -236,10 +230,10 @@ func TestMonitor_MaskFiltersEvents(t *testing.T) {
 		t.Errorf("close: %v", err)
 	}
 
-	// Drain the channel for a short window.
-	drainCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	collected := drainEvents(drainCtx, evts)
-	cancel()
+	// Listening is the only event the mask lets through; Closed must not
+	// follow it, so give the masked-out event a short window to show up.
+	collected := testutil.CollectUntil(evts, 3*time.Second, func(evts []gozmq.Event) bool { return len(evts) > 0 })
+	collected = append(collected, testutil.CollectUntil(evts, 100*time.Millisecond, func([]gozmq.Event) bool { return false })...)
 
 	for _, ev := range collected {
 		if ev.Type != gozmq.EventListening {
@@ -264,10 +258,7 @@ func TestMonitor_EventTimestampsPopulated(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Errorf("close: %v", err)
 	}
-	drainCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	collected := drainEvents(drainCtx, evts)
-	cancel()
-
+	collected := testutil.CollectUntil(evts, 3*time.Second, func(evts []gozmq.Event) bool { return hasType(evts, gozmq.EventClosed) })
 	if len(collected) == 0 {
 		t.Fatal("no events collected")
 	}

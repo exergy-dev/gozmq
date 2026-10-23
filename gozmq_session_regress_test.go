@@ -47,21 +47,17 @@ func TestLingerDrainsUnboundedQueue(t *testing.T) {
 			_, err = pull.RecvBytes(c)
 			require.NoError(t, err)
 
+			const n = 20000
 			got := make(chan int, 1)
 			go func() {
 				k := 0
-				for {
-					rc, rcancel := context.WithTimeout(context.Background(), time.Second)
-					_, err := pull.RecvBytes(rc)
-					rcancel()
-					if err != nil {
-						got <- k
-						return
+				for ; k < n; k++ {
+					if _, err := pull.RecvBytes(c); err != nil {
+						break
 					}
-					k++
 				}
+				got <- k
 			}()
-			const n = 20000
 			for i := 0; i < n; i++ {
 				require.NoError(t, push.SendBytes(c, []byte("x")))
 			}

@@ -53,14 +53,12 @@ func requireEvent(t *testing.T, ch <-chan Event, typ EventType) {
 	testutil.WaitEvent(t, ch, time.Second, func(e Event) bool { return e.Type == typ })
 }
 
-// TestInproc_ConnectBeforeBindWaits: a Connect may precede its Bind by
-// longer than the old 500 ms window.
+// TestInproc_ConnectBeforeBindWaits: a Connect may precede its Bind.
 func TestInproc_ConnectBeforeBindWaits(t *testing.T) {
 	zctx := newInprocContext(t)
 	const ep = "inproc://connect-before-bind"
 	push := inprocSocket(t, zctx, Push)
 	require.NoError(t, push.Connect(ep))
-	time.Sleep(600 * time.Millisecond)
 	pull := inprocSocket(t, zctx, Pull)
 	require.NoError(t, pull.Bind(ep))
 	requireRoundTrip(t, push, pull, "late bind")

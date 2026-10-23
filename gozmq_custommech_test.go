@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/security"
 )
 
@@ -256,10 +257,9 @@ func TestWithSecurityMechConstructorErrorDoesNotDowngrade(t *testing.T) {
 	defer func() { _ = client.Close() }()
 	require.NoError(t, client.Connect(rep.LastEndpoint()))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
 	// The server never completes a handshake, so no request is ever read.
+	testutil.WaitEvent(t, events, 5*time.Second, func(e gozmq.Event) bool { return e.Type == gozmq.EventHandshakeFailedProtocol })
+	ctx := testutil.Ctx(t, 100*time.Millisecond)
 	_ = client.SendBytes(ctx, []byte("ping"))
 	_, err = rep.RecvBytes(ctx)
 	require.Error(t, err)

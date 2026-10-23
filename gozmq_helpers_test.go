@@ -13,13 +13,20 @@ import (
 	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
+// withTestDefaults prepends the options every test socket wants: no
+// linger, so a Close with unread messages does not wait out the 1 s
+// default. A test's own options come later and win.
+func withTestDefaults(opts []gozmq.Option) []gozmq.Option {
+	return append([]gozmq.Option{gozmq.WithLinger(0)}, opts...)
+}
+
 // newTestSocket creates a Context plus a single socket of the given type.
 // Cleanup of both is registered via t.Cleanup.
 func newTestSocket(t *testing.T, typ gozmq.SocketType, opts ...gozmq.Option) (*gozmq.Context, *gozmq.Socket) {
 	t.Helper()
 	ctx := gozmq.NewContext()
 	t.Cleanup(func() { _ = ctx.Close() })
-	s, err := ctx.NewSocket(typ, opts...)
+	s, err := ctx.NewSocket(typ, withTestDefaults(opts)...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 	return ctx, s
@@ -46,11 +53,11 @@ func newSocketPairTypes(
 	t.Helper()
 	ctx := gozmq.NewContext()
 	t.Cleanup(func() { _ = ctx.Close() })
-	server, err := ctx.NewSocket(serverType, serverOpts...)
+	server, err := ctx.NewSocket(serverType, withTestDefaults(serverOpts)...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = server.Close() })
 	require.NoError(t, server.Bind(transport))
-	client, err := ctx.NewSocket(clientType, clientOpts...)
+	client, err := ctx.NewSocket(clientType, withTestDefaults(clientOpts)...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
 	require.NoError(t, client.Connect(server.LastEndpoint()))
@@ -73,11 +80,11 @@ func newPubSubPair(
 	t.Helper()
 	ctx := gozmq.NewContext()
 	t.Cleanup(func() { _ = ctx.Close() })
-	pub, err := ctx.NewSocket(gozmq.Pub, pubOpts...)
+	pub, err := ctx.NewSocket(gozmq.Pub, withTestDefaults(pubOpts)...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pub.Close() })
 	require.NoError(t, pub.Bind(endpoint))
-	sub, err := ctx.NewSocket(gozmq.Sub, subOpts...)
+	sub, err := ctx.NewSocket(gozmq.Sub, withTestDefaults(subOpts)...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sub.Close() })
 	if len(topics) == 0 {
