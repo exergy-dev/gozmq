@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"slices"
 
 	"github.com/exergy-dev/gozmq/internal/bufpool"
@@ -37,7 +36,7 @@ func (s *Session) runReader() {
 		// Seed the last-inbound clock so a heartbeat fired immediately
 		// after handshake doesn't trip the timeout.
 		s.lastInboundUnix.Store(s.cfg.Now())
-		peerInfo := pipe.PeerInfo{Identity: identityFromMetadata(s.cfg.Mech)}
+		peerInfo := pipe.PeerInfo{Identity: []byte(s.cfg.Mech.PeerMetadata()["Identity"])}
 		s.sessionPipe, s.enginePipe = pipe.NewPair(s.cfg.RecvHWM, s.cfg.SendHWM, pipe.PeerInfo{}, peerInfo)
 	}
 	close(s.hsOut) // the writer moves on to traffic, or exits on failure
@@ -88,7 +87,7 @@ func (s *Session) readLoop() {
 
 		flags, body, err := s.cfg.Codec.ReadFrame(s.reader, scratch, s.recvPool)
 		if err != nil {
-			if !isShutdownErr(err) {
+			if !zmqerr.IsShutdown(err) {
 				s.cfg.Logger.Debug("gozmq/session: reader exit", "err", err)
 			}
 			return
@@ -158,7 +157,7 @@ func (s *Session) readLoop() {
 		frames = frames[:0]
 		if err := s.publishInbound(m); err != nil {
 			m.Release() // never queued: the buffers can go back now
-			if !isShutdownErr(err) {
+			if !zmqerr.IsShutdown(err) {
 				s.cfg.Logger.Debug("gozmq/session: publish inbound", "err", err)
 			}
 			return
@@ -209,23 +208,17 @@ func (s *Session) publishInbound(m *msg.Msg) error {
 	return nil
 }
 
-// handleCommand dispatches a COMMAND-flagged body. ZMTP commands are
-// length-prefixed: 1 byte name length, name bytes, then body. We
-// decode just enough to pick PING/PONG/etc. Unknown commands are
-// dropped silently per ZMTP 3.1 §3.
 // maxPingContextLen is the ZMTP 3.1 limit on the opaque PING context.
 const maxPingContextLen = 16
 
+// handleCommand dispatches a COMMAND-flagged body. Unknown commands are
+// dropped silently per ZMTP 3.1 §3.
 func (s *Session) handleCommand(body []byte) error {
-	if len(body) < 1 {
-		return fmt.Errorf("%w: empty command body", zmqerr.ErrMalformedFrame)
+	cmd, err := zmtp.DecodeCommand(body)
+	if err != nil {
+		return err
 	}
-	nameLen := int(body[0])
-	if 1+nameLen > len(body) {
-		return fmt.Errorf("%w: command name overruns body (len=%d body=%d)", zmqerr.ErrMalformedFrame, nameLen, len(body))
-	}
-	name := string(body[1 : 1+nameLen])
-	rest := body[1+nameLen:]
+	name, rest := cmd.Name, cmd.Body
 
 	switch name {
 	case "PING":
@@ -259,15 +252,8 @@ func (s *Session) handleCommand(body []byte) error {
 			s.cfg.Logger.Debug("gozmq/session: ignoring subscription command", "name", name)
 			return nil
 		}
-		var flag byte = 0x01
-		if name == "CANCEL" {
-			flag = 0x00
-		}
-		body := make([]byte, 1+len(rest))
-		body[0] = flag
-		copy(body[1:], rest)
-		if err := s.publishInbound(msg.FromBytes(body)); err != nil {
-			if !isShutdownErr(err) {
+		if err := s.publishInbound(msg.FromBytes(zmtp.SubscriptionFrame(name == "SUBSCRIBE", rest))); err != nil {
+			if !zmqerr.IsShutdown(err) {
 				return fmt.Errorf("gozmq/session: publish subscription: %w", err)
 			}
 			return err
@@ -277,14 +263,10 @@ func (s *Session) handleCommand(body []byte) error {
 		// Peer requested an orderly shutdown. Surface as a normal exit.
 		return io.EOF
 	case "ERROR":
-		// Treat as an auth/protocol-level failure and exit. The error
-		// text (if any) is in rest after a 1-byte length prefix.
-		reason := "(none)"
-		if len(rest) >= 1 {
-			rl := int(rest[0])
-			if 1+rl <= len(rest) {
-				reason = string(rest[1 : 1+rl])
-			}
+		// Treat as an auth/protocol-level failure and exit.
+		reason, rerr := zmtp.DecodeErrorReason(rest)
+		if rerr != nil {
+			reason = "(none)"
 		}
 		return fmt.Errorf("%w: peer ERROR: %s", zmqerr.ErrSocketClosed, reason)
 	default:
@@ -293,16 +275,4 @@ func (s *Session) handleCommand(body []byte) error {
 		s.cfg.Logger.Debug("gozmq/session: ignoring unknown command", "name", name)
 		return nil
 	}
-}
-
-// isShutdownErr returns true for errors we expect to see during a normal
-// teardown (peer EOF, conn closed by Stop, ctx cancellation). Used by both
-// the reader and writer loops to suppress noisy logs.
-func isShutdownErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) ||
-		errors.Is(err, context.Canceled) || errors.Is(err, zmqerr.ErrSocketClosed) ||
-		errors.Is(err, net.ErrClosed)
 }

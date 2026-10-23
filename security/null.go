@@ -51,6 +51,7 @@ const nullMechName = "NULL"
 // done == sentReady && peerReady.
 type nullMech struct {
 	MechBase
+	identityFraming
 	sentReady bool
 	peerReady bool
 }
@@ -88,7 +89,7 @@ func (m *nullMech) NextHandshake(in []byte) ([]byte, bool, error) {
 			return nil, false, fmt.Errorf("gozmq/security/null: unexpected input on seed step: %w", zmqerr.ErrMalformedFrame)
 		}
 		m.sentReady = true
-		return m.encodeReady(), false, nil
+		return EncodeReady(m.localMeta), false, nil
 	}
 
 	// Second direction: parse the peer's READY command body.
@@ -102,7 +103,7 @@ func (m *nullMech) NextHandshake(in []byte) ([]byte, bool, error) {
 			}
 			return nil, false, fmt.Errorf("gozmq/security/null: server rejected handshake: %q: %w", reason, zmqerr.ErrAuthFailed)
 		}
-		props, err := m.decodeReady(in)
+		props, err := DecodeReady(in)
 		if err != nil {
 			return nil, false, err
 		}
@@ -125,7 +126,7 @@ func (m *nullMech) nextServer(in []byte) ([]byte, bool, error) {
 		if in == nil {
 			return nil, false, fmt.Errorf("gozmq/security/null: nil peer input on server handshake step: %w", zmqerr.ErrMalformedFrame)
 		}
-		props, err := m.decodeReady(in)
+		props, err := DecodeReady(in)
 		if err != nil {
 			return nil, false, err
 		}
@@ -134,7 +135,7 @@ func (m *nullMech) nextServer(in []byte) ([]byte, bool, error) {
 			// error so the peer sees an auth-failure reason rather than an
 			// abrupt close. The reason text is short and opaque so as not
 			// to leak authorization detail.
-			out := encodeCommand(zmtp.CmdError, encodeErrorReason("Authentication failure"))
+			out := zmtp.EncodeError("Authentication failure")
 			return out, false, fmt.Errorf("gozmq/security/null: ZAP rejected peer: %w", err)
 		}
 		m.MergePeerMetadata(props)
@@ -142,7 +143,7 @@ func (m *nullMech) nextServer(in []byte) ([]byte, bool, error) {
 	}
 	if !m.sentReady {
 		m.sentReady = true
-		return m.encodeReady(), true, nil
+		return EncodeReady(m.localMeta), true, nil
 	}
 	return nil, true, nil
 }
@@ -155,32 +156,4 @@ func (m *nullMech) authorizeNull() error {
 		return nil
 	}
 	return m.AuthorizeZAP(nullMechName, nil)
-}
-
-// IdentityFraming reports that NULL frames cross the wire unmodified.
-func (*nullMech) IdentityFraming() bool { return true }
-
-// EncodeFrame is the identity codec for NULL — no per-frame rewriting.
-func (*nullMech) EncodeFrame(flags uint8, plain []byte) (uint8, []byte, error) {
-	return flags, plain, nil
-}
-
-// DecodeFrame is the identity codec for NULL — no per-frame rewriting.
-func (*nullMech) DecodeFrame(flags uint8, wire []byte) (uint8, []byte, error) {
-	return flags, wire, nil
-}
-
-// encodeReady builds a ZMTP READY command body (name + metadata property
-// list). The session layer wraps this in a COMMAND frame. NULL's handshake
-// is nothing but this exchange, so it delegates to the shared codec that
-// out-of-tree mechanisms use (see ready.go).
-func (m *nullMech) encodeReady() []byte {
-	return EncodeReady(m.localMeta)
-}
-
-// decodeReady parses a READY command body and returns its metadata. ZMTP
-// command names are exact (case-sensitive) ASCII tokens, so the match is
-// byte-exact.
-func (m *nullMech) decodeReady(body []byte) (map[string]string, error) {
-	return DecodeReady(body)
 }

@@ -433,8 +433,7 @@ func (m *curveMech) buildHello() ([]byte, error) {
 	}
 
 	body := make([]byte, 0, helloBodySize)
-	body = append(body, byte(len(cmdHello)))
-	body = append(body, cmdHello...)
+	body = zmtp.AppendCommandName(body, cmdHello)
 	body = append(body, curveVersionMajor, curveVersionMinor)
 	body = append(body, make([]byte, 72)...)
 	body = append(body, m.ourEphPublic[:]...)
@@ -454,7 +453,7 @@ func (m *curveMech) parseHello(body []byte) error {
 	if len(body) != helloBodySize {
 		return fmt.Errorf("gozmq/security/curve: HELLO length %d != %d: %w", len(body), helloBodySize, zmqerr.ErrMalformedFrame)
 	}
-	if err := expectCommandName(body, cmdHello); err != nil {
+	if _, err := zmtp.ExpectCommand(body, cmdHello); err != nil {
 		return err
 	}
 	off := 1 + len(cmdHello)
@@ -550,8 +549,7 @@ func (m *curveMech) buildWelcome() ([]byte, error) {
 
 	// Assemble WELCOME body.
 	body := make([]byte, 0, welcomeBodySize)
-	body = append(body, byte(len(cmdWelcome)))
-	body = append(body, cmdWelcome...)
+	body = zmtp.AppendCommandName(body, cmdWelcome)
 	body = append(body, welNonceR[:]...)
 	body = append(body, welBox...)
 	if err := assertLen(len(body), welcomeBodySize, "WELCOME body"); err != nil {
@@ -567,7 +565,7 @@ func (m *curveMech) parseWelcome(body []byte) ([]byte, error) {
 	if len(body) != welcomeBodySize {
 		return nil, fmt.Errorf("gozmq/security/curve: WELCOME length %d != %d: %w", len(body), welcomeBodySize, zmqerr.ErrMalformedFrame)
 	}
-	if err := expectCommandName(body, cmdWelcome); err != nil {
+	if _, err := zmtp.ExpectCommand(body, cmdWelcome); err != nil {
 		return nil, err
 	}
 	off := 1 + len(cmdWelcome)
@@ -642,8 +640,7 @@ func (m *curveMech) buildInitiate(cookie []byte) ([]byte, error) {
 
 	// Assemble INITIATE body.
 	body := make([]byte, 0, 1+len(cmdInitiate)+cookieSize+8+len(initBox))
-	body = append(body, byte(len(cmdInitiate)))
-	body = append(body, cmdInitiate...)
+	body = zmtp.AppendCommandName(body, cmdInitiate)
 	body = append(body, cookie...)
 	body = binary.BigEndian.AppendUint64(body, counter)
 	body = append(body, initBox...)
@@ -664,7 +661,7 @@ func (m *curveMech) parseInitiate(body []byte) ([]byte, error) {
 	if len(body) < minLen {
 		return nil, fmt.Errorf("gozmq/security/curve: INITIATE length %d < min %d: %w", len(body), minLen, zmqerr.ErrMalformedFrame)
 	}
-	if err := expectCommandName(body, cmdInitiate); err != nil {
+	if _, err := zmtp.ExpectCommand(body, cmdInitiate); err != nil {
 		return nil, err
 	}
 	off := 1 + len(cmdInitiate)
@@ -767,7 +764,7 @@ func (m *curveMech) parseInitiate(body []byte) ([]byte, error) {
 		// Hand back an ERROR command body so the peer learns why it was
 		// dropped. The reason is deliberately terse — authorization
 		// detail stays on the server.
-		return errorCommand("Authentication failure"), fmt.Errorf("gozmq/security/curve: ZAP rejected client key: %w", err)
+		return zmtp.EncodeError("Authentication failure"), fmt.Errorf("gozmq/security/curve: ZAP rejected client key: %w", err)
 	}
 	m.MergePeerMetadata(props)
 	m.peerShortNonce = counter + 1
@@ -791,8 +788,7 @@ func (m *curveMech) buildReady() []byte {
 	readyBox := sealShort(prefixReady, counter, meta, &m.peerEphPublic, &m.ourEphSecret)
 
 	body := make([]byte, 0, 1+len(cmdReady)+8+len(readyBox))
-	body = append(body, byte(len(cmdReady)))
-	body = append(body, cmdReady...)
+	body = zmtp.AppendCommandName(body, cmdReady)
 	body = binary.BigEndian.AppendUint64(body, counter)
 	body = append(body, readyBox...)
 	return body
@@ -805,7 +801,7 @@ func (m *curveMech) parseReady(body []byte) error {
 	if len(body) < minLen {
 		return fmt.Errorf("gozmq/security/curve: READY length %d < min %d: %w", len(body), minLen, zmqerr.ErrMalformedFrame)
 	}
-	if err := expectCommandName(body, cmdReady); err != nil {
+	if _, err := zmtp.ExpectCommand(body, cmdReady); err != nil {
 		return err
 	}
 	off := 1 + len(cmdReady)
@@ -912,7 +908,7 @@ func (m *curveMech) DecodeFrame(flags uint8, wire []byte) (uint8, []byte, error)
 	if len(wire) < minLen {
 		return 0, nil, fmt.Errorf("gozmq/security/curve: MESSAGE length %d < min %d: %w", len(wire), minLen, zmqerr.ErrMalformedFrame)
 	}
-	if err := expectCommandName(wire, cmdMessage); err != nil {
+	if _, err := zmtp.ExpectCommand(wire, cmdMessage); err != nil {
 		return 0, nil, err
 	}
 	off := 1 + len(cmdMessage)
@@ -991,18 +987,6 @@ func assertLen(got, want int, what string) error {
 	return nil
 }
 
-// errorCommand builds a ZMTP 3.1 ERROR command body:
-// [5]"ERROR" + [1 byte reason-length][reason].
-func errorCommand(reason string) []byte {
-	if len(reason) > 255 {
-		reason = reason[:255]
-	}
-	payload := make([]byte, 0, 1+len(reason))
-	payload = append(payload, byte(len(reason)))
-	payload = append(payload, reason...)
-	return zmtp.EncodeCommand(zmtp.Command{Name: zmtp.CmdError, Body: payload})
-}
-
 // peerError returns an error wrapping ErrAuthFailed when body is the ERROR
 // a server sends instead of WELCOME or READY to reject the handshake, and
 // nil for any other command. An ERROR with a truncated reason is malformed.
@@ -1025,24 +1009,6 @@ func wipe(b []byte) {
 	for i := range b {
 		b[i] = 0
 	}
-}
-
-// expectCommandName verifies that body starts with a 1-byte length prefix
-// equal to len(name), followed by the literal name bytes. The comparison is
-// byte-exact: RFC 26 command names are fixed uppercase ASCII tokens, and
-// libzmq compares them with memcmp.
-func expectCommandName(body []byte, name string) error {
-	if len(body) < 1+len(name) {
-		return fmt.Errorf("gozmq/security/curve: %s command truncated in name: %w", name, zmqerr.ErrMalformedFrame)
-	}
-	if int(body[0]) != len(name) {
-		return fmt.Errorf("gozmq/security/curve: %s name-length byte %d != %d: %w", name, body[0], len(name), zmqerr.ErrMalformedFrame)
-	}
-	got := string(body[1 : 1+len(name)])
-	if got != name {
-		return fmt.Errorf("gozmq/security/curve: expected %s, got %q: %w", name, got, zmqerr.ErrMalformedFrame)
-	}
-	return nil
 }
 
 // checkNonceCounter returns an error wrapping zmqerr.ErrNonceExhausted

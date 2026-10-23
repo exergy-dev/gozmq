@@ -127,3 +127,22 @@ func hasProperty(props map[string]string, name string) bool {
 	}
 	return false
 }
+
+// identityFraming is embedded by the mechanisms whose per-frame transform is
+// the identity (NULL, PLAIN); it opts them into the session's zero-copy
+// framing path. It is deliberately not part of MechBase: a custom mechanism
+// must declare identity framing itself, never inherit it.
+type identityFraming struct{}
+
+// IdentityFraming reports that frames cross the wire unmodified.
+func (identityFraming) IdentityFraming() bool { return true }
+
+// EncodeFrame returns its input: the identity transform.
+func (identityFraming) EncodeFrame(flags uint8, plain []byte) (uint8, []byte, error) {
+	return flags, plain, nil
+}
+
+// DecodeFrame returns its input: the identity transform.
+func (identityFraming) DecodeFrame(flags uint8, wire []byte) (uint8, []byte, error) {
+	return flags, wire, nil
+}

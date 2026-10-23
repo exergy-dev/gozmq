@@ -3,6 +3,8 @@ package security
 import (
 	"bytes"
 	"testing"
+
+	"github.com/exergy-dev/gozmq/internal/zmtp"
 )
 
 // Fuzz targets for everything in this package that parses peer-controlled
@@ -13,7 +15,7 @@ import (
 // commands (HELLO, then INITIATE when HELLO was accepted).
 func FuzzPlainServerHandshake(f *testing.F) {
 	hello, _ := encodeHello("u", "p")
-	f.Add(hello, encodeCommand(plainCmdInitiate, EncodeMetadata(map[string]string{"Socket-Type": "PAIR"})))
+	f.Add(hello, zmtp.EncodeCommand(zmtp.Command{Name: plainCmdInitiate, Body: EncodeMetadata(map[string]string{"Socket-Type": "PAIR"})}))
 	f.Add([]byte{5, 'H', 'E', 'L', 'L', 'O', 1, 'u'}, []byte{8, 'I', 'N', 'I', 'T', 'I', 'A', 'T', 'E'})
 	f.Add([]byte{}, []byte{0x5E, 'R', 'R', 'O', 'R'})
 	f.Fuzz(func(t *testing.T, a, b []byte) {
@@ -32,8 +34,8 @@ func FuzzPlainServerHandshake(f *testing.F) {
 // FuzzPlainClientHandshake feeds a PLAIN client arbitrary WELCOME and READY
 // replies.
 func FuzzPlainClientHandshake(f *testing.F) {
-	f.Add(encodeCommand(plainCmdWelcome, nil), EncodeReady(map[string]string{"Socket-Type": "PAIR"}))
-	f.Add(encodeCommand(plainCmdError, encodeErrorReason("no")), []byte{})
+	f.Add(zmtp.EncodeCommand(zmtp.Command{Name: plainCmdWelcome}), EncodeReady(map[string]string{"Socket-Type": "PAIR"}))
+	f.Add(zmtp.EncodeError("no"), []byte{})
 	f.Add([]byte{0x5E, 'R', 'R', 'O', 'R', 0x03, '4', '0', '0'}, []byte{5, 'E', 'R', 'R', 'O', 'R', 9})
 	f.Fuzz(func(t *testing.T, a, b []byte) {
 		c := NewPlainClient("u", "p", nil)
@@ -49,7 +51,7 @@ func FuzzPlainClientHandshake(f *testing.F) {
 // FuzzNullHandshake feeds both NULL roles an arbitrary peer command.
 func FuzzNullHandshake(f *testing.F) {
 	f.Add(EncodeReady(map[string]string{"Socket-Type": "PAIR"}))
-	f.Add(encodeCommand(plainCmdError, encodeErrorReason("no")))
+	f.Add(zmtp.EncodeError("no"))
 	f.Fuzz(func(t *testing.T, a []byte) {
 		for _, role := range []Role{RoleClient, RoleServer} {
 			m := NewNull(role, nil)

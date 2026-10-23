@@ -10,6 +10,7 @@ import (
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/zmtp"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -260,7 +261,7 @@ func (e *SubEngine) removeSubFromList(key string) {
 func (e *SubEngine) forwardSubscription(ctx context.Context, p *pipe.End, subscribe bool, prefix []byte) {
 	sendCtx, cancel := context.WithTimeout(ctx, subForwardTimeout)
 	defer cancel()
-	_ = p.Send(sendCtx, msg.FromBytes(subscriptionFrame(subscribe, prefix)))
+	_ = p.Send(sendCtx, msg.FromBytes(zmtp.SubscriptionFrame(subscribe, prefix)))
 }
 
 // subForwardTimeout bounds how long Subscribe/Unsubscribe will wait on

@@ -3,10 +3,9 @@ package gozmq
 import (
 	"context"
 	"errors"
-	"io"
-	"net"
-	"strings"
 	"time"
+
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
 // Close tears the socket down. Idempotent: repeated calls return nil,
@@ -66,7 +65,7 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 
 	var errs []error
 	addErr := func(err error) {
-		if err == nil || isExpectedTeardownErr(err) {
+		if err == nil || zmqerr.IsShutdown(err) {
 			return
 		}
 		errs = append(errs, err)
@@ -116,29 +115,6 @@ func (s *Socket) CloseCtx(ctx context.Context) error {
 		return joined
 	}
 	return ctxErr
-}
-
-// isExpectedTeardownErr reports whether err is one of the
-// "already-shutting-down" errors that routinely fire when Close races
-// with the session's own teardown — closing a conn that was closed by
-// the reader, closing a pipe that was closed by the peer, etc. These
-// are normal and MUST NOT be surfaced from Close as a user-visible
-// failure.
-func isExpectedTeardownErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
-		return true
-	}
-	// net.OpError unwraps via Is on its Err; the sentinel above matches
-	// "use of closed network connection" from net.Listener.Close and
-	// net.Conn.Close in go1.16+. Belt-and-braces: match the message too
-	// in case some path wraps it differently.
-	if strings.Contains(err.Error(), "use of closed network connection") {
-		return true
-	}
-	return false
 }
 
 // waitDrained blocks until every channel in drains closes, bounded by

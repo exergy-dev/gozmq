@@ -20,7 +20,6 @@
 package security
 
 import (
-	"bytes"
 	"fmt"
 
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
@@ -35,8 +34,6 @@ const (
 	plainCmdHello    = "HELLO"
 	plainCmdWelcome  = "WELCOME"
 	plainCmdInitiate = "INITIATE"
-	plainCmdError    = "ERROR"
-	plainCmdReady    = "READY"
 )
 
 // plainState names the state of the handshake state machine. States progress
@@ -69,6 +66,7 @@ const (
 // NextHandshake single-threaded.
 type plainMech struct {
 	MechBase
+	identityFraming
 	state    plainState
 	username string
 	password string
@@ -111,19 +109,6 @@ func NewPlainServer(authenticate func(user, pass string) bool, localMeta map[str
 // Name reports the greeting mechanism token, unpadded.
 func (*plainMech) Name() string { return plainMechName }
 
-// IdentityFraming reports that PLAIN frames cross the wire unmodified.
-func (*plainMech) IdentityFraming() bool { return true }
-
-// EncodeFrame is the identity codec for PLAIN — no per-frame rewriting.
-func (*plainMech) EncodeFrame(flags uint8, plain []byte) (uint8, []byte, error) {
-	return flags, plain, nil
-}
-
-// DecodeFrame is the identity codec for PLAIN — no per-frame rewriting.
-func (*plainMech) DecodeFrame(flags uint8, wire []byte) (uint8, []byte, error) {
-	return flags, wire, nil
-}
-
 // NextHandshake drives the PLAIN handshake state machine. See the package
 // header comment for the state sequence.
 func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
@@ -144,30 +129,30 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		if in == nil {
 			return nil, false, fmt.Errorf("gozmq/security/plain: nil peer input awaiting WELCOME: %w", zmqerr.ErrMalformedFrame)
 		}
-		name, payload, err := parseCommand(in)
+		cmd, err := zmtp.DecodeCommand(in)
 		if err != nil {
 			return nil, false, fmt.Errorf("gozmq/security/plain: parse WELCOME/ERROR body %x: %w", in, err)
 		}
-		switch name {
+		switch cmd.Name {
 		case plainCmdWelcome:
-			// WELCOME has no payload per RFC 24 §4.
-			if len(payload) != 0 {
-				return nil, false, fmt.Errorf("gozmq/security/plain: WELCOME carries unexpected payload (%d bytes): %w", len(payload), zmqerr.ErrMalformedFrame)
+			// WELCOME has no cmd.Body per RFC 24 §4.
+			if len(cmd.Body) != 0 {
+				return nil, false, fmt.Errorf("gozmq/security/plain: WELCOME carries unexpected cmd.Body (%d bytes): %w", len(cmd.Body), zmqerr.ErrMalformedFrame)
 			}
 			m.state = plainClientSendInitiate
 			return m.NextHandshake(nil)
-		case plainCmdError:
-			reason, perr := parseErrorReason(payload)
+		case zmtp.CmdError:
+			reason, perr := zmtp.DecodeErrorReason(cmd.Body)
 			if perr != nil {
 				return nil, false, perr
 			}
 			return nil, false, fmt.Errorf("gozmq/security/plain: server rejected credentials: %q: %w", reason, zmqerr.ErrAuthFailed)
 		default:
-			return nil, false, fmt.Errorf("gozmq/security/plain: expected WELCOME or ERROR, got %q: %w", name, zmqerr.ErrMalformedFrame)
+			return nil, false, fmt.Errorf("gozmq/security/plain: expected WELCOME or ERROR, got %q: %w", cmd.Name, zmqerr.ErrMalformedFrame)
 		}
 
 	case plainClientSendInitiate:
-		out := encodeCommand(plainCmdInitiate, zmtp.MetadataCodec.Encode(m.localMeta))
+		out := zmtp.EncodeCommand(zmtp.Command{Name: plainCmdInitiate, Body: zmtp.MetadataCodec.Encode(m.localMeta)})
 		m.state = plainClientRecvReady
 		return out, false, nil
 
@@ -175,19 +160,19 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		if in == nil {
 			return nil, false, fmt.Errorf("gozmq/security/plain: nil peer input awaiting READY: %w", zmqerr.ErrMalformedFrame)
 		}
-		name, payload, err := parseCommand(in)
+		cmd, err := zmtp.DecodeCommand(in)
 		if err != nil {
 			return nil, false, fmt.Errorf("gozmq/security/plain: parse READY body %x: %w", in, err)
 		}
-		switch name {
-		case plainCmdError:
-			reason, perr := parseErrorReason(payload)
+		switch cmd.Name {
+		case zmtp.CmdError:
+			reason, perr := zmtp.DecodeErrorReason(cmd.Body)
 			if perr != nil {
 				return nil, false, perr
 			}
 			return nil, false, fmt.Errorf("gozmq/security/plain: server rejected INITIATE: %q: %w", reason, zmqerr.ErrAuthFailed)
-		case plainCmdReady:
-			props, err := zmtp.MetadataCodec.Decode(payload)
+		case zmtp.CmdReady:
+			props, err := zmtp.MetadataCodec.Decode(cmd.Body)
 			if err != nil {
 				return nil, false, err
 			}
@@ -195,7 +180,7 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 			m.state = plainDone
 			return nil, true, nil
 		default:
-			return nil, false, fmt.Errorf("gozmq/security/plain: expected READY or ERROR, got %q: %w", name, zmqerr.ErrMalformedFrame)
+			return nil, false, fmt.Errorf("gozmq/security/plain: expected READY or ERROR, got %q: %w", cmd.Name, zmqerr.ErrMalformedFrame)
 		}
 
 	// ------------------------------------------------------------------ Server
@@ -211,14 +196,14 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		if in == nil {
 			return nil, false, fmt.Errorf("gozmq/security/plain: nil peer input awaiting HELLO: %w", zmqerr.ErrMalformedFrame)
 		}
-		name, payload, err := parseCommand(in)
+		cmd, err := zmtp.DecodeCommand(in)
 		if err != nil {
 			return nil, false, err
 		}
-		if name != plainCmdHello {
-			return nil, false, fmt.Errorf("gozmq/security/plain: expected HELLO, got %q: %w", name, zmqerr.ErrMalformedFrame)
+		if cmd.Name != plainCmdHello {
+			return nil, false, fmt.Errorf("gozmq/security/plain: expected HELLO, got %q: %w", cmd.Name, zmqerr.ErrMalformedFrame)
 		}
-		user, pass, err := parseHello(payload)
+		user, pass, err := parseHello(cmd.Body)
 		if err != nil {
 			return nil, false, err
 		}
@@ -227,7 +212,7 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		switch {
 		case m.zap != nil:
 			if err := m.AuthorizeZAP(plainMechName, [][]byte{[]byte(user), []byte(pass)}); err != nil {
-				out := encodeCommand(plainCmdError, encodeErrorReason("Invalid username or password"))
+				out := zmtp.EncodeError("Invalid username or password")
 				m.state = plainDone
 				return out, false, fmt.Errorf("gozmq/security/plain: ZAP rejected user %q: %w", user, err)
 			}
@@ -235,12 +220,12 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 			// Emit ERROR and tear down. The reason text is short and
 			// opaque per RFC 24's guidance not to leak authentication
 			// detail.
-			out := encodeCommand(plainCmdError, encodeErrorReason("Invalid username or password"))
+			out := zmtp.EncodeError("Invalid username or password")
 			m.state = plainDone
 			return out, false, fmt.Errorf("gozmq/security/plain: authentication failed for user %q: %w", user, zmqerr.ErrAuthFailed)
 		}
 		// Success: emit WELCOME, await INITIATE.
-		out := encodeCommand(plainCmdWelcome, nil)
+		out := zmtp.EncodeCommand(zmtp.Command{Name: plainCmdWelcome, Body: nil})
 		m.state = plainServerRecvInitiate
 		return out, false, nil
 
@@ -248,14 +233,14 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		if in == nil {
 			return nil, false, fmt.Errorf("gozmq/security/plain: nil peer input awaiting INITIATE: %w", zmqerr.ErrMalformedFrame)
 		}
-		name, payload, err := parseCommand(in)
+		cmd, err := zmtp.DecodeCommand(in)
 		if err != nil {
 			return nil, false, err
 		}
-		if name != plainCmdInitiate {
-			return nil, false, fmt.Errorf("gozmq/security/plain: expected INITIATE, got %q: %w", name, zmqerr.ErrMalformedFrame)
+		if cmd.Name != plainCmdInitiate {
+			return nil, false, fmt.Errorf("gozmq/security/plain: expected INITIATE, got %q: %w", cmd.Name, zmqerr.ErrMalformedFrame)
 		}
-		props, err := zmtp.MetadataCodec.Decode(payload)
+		props, err := zmtp.MetadataCodec.Decode(cmd.Body)
 		if err != nil {
 			return nil, false, err
 		}
@@ -264,7 +249,7 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		return m.NextHandshake(nil)
 
 	case plainServerSendReady:
-		out := encodeCommand(plainCmdReady, zmtp.MetadataCodec.Encode(m.localMeta))
+		out := zmtp.EncodeCommand(zmtp.Command{Name: zmtp.CmdReady, Body: zmtp.MetadataCodec.Encode(m.localMeta)})
 		m.state = plainDone
 		return out, true, nil
 
@@ -277,56 +262,6 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 // ---------------------------------------------------------------------------
 // Wire helpers (RFC 24 §4 command bodies).
 // ---------------------------------------------------------------------------
-
-// encodeCommand builds a ZMTP command BODY ([1 byte name-length][name][payload])
-// via the canonical zmtp codec. The session layer wraps this in a COMMAND frame.
-func encodeCommand(name string, payload []byte) []byte {
-	return zmtp.EncodeCommand(zmtp.Command{Name: name, Body: payload})
-}
-
-// parseCommand splits a command body into (name, payload). Command names in
-// ZMTP are exact (case-sensitive) ASCII tokens, so no normalization is
-// applied.
-func parseCommand(body []byte) (string, []byte, error) {
-	if len(body) < 1 {
-		return "", nil, fmt.Errorf("gozmq/security/plain: empty command body: %w", zmqerr.ErrMalformedFrame)
-	}
-	nameLen := int(body[0])
-	if 1+nameLen > len(body) {
-		if name, payload, ok := parseLibzmqBrokenError(body); ok {
-			return name, payload, nil
-		}
-		return "", nil, fmt.Errorf("gozmq/security/plain: command name truncated (declared %d, have %d): %w", nameLen, len(body)-1, zmqerr.ErrMalformedFrame)
-	}
-	return string(body[1 : 1+nameLen]), body[1+nameLen:], nil
-}
-
-// libzmqBrokenErrorPrefix is the exact byte sequence libzmq emits instead of
-// a well-formed ERROR command name.
-//
-// libzmq's plain_server_t::produce_error writes the literal "\x5ERROR",
-// intending a 0x05 length byte followed by "ERROR". In C, \x hex escapes
-// consume as many hex digits as follow, so \x5E swallows the 'E': the
-// literal is really the four characters 0x5E 'R' 'R' 'O' 'R'. The result is
-// a command whose declared name length is 94 with only four name bytes
-// behind it.
-//
-// Confirmed against libzmq 4.3.4. A gozmq client that rejects this — which
-// a strict reading of ZMTP 3.1 §5.1 requires — reports every bad-password
-// handshake against a real libzmq server as a malformed frame instead of an
-// authentication failure, which is both wrong and actively misleading.
-var libzmqBrokenErrorPrefix = []byte{0x5E, 'R', 'R', 'O', 'R'}
-
-// parseLibzmqBrokenError recognises that one malformed encoding and nothing
-// else. It runs only after the strict parse has already failed, and matches
-// the full five-byte prefix, so no other malformed name is accepted: a
-// genuinely corrupt frame still fails.
-func parseLibzmqBrokenError(body []byte) (name string, payload []byte, ok bool) {
-	if !bytes.HasPrefix(body, libzmqBrokenErrorPrefix) {
-		return "", nil, false
-	}
-	return plainCmdError, body[len(libzmqBrokenErrorPrefix):], true
-}
 
 // putShortString appends the RFC 24 short-string form — [1 byte length][bytes]
 // — of s to dst. Strings are capped at 255 bytes by the single-byte prefix.
@@ -364,11 +299,11 @@ func encodeHello(user, pass string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return encodeCommand(plainCmdHello, payload), nil
+	return zmtp.EncodeCommand(zmtp.Command{Name: plainCmdHello, Body: payload}), nil
 }
 
 // parseHello parses the HELLO payload (NOT the full command body — the
-// command-name prefix must already have been stripped by parseCommand).
+// command-name prefix must already have been stripped).
 func parseHello(payload []byte) (string, string, error) {
 	user, rest, err := getShortString(payload, "HELLO username")
 	if err != nil {
@@ -383,19 +318,4 @@ func parseHello(payload []byte) (string, string, error) {
 		return "", "", fmt.Errorf("gozmq/security/plain: HELLO has %d trailing bytes: %w", len(rest), zmqerr.ErrMalformedFrame)
 	}
 	return user, pass, nil
-}
-
-// encodeErrorReason builds an ERROR command payload: [1 byte length][reason].
-func encodeErrorReason(reason string) []byte {
-	if len(reason) > 255 {
-		reason = reason[:255]
-	}
-	out, _ := putShortString(make([]byte, 0, 1+len(reason)), reason, "reason") // length pre-clamped; cannot fail
-	return out
-}
-
-// parseErrorReason parses an ERROR payload: [1 byte length][reason].
-func parseErrorReason(payload []byte) (string, error) {
-	reason, _, err := getShortString(payload, "ERROR reason")
-	return reason, err
 }

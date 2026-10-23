@@ -225,7 +225,7 @@ func validateSocketTypeCompatibility(localMeta, peerMeta map[string]string) erro
 	if localType == "STREAM" || peerType == "STREAM" {
 		return fmt.Errorf("gozmq/session: STREAM sockets do not negotiate ZMTP sessions (local=%s peer=%s)", localType, peerType)
 	}
-	if !socketTypesCompatible(localType, peerType) {
+	if !SocketTypesCompatible(localType, peerType) {
 		return fmt.Errorf("gozmq/session: incompatible Socket-Type pairing local=%s peer=%s", localType, peerType)
 	}
 	return nil
@@ -240,15 +240,10 @@ func metadataValue(props map[string]string, name string) (string, bool) {
 	return "", false
 }
 
-// SocketTypesCompatible reports whether two ZMTP Socket-Type metadata
-// values form a valid pairing per the ZMTP 3.1 specification. Exported
-// so inproc wiring, which has no handshake, can validate compatibility without
-// running a full ZMTP handshake.
+// SocketTypesCompatible reports whether two ZMTP Socket-Type values form a
+// valid pairing per ZMTP 3.1. Inproc wiring, which has no handshake, uses it
+// directly.
 func SocketTypesCompatible(localType, peerType string) bool {
-	return socketTypesCompatible(localType, peerType)
-}
-
-func socketTypesCompatible(localType, peerType string) bool {
 	switch localType {
 	case "REQ":
 		return peerType == "REP" || peerType == "ROUTER"

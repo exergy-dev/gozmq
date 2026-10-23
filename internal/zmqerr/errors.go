@@ -10,7 +10,12 @@
 // transparently across either reference.
 package zmqerr
 
-import "errors"
+import (
+	"context"
+	"errors"
+	"io"
+	"net"
+)
 
 var (
 	ErrContextClosed    = errors.New("gozmq: context closed")
@@ -33,3 +38,13 @@ var (
 	// the monitor channel like other mid-traffic mechanism errors.
 	ErrNonceExhausted = errors.New("gozmq: curve nonce counter exhausted")
 )
+
+// IsShutdown reports whether err is one of the errors an orderly teardown
+// produces (peer EOF, a closed conn or pipe, a cancelled context, a closed
+// socket or Context) rather than a fault worth surfacing or logging loudly.
+func IsShutdown(err error) bool {
+	return err != nil && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) ||
+		errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrSocketClosed) ||
+		errors.Is(err, ErrContextClosed))
+}

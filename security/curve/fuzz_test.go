@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/exergy-dev/gozmq/internal/zmtp"
 	"github.com/exergy-dev/gozmq/security"
 )
 
@@ -55,7 +56,7 @@ func FuzzCurveClientHandshake(f *testing.F) {
 	if err != nil {
 		f.Fatal(err)
 	}
-	f.Add(errorCommand("no"))
+	f.Add(zmtp.EncodeError("no"))
 	f.Add([]byte{0x5E, 'R', 'R', 'O', 'R', 0x03, '4', '0', '0'})
 	f.Add(append([]byte{7}, cmdWelcome...))
 	f.Fuzz(func(t *testing.T, a []byte) {

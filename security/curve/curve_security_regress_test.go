@@ -10,6 +10,7 @@ import (
 	"golang.org/x/crypto/nacl/box"
 
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/zmtp"
 	"github.com/exergy-dev/gozmq/security"
 )
 
@@ -132,7 +133,7 @@ func TestCurve_ClientReportsServerError(t *testing.T) {
 // mis-encoded ERROR name the way PLAIN does.
 func TestCurve_ClientReportsErrorInsteadOfWelcome(t *testing.T) {
 	for name, body := range map[string][]byte{
-		"well-formed":   errorCommand("Invalid key"),
+		"well-formed":   zmtp.EncodeError("Invalid key"),
 		"libzmq broken": {0x5E, 'R', 'R', 'O', 'R', 0x03, '4', '0', '0'},
 	} {
 		t.Run(name, func(t *testing.T) {

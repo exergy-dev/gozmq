@@ -118,21 +118,6 @@ type pubEngine struct {
 	counters
 }
 
-// subscriptionFrame builds the single-frame synthetic subscription
-// payload: SubscribeByte/UnsubscribeByte followed by the prefix bytes.
-// Shared by SUB/XSUB's upstream forwarding (sub.go) and XPUB's
-// detach-synthesized CANCELs (xpub.go).
-func subscriptionFrame(subscribe bool, prefix []byte) []byte {
-	buf := make([]byte, 1+len(prefix))
-	if subscribe {
-		buf[0] = SubscribeByte
-	} else {
-		buf[0] = UnsubscribeByte
-	}
-	copy(buf[1:], prefix)
-	return buf
-}
-
 // NewPubEngine returns a new PUB socket engine.
 func NewPubEngine() Engine {
 	return newPubEngineBase(nil)
