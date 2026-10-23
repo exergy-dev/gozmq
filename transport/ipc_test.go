@@ -42,7 +42,7 @@ func TestIPC_Filesystem_RoundTrip(t *testing.T) {
 
 	ctx := testutil.Ctx(t, 2*time.Second)
 
-	acceptCh := make(chan *ipcConn, 1)
+	acceptCh := make(chan *conn, 1)
 	go func() {
 		c, err := l.Accept(ctx)
 		if err != nil {
@@ -50,7 +50,7 @@ func TestIPC_Filesystem_RoundTrip(t *testing.T) {
 			close(acceptCh)
 			return
 		}
-		acceptCh <- c.(*ipcConn)
+		acceptCh <- c.(*conn)
 	}()
 
 	dial, err := tr.Dial(ctx, endpoint)
@@ -62,7 +62,7 @@ func TestIPC_Filesystem_RoundTrip(t *testing.T) {
 	defer srv.Close()
 
 	// Endpoint reporting.
-	assert.True(t, ipcHasPrefix(dial.(*ipcConn).RemoteEndpoint(), "ipc://"), "client Remote = %q", dial.(*ipcConn).RemoteEndpoint())
+	assert.True(t, ipcHasPrefix(dial.(*conn).RemoteEndpoint(), "ipc://"), "client Remote = %q", dial.(*conn).RemoteEndpoint())
 
 	want := []byte("ping-ipc")
 	_, err = dial.Write(want)
@@ -143,7 +143,7 @@ func TestIPC_AbstractNamespace(t *testing.T) {
 
 	ctx := testutil.Ctx(t, 2*time.Second)
 
-	acceptCh := make(chan *ipcConn, 1)
+	acceptCh := make(chan *conn, 1)
 	go func() {
 		c, err := l.Accept(ctx)
 		if err != nil {
@@ -151,7 +151,7 @@ func TestIPC_AbstractNamespace(t *testing.T) {
 			close(acceptCh)
 			return
 		}
-		acceptCh <- c.(*ipcConn)
+		acceptCh <- c.(*conn)
 	}()
 
 	dial, err := tr.Dial(ctx, endpoint)

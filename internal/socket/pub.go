@@ -3,6 +3,8 @@ package socket
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -140,10 +142,7 @@ func newPubEngineBase(onSub func(*pipe.End, bool, []byte, *msg.Msg) bool) *pubEn
 // e.peers. Caller must hold e.mu; must not be called after Close (which
 // leaves the snapshot nil as the closed sentinel).
 func (e *pubEngine) rebuildSnapLocked() {
-	s := make([]*pubPeer, 0, len(e.peers))
-	for _, peer := range e.peers {
-		s = append(s, peer)
-	}
+	s := slices.Collect(maps.Values(e.peers))
 	e.snap.Store(&s)
 }
 

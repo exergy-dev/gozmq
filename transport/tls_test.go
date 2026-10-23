@@ -113,8 +113,8 @@ func listenTLSLoopback(t *testing.T, cfg *tls.Config) (*TLSTransport, Listener) 
 func handshakePair(ctx context.Context, t *testing.T, cli, srv Conn) {
 	t.Helper()
 	errCh := make(chan error, 1)
-	go func() { errCh <- srv.(*tlsConn).HandshakeContext(ctx) }()
-	require.NoError(t, cli.(*tlsConn).HandshakeContext(ctx), "client handshake")
+	go func() { errCh <- tlsOf(srv).HandshakeContext(ctx) }()
+	require.NoError(t, tlsOf(cli).HandshakeContext(ctx), "client handshake")
 	require.NoError(t, <-errCh, "server handshake")
 }
 
@@ -170,7 +170,7 @@ func TestTLS_RoundTrip(t *testing.T) {
 
 	// Endpoint-string reporting: the Conn LocalEndpoint / RemoteEndpoint
 	// must announce tls+tcp, not raw tcp.
-	cli, ok := dial.(*tlsConn)
+	cli, ok := dial.(*conn)
 	require.True(t, ok, "client conn type = %T", dial)
 	assert.True(t, strings.HasPrefix(cli.RemoteEndpoint(), "tls+tcp://"),
 		"client RemoteEndpoint = %q, want tls+tcp prefix", cli.RemoteEndpoint())
@@ -330,7 +330,7 @@ func TestTLS_ManyConcurrentDials(t *testing.T) {
 				defer c.Close()
 				hctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				defer cancel()
-				assert.NoError(t, c.(*tlsConn).HandshakeContext(hctx), "server handshake")
+				assert.NoError(t, tlsOf(c).HandshakeContext(hctx), "server handshake")
 			}()
 		}
 	}()
@@ -347,7 +347,7 @@ func TestTLS_ManyConcurrentDials(t *testing.T) {
 				assert.NoError(t, err, "Dial")
 				return
 			}
-			assert.NoError(t, c.(*tlsConn).HandshakeContext(ctx), "client handshake")
+			assert.NoError(t, tlsOf(c).HandshakeContext(ctx), "client handshake")
 			c.Close()
 		}()
 	}
@@ -647,3 +647,6 @@ func TestTLS_AcceptGoroutineExitsOnCtxCancel(t *testing.T) {
 	// goleak in TestMain will catch any stray Accept goroutine at
 	// package-test teardown; this test's own return is the trigger.
 }
+
+// tlsOf returns the *tls.Conn under a Conn the TLS transport produced.
+func tlsOf(c Conn) *tls.Conn { return c.(*conn).Conn.(*tls.Conn) }

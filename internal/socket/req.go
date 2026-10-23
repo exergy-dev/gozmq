@@ -293,20 +293,15 @@ func (e *reqEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 
 	stripped, serr := stripReqDelimiter(m)
 	m.Release()
-	if serr != nil {
-		// Malformed reply — still flip state so the FSM can continue.
-		e.mu.Lock()
-		e.state = reqStateCanSend
-		e.sticky = nil
-		e.armOut()
-		e.mu.Unlock()
-		return nil, serr
-	}
+	// A malformed reply still flips the state so the FSM can continue.
 	e.mu.Lock()
 	e.state = reqStateCanSend
 	e.sticky = nil
 	e.armOut()
 	e.mu.Unlock()
+	if serr != nil {
+		return nil, serr
+	}
 	e.recv.Add(1)
 	return stripped, nil
 }
