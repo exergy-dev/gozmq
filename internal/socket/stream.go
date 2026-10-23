@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -84,7 +85,10 @@ func (e *streamEngine) Send(ctx context.Context, m *msg.Msg) error {
 	// of multipart STREAM sends). An empty result is the half-close sentinel,
 	// still handed down as a well-formed Msg for the writer to act on.
 	out := msg.FromBytes(bytes.Join(body, nil))
-	if err := p.Send(ctx, out); err != nil {
+	if err := p.SendOr(ctx, out, e.closeCh); err != nil {
+		if errors.Is(err, pipe.ErrAborted) {
+			return fmt.Errorf("stream send: %w", zmqerr.ErrSocketClosed)
+		}
 		if errors.Is(err, io.ErrClosedPipe) {
 			return fmt.Errorf("stream send: identity %q: peer disconnected: %w", id, zmqerr.ErrRouteUnknown)
 		}

@@ -42,6 +42,12 @@ changes are listed first, each with a migration hint.
   `Example*` functions and are gone; `security_plain` and `security_curve`
   are one `examples/security` program with a `-mech` flag.
 
+### Fixed
+
+- `Close` now unblocks a ROUTER or STREAM `Send` parked at the peer's
+  high-water mark, as it already did for every other socket type; before,
+  only the call's context could end such a send.
+
 ### Internal
 
 - One ZMTP command codec in `internal/zmtp` replaces the copies in the

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -77,8 +78,11 @@ func (e *routerEngine) Send(ctx context.Context, m *msg.Msg) error {
 	// read-only). The derived message carries its own reference, so m's
 	// is released whatever happens to it.
 	out := m.Derive(rest...)
-	if err := p.Send(ctx, out); err != nil {
+	if err := p.SendOr(ctx, out, e.closeCh); err != nil {
 		out.Release()
+		if errors.Is(err, pipe.ErrAborted) {
+			return fmt.Errorf("router send: %w", zmqerr.ErrSocketClosed)
+		}
 		if !errors.Is(err, io.ErrClosedPipe) {
 			return err
 		}

@@ -39,8 +39,7 @@ func TestEngineConformance(t *testing.T) {
 		// pipe (Send at HWM, Recv on an empty pipe) and must be unblocked
 		// by Close with ErrSocketClosed. False where the engine never
 		// parks there: PUB/XPUB drop at HWM, XSUB bounds its forward with
-		// a timeout, ROUTER/STREAM park in a bare pipe.Send that only ctx
-		// ends, REP cannot Send before a Recv.
+		// a timeout, REP cannot Send before a Recv.
 		attachedSend, attachedRecv bool
 		// closedSendErr/closedRecvErr: sentinel returned after Close. An
 		// ErrFSMViolation here is also asserted on the open engine.
@@ -59,8 +58,8 @@ func TestEngineConformance(t *testing.T) {
 		{"xsub", mkXSub, plain, false, true, false, true, zmqerr.ErrSocketClosed, zmqerr.ErrSocketClosed, true},
 		{"req", socket.NewReqEngine, plain, true, false, true, false, zmqerr.ErrSocketClosed, zmqerr.ErrSocketClosed, true},
 		{"rep", socket.NewRepEngine, plain, false, true, false, true, zmqerr.ErrSocketClosed, zmqerr.ErrSocketClosed, true},
-		{"router", func() socket.Engine { return socket.NewRouterEngine(false) }, routed, false, true, false, true, zmqerr.ErrSocketClosed, zmqerr.ErrSocketClosed, true},
-		{"stream", socket.NewStreamEngine, routed, false, true, false, true, zmqerr.ErrSocketClosed, zmqerr.ErrSocketClosed, true},
+		{"router", func() socket.Engine { return socket.NewRouterEngine(false) }, routed, false, true, true, true, zmqerr.ErrSocketClosed, zmqerr.ErrSocketClosed, true},
+		{"stream", socket.NewStreamEngine, routed, false, true, true, true, zmqerr.ErrSocketClosed, zmqerr.ErrSocketClosed, true},
 	}
 
 	for _, tc := range cases {
@@ -122,7 +121,9 @@ func TestEngineConformance(t *testing.T) {
 				return
 			}
 			eng = tc.mk()
-			pa, pb := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+			// The engine's end sees a peer whose identity the routed
+			// message names, so ROUTER/STREAM route to this pipe.
+			pa, pb := pipe.NewPair(1, 1, pipe.PeerInfo{Identity: []byte("id")}, pipe.PeerInfo{})
 			defer closePipes(pa, pb)
 			require.NoError(t, eng.AttachPipe(pa), "attach")
 			ops = ops[:0]
