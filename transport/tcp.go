@@ -93,7 +93,7 @@ func (t *TCPTransport) listen(ctx context.Context, addr string) (net.Listener, e
 // endpoint strings.
 func (t *TCPTransport) wrap(c net.Conn, scheme string) *conn {
 	t.applySocketOptions(c)
-	return &conn{Conn: c, local: formatTCPEndpoint(scheme, c.LocalAddr()), remote: formatTCPEndpoint(scheme, c.RemoteAddr())}
+	return &conn{Conn: c, scheme: scheme}
 }
 
 // Listen binds endpoint. For "tcp://*:port" the wildcard expands to
@@ -146,16 +146,30 @@ func (t *TCPTransport) applySocketOptions(c net.Conn) {
 	}
 }
 
-// conn adapts a net.Conn (TCP, Unix or TLS) to Conn: the ZMQ-style
-// endpoint strings are fixed at construction, and WriteBuffers is writev
-// where the underlying conn supports it.
+// conn adapts a net.Conn (TCP, Unix or TLS) to Conn. IPC fixes the
+// endpoint strings at construction; TCP and TLS format them from the
+// addresses on demand (they are rarely asked for, so this costs nothing
+// per connection). WriteBuffers is writev where the underlying conn
+// supports it.
 type conn struct {
 	net.Conn
-	local, remote string
+	scheme        string // TCP/TLS: formats the endpoints from the addresses
+	local, remote string // IPC: fixed endpoint strings
 }
 
-func (c *conn) LocalEndpoint() string  { return c.local }
-func (c *conn) RemoteEndpoint() string { return c.remote }
+func (c *conn) LocalEndpoint() string {
+	if c.scheme != "" {
+		return formatTCPEndpoint(c.scheme, c.LocalAddr())
+	}
+	return c.local
+}
+
+func (c *conn) RemoteEndpoint() string {
+	if c.scheme != "" {
+		return formatTCPEndpoint(c.scheme, c.RemoteAddr())
+	}
+	return c.remote
+}
 
 func (c *conn) WriteBuffers(buffers *net.Buffers) (int64, error) { return buffers.WriteTo(c.Conn) }
 
