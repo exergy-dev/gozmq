@@ -178,12 +178,12 @@ func TestWriter_BatchRetainsBufferCapacityAcrossFlushes(t *testing.T) {
 	_ = ep
 
 	var batch writerBatch
-	require.NoError(t, s.writeBatchFrom(&batch, msg.FromBytes([]byte("first")), nil), "flush[0]")
+	require.NoError(t, s.writeBatchFrom(&batch, msg.FromBytes([]byte("first"))), "flush[0]")
 	capAfterFirst := cap(batch.buffers)
 	require.Greater(t, capAfterFirst, 0,
 		"batch.buffers lost its backing array after a flush (consumed slice header leaked into the batch)")
 	for i := 1; i <= 4; i++ {
-		require.NoError(t, s.writeBatchFrom(&batch, msg.FromBytes([]byte("again")), nil), "flush[%d]", i)
+		require.NoError(t, s.writeBatchFrom(&batch, msg.FromBytes([]byte("again"))), "flush[%d]", i)
 		require.GreaterOrEqual(t, cap(batch.buffers), capAfterFirst,
 			"batch.buffers capacity eroded on flush %d", i)
 	}
@@ -192,7 +192,7 @@ func TestWriter_BatchRetainsBufferCapacityAcrossFlushes(t *testing.T) {
 	require.Positive(t, cap(batch.scratch), "scratch not reused")
 	// ...unless one oversized message grew it past the retention cap.
 	big := make([]byte, maxRetainedScratch)
-	require.NoError(t, s.writeBatchFrom(&batch, msg.FromBytes(big), nil), "flush(big)")
+	require.NoError(t, s.writeBatchFrom(&batch, msg.FromBytes(big)), "flush(big)")
 	require.Zero(t, cap(batch.scratch), "oversized scratch retained after flush")
 }
 

@@ -60,7 +60,7 @@ func (s *Session) runWriter() {
 	var batch writerBatch
 
 	for {
-		m, cmd, err := s.writerNext()
+		m, err := s.writerNext()
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				// writerCtx was cancelled by the socket-level linger path.
@@ -79,10 +79,7 @@ func (s *Session) runWriter() {
 			}
 			return
 		}
-		if m == nil && cmd == nil {
-			continue // woken for a command that the next call picks up
-		}
-		if err := s.writeBatchFrom(&batch, m, cmd); err != nil {
+		if err := s.writeBatchFrom(&batch, m); err != nil {
 			return
 		}
 	}
@@ -108,55 +105,42 @@ func (s *Session) writeHandshake() bool {
 	return !failed && s.sessionPipe != nil
 }
 
-// writerNext blocks until the writer has work: a queued user message (m),
-// a pending PING/PONG command body from cmdCh (cmd), writer cancellation,
-// or pipe closure (queued messages first, then io.EOF). Both results nil
-// with a nil error means the receive was aborted by cmdWake; the next call
-// finds the command. All traffic-phase wire writes funnel through the
-// writer goroutine — see the cmdCh field doc for why the reader/heartbeat
-// goroutines never write directly.
-//
-// cmdCh is polled before every receive: RecvOr prefers queued data over
-// its abort channel (cmdWake), so under sustained traffic this check is
-// what keeps PING/PONG flowing.
-func (s *Session) writerNext() (m *msg.Msg, cmd []byte, err error) {
-	select {
-	case cmd = <-s.cmdCh:
-		return nil, cmd, nil
-	default:
-	}
-	m, err = s.sessionPipe.RecvOr(s.writerCtx, s.cmdWake)
+// writerNext blocks until the writer has work: a queued user message, a
+// PING/PONG queued on cmdCh (cmdWake aborts the receive; m is then nil and
+// writeBatchFrom finds the command), writer cancellation, or pipe closure
+// (queued messages first, then io.EOF). All traffic-phase wire writes
+// funnel through the writer goroutine — see the cmdCh field doc for why
+// the reader/heartbeat goroutines never write directly.
+func (s *Session) writerNext() (*msg.Msg, error) {
+	m, err := s.sessionPipe.RecvOr(s.writerCtx, s.cmdWake)
 	if errors.Is(err, pipe.ErrAborted) {
-		return nil, nil, nil
+		return nil, nil
 	}
-	return m, nil, err
+	return m, err
 }
 
-// writeBatchFrom encodes first (a user message, or when it is nil the
-// command body cmd) plus any immediately-queued messages (bounded by
+// writeBatchFrom encodes the commands queued on cmdCh, then first (when
+// not nil) plus any immediately-queued messages (bounded by
 // maxBatchMessages/maxBatchBytes) into batch and flushes them in one
-// writev. Shared by the runWriter hot loop and the linger drain. On error
-// it releases the batch, logs, and triggers a session shutdown unless the
-// error is an expected teardown artifact; the caller just exits on a
-// non-nil return.
-func (s *Session) writeBatchFrom(batch *writerBatch, first *msg.Msg, cmd []byte) error {
+// writev. Commands go first so a PONG never waits behind a data burst and
+// a command queued before a message precedes it on the wire. Shared by the
+// runWriter hot loop and the linger drain. On error it releases the batch,
+// logs, and triggers a session shutdown unless the error is an expected
+// teardown artifact; the caller just exits on a non-nil return.
+func (s *Session) writeBatchFrom(batch *writerBatch, first *msg.Msg) error {
 	var batchBytes int
 	var err error
-	if first != nil {
-		batchBytes, err = batch.appendMessage(s, first, 0)
-	} else {
-		// Every command already queued goes ahead of the data pulled
-		// below, as when commands were written one at a time.
-		batchBytes, err = batch.appendFrame(s, zmtp.FlagCommand, cmd, 0)
-		for err == nil {
-			select {
-			case c := <-s.cmdCh:
-				batchBytes, err = batch.appendFrame(s, zmtp.FlagCommand, c, batchBytes)
-				continue
-			default:
-			}
-			break
+	for err == nil {
+		select {
+		case c := <-s.cmdCh:
+			batchBytes, err = batch.appendFrame(s, zmtp.FlagCommand, c, batchBytes)
+			continue
+		default:
 		}
+		break
+	}
+	if err == nil && first != nil {
+		batchBytes, err = batch.appendMessage(s, first, batchBytes)
 	}
 	if err == nil {
 		for msgCount := 1; msgCount < maxBatchMessages && batchBytes < maxBatchBytes; msgCount++ {
@@ -332,7 +316,7 @@ func (s *Session) drainSessionPipe() {
 		if !ok {
 			return
 		}
-		if err := s.writeBatchFrom(&batch, m, nil); err != nil {
+		if err := s.writeBatchFrom(&batch, m); err != nil {
 			return
 		}
 	}
