@@ -16,12 +16,12 @@ import (
 // TestXPub_SurfacesSubscribeToApplication: XPUB's Recv returns the
 // synthetic subscription message sent by a peer.
 //
-// Construct with NewXPubEngineV(true) so dedup is disabled and the first
+// Construct with NewXPubEngine(true) so dedup is disabled and the first
 // (and only) SUBSCRIBE in this test is guaranteed to surface regardless
 // of cross-peer refcount accounting.
 func TestXPub_SurfacesSubscribeToApplication(t *testing.T) {
 	t.Parallel()
-	eng := socket.NewXPubEngineV(true)
+	eng := socket.NewXPubEngine(true)
 	defer eng.Close()
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
@@ -53,7 +53,7 @@ func TestXPub_SurfacesSubscribeToApplication(t *testing.T) {
 // every command surfaces regardless of refcount.
 func TestXPub_SurfacesUnsubscribe(t *testing.T) {
 	t.Parallel()
-	eng := socket.NewXPubEngineV(true)
+	eng := socket.NewXPubEngine(true)
 	defer eng.Close()
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
@@ -80,7 +80,7 @@ func TestXPub_SurfacesUnsubscribe(t *testing.T) {
 // the application-facing Recv filter.
 func TestXPub_DedupDefault(t *testing.T) {
 	t.Parallel()
-	eng := socket.NewXPubEngineV(false)
+	eng := socket.NewXPubEngine(false)
 	defer eng.Close()
 
 	a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
@@ -112,7 +112,7 @@ func TestXPub_DedupDefault(t *testing.T) {
 // every SUBSCRIBE/CANCEL to surface, including exact duplicates.
 func TestXPub_VerboseDisablesDedup(t *testing.T) {
 	t.Parallel()
-	eng := socket.NewXPubEngineV(true)
+	eng := socket.NewXPubEngine(true)
 	defer eng.Close()
 
 	a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
@@ -140,7 +140,7 @@ func TestXPub_VerboseDisablesDedup(t *testing.T) {
 // final unsubscribe (refcount -> 0) surfaces a CANCEL event.
 func TestXPub_DedupLastCancel(t *testing.T) {
 	t.Parallel()
-	eng := socket.NewXPubEngineV(false)
+	eng := socket.NewXPubEngine(false)
 	defer eng.Close()
 
 	a1, b1 := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
@@ -190,7 +190,7 @@ func TestXPub_DetachEmitsCancel(t *testing.T) {
 		name := map[bool]string{false: "dedup", true: "verbose"}[verbose]
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			eng := socket.NewXPubEngineV(verbose)
+			eng := socket.NewXPubEngine(verbose)
 			defer eng.Close()
 
 			a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
@@ -221,7 +221,7 @@ func TestXPub_DetachEmitsCancel(t *testing.T) {
 // still subscribed suppresses it.
 func TestXPub_DetachEmitsNoCancelWhileOtherSubscribersRemain(t *testing.T) {
 	t.Parallel()
-	eng := socket.NewXPubEngineV(false)
+	eng := socket.NewXPubEngine(false)
 	defer eng.Close()
 
 	a1, b1 := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
@@ -281,7 +281,7 @@ func requireXPubEvent(ctx context.Context, t *testing.T, eng interface {
 // later subscriber's SUBSCRIBE.
 func TestXPub_DetachBeforeRecvSettlesRefcounts(t *testing.T) {
 	t.Parallel()
-	eng := socket.NewXPubEngineV(false)
+	eng := socket.NewXPubEngine(false)
 	defer eng.Close()
 	ctx := testutil.Ctx(t)
 
@@ -306,7 +306,7 @@ func TestXPub_DetachBeforeRecvSettlesRefcounts(t *testing.T) {
 // subscribed to neither surfaces nor releases another peer's subscription.
 func TestXPub_ForeignCancelIgnored(t *testing.T) {
 	t.Parallel()
-	eng := socket.NewXPubEngineV(false)
+	eng := socket.NewXPubEngine(false)
 	defer eng.Close()
 	ctx := testutil.Ctx(t)
 
@@ -337,7 +337,7 @@ func TestXPub_ForeignCancelIgnored(t *testing.T) {
 // the CANCEL synthesized for it, with no Send or Recv in between.
 func TestXPub_DetachAppliesQueuedCommandsFirst(t *testing.T) {
 	t.Parallel()
-	eng := socket.NewXPubEngineV(false)
+	eng := socket.NewXPubEngine(false)
 	defer eng.Close()
 	ctx := testutil.Ctx(t)
 

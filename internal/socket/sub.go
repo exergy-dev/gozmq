@@ -52,11 +52,9 @@ type SubEngine struct {
 	// subscription.
 	peers map[*pipe.End]struct{}
 
-	// subs is the refcount per subscribed prefix (duplicate Subscribe
-	// calls are legal and need matching Unsubscribes); tree is the same
-	// set arranged for Match on Recv.
+	// tree is the refcounted local filter (duplicate Subscribe calls are
+	// legal and need matching Unsubscribes), matched on Recv.
 	tree *SubTree
-	subs map[string]int
 
 	// fq fair-queues Recv across all attached pipes. Matching is done
 	// AFTER FairQueue returns — messages whose topic frame doesn't match
@@ -92,7 +90,6 @@ func newSubEngineBase(surface bool) *SubEngine {
 	return &SubEngine{
 		peers:   make(map[*pipe.End]struct{}),
 		tree:    NewSubTree(),
-		subs:    make(map[string]int),
 		fq:      NewFairQueue(g.in),
 		surface: surface,
 		gates:   g,
@@ -128,7 +125,8 @@ func (e *SubEngine) AttachPipe(p *pipe.End) error {
 	e.peers[p] = struct{}{}
 	// Snapshot the subscriptions under the lock so a concurrent Subscribe
 	// cannot race the replay.
-	snapshot := slices.Collect(maps.Keys(e.subs))
+	var snapshot [][]byte
+	e.tree.Walk(func(prefix []byte, _ int) { snapshot = append(snapshot, slices.Clone(prefix)) })
 	e.mu.Unlock()
 
 	if err := e.fq.Attach(p); err != nil {
@@ -139,7 +137,7 @@ func (e *SubEngine) AttachPipe(p *pipe.End) error {
 	// (subscription forwarding is best-effort; the application is
 	// expected to resubscribe on reconnect via the socket option).
 	for _, prefix := range snapshot {
-		e.forwardSubscription(context.Background(), p, true, []byte(prefix))
+		e.forwardSubscription(context.Background(), p, true, prefix)
 	}
 	return nil
 }
@@ -180,26 +178,15 @@ func (e *SubEngine) subscribe(prefix []byte, subscribe bool) error {
 }
 
 // applySubLocked applies one subscribe or unsubscribe of prefix to the
-// refcount map and the match tree, and reports whether it was the first add
-// or the last remove, i.e. whether a SUBSCRIBE/CANCEL must go upstream. An
-// unsubscribe of an absent prefix is a no-op. The caller holds e.mu.
+// filter and reports whether it was the first add or the last remove, i.e.
+// whether a SUBSCRIBE/CANCEL must go upstream. An unsubscribe of an absent
+// prefix is a no-op. The caller holds e.mu.
 func (e *SubEngine) applySubLocked(prefix []byte, subscribe bool) bool {
-	key := string(prefix)
 	if subscribe {
-		e.subs[key]++
-		e.tree.Add(prefix)
-		return e.subs[key] == 1
+		return e.tree.Add(prefix)
 	}
-	if e.subs[key] == 0 {
-		return false
-	}
-	e.subs[key]--
-	e.tree.Remove(prefix)
-	if e.subs[key] == 0 {
-		delete(e.subs, key)
-		return true
-	}
-	return false
+	_, gone := e.tree.Remove(prefix)
+	return gone
 }
 
 // forwardSubscription sends a synthetic single-frame subscription

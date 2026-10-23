@@ -118,7 +118,7 @@ func TestReq_InGateWakesOnReply(t *testing.T) {
 // wakes when a peer subscribes, with no goroutine applying the command.
 func TestXPub_InGateWakesOnSubscription(t *testing.T) {
 	t.Parallel()
-	eng := socket.NewXPubEngineV(false)
+	eng := socket.NewXPubEngine(false)
 	defer eng.Close()
 
 	a1, b1 := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})

@@ -226,7 +226,7 @@ func TestPub_NoGoroutinesPerSubscriber(t *testing.T) {
 		eng  func() socket.Engine
 	}{
 		{"pub", socket.NewPubEngine},
-		{"xpub", func() socket.Engine { return socket.NewXPubEngineV(false) }},
+		{"xpub", func() socket.Engine { return socket.NewXPubEngine(false) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const n = 64
@@ -265,7 +265,7 @@ func TestPub_SubscriptionAppliesAtNextSend(t *testing.T) {
 		eng  func() socket.Engine
 	}{
 		{"pub", socket.NewPubEngine},
-		{"xpub", func() socket.Engine { return socket.NewXPubEngineV(false) }},
+		{"xpub", func() socket.Engine { return socket.NewXPubEngine(false) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			eng := tc.eng()

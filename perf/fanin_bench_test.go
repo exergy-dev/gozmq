@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/exergy-dev/gozmq"
 	"github.com/exergy-dev/gozmq/internal/testutil"
@@ -158,6 +159,32 @@ func BenchmarkPubSubFanoutWide_Inproc(b *testing.B) {
 	const nSub = 64
 	b.Run(fmt.Sprintf("subs=%d", nSub), func(b *testing.B) {
 		benchPubSubFanout(b, inprocEndpoint(), scaleMsgSize, nSub)
+	})
+}
+
+// BenchmarkPubSubFanoutSelective_Inproc is the wide fan-out with topic
+// prefixes: every subscriber holds eight 8-byte prefixes and receives the
+// published topic through one of them, so each match walks the trie instead
+// of stopping at a subscribe-to-all root.
+func BenchmarkPubSubFanoutSelective_Inproc(b *testing.B) {
+	const nSub = 64
+	b.Run(fmt.Sprintf("subs=%d", nSub), func(b *testing.B) {
+		b.StopTimer()
+		pub := bind(b, gozmq.Pub, inprocEndpoint(), gozmq.WithSendHWM(benchHWM), gozmq.WithRecvHWM(benchHWM))
+		opts := []gozmq.Option{gozmq.WithSendHWM(benchHWM), gozmq.WithRecvHWM(benchHWM),
+			// syncSubs' probes must pass the filter too.
+			gozmq.WithSubscribe([]byte("gozmq-bench-sync-probe"))}
+		for i := 0; i < 8; i++ {
+			opts = append(opts, gozmq.WithSubscribe(fmt.Appendf(nil, "topic-%02d", i)))
+		}
+		subs := make([]*gozmq.Socket, nSub)
+		for i := range subs {
+			subs[i] = pub.connect(gozmq.Sub, opts...)
+		}
+		syncSubs(b, pub.sock, subs...)
+		payload := append([]byte("topic-03"), newPayload(scaleMsgSize-8)...)
+		delivered := benchStreamPayload(b, pub.sock, subs, payload, 3*time.Second)
+		b.ReportMetric(float64(delivered), "msgs-delivered")
 	})
 }
 

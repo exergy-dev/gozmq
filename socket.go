@@ -103,7 +103,7 @@ func newEngineFor(t SocketType, cfg *socketConfig) (socket.Engine, *socket.SubEn
 		eng, sub := socket.NewSubEngine()
 		return eng, sub, nil
 	case XPub:
-		return socket.NewXPubEngineV(cfg.xpubVerbose), nil, nil
+		return socket.NewXPubEngine(cfg.xpubVerbose), nil, nil
 	case XSub:
 		eng, sub := socket.NewXSubEngine()
 		return eng, sub, nil
