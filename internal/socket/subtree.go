@@ -1,7 +1,6 @@
 package socket
 
 import (
-	"maps"
 	"sync"
 	"sync/atomic"
 )
@@ -13,21 +12,21 @@ import (
 // gone), and Match reports whether any stored prefix is a prefix of the
 // topic, the empty prefix matching every topic.
 //
-// The tree is copy-on-write. Nodes are immutable once published; Add and
-// Remove build a new path from the root and publish it with one atomic
-// store, so Match and Walk read a consistent snapshot with no lock. A PUB
-// matches every peer's tree on every Send, so that read path is the one
-// that matters; subscriptions change rarely, and their writers serialize
-// on mu. Memory stays proportional to the stored prefixes: a node holds
-// only the next-byte transitions that exist.
+// A PUB matches every peer's tree on every Send, so Match is the path that
+// matters. The common case, a subscription to everything, is answered from
+// an atomic flag without taking the lock; a selective tree is walked under
+// the read lock. Writers hold the write lock and update in place, so a
+// subscription change costs only the nodes it adds. Memory stays
+// proportional to the stored prefixes: a node holds only the next-byte
+// transitions that exist.
 type SubTree struct {
-	mu   sync.Mutex
-	root atomic.Pointer[subNode] // nil is the empty tree
+	mu   sync.RWMutex
+	root subNode
+	all  atomic.Bool // root.refs > 0: a subscription to everything
 }
 
 // subNode is one trie node: refs > 0 means a subscription ends here, and
-// children holds the transitions. Both are fixed once the node is reachable
-// from a published root.
+// children holds the transitions.
 type subNode struct {
 	refs     int
 	children map[byte]*subNode
@@ -41,9 +40,23 @@ func NewSubTree() *SubTree { return &SubTree{} }
 func (t *SubTree) Add(prefix []byte) (first bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	root, first := add(t.root.Load(), prefix)
-	t.root.Store(root)
-	return first
+	n := &t.root
+	for _, b := range prefix {
+		if n.children == nil {
+			n.children = make(map[byte]*subNode)
+		}
+		child, ok := n.children[b]
+		if !ok {
+			child = &subNode{}
+			n.children[b] = child
+		}
+		n = child
+	}
+	n.refs++
+	if n == &t.root {
+		t.all.Store(true)
+	}
+	return n.refs == 1
 }
 
 // Remove decrements prefix's refcount. held reports whether the prefix was
@@ -52,122 +65,80 @@ func (t *SubTree) Add(prefix []byte) (first bool) {
 func (t *SubTree) Remove(prefix []byte) (held, gone bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	root, held, gone := remove(t.root.Load(), prefix)
-	if held {
-		t.root.Store(root)
+	// Walk down, recording the path so empty nodes can be pruned on the
+	// way back up.
+	path := make([]*subNode, 0, len(prefix)+1)
+	n := &t.root
+	path = append(path, n)
+	for _, b := range prefix {
+		child, ok := n.children[b]
+		if !ok {
+			return false, false
+		}
+		path = append(path, child)
+		n = child
 	}
-	return held, gone
+	if n.refs == 0 {
+		return false, false
+	}
+	n.refs--
+	if n.refs > 0 {
+		return true, false
+	}
+	if n == &t.root {
+		t.all.Store(false)
+	}
+	// Prune empty nodes back up the path; the root stays.
+	for i := len(prefix); i >= 1; i-- {
+		child, parent := path[i], path[i-1]
+		if child.refs > 0 || len(child.children) > 0 {
+			break
+		}
+		delete(parent.children, prefix[i-1])
+		if len(parent.children) == 0 {
+			parent.children = nil
+		}
+	}
+	return true, true
 }
 
 // Match reports whether any stored prefix is a prefix of topic.
 func (t *SubTree) Match(topic []byte) bool {
-	n := t.root.Load()
-	for n != nil {
+	if t.all.Load() {
+		return true
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	n := &t.root
+	for {
 		if n.refs > 0 {
 			return true
 		}
-		if len(topic) == 0 {
+		if len(topic) == 0 || n.children == nil {
 			return false
 		}
-		n = n.children[topic[0]]
-		topic = topic[1:]
+		child, ok := n.children[topic[0]]
+		if !ok {
+			return false
+		}
+		n, topic = child, topic[1:]
 	}
-	return false
 }
 
 // Walk calls fn for every stored prefix with its refcount, in no
-// particular order. prefix is reused between calls, so fn must copy what
-// it keeps. The walk sees the tree as of the call; concurrent changes are
-// not reflected.
+// particular order, under the read lock: fn must not call Add or Remove
+// and must copy any prefix it keeps, since the slice is reused.
 func (t *SubTree) Walk(fn func(prefix []byte, refs int)) {
-	walk(t.root.Load(), nil, fn)
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	walk(&t.root, nil, fn)
 }
 
 func walk(n *subNode, prefix []byte, fn func([]byte, int)) {
-	if n == nil {
-		return
-	}
 	if n.refs > 0 {
 		fn(prefix, n.refs)
 	}
 	for b, child := range n.children {
 		walk(child, append(prefix, b), fn)
 	}
-}
-
-// add returns the node replacing n once prefix has one more reference,
-// and whether that reference is the first.
-func add(n *subNode, prefix []byte) (*subNode, bool) {
-	c := n.clone()
-	if len(prefix) == 0 {
-		c.refs++
-		return c, c.refs == 1
-	}
-	child, first := add(n.child(prefix[0]), prefix[1:])
-	c.setChild(prefix[0], child)
-	return c, first
-}
-
-// remove returns the node replacing n (nil when it becomes empty) once
-// prefix has one reference fewer, with Remove's held and gone results.
-// n is returned as is when the prefix is absent.
-func remove(n *subNode, prefix []byte) (_ *subNode, held, gone bool) {
-	if n == nil {
-		return nil, false, false
-	}
-	if len(prefix) == 0 {
-		if n.refs == 0 {
-			return n, false, false
-		}
-		c := n.clone()
-		c.refs--
-		return c.orNil(), true, c.refs == 0
-	}
-	child, held, gone := remove(n.child(prefix[0]), prefix[1:])
-	if !held {
-		return n, false, false
-	}
-	c := n.clone()
-	c.setChild(prefix[0], child)
-	return c.orNil(), true, gone
-}
-
-func (n *subNode) child(b byte) *subNode {
-	if n == nil {
-		return nil
-	}
-	return n.children[b]
-}
-
-// clone returns a mutable copy of n (an empty node for nil) whose
-// children map is its own.
-func (n *subNode) clone() *subNode {
-	if n == nil {
-		return &subNode{}
-	}
-	return &subNode{refs: n.refs, children: maps.Clone(n.children)}
-}
-
-// setChild sets or, for a nil child, deletes the transition on b. Only
-// called on a clone.
-func (n *subNode) setChild(b byte, child *subNode) {
-	switch {
-	case child != nil && n.children == nil:
-		n.children = map[byte]*subNode{b: child}
-	case child != nil:
-		n.children[b] = child
-	default:
-		delete(n.children, b)
-		if len(n.children) == 0 {
-			n.children = nil
-		}
-	}
-}
-
-// orNil returns n, or nil when it holds nothing.
-func (n *subNode) orNil() *subNode {
-	if n.refs == 0 && len(n.children) == 0 {
-		return nil
-	}
-	return n
 }
