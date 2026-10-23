@@ -27,6 +27,9 @@ func TestCommandCodec(t *testing.T) {
 	require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 	_, err = ExpectCommand([]byte{9}, "PONG")
 	require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
+	require.True(t, HasCommandName(body, "PING"))
+	require.False(t, HasCommandName(body, "PONG"))
+	require.False(t, HasCommandName([]byte{4, 'P', 'I', 'N'}, "PING"))
 	for _, raw := range [][]byte{nil, {0}, {3, 'A', 'B'}, {2, 'A', 0x01}} {
 		_, err := DecodeCommand(raw)
 		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame, "%v", raw)

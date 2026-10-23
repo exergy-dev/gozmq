@@ -842,8 +842,8 @@ func (m *curveMech) DecodeFrame(flags uint8, wire []byte) (uint8, []byte, error)
 	if len(wire) < minLen {
 		return 0, nil, fmt.Errorf("gozmq/security/curve: MESSAGE length %d < min %d: %w", len(wire), minLen, zmqerr.ErrMalformedFrame)
 	}
-	if _, err := zmtp.ExpectCommand(wire, cmdMessage); err != nil {
-		return 0, nil, err
+	if !zmtp.HasCommandName(wire, cmdMessage) {
+		return 0, nil, fmt.Errorf("gozmq/security/curve: not a MESSAGE command: %w", zmqerr.ErrMalformedFrame)
 	}
 	off := 1 + len(cmdMessage)
 	counter := binary.BigEndian.Uint64(wire[off : off+8])

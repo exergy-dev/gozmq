@@ -96,6 +96,13 @@ func ExpectCommand(raw []byte, name string) ([]byte, error) {
 	return cmd.Body, nil
 }
 
+// HasCommandName reports whether raw starts with the header of command
+// name. It is the allocation-free check for the per-frame path (CURVE
+// MESSAGE); ExpectCommand gives the error detail for handshake commands.
+func HasCommandName(raw []byte, name string) bool {
+	return len(raw) > len(name) && int(raw[0]) == len(name) && string(raw[1:1+len(name)]) == name
+}
+
 // EncodeError builds an ERROR command body carrying reason, cut to the 255
 // bytes its one-byte length allows.
 func EncodeError(reason string) []byte {
