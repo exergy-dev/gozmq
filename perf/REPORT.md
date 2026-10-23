@@ -1,6 +1,6 @@
 # Performance report
 
-Measured 2026-10-24 on the `cleanup` branch (v0.2.0 candidate) against
+Measured 2026-10-23 on the `cleanup` branch (v0.2.0 candidate) against
 `v0.1.1`. Machine: Intel i9-14900KF (32 threads), WSL2 Linux, Go 1.25.3,
 `GOMAXPROCS=8` for the Go benchmarks. Earlier rounds of tuning and the
 numbers they produced are in the git history of this file.
@@ -30,9 +30,10 @@ numbers they produced are in the git history of this file.
 | 64 KB | 0.09M msg/s (45.7 Gb/s) | 0.11M msg/s (55.9 Gb/s) | 0.82× |
 
 The 32 B gap is scheduler-bound (goroutine wakeups dominate a profile there)
-and does not move with allocation tuning. The 64 KB gap is the per-frame
-copy of a large body into Go memory; `WithRecvBufferPool(true)` removes it on
-the receiving side (see the 1 MB rows below).
+and does not move with allocation tuning. The 64 KB gap was not isolated in
+this run; the comparison harness runs gozmq's receiver without
+`WithRecvBufferPool`, so the in-repo `PushPullLarge_TCP/pool=true` rows are
+the place to see what pooling buys on large frames.
 
 ## In-repo benchmarks, cleanup branch vs v0.1.1
 
@@ -58,9 +59,9 @@ Every row passed the gate. Representative rows (sec/op, base → candidate):
 
 allocs/op and B/op are unchanged on every row (5 allocs per PUSH/PULL
 delivery, 25 per REQ/REP round trip, 16 per ROUTER/DEALER round trip, 255 per
-TCP connect and handshake). The inproc rows improved because the test suite
-and benchmark setup changes shortened the engines' hot paths slightly
-(`slices`/`maps` helpers, one fewer indirection in the SUB and REQ engines).
+TCP connect and handshake). The inproc rows read a few percent faster, but
+the base run had ±10% variance on them where the candidate had ±1%, so the
+cause was not isolated and the difference may be run conditions.
 
 ## Decisions these numbers rest on
 

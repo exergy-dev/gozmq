@@ -34,7 +34,10 @@ changes are listed first, each with a migration hint.
 - `Socket.Close` classifies "already shutting down" errors with `errors.Is`
   only; the string match on "use of closed network connection" is gone. A
   third-party `transport.Conn` whose Close error does not wrap
-  `net.ErrClosed` now surfaces that error from `Close`.
+  `net.ErrClosed` now surfaces that error from `Close`. The shared
+  classifier also treats `io.EOF`, a cancelled or expired context,
+  `ErrSocketClosed` and `ErrContextClosed` as expected teardown errors, which
+  `Close` previously would have surfaced.
 - A SUB socket replays its subscriptions to a newly connected publisher in
   map order rather than subscription order. The set is identical; only the
   order of the SUBSCRIBE frames on the wire changes.
@@ -141,5 +144,7 @@ pushed to GitHub or a module proxy. It has the memory-exhaustion, CURVE
 and crash issues listed under 0.1.1, so it is not available and should not
 be used; the first published version is 0.1.1.
 
-[Unreleased]: https://github.com/exergy-dev/gozmq/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/exergy-dev/gozmq/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/exergy-dev/gozmq/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/exergy-dev/gozmq/releases/tag/v0.1.1
+[0.1.0]: https://github.com/exergy-dev/gozmq/commit/62a43b78a3561a7b8db530ce710dc57dc09b0bcd
