@@ -28,6 +28,7 @@ import (
 //     within a bounded timeout (refcount 0 → filter removed locally and
 //     CANCEL forwarded to PUB).
 func TestSubscribe_RefcountedBehavior(t *testing.T) {
+	t.Parallel()
 	endpoint := fmt.Sprintf("inproc://sub-refcount-%d", time.Now().UnixNano())
 	// The same prefix twice — refcount goes 0 → 1 → 2.
 	_, pub, sub := newPubSubPair(t, endpoint, [][]byte{[]byte("a"), []byte("a")}, nil, nil)
@@ -82,6 +83,7 @@ func sendAndExpect(t *testing.T, pub, sub *gozmq.Socket, payload string, want bo
 //	Case B (WithRouterMandatory(true)): Send(unknown) returns
 //	  ErrRouteUnknown per errors.Is.
 func TestRouterMandatory_UnroutableReturnsError(t *testing.T) {
+	t.Parallel()
 	t.Run("DefaultDropsSilently", func(t *testing.T) {
 		// No peers attached — every identity is unknown.
 		_, router := newTestSocket(t, gozmq.Router)
@@ -111,6 +113,7 @@ func TestRouterMandatory_UnroutableReturnsError(t *testing.T) {
 //
 // The REQ↔REP pairing uses inproc for deterministic scheduling.
 func TestReq_FSMViolations(t *testing.T) {
+	t.Parallel()
 	t.Run("SendTwiceWithoutRecv", func(t *testing.T) {
 		endpoint := fmt.Sprintf("inproc://req-fsm-double-send-%d", time.Now().UnixNano())
 		_, rep, req := newSocketPairTypes(t, gozmq.Rep, gozmq.Req, endpoint, nil, nil)

@@ -11,6 +11,7 @@ import (
 // TestNewMechanism_PlainRoleFromOption: the PLAIN handshake role comes from
 // the option, whichever side of the connection the socket is on.
 func TestNewMechanism_PlainRoleFromOption(t *testing.T) {
+	t.Parallel()
 	zctx := NewContext()
 	defer func() { _ = zctx.Close() }()
 	srv, err := zctx.NewSocket(Pair, WithPlainAuth(func(string, string) bool { return true }))
@@ -38,6 +39,7 @@ func TestNewMechanism_PlainRoleFromOption(t *testing.T) {
 // rejects these, rather than failing every session later (PLAIN server plus
 // client) or silently picking CURVE.
 func TestNewSocket_RejectsConflictingSecurityOptions(t *testing.T) {
+	t.Parallel()
 	zctx := NewContext()
 	defer func() { _ = zctx.Close() }()
 	key := make([]byte, 32)

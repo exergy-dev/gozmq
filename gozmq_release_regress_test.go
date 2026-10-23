@@ -25,6 +25,7 @@ func curveOpts(t *testing.T) (server, client gozmq.Option) {
 // INITIATE is ~280 bytes) are bounded independently of WithMaxMessageSize,
 // which used to cap the handshake writer too and break CURVE below ~300 B.
 func TestCurve_SmallMaxMessageSizeStillHandshakes(t *testing.T) {
+	t.Parallel()
 	srvOpt, cliOpt := curveOpts(t)
 	_, srv, cli := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair, "tcp://127.0.0.1:0",
 		[]gozmq.Option{srvOpt, gozmq.WithMaxMessageSize(128)},
@@ -42,6 +43,7 @@ func TestCurve_SmallMaxMessageSizeStillHandshakes(t *testing.T) {
 // down after SendMsg had accepted it), one byte more is a synchronous error,
 // and the session stays up.
 func TestCurve_MaxMessageSizeBoundsPlaintext(t *testing.T) {
+	t.Parallel()
 	const limit = 1000
 	srvOpt, cliOpt := curveOpts(t)
 	_, srv, cli := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair, "tcp://127.0.0.1:0",
@@ -62,6 +64,7 @@ func TestCurve_MaxMessageSizeBoundsPlaintext(t *testing.T) {
 // WithHandshakeTimeout (30 s by default). The greeting's as-server flags
 // now expose the misconfiguration immediately.
 func TestCurve_TwoServersFailFast(t *testing.T) {
+	t.Parallel()
 	_, serverSec := testutil.CurveKeys(t)
 	_, otherSec := testutil.CurveKeys(t)
 	ctx := gozmq.NewContext()
@@ -86,6 +89,7 @@ func TestCurve_TwoServersFailFast(t *testing.T) {
 // TestCloseCtx_NilContext: a nil ctx must behave as context.Background,
 // not panic after the socket is already marked closed.
 func TestCloseCtx_NilContext(t *testing.T) {
+	t.Parallel()
 	_, _, cli := newSocketPair(t, gozmq.Pair, "tcp://127.0.0.1:0")
 	require.NoError(t, cli.SendBytes(testutil.Ctx(t), []byte("x")))
 	var nilCtx context.Context // a nil interface, as a careless caller would pass
@@ -98,6 +102,7 @@ func TestCloseCtx_NilContext(t *testing.T) {
 // another must not leave the binder with a dead pipe attached. For a PUB
 // binder such a pipe counted a drop on every later publish.
 func TestInproc_WiringRaceLeavesNoStalePeer(t *testing.T) {
+	t.Parallel()
 	ctx := gozmq.NewContext()
 	t.Cleanup(func() { _ = ctx.Close() })
 	callCtx := testutil.Ctx(t)

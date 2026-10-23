@@ -19,6 +19,7 @@ import (
 // channel send that never armed the receiver's ready gate, so a Poll on the
 // receiving PAIR hung.
 func TestPoller_WakesOnInprocDelivery(t *testing.T) {
+	t.Parallel()
 	hwm := []gozmq.Option{gozmq.WithSendHWM(1), gozmq.WithRecvHWM(1)}
 	for _, tc := range []struct {
 		name         string
@@ -73,6 +74,7 @@ func TestPoller_WakesOnInprocDelivery(t *testing.T) {
 // TestPoller_RepSubXSub covers the engines that used to lack readiness
 // signals entirely (REP, SUB, XSUB), so a Poller never reported them.
 func TestPoller_RepSubXSub(t *testing.T) {
+	t.Parallel()
 	t.Run("rep", func(t *testing.T) {
 		_, rep, req := newSocketPairTypes(t, gozmq.Rep, gozmq.Req, "inproc://poller-rep", nil, nil)
 		ctx := testutil.Ctx(t)
@@ -121,6 +123,7 @@ func TestPoller_RepSubXSub(t *testing.T) {
 // reply must wake when Send makes the request already queued receivable.
 // Nothing arrives at that point, so only REP's own state change can wake it.
 func TestPoller_RepPollInAfterSend(t *testing.T) {
+	t.Parallel()
 	_, rep, dealer := newSocketPairTypes(t, gozmq.Rep, gozmq.Dealer, "inproc://poller-rep-send", nil, nil)
 	ctx := testutil.Ctx(t)
 	for _, q := range []string{"q1", "q2"} {
@@ -157,6 +160,7 @@ func TestPoller_RepPollInAfterSend(t *testing.T) {
 // unpeered PUSH (LoadBalancer out-gate) — and makes each ready in turn
 // while Poll is parked. Every Poll must wake for exactly that socket.
 func TestPoller_MixedSocketsWakeEach(t *testing.T) {
+	t.Parallel()
 	zctx := gozmq.NewContext()
 	t.Cleanup(func() { _ = zctx.Close() })
 	newSock := func(typ gozmq.SocketType) *gozmq.Socket {

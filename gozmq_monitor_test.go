@@ -64,6 +64,7 @@ func hasType(events []gozmq.Event, t gozmq.EventType) bool {
 // sequence on a single PAIR/TCP round trip: Listening → Accepted →
 // HandshakeSucceeded → (client connect-side events) → Closed.
 func TestMonitor_ServerLifecycle(t *testing.T) {
+	t.Parallel()
 	srvEvents := make(chan gozmq.Event, 64)
 	cliEvents := make(chan gozmq.Event, 64)
 	_, srv, cli := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair, "tcp://127.0.0.1:0",
@@ -151,6 +152,7 @@ func TestMonitor_ServerLifecycle(t *testing.T) {
 // malformed endpoint produces an error and a monitor event with a
 // non-empty Reason.
 func TestMonitor_BindFailed(t *testing.T) {
+	t.Parallel()
 	evts := make(chan gozmq.Event, 16)
 	_, s := newTestSocket(t, gozmq.Pair, gozmq.WithMonitor(evts, gozmq.EventAll))
 
@@ -172,6 +174,7 @@ func TestMonitor_BindFailed(t *testing.T) {
 // on. We cap the test to a short window and assert the Reconnects
 // metric was bumped.
 func TestMonitor_ConnectRetryOnRefused(t *testing.T) {
+	t.Parallel()
 	evts := make(chan gozmq.Event, 64)
 	_, s := newTestSocket(t, gozmq.Pair,
 		gozmq.WithMonitor(evts, gozmq.EventAll),
@@ -218,6 +221,7 @@ func eventTypes(events []gozmq.Event) []uint32 {
 // TestMonitor_MaskFiltersEvents verifies WithMonitor's mask argument
 // keeps events off the channel when their Type bit is unset.
 func TestMonitor_MaskFiltersEvents(t *testing.T) {
+	t.Parallel()
 	evts := make(chan gozmq.Event, 16)
 	// Subscribe only to EventListening — no other event should
 	// reach the channel.
@@ -250,6 +254,7 @@ func TestMonitor_MaskFiltersEvents(t *testing.T) {
 // skew could break it on exotic platforms) but catches accidental
 // zero-Time events.
 func TestMonitor_EventTimestampsPopulated(t *testing.T) {
+	t.Parallel()
 	evts := make(chan gozmq.Event, 16)
 	_, s := newTestSocket(t, gozmq.Pair, gozmq.WithMonitor(evts, gozmq.EventAll))
 	if err := s.Bind("tcp://127.0.0.1:0"); err != nil {
@@ -292,6 +297,7 @@ func countType(events []gozmq.Event, t gozmq.EventType) int {
 // success and, when the link drops, one disconnect; a failed handshake is
 // reported on both sides with no success and no attach.
 func TestMonitor_SessionEventsBothSides(t *testing.T) {
+	t.Parallel()
 	const peerEvents = gozmq.EventHandshakeSucceeded | gozmq.EventHandshakeFailedProtocol |
 		gozmq.EventConnected | gozmq.EventDisconnected
 	t.Run("established", func(t *testing.T) {

@@ -18,6 +18,7 @@ import (
 // side runs with an idle second PUSH peer so its FairQueue takes the
 // multi-peer path, which drains a detached pipe to EOF.
 func TestLingerDrainsUnboundedQueue(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ sendHWM, recvHWM int }{
 		{1000, 1000},
 		{0, 1000},

@@ -135,6 +135,7 @@ var (
 )
 
 func TestRegisterOutOfTreeTransport(t *testing.T) {
+	t.Parallel()
 	tr := &countingTransport{}
 
 	zctx := gozmq.NewContext()
@@ -177,6 +178,7 @@ func TestRegisterOutOfTreeTransport(t *testing.T) {
 // RegisterTransport: replacing a preregistered scheme with a reconfigured
 // instance of the same built-in.
 func TestRegisterTransportOverridesBuiltin(t *testing.T) {
+	t.Parallel()
 	tcp := transport.NewTCPTransport()
 	tcp.KeepAlivePeriod = 10 * time.Second
 	tcp.ReadBufferSize = 1 << 20
@@ -208,6 +210,7 @@ func TestRegisterTransportOverridesBuiltin(t *testing.T) {
 // preregistered schemes resolve, a malformed endpoint and an unknown
 // scheme fail with their sentinels, and RegisterTransport may race Bind.
 func TestContextTransportLookup(t *testing.T) {
+	t.Parallel()
 	zctx := gozmq.NewContext()
 	defer zctx.Close()
 	s, err := zctx.NewSocket(gozmq.Pull)

@@ -10,6 +10,7 @@ import (
 )
 
 func TestNewSocketRejectsInvalidOptionCombinations(t *testing.T) {
+	t.Parallel()
 	ctx := NewContext()
 	defer ctx.Close()
 
@@ -58,6 +59,7 @@ func TestNewSocketRejectsInvalidOptionCombinations(t *testing.T) {
 }
 
 func TestNewSocketAcceptsLargeMaxMessageSize(t *testing.T) {
+	t.Parallel()
 	ctx := NewContext()
 	defer ctx.Close()
 
@@ -67,6 +69,7 @@ func TestNewSocketAcceptsLargeMaxMessageSize(t *testing.T) {
 }
 
 func TestContextCloseIsIdempotent(t *testing.T) {
+	t.Parallel()
 	ctx := NewContext()
 	require.NoError(t, ctx.Close())
 	require.NoError(t, ctx.Close())
@@ -75,6 +78,7 @@ func TestContextCloseIsIdempotent(t *testing.T) {
 }
 
 func TestNewSocketAcceptsMaxHWM(t *testing.T) {
+	t.Parallel()
 	ctx := NewContext()
 	defer ctx.Close()
 	s, err := ctx.NewSocket(Pair, WithSendHWM(MaxHWM), WithRecvHWM(MaxHWM))
@@ -86,6 +90,7 @@ func TestNewSocketAcceptsMaxHWM(t *testing.T) {
 // matchable error. REQ and REP used to dereference it, REQ after the empty
 // request had already been sent.
 func TestSendMsgNilRejectedOnEveryType(t *testing.T) {
+	t.Parallel()
 	ctx := NewContext()
 	defer ctx.Close()
 	for _, typ := range []SocketType{Pair, Push, Pull, Dealer, Router, Req, Rep, Pub, Sub, XPub, XSub, Stream} {
@@ -101,6 +106,7 @@ func TestSendMsgNilRejectedOnEveryType(t *testing.T) {
 // frames, matching the receive side, so a gozmq sender never emits a
 // multipart message a gozmq receiver tears the session down for.
 func TestSendMsgMaxMessageSizeCountsWholeMessage(t *testing.T) {
+	t.Parallel()
 	ctx := NewContext()
 	defer ctx.Close()
 	s, err := ctx.NewSocket(Pair, WithMaxMessageSize(1000))

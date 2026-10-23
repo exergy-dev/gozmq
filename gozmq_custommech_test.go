@@ -99,6 +99,7 @@ func newXORMech(frames *atomic.Int64) func(security.Role, map[string]string) (se
 }
 
 func TestWithSecurityMechOutOfTree(t *testing.T) {
+	t.Parallel()
 	var frames atomic.Int64
 	mech := gozmq.WithSecurityMech(newXORMech(&frames))
 
@@ -151,6 +152,7 @@ func (f forwardingMech) DecodeFrame(flags uint8, b []byte) (uint8, []byte, error
 }
 
 func TestWithSecurityMechWithoutMechBase(t *testing.T) {
+	t.Parallel()
 	mech := gozmq.WithSecurityMech(func(role security.Role, meta map[string]string) (security.Mech, error) {
 		return forwardingMech{security.NewNull(role, meta)}, nil
 	})
@@ -175,6 +177,7 @@ func TestWithSecurityMechWithoutMechBase(t *testing.T) {
 }
 
 func TestWithSecurityMechRejectsConflicts(t *testing.T) {
+	t.Parallel()
 	var frames atomic.Int64
 	mech := gozmq.WithSecurityMech(newXORMech(&frames))
 
@@ -223,6 +226,7 @@ func TestWithSecurityMechRejectsConflicts(t *testing.T) {
 }
 
 func TestWithSecurityMechRejectsNilConstructor(t *testing.T) {
+	t.Parallel()
 	zctx := gozmq.NewContext()
 	defer func() { _ = zctx.Close() }()
 
@@ -234,6 +238,7 @@ func TestWithSecurityMechRejectsNilConstructor(t *testing.T) {
 // A constructor that fails must fail the session outright — gozmq must never
 // silently fall back to NULL, which would be a downgrade.
 func TestWithSecurityMechConstructorErrorDoesNotDowngrade(t *testing.T) {
+	t.Parallel()
 	sentinel := errors.New("mechanism unavailable")
 
 	zctx := gozmq.NewContext()

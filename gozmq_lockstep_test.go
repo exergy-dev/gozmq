@@ -42,6 +42,7 @@ func requireRecv(t *testing.T, ch <-chan recvResult, want string) {
 // when its bound peer goes away keeps waiting and receives from the peer
 // that binds in its place, rather than failing with io.EOF.
 func TestPairReconnectingPeerKeepsWaiting(t *testing.T) {
+	t.Parallel()
 	ctx := gozmq.NewContext()
 	t.Cleanup(func() { _ = ctx.Close() })
 	callCtx := testutil.Ctx(t)
@@ -80,6 +81,7 @@ func TestPairReconnectingPeerKeepsWaiting(t *testing.T) {
 // TestPairBoundPeerAcceptsNextPeer: a bound PAIR parked in RecvMsg when its
 // connected peer disconnects receives from the next peer to connect.
 func TestPairBoundPeerAcceptsNextPeer(t *testing.T) {
+	t.Parallel()
 	ctx, server, client := newSocketPair(t, gozmq.Pair, "tcp://127.0.0.1:0")
 	callCtx := testutil.Ctx(t)
 
@@ -108,6 +110,7 @@ func TestPairBoundPeerAcceptsNextPeer(t *testing.T) {
 // exactly one request in flight; the rest fail with an error wrapping
 // ErrFSMViolation.
 func TestReqConcurrentSendsOneWins(t *testing.T) {
+	t.Parallel()
 	_, rep, req := newSocketPairTypes(t, gozmq.Rep, gozmq.Req, "tcp://127.0.0.1:0", nil, nil)
 	callCtx := testutil.Ctx(t)
 
@@ -145,6 +148,7 @@ func TestReqConcurrentSendsOneWins(t *testing.T) {
 // disconnected is dropped silently (libzmq semantics) and the socket can
 // serve the next request.
 func TestRepReplyToVanishedRequester(t *testing.T) {
+	t.Parallel()
 	ctx, rep, req := newSocketPairTypes(t, gozmq.Rep, gozmq.Req, "tcp://127.0.0.1:0", nil, nil)
 	callCtx := testutil.Ctx(t)
 

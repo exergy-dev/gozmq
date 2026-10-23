@@ -17,6 +17,7 @@ import (
 // whole linger, and a queued one must release Close as soon as the peer
 // reads it — not when linger expires, and not only when the peer closes.
 func TestInprocCloseLingerEndsWhenConsumed(t *testing.T) {
+	t.Parallel()
 	const (
 		linger = 3 * time.Second
 		n      = 50
@@ -101,6 +102,7 @@ func TestInprocCloseLingerEndsWhenConsumed(t *testing.T) {
 // peer) must not report EventConnected or leave the session running
 // unattached; it backs off and retries like any other failed attempt.
 func TestConnectAttachFailureTearsDownSession(t *testing.T) {
+	t.Parallel()
 	zctx := gozmq.NewContext()
 	defer zctx.Close()
 	var eps []string
@@ -147,6 +149,7 @@ func TestConnectAttachFailureTearsDownSession(t *testing.T) {
 // TestRecvBytesMultipartWrapsSentinel: every returned error wraps a
 // sentinel (errors.go), including RecvBytes' multipart refusal.
 func TestRecvBytesMultipartWrapsSentinel(t *testing.T) {
+	t.Parallel()
 	_, a, b := newSocketPair(t, gozmq.Pair, "inproc://recvbytes-multipart")
 	ctx := testutil.Ctx(t)
 	require.NoError(t, a.SendMsg(ctx, gozmq.NewMsgFromFrames([]byte("a"), []byte("b"))))

@@ -65,6 +65,7 @@ func (*rejectMech) DecodeFrame(f uint8, b []byte) (uint8, []byte, error) { retur
 // exchange traffic with a peer that skipped its handshake. (Over inproc,
 // which runs no handshake, such a socket cannot Bind or Connect at all.)
 func TestSecurity_CustomMechNotBypassed(t *testing.T) {
+	t.Parallel()
 	t.Run("xor binder, NULL dialer", func(t *testing.T) {
 		var frames atomic.Int64
 		events, srv, cli := rejectedPair(t, gozmq.Pull, gozmq.Push, []gozmq.Option{gozmq.WithSecurityMech(newXORMech(&frames))}, nil)
@@ -101,6 +102,7 @@ func TestSecurity_CustomMechNotBypassed(t *testing.T) {
 // Before the fix a WithPlainAuth socket that connected (or a WithPlainClient
 // socket that bound) fell back to NULL and authenticated nobody.
 func TestSecurity_PlainRoleFollowsOption(t *testing.T) {
+	t.Parallel()
 	const ep = "tcp://127.0.0.1:0"
 	t.Run("auth socket connects to NULL peer", func(t *testing.T) {
 		var called atomic.Bool
@@ -199,6 +201,7 @@ func TestSecurity_PreAuthAllocationBounded(t *testing.T) {
 // server role, so a PLAIN server that Connects is still vetted by the
 // Context's ZAP handler.
 func TestSecurity_ZapConsultedForConnectingServer(t *testing.T) {
+	t.Parallel()
 	var zapCalls atomic.Int64
 	handler := security.ZAPHandler(func(string, string, string, [][]byte) (string, map[string]string, error) {
 		zapCalls.Add(1)
@@ -228,6 +231,7 @@ func TestSecurity_ZapConsultedForConnectingServer(t *testing.T) {
 // with a bare error (not wrapping ErrAuthFailed) is still reported as an
 // authorization failure on the server's monitor.
 func TestSecurity_ZAPPlainErrorReportsAuthFailure(t *testing.T) {
+	t.Parallel()
 	handler := security.ZAPHandler(func(string, string, string, [][]byte) (string, map[string]string, error) {
 		return "", nil, errors.New("not on the allowlist")
 	})
@@ -332,6 +336,7 @@ func pingFrame(context []byte) []byte {
 // authenticated peer queue PONGs up to MaxMessageSize each; now it is a
 // protocol error that ends the session.
 func TestSecurity_PingContextCapped(t *testing.T) {
+	t.Parallel()
 	_, srv := newTestSocket(t, gozmq.Pull)
 	require.NoError(t, srv.Bind("tcp://127.0.0.1:0"))
 	addr := strings.TrimPrefix(srv.LastEndpoint(), "tcp://")
@@ -357,6 +362,7 @@ func TestSecurity_PingContextCapped(t *testing.T) {
 // let a peer collide with the identities a ROUTER synthesizes and take over
 // another peer's routing slot.
 func TestSecurity_PeerIdentityValidated(t *testing.T) {
+	t.Parallel()
 	_, srv := newTestSocket(t, gozmq.Router)
 	require.NoError(t, srv.Bind("tcp://127.0.0.1:0"))
 	addr := strings.TrimPrefix(srv.LastEndpoint(), "tcp://")

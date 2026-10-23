@@ -24,6 +24,7 @@ func waitEvent(t *testing.T, events <-chan gozmq.Event, typ gozmq.EventType) {
 // path) or one of several. A ROUTER receiver still stamps them with the
 // departed peer's identity.
 func TestPeerDetach_QueuedMessagesSurvive(t *testing.T) {
+	t.Parallel()
 	for _, transport := range []string{"tcp", "inproc"} {
 		for _, extraPeer := range []bool{false, true} {
 			for _, router := range []bool{false, true} {
@@ -117,6 +118,7 @@ func requireSubEvent(t *testing.T, xpub *gozmq.Socket, subscribe bool, prefix st
 // before the application reads the SUBSCRIBE must not leave a stale
 // refcount behind, which would suppress a later subscriber's SUBSCRIBE.
 func TestXPub_EarlyDetachKeepsRefcounts(t *testing.T) {
+	t.Parallel()
 	events := make(chan gozmq.Event, 64)
 	zctx, xpub := newTestSocket(t, gozmq.XPub, gozmq.WithMonitor(events, gozmq.EventDisconnected))
 	require.NoError(t, xpub.Bind("tcp://127.0.0.1:0"))
@@ -142,6 +144,7 @@ func TestXPub_EarlyDetachKeepsRefcounts(t *testing.T) {
 // TestXPub_ForeignCancelIgnored: a CANCEL for a prefix the sending peer never
 // subscribed to must not disturb another peer's subscription or surface.
 func TestXPub_ForeignCancelIgnored(t *testing.T) {
+	t.Parallel()
 	zctx, xpub := newTestSocket(t, gozmq.XPub)
 	require.NoError(t, xpub.Bind("tcp://127.0.0.1:0"))
 	ep := xpub.LastEndpoint()
