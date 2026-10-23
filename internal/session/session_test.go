@@ -615,110 +615,134 @@ func TestSession_HandshakeErr_ProtocolViolation(t *testing.T) {
 // that failed to close Done() would hang the reconnect loop.
 // --------------------------------------------------------------------------
 
-// TestSession_Done_FiresOnNormalStop covers the happy path: handshake
-// completes, traffic flows, caller invokes Stop, Done() closes.
-func TestSession_Done_FiresOnNormalStop(t *testing.T) {
+// TestSession_Done_Fires runs every teardown path: the session is started,
+// Done must stay open until the row's trigger runs, then close within the
+// row's timeout, then the row's extra assertions hold.
+func TestSession_Done_Fires(t *testing.T) {
 	t.Parallel()
-	sA, _, _, _ := startSessionPair(t, nil, nil, 1)
-
-	// Done must not fire until Stop.
-	select {
-	case <-sA.Done():
-		require.FailNow(t, "Done fired before Stop")
-	case <-time.After(20 * time.Millisecond):
+	// startLone starts one session on a fresh conn pair with the peer end
+	// unanswered, so the session sits in its greeting read; the peer end is
+	// returned for rows that need to drive it.
+	startLone := func(t *testing.T) (*tSession, *fakeConn) {
+		t.Helper()
+		connA, connB := newFakeConnPair()
+		t.Cleanup(func() { _ = connB.Close() })
+		s := startTestSession(Config{
+			Conn: connA, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{},
+			SendHWM: 1, RecvHWM: 1,
+		})
+		t.Cleanup(func() { _ = s.Stop() })
+		return s, connB
+	}
+	stopOnce := func(t *testing.T, s *tSession, _ *fakeConn) {
+		require.NoError(t, s.Stop(), "Stop")
 	}
 
-	require.NoError(t, sA.Stop(), "Stop")
-	waitClosed(t, sA.Done(), time.Second, "Done did not fire after Stop")
-}
+	cases := []struct {
+		name string
+		// start returns the session under test and the peer's conn.
+		start func(t *testing.T) (*tSession, *fakeConn)
+		// trigger starts the teardown.
+		trigger func(t *testing.T, s *tSession, peer *fakeConn)
+		timeout time.Duration
+		// after holds once Done has closed.
+		after func(t *testing.T, s *tSession)
+	}{
+		{
+			// The happy path: handshake completes, traffic flows, the
+			// caller invokes Stop.
+			name: "normal stop",
+			start: func(t *testing.T) (*tSession, *fakeConn) {
+				sA, _, _, connB := startSessionPair(t, nil, nil, 1)
+				return sA, connB
+			},
+			trigger: stopOnce,
+			timeout: time.Second,
+		},
+		{
+			// A peer disconnecting mid-traffic: the reader's ReadFrame
+			// returns EOF, runReader calls shutdown, which cancels ctx and
+			// closes the conn; the writer exits on pipe Recv cancellation;
+			// the last one out closes Done.
+			name: "reader EOF",
+			start: func(t *testing.T) (*tSession, *fakeConn) {
+				sA, _, _, connB := startSessionPair(t, nil, nil, 1)
+				return sA, connB
+			},
+			trigger: func(t *testing.T, _ *tSession, peer *fakeConn) { _ = peer.Close() },
+			timeout: 2 * time.Second,
+		},
+		{
+			// Done closes even when the session never reached the traffic
+			// phase, without Stop being called: both goroutines exit once
+			// the handshake fails.
+			name:  "handshake failure",
+			start: startLone,
+			trigger: func(t *testing.T, s *tSession, peer *fakeConn) {
+				// Feed garbage to trip handshake decode.
+				go func() {
+					buf := make([]byte, 64)
+					_, _ = io.ReadFull(peer, buf)
+					bad := make([]byte, 64) // zeros — bad greeting signature
+					_, _ = peer.Write(bad)
+				}()
+				waitClosed(t, s.Handshaked(), 2*time.Second, "handshake did not settle")
+				require.Error(t, s.HandshakeErr(), "expected HandshakeErr, got nil")
+			},
+			timeout: 2 * time.Second,
+			after: func(t *testing.T, s *tSession) {
+				// Drain must finish too — linger waiters cannot be allowed
+				// to hang on a failed handshake.
+				waitClosed(t, s.Drain(), time.Second, "Drain not finished after handshake failure")
+				// Stop still idempotent afterwards.
+				assert.NoError(t, s.Stop(), "Stop after handshake failure")
+			},
+		},
+		{
+			// There is no externally-observable context cancel path that
+			// is not Stop (Stop owns the session-level ctx), so Stop is the
+			// cancellation trigger: Done must fire even when the session
+			// never reached the handshake-success state.
+			name:    "stop before handshake",
+			start:   startLone,
+			trigger: stopOnce,
+			timeout: 2 * time.Second,
+		},
+		{
+			// Repeated Stop must not panic (which would indicate a
+			// double-close of done) and Done() must remain readable
+			// (closed channels stay closed; a second close would panic).
+			name:  "exactly once",
+			start: startLone,
+			trigger: func(t *testing.T, s *tSession, _ *fakeConn) {
+				require.NoError(t, s.Stop(), "first Stop")
+				require.NoError(t, s.Stop(), "second Stop")
+				// Third stop, for good measure — must not panic.
+				require.NoError(t, s.Stop(), "third Stop")
+			},
+			timeout: time.Second,
+		},
+	}
 
-// TestSession_Done_FiresOnReaderEOF covers a peer disconnecting mid-
-// traffic: the reader's ReadFrame returns EOF, runReader calls shutdown,
-// which cancels ctx and closes the conn; the writer exits on pipe Recv
-// cancellation; the last one out closes Done.
-func TestSession_Done_FiresOnReaderEOF(t *testing.T) {
-	t.Parallel()
-	sA, _, _, connB := startSessionPair(t, nil, nil, 1)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s, peer := tc.start(t)
 
-	// Kill the peer's conn out from under sA. sA's reader sees EOF
-	// (io.Pipe closed), shutdown cascades, Done fires.
-	_ = connB.Close()
+			// Done must not fire until the trigger.
+			select {
+			case <-s.Done():
+				require.FailNow(t, "Done fired before the teardown trigger")
+			case <-time.After(20 * time.Millisecond):
+			}
 
-	waitClosed(t, sA.Done(), 2*time.Second, "Done did not fire after peer EOF")
-}
-
-// TestSession_Done_FiresOnHandshakeFailure verifies Done closes even
-// when the session never reached the traffic phase.
-func TestSession_Done_FiresOnHandshakeFailure(t *testing.T) {
-	t.Parallel()
-	connA, connB := newFakeConnPair()
-	defer connB.Close()
-
-	sA := startTestSession(Config{
-		Conn: connA, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{},
-		SendHWM: 1, RecvHWM: 1,
-	})
-
-	// Feed garbage to trip handshake decode.
-	go func() {
-		buf := make([]byte, 64)
-		_, _ = io.ReadFull(connB, buf)
-		bad := make([]byte, 64) // zeros — bad greeting signature
-		_, _ = connB.Write(bad)
-	}()
-
-	waitClosed(t, sA.Handshaked(), 2*time.Second, "handshake did not settle")
-	require.Error(t, sA.HandshakeErr(), "expected HandshakeErr, got nil")
-	// Done fires without Stop being called: both goroutines exit once
-	// the handshake fails.
-	waitClosed(t, sA.Done(), 2*time.Second, "Done did not fire after handshake failure")
-	// Drain must finish too — linger waiters cannot be allowed to hang on
-	// a failed handshake.
-	waitClosed(t, sA.Drain(), time.Second, "Drain not finished after handshake failure")
-	// Stop still idempotent afterwards.
-	assert.NoError(t, sA.Stop(), "Stop after handshake failure")
-}
-
-// TestSession_Done_FiresOnContextCancel is exercised via Stop; there is
-// no externally-observable context cancel path that is not Stop (Stop
-// owns the session-level ctx). This test therefore covers the
-// StopBeforeHandshake scenario from a Done() perspective: Stop is the
-// cancellation trigger, Done must fire even when we never reached the
-// handshake-success state.
-func TestSession_Done_FiresOnStopBeforeHandshake(t *testing.T) {
-	t.Parallel()
-	connA, connB := newFakeConnPair()
-	defer connB.Close()
-
-	s := startTestSession(Config{
-		Conn: connA, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{},
-		SendHWM: 1, RecvHWM: 1,
-	})
-	// Give the run goroutine a moment to reach the blocking greeting read.
-	time.Sleep(10 * time.Millisecond)
-	require.NoError(t, s.Stop(), "Stop")
-	waitClosed(t, s.Done(), 2*time.Second, "Done did not fire after Stop-before-handshake")
-}
-
-// TestSession_Done_FiresExactlyOnce: repeated Stop must not panic (which
-// would indicate a double-close of done) and Done() must remain
-// readable (closed channels stay closed; a second close would panic).
-func TestSession_Done_FiresExactlyOnce(t *testing.T) {
-	t.Parallel()
-	connA, connB := newFakeConnPair()
-	defer connB.Close()
-
-	s := startTestSession(Config{
-		Conn: connA, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{},
-		SendHWM: 1, RecvHWM: 1,
-	})
-	time.Sleep(10 * time.Millisecond)
-	require.NoError(t, s.Stop(), "first Stop")
-	require.NoError(t, s.Stop(), "second Stop")
-	// Third stop, for good measure — must not panic.
-	require.NoError(t, s.Stop(), "third Stop")
-	// Done still closed and drainable without panic.
-	waitClosed(t, s.Done(), time.Second, "Done not closed after multiple Stops")
+			tc.trigger(t, s, peer)
+			waitClosed(t, s.Done(), tc.timeout, "Done did not fire after "+tc.name)
+			if tc.after != nil {
+				tc.after(t, s)
+			}
+		})
+	}
 }
 
 // --------------------------------------------------------------------------
@@ -726,52 +750,57 @@ func TestSession_Done_FiresExactlyOnce(t *testing.T) {
 // accumulation — the codec only caps individual frames.
 // --------------------------------------------------------------------------
 
-// TestReader_MaxMessageSize_UnderLimit: a multipart message at/below the
-// cap passes through untouched.
-func TestReader_MaxMessageSize_UnderLimit(t *testing.T) {
+// TestReader_MaxMessageSize: a multipart message at/below the cap passes
+// through untouched; once the accumulated multipart size exceeds the cap,
+// the receiving session tears down instead of ballooning memory, and the
+// peer observes the disconnect.
+func TestReader_MaxMessageSize(t *testing.T) {
 	t.Parallel()
-	connA, connB := newFakeConnPair()
-	sA, sB := startPair(t,
-		Config{Conn: connA, Mech: newFakeMech("NULL", false, nil), SendHWM: 4, RecvHWM: 4},
-		Config{Conn: connB, Mech: newFakeMech("NULL", true, nil), SendHWM: 4, RecvHWM: 4,
-			MaxMessageSize: 1024},
-	)
+	cases := []struct {
+		name   string
+		limit  int64
+		frames int // of 256 B each
+		over   bool
+	}{
+		// 4 × 256 B = exactly the cap — allowed (the limit is "exceeds").
+		{"under limit", 1024, 4, false},
+		// 3 × 256 B = 768 B > 512 B: B's reader must reject mid-message.
+		// The teardown happens as soon as the third frame arrives — B never
+		// assembles the full message, so memory stays bounded at the cap.
+		{"over limit", 512, 3, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			connA, connB := newFakeConnPair()
+			sA, sB := startPair(t,
+				Config{Conn: connA, Mech: newFakeMech("NULL", false, nil), SendHWM: 8, RecvHWM: 8},
+				Config{Conn: connB, Mech: newFakeMech("NULL", true, nil), SendHWM: 8, RecvHWM: 8,
+					MaxMessageSize: tc.limit},
+			)
 
-	ctx := testutil.Ctx(t, 2*time.Second)
-	frame := make([]byte, 256)
-	// 4 × 256 B = exactly the cap — allowed (the limit is "exceeds").
-	require.NoError(t, sA.Pipe().Send(ctx, msg.FromFrames(frame, frame, frame, frame)), "Send")
-	got, err := sB.Pipe().Recv(ctx)
-	require.NoError(t, err, "Recv")
-	require.Equal(t, 4, got.NumFrames(), "frame count")
-	require.Equal(t, 1024, got.TotalSize(), "total size")
-}
+			ctx := testutil.Ctx(t, 2*time.Second)
+			frames := make([][]byte, tc.frames)
+			for i := range frames {
+				frames[i] = make([]byte, 256)
+			}
+			require.NoError(t, sA.Pipe().Send(ctx, msg.FromFrames(frames...)), "Send")
 
-// TestReader_MaxMessageSize_OverLimit: once the accumulated multipart
-// size exceeds the cap, the receiving session tears down instead of
-// ballooning memory, and the peer observes the disconnect.
-func TestReader_MaxMessageSize_OverLimit(t *testing.T) {
-	t.Parallel()
-	connA, connB := newFakeConnPair()
-	sA, sB := startPair(t,
-		Config{Conn: connA, Mech: newFakeMech("NULL", false, nil), SendHWM: 8, RecvHWM: 8},
-		Config{Conn: connB, Mech: newFakeMech("NULL", true, nil), SendHWM: 8, RecvHWM: 8,
-			MaxMessageSize: 512},
-	)
-
-	ctx := testutil.Ctx(t, 2*time.Second)
-	frame := make([]byte, 256)
-	// 3 × 256 B = 768 B > 512 B: B's reader must reject mid-message. The
-	// teardown happens as soon as the third frame arrives — B never
-	// assembles the full message, so memory stays bounded at the cap.
-	require.NoError(t, sA.Pipe().Send(ctx, msg.FromFrames(frame, frame, frame)), "Send")
-
-	waitClosed(t, sB.Done(), 2*time.Second, "receiver did not tear down on oversized multipart")
-	// The rejected message must not surface on B's pipe.
-	_, err := sB.Pipe().Recv(testutil.Ctx(t, time.Second))
-	require.Error(t, err, "oversized message surfaced on the pipe")
-	// A sees the disconnect (B closed the conn during shutdown).
-	waitClosed(t, sA.Done(), 2*time.Second, "sender did not observe receiver teardown")
+			if !tc.over {
+				got, err := sB.Pipe().Recv(ctx)
+				require.NoError(t, err, "Recv")
+				require.Equal(t, tc.frames, got.NumFrames(), "frame count")
+				require.Equal(t, 256*tc.frames, got.TotalSize(), "total size")
+				return
+			}
+			waitClosed(t, sB.Done(), 2*time.Second, "receiver did not tear down on oversized multipart")
+			// The rejected message must not surface on B's pipe.
+			_, err := sB.Pipe().Recv(testutil.Ctx(t, time.Second))
+			require.Error(t, err, "oversized message surfaced on the pipe")
+			// A sees the disconnect (B closed the conn during shutdown).
+			waitClosed(t, sA.Done(), 2*time.Second, "sender did not observe receiver teardown")
+		})
+	}
 }
 
 // --------------------------------------------------------------------------

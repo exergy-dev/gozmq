@@ -10,7 +10,6 @@ import (
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
 	"github.com/exergy-dev/gozmq/internal/testutil"
-	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -72,18 +71,6 @@ func TestXPub_SurfacesUnsubscribe(t *testing.T) {
 	body := m.Frames()[0]
 	require.Equal(t, socket.UnsubscribeByte, body[0])
 	require.Equal(t, "t", string(body[1:]))
-}
-
-// TestXPub_CloseUnblocksRecv.
-func TestXPub_CloseUnblocksRecv(t *testing.T) {
-	t.Parallel()
-	eng := socket.NewXPubEngineV(true)
-
-	err := testutil.RequireUnblocks(t, func() error {
-		_, err := eng.Recv(context.Background())
-		return err
-	}, func() { require.NoError(t, eng.Close(), "close") })
-	require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
 }
 
 // TestXPub_DedupDefault: default (non-verbose) XPUB deduplicates

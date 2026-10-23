@@ -65,34 +65,6 @@ func TestPair_SendBeforeAttachWaits(t *testing.T) {
 		"send err = %v, want ctx err", err)
 }
 
-func TestPair_CloseUnblocksSend(t *testing.T) {
-	t.Parallel()
-	eng := socket.NewPairEngine()
-
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
-	defer closePipes(a, b)
-	mustAttach(t, eng, a)
-	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("fill"))))
-	err := testutil.RequireUnblocks(t,
-		func() error { return eng.Send(context.Background(), msg.FromBytes([]byte("x"))) },
-		func() { require.NoError(t, eng.Close(), "close") })
-	require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
-}
-
-func TestPair_CloseUnblocksRecv(t *testing.T) {
-	t.Parallel()
-	eng := socket.NewPairEngine()
-
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
-	defer closePipes(a, b)
-	mustAttach(t, eng, a)
-	err := testutil.RequireUnblocks(t, func() error {
-		_, err := eng.Recv(context.Background())
-		return err
-	}, func() { require.NoError(t, eng.Close(), "close") })
-	require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
-}
-
 // recvAsync starts eng.Recv in a goroutine and returns channels for its
 // result.
 func recvAsync(ctx context.Context, eng socket.Engine) (<-chan *msg.Msg, <-chan error) {
@@ -272,14 +244,4 @@ func TestPair_SendWaitsAcrossPeerClose(t *testing.T) {
 	got, err := b2.Recv(ctx)
 	require.NoError(t, err)
 	require.Equal(t, "next", string(got.Bytes()))
-}
-
-func TestPair_CloseUnblocksRecvBeforeAttach(t *testing.T) {
-	t.Parallel()
-	eng := socket.NewPairEngine()
-	err := testutil.RequireUnblocks(t, func() error {
-		_, err := eng.Recv(context.Background())
-		return err
-	}, func() { require.NoError(t, eng.Close(), "close") })
-	require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
 }

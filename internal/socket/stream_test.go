@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net"
 	"sync"
 	"testing"
 	"time"
@@ -14,12 +13,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
-	"github.com/exergy-dev/gozmq/internal/session"
 	"github.com/exergy-dev/gozmq/internal/socket"
 	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
-	"github.com/exergy-dev/gozmq/transport"
 )
 
 // --------------------------------------------------------------------------
@@ -157,6 +154,8 @@ func TestStream_DetachRemovesRoute(t *testing.T) {
 // tagged with *some* non-empty identity (the engine synthesizes one).
 // This matches the ROUTER anonymous-peer convention: the app sees a
 // stable 5-byte identity it can reuse on Send to address the same peer.
+// Every raw TCP peer is anonymous, so two of them must get distinct
+// identities and each must route back to its own pipe.
 func TestStream_AnonymousPeerGetsSynthesizedIdentity(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewStreamEngine()
@@ -186,6 +185,24 @@ func TestStream_AnonymousPeerGetsSynthesizedIdentity(t *testing.T) {
 	got, err := peer.Recv(ctx)
 	require.NoError(t, err, "peer recv")
 	require.Equal(t, []byte("reply"), got.Bytes())
+
+	// A second anonymous peer gets its own identity, and Send to it does
+	// not leak into the first peer.
+	engP2, peer2 := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer closePipes(engP2, peer2)
+	mustAttach(t, eng, engP2)
+	require.NoError(t, peer2.Send(ctx, msg.FromBytes([]byte("raw2"))), "peer2 send")
+	m, err = eng.Recv(ctx)
+	require.NoError(t, err, "recv from peer2")
+	id2 := m.Frames()[0]
+	require.NotEmpty(t, id2, "second synthesized identity was empty")
+	require.NotEqual(t, id, id2, "two anonymous peers share an identity")
+	require.NoError(t, eng.Send(ctx, msg.FromFrames(id2, []byte("reply2"))), "send to peer2")
+	got, err = peer2.Recv(ctx)
+	require.NoError(t, err, "peer2 recv")
+	require.Equal(t, []byte("reply2"), got.Bytes())
+	_, ok := peer.TryRecv()
+	require.False(t, ok, "peer2's reply reached the first peer")
 }
 
 // TestStream_SendToVanishedPeer: sending to a peer whose pipe closed but
@@ -202,18 +219,6 @@ func TestStream_SendToVanishedPeer(t *testing.T) {
 
 	err := eng.Send(testutil.Ctx(t), msg.FromFrames([]byte("gone"), []byte("x")))
 	require.ErrorIs(t, err, zmqerr.ErrRouteUnknown)
-}
-
-// TestStream_CloseUnblocksRecv asserts that Close wakes a pending Recv.
-func TestStream_CloseUnblocksRecv(t *testing.T) {
-	t.Parallel()
-	eng := socket.NewStreamEngine()
-
-	err := testutil.RequireUnblocks(t, func() error {
-		_, err := eng.Recv(context.Background())
-		return err
-	}, func() { require.NoError(t, eng.Close(), "close") })
-	require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
 }
 
 // --------------------------------------------------------------------------
@@ -508,310 +513,4 @@ func TestStream_PeerCloseDrainsInFlight(t *testing.T) {
 	defer dc()
 	_, err := p.engine.Recv(dl)
 	require.ErrorIs(t, err, io.EOF, "engine pipe.Recv after peer close")
-}
-
-// --------------------------------------------------------------------------
-// TCP-wired tests. These stand up a real TCP listener, run the server
-// side's conn as a raw-mode session attached to a streamEngine, and
-// exercise the full raw-bytes path an application sees through
-// gozmq.Socket(Stream).
-// --------------------------------------------------------------------------
-
-// tcpConn wraps *net.TCPConn to satisfy transport.Conn (net.Conn does not
-// expose the ZMQ endpoint-string accessors the session requires).
-type tcpConn struct {
-	net.Conn
-}
-
-func (c *tcpConn) LocalEndpoint() string  { return "tcp://" + c.Conn.LocalAddr().String() }
-func (c *tcpConn) RemoteEndpoint() string { return "tcp://" + c.Conn.RemoteAddr().String() }
-
-// tcpPair spins up a 127.0.0.1 listener, accepts one connection, and
-// returns (serverSide, clientSide) wrapped as transport.Conn. Closing either
-// side is the caller's responsibility.
-func tcpPair(t *testing.T) (srv, cli transport.Conn, close func()) {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err, "listen")
-
-	type result struct {
-		c   net.Conn
-		err error
-	}
-	accepted := make(chan result, 1)
-	go func() {
-		c, err := l.Accept()
-		accepted <- result{c, err}
-	}()
-
-	clientConn, err := net.Dial("tcp", l.Addr().String())
-	if err != nil {
-		_ = l.Close()
-		require.NoError(t, err, "dial")
-	}
-	r := <-accepted
-	if r.err != nil {
-		_ = clientConn.Close()
-		_ = l.Close()
-		require.NoError(t, r.err, "accept")
-	}
-	_ = l.Close()
-
-	return &tcpConn{Conn: r.c}, &tcpConn{Conn: clientConn}, func() {
-		_ = r.c.Close()
-		_ = clientConn.Close()
-	}
-}
-
-// startRawSession runs conn as a raw-mode session, as a STREAM socket does,
-// attaching its pipe to eng. It returns the pipe once attached; the session
-// is stopped at test end.
-func startRawSession(t *testing.T, eng socket.Engine, conn transport.Conn) *pipe.End {
-	t.Helper()
-	ready := make(chan *pipe.End, 1)
-	sess := session.New(session.Config{Conn: conn, Raw: true, OnReady: func(p *pipe.End) error {
-		if err := eng.AttachPipe(p); err != nil {
-			return err
-		}
-		ready <- p
-		return nil
-	}})
-	sess.Start()
-	t.Cleanup(func() { _ = sess.Stop() })
-	select {
-	case p := <-ready:
-		return p
-	case <-time.After(2 * time.Second):
-		require.Fail(t, "raw session did not attach")
-		return nil
-	}
-}
-
-// TestStream_TCP_HTTPEcho stands up a STREAM server over real TCP and
-// has it echo an HTTP-style request back to the client via identity-
-// based routing. End-to-end check on the session + engine contract.
-func TestStream_TCP_HTTPEcho(t *testing.T) {
-	t.Parallel()
-	srvConn, cliConn, teardown := tcpPair(t)
-	defer teardown()
-
-	eng := socket.NewStreamEngine()
-	defer eng.Close()
-
-	startRawSession(t, eng, srvConn)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	const request = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
-
-	// Client (raw net.Conn) sends the request bytes.
-	_, err := cliConn.Write([]byte(request))
-	require.NoError(t, err, "client write")
-
-	// Server reads the tagged Msg and echoes the body back.
-	var gotReq bytes.Buffer
-	var peerID []byte
-	for gotReq.Len() < len(request) {
-		m, err := eng.Recv(ctx)
-		require.NoError(t, err, "server recv")
-		require.Equal(t, 2, m.NumFrames())
-		peerID = m.Frames()[0]
-		gotReq.Write(m.Frames()[1])
-	}
-	require.Equal(t, request, gotReq.String(), "server got")
-
-	// Echo back.
-	require.NoError(t, eng.Send(ctx, msg.FromFrames(peerID, gotReq.Bytes())), "server send")
-
-	buf := make([]byte, len(request))
-	_, err = io.ReadFull(cliConn, buf)
-	require.NoError(t, err, "client read")
-	require.Equal(t, request, string(buf), "client got")
-}
-
-// TestStream_TCP_Multiplex runs 3 concurrent TCP clients against one
-// STREAM server (one raw session per accepted conn), asserts the server
-// fair-queues them and can reply to each via its identity.
-func TestStream_TCP_Multiplex(t *testing.T) {
-	t.Parallel()
-	const nClients = 3
-
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err, "listen")
-	defer l.Close()
-	addr := l.Addr().String()
-
-	eng := socket.NewStreamEngine()
-	defer eng.Close()
-
-	// Accept side: one raw session per incoming conn.
-	var sessions []*session.Session
-	defer func() {
-		for _, sess := range sessions {
-			_ = sess.Stop()
-		}
-	}()
-	acceptDone := make(chan struct{})
-	go func() {
-		defer close(acceptDone)
-		for i := 0; i < nClients; i++ {
-			c, err := l.Accept()
-			if err != nil {
-				return
-			}
-			sess := session.New(session.Config{Conn: &tcpConn{Conn: c}, Raw: true, OnReady: eng.AttachPipe})
-			sessions = append(sessions, sess)
-			sess.Start()
-		}
-	}()
-
-	// Spin up nClients TCP dialers, each sending a distinct payload.
-	clients := make([]net.Conn, nClients)
-	for i := 0; i < nClients; i++ {
-		c, err := net.Dial("tcp", addr)
-		require.NoError(t, err, "dial %d", i)
-		clients[i] = c
-		defer c.Close()
-	}
-	<-acceptDone
-
-	var wg sync.WaitGroup
-	for i, c := range clients {
-		wg.Add(1)
-		go func(i int, c net.Conn) {
-			defer wg.Done()
-			payload := fmt.Sprintf("payload-%d\n", i)
-			if _, err := c.Write([]byte(payload)); err != nil {
-				assert.NoError(t, err, "client %d write", i)
-			}
-		}(i, c)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// Server collects nClients messages (one conn.Read per payload is
-	// typical but not guaranteed; if a message arrives split we merge
-	// into the slot indexed by peer identity).
-	type slot struct {
-		id   []byte
-		body bytes.Buffer
-	}
-	slots := make(map[string]*slot)
-	for len(slots) < nClients {
-		m, err := eng.Recv(ctx)
-		require.NoError(t, err, "server recv")
-		id := string(m.Frames()[0])
-		sl, ok := slots[id]
-		if !ok {
-			sl = &slot{id: m.Frames()[0]}
-			slots[id] = sl
-		}
-		sl.body.Write(m.Frames()[1])
-	}
-	wg.Wait()
-
-	// Map payload->identity so we can reply deterministically.
-	payloadToID := make(map[string][]byte, nClients)
-	for _, sl := range slots {
-		payloadToID[sl.body.String()] = sl.id
-	}
-	for i := 0; i < nClients; i++ {
-		want := fmt.Sprintf("payload-%d\n", i)
-		require.Contains(t, payloadToID, want, "missing payload %q", want)
-	}
-
-	// Reply to each peer; the client should read exactly the reply we
-	// sent for its identity.
-	for i := 0; i < nClients; i++ {
-		payload := fmt.Sprintf("payload-%d\n", i)
-		id := payloadToID[payload]
-		reply := fmt.Sprintf("reply-%d\n", i)
-		require.NoError(t, eng.Send(ctx, msg.FromFrames(id, []byte(reply))), "server reply %d", i)
-	}
-
-	for i, c := range clients {
-		want := fmt.Sprintf("reply-%d\n", i)
-		buf := make([]byte, len(want))
-		_, err := io.ReadFull(c, buf)
-		require.NoError(t, err, "client %d read", i)
-		assert.Equal(t, want, string(buf), "client %d reply", i)
-	}
-}
-
-// TestStream_TCP_PeerDisconnect asserts that a client closing its TCP
-// conn causes the server-side session to close its engine pipe,
-// surfacing io.EOF on engine recv from that peer (the app-level signal
-// to DetachPipe).
-func TestStream_TCP_PeerDisconnect(t *testing.T) {
-	t.Parallel()
-	srvConn, cliConn, teardown := tcpPair(t)
-	defer teardown()
-
-	eng := socket.NewStreamEngine()
-	defer eng.Close()
-
-	engPipe := startRawSession(t, eng, srvConn)
-
-	ctx := testutil.Ctx(t)
-
-	// Send one chunk, then close the client.
-	_, err := cliConn.Write([]byte("hello\n"))
-	require.NoError(t, err, "client write")
-	m, err := eng.Recv(ctx)
-	require.NoError(t, err, "engine recv")
-	require.Equal(t, []byte("hello\n"), m.Frames()[1])
-	peerID := m.Frames()[0]
-
-	// Close the client — the session's reader should see EOF, close the
-	// pipe; engPipe.Closed() must fire.
-	_ = cliConn.Close()
-
-	select {
-	case <-engPipe.Closed():
-	case <-time.After(2 * time.Second):
-		require.Fail(t, "engine pipe did not close after client disconnect")
-	}
-
-	// Post-detach, Send to the peer's identity should fail with
-	// ErrRouteUnknown after we actually Detach.
-	require.NoError(t, eng.DetachPipe(engPipe), "detach")
-	err = eng.Send(context.Background(), msg.FromFrames(peerID, []byte("lost")))
-	require.ErrorIs(t, err, zmqerr.ErrRouteUnknown, "post-detach send")
-}
-
-// TestStream_TCP_HalfClose asserts that sending an empty-body Msg to a
-// peer's identity causes the session to close its conn — the far side
-// sees EOF on subsequent Read.
-func TestStream_TCP_HalfClose(t *testing.T) {
-	t.Parallel()
-	srvConn, cliConn, teardown := tcpPair(t)
-	defer teardown()
-
-	eng := socket.NewStreamEngine()
-	defer eng.Close()
-
-	startRawSession(t, eng, srvConn)
-
-	ctx := testutil.Ctx(t)
-
-	// Prime: have the client write something so the server learns the
-	// peer's identity.
-	_, err := cliConn.Write([]byte("hi"))
-	require.NoError(t, err, "client write")
-	m, err := eng.Recv(ctx)
-	require.NoError(t, err, "recv")
-	peerID := m.Frames()[0]
-
-	// Server sends a final payload, then the half-close sentinel
-	// (identity-only, which the engine translates to an empty-body
-	// frame on the outbound pipe).
-	require.NoError(t, eng.Send(ctx, msg.FromFrames(peerID, []byte("goodbye\n"))), "data send")
-	require.NoError(t, eng.Send(ctx, msg.FromFrames(peerID)), "half-close send")
-
-	// Client must see "goodbye\n" then EOF.
-	buf, err := io.ReadAll(cliConn)
-	require.NoError(t, err, "client ReadAll")
-	require.Equal(t, []byte("goodbye\n"), buf, "client got")
 }

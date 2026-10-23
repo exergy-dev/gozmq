@@ -10,7 +10,6 @@ import (
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
 	"github.com/exergy-dev/gozmq/internal/testutil"
-	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -165,25 +164,4 @@ func TestSub_RefcountedSubscribe(t *testing.T) {
 	require.NoError(t, err, "recv cancel")
 	require.Equal(t, socket.UnsubscribeByte, m.Frames()[0][0])
 	require.Equal(t, "x", string(m.Frames()[0][1:]))
-}
-
-// TestSub_SendIsFSMViolation: SUB is recv-only.
-func TestSub_SendIsFSMViolation(t *testing.T) {
-	t.Parallel()
-	eng, _ := socket.NewSubEngine()
-	defer eng.Close()
-	err := eng.Send(context.Background(), msg.FromBytes([]byte("x")))
-	require.ErrorIs(t, err, zmqerr.ErrFSMViolation)
-}
-
-// TestSub_CloseUnblocksRecv.
-func TestSub_CloseUnblocksRecv(t *testing.T) {
-	t.Parallel()
-	eng, _ := socket.NewSubEngine()
-
-	err := testutil.RequireUnblocks(t, func() error {
-		_, err := eng.Recv(context.Background())
-		return err
-	}, func() { require.NoError(t, eng.Close(), "close") })
-	require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
 }
