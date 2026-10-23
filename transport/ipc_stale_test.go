@@ -10,8 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/stretchr/testify/require"
+
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // TestIPC_StaleSocketFileIsReclaimed: a socket file left behind by a crashed

@@ -11,31 +11,6 @@ import (
 	"github.com/exergy-dev/gozmq"
 )
 
-// sendAndExpect emits a single topic-prefixed message on pub and either
-// expects it to arrive on sub (want=true) or confirms it does not within
-// a bounded 500ms window (want=false). Fails the test on mismatch.
-func sendAndExpect(t *testing.T, pub, sub *gozmq.Socket, payload string, want bool) {
-	t.Helper()
-	sendCtx, sendCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer sendCancel()
-	require.NoError(t, pub.SendMsg(sendCtx, gozmq.NewMsgFromBytes([]byte(payload))), "pub send %q", payload)
-	recvCtx, recvCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer recvCancel()
-	got, err := sub.RecvMsg(recvCtx)
-	if want {
-		require.NoError(t, err, "expected to receive %q", payload)
-		require.Equal(t, payload, string(got.Bytes()))
-		got.Release()
-		return
-	}
-	if err == nil {
-		require.Fail(t, "expected NOT to receive", "payload %q (filter removed), but got %q", payload, got.Bytes())
-	}
-	// Non-delivery must surface as the recv context timing out — any
-	// other error (closed pipe, FSM violation, ...) is a real failure.
-	require.ErrorIs(t, err, context.DeadlineExceeded, "non-delivery of %q", payload)
-}
-
 // TestReq_FSMViolations exercises the REQ socket's strict lock-step FSM:
 //   - Send-after-Send without Recv: ErrFSMViolation.
 //   - Recv without prior Send: ErrFSMViolation.
