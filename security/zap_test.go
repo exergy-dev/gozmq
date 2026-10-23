@@ -29,10 +29,6 @@ func (p *mockPolicy) Authenticate(_, _, mech string, creds [][]byte) (string, ma
 	return p.userID, p.metadata, p.err
 }
 
-// ---------------------------------------------------------------------------
-// Codec round-trip tests
-// ---------------------------------------------------------------------------
-
 func TestZapRequestRoundTrip(t *testing.T) {
 	req := &ZAPRequest{
 		Version:     "1.0",
@@ -94,10 +90,6 @@ func TestZapResponseEncodeIsolatesInput(t *testing.T) {
 	reqID[0] = 0xff
 	require.NotEqual(t, byte(0xff), frames[1][0], "EncodeZAPResponse aliases input RequestID")
 }
-
-// ---------------------------------------------------------------------------
-// ServeRequest tests
-// ---------------------------------------------------------------------------
 
 func TestZapServeValidRequest200(t *testing.T) {
 	policy := &mockPolicy{

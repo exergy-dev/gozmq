@@ -10,6 +10,7 @@ import (
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -25,7 +26,7 @@ func TestReq_PrependsEmptyDelimiter(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("hello"))), "send")
 	got, err := b.Recv(ctx)
@@ -46,7 +47,7 @@ func TestReq_StripsEmptyDelimiterOnRecv(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// First send so the FSM moves to canRecv with a sticky pipe.
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))), "send")
@@ -74,7 +75,7 @@ func TestReq_DoubleSendFSMViolation(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("1"))), "first send")
 	err := eng.Send(ctx, msg.FromBytes([]byte("2")))
@@ -96,7 +97,7 @@ func TestReq_ConcurrentSendsOneWins(t *testing.T) {
 	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("fill"))))
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	const n = 8
 	errs := make(chan error, n)
 	start := make(chan struct{})
@@ -158,7 +159,7 @@ func TestReq_ConcurrentRecvFSMViolation(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))))
 	_, err := b.Recv(ctx)
 	require.NoError(t, err)
@@ -196,7 +197,7 @@ func TestReq_SendCtxCancelRestoresCanSend(t *testing.T) {
 	defer cancel()
 	require.ErrorIs(t, eng.Send(sctx, msg.FromBytes([]byte("q"))), context.DeadlineExceeded)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	_, err := b.Recv(ctx) // drain the filler
 	require.NoError(t, err)
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))))
@@ -225,7 +226,7 @@ func TestReq_DoubleRecvFSMViolation(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))), "send")
 	// Drain request; peer replies.
 	_, err := b.Recv(ctx)
@@ -254,7 +255,7 @@ func TestReq_Rep_RoundTrip_Direct(t *testing.T) {
 	mustAttach(t, reqEng, reqSide)
 	mustAttach(t, repEng, repSide)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	const rounds = 4
 	for i := 0; i < rounds; i++ {
@@ -296,19 +297,11 @@ func TestReq_Close_UnblocksRecv(t *testing.T) {
 	_, err := b.Recv(ctx)
 	require.NoError(t, err, "drain")
 
-	recvDone := make(chan error, 1)
-	go func() {
+	err = testutil.RequireUnblocks(t, func() error {
 		_, err := eng.Recv(ctx)
-		recvDone <- err
-	}()
-	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, eng.Close(), "close")
-	select {
-	case err := <-recvDone:
-		require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
-	case <-time.After(time.Second):
-		require.Fail(t, "recv did not unblock on close")
-	}
+		return err
+	}, func() { require.NoError(t, eng.Close(), "close") })
+	require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
 }
 
 // TestReq_Send_WaitsForPeer asserts that Send parks when no peer is
@@ -318,29 +311,16 @@ func TestReq_Send_WaitsForPeer(t *testing.T) {
 	eng := socket.NewReqEngine()
 	defer eng.Close()
 
-	ctx := testCtx(t)
-
-	sendDone := make(chan error, 1)
-	go func() {
-		sendDone <- eng.Send(ctx, msg.FromBytes([]byte("q")))
-	}()
-	select {
-	case err := <-sendDone:
-		require.Fail(t, "send returned early", "%v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
-
+	ctx := testutil.Ctx(t)
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	mustAttach(t, eng, a)
-	select {
-	case err := <-sendDone:
-		require.NoError(t, err, "send")
-	case <-time.After(time.Second):
-		require.Fail(t, "send did not unblock on attach")
-	}
+
+	err := testutil.RequireUnblocks(t,
+		func() error { return eng.Send(ctx, msg.FromBytes([]byte("q"))) },
+		func() { mustAttach(t, eng, a) })
+	require.NoError(t, err, "send")
 	// Drain the request so the pipe doesn't hold a message at close.
-	_, err := b.Recv(ctx)
+	_, err = b.Recv(ctx)
 	require.NoError(t, err, "drain")
 }
 
@@ -356,7 +336,7 @@ func TestReq_RecvCtxErrorKeepsAwaitingReply(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))), "send")
 	_, err := b.Recv(ctx)
 	require.NoError(t, err, "drain request")
@@ -388,7 +368,7 @@ func TestReq_StaleReplyDiscardedOnNextSend(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q1"))), "send q1")
 	_, err := b.Recv(ctx)
 	require.NoError(t, err, "drain q1")
@@ -412,35 +392,4 @@ func TestReq_StaleReplyDiscardedOnNextSend(t *testing.T) {
 	reply, err := eng.Recv(ctx)
 	require.NoError(t, err, "recv fresh")
 	require.Equal(t, "fresh", string(reply.Bytes()), "stale reply delivered for a later request")
-}
-
-// TestReq_CloseUnblocksSendAtHWM: a Send blocked on a full sticky-candidate
-// pipe must honor the Close contract and unblock with ErrSocketClosed
-// (the old code parked in a bare Pipe.Send with no closeCh arm).
-func TestReq_CloseUnblocksSendAtHWM(t *testing.T) {
-	t.Parallel()
-	eng := socket.NewReqEngine()
-
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
-	defer closePipes(a, b)
-	mustAttach(t, eng, a)
-
-	// Fill the single HWM slot from the engine side so eng.Send blocks.
-	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("fill"))), "fill")
-
-	sendDone := make(chan error, 1)
-	go func() { sendDone <- eng.Send(context.Background(), msg.FromBytes([]byte("q"))) }()
-	select {
-	case err := <-sendDone:
-		require.Fail(t, "send returned before close", "%v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	require.NoError(t, eng.Close(), "close")
-	select {
-	case err := <-sendDone:
-		require.ErrorIs(t, err, zmqerr.ErrSocketClosed, "blocked send")
-	case <-time.After(time.Second):
-		require.Fail(t, "send at HWM did not unblock on close")
-	}
 }

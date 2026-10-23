@@ -3,7 +3,6 @@ package session
 import (
 	"context"
 	"errors"
-	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,12 +14,10 @@ import (
 	"github.com/exergy-dev/gozmq/transport"
 )
 
-// --------------------------------------------------------------------------
 // Reconnect test doubles. We don't exercise the real Session machinery
 // here — the goal is to verify Reconnector's state flow (dial → start →
 // run ends → backoff → reconnect) in isolation. Interop tests exercise
 // reconnection end-to-end against a real peer.
-// --------------------------------------------------------------------------
 
 // stubRunner is a Runner whose lifecycle is driven by test code: end()
 // simulates the connection ending on its own, Stop a local teardown.
@@ -64,14 +61,13 @@ func (stubConn) LocalEndpoint() string       { return "stub://local" }
 func (stubConn) RemoteEndpoint() string      { return "stub://remote" }
 func (stubConn) SetDeadline(time.Time) error { return nil }
 
-// --------------------------------------------------------------------------
-// Tests
-// --------------------------------------------------------------------------
-
 // TestReconnector_DialRetriesThenSucceeds exercises the full
 // dial-fails-then-succeeds-then-disconnects-then-reconnects cycle. We
 // fail the first two dials, succeed the third, end that run to simulate
 // a disconnect, then verify the loop reconnects (fourth dial, second run).
+//
+// Not parallel: it compares real backoff gaps (gap2 > gap1/2), which a
+// loaded scheduler can invert.
 func TestReconnector_DialRetriesThenSucceeds(t *testing.T) {
 	var (
 		dialN     atomic.Int32
@@ -139,6 +135,7 @@ func TestReconnector_DialRetriesThenSucceeds(t *testing.T) {
 // TestReconnector_ContextCancellationStopsLoop verifies that an external
 // ctx cancel surfaces promptly and the loop exits.
 func TestReconnector_ContextCancellationStopsLoop(t *testing.T) {
+	t.Parallel()
 	dialCh := make(chan struct{}, 16)
 	cfg := ReconnectConfig{
 		InitialBackoff: time.Millisecond,
@@ -180,6 +177,7 @@ func TestReconnector_ContextCancellationStopsLoop(t *testing.T) {
 // TestReconnector_StopWakesSleepingBackoff: force a long backoff, then
 // Stop and assert return is far under the backoff interval.
 func TestReconnector_StopWakesSleepingBackoff(t *testing.T) {
+	t.Parallel()
 	cfg := ReconnectConfig{
 		InitialBackoff: 10 * time.Second, // huge — Stop must wake this
 		JitterFraction: 0,
@@ -204,6 +202,7 @@ func TestReconnector_StopWakesSleepingBackoff(t *testing.T) {
 // TestReconnector_StopStopsLiveRunner: Stop tears down the live run and
 // returns its Stop error.
 func TestReconnector_StopStopsLiveRunner(t *testing.T) {
+	t.Parallel()
 	run := newStubRunner(true)
 	run.stopErr = errors.New("close failed")
 	started := make(chan struct{})
@@ -225,6 +224,7 @@ func TestReconnector_StopStopsLiveRunner(t *testing.T) {
 // as a failed attempt: the loop redials, and the attempt counter keeps
 // advancing instead of resetting as it does after an attached run.
 func TestReconnector_UnattachedRunAdvancesBackoff(t *testing.T) {
+	t.Parallel()
 	var starts atomic.Int32
 	retries := make(chan int, 16)
 	cfg := ReconnectConfig{
@@ -258,6 +258,7 @@ func TestReconnector_UnattachedRunAdvancesBackoff(t *testing.T) {
 // TestReconnector_AttachedRunResetsBackoff: after an attached run ends,
 // the next retry is attempt 1 at the initial backoff again.
 func TestReconnector_AttachedRunResetsBackoff(t *testing.T) {
+	t.Parallel()
 	var starts atomic.Int32
 	type retry struct {
 		attempt int
@@ -300,6 +301,7 @@ func TestReconnector_AttachedRunResetsBackoff(t *testing.T) {
 // loop sleeps off a dial failure must prevent the NEXT dial attempt —
 // otherwise a closing socket would get a brand-new session attached.
 func TestReconnector_QuiesceDuringDialBackoff(t *testing.T) {
+	t.Parallel()
 	var dials atomic.Int32
 	dialed := make(chan struct{}, 16)
 	cfg := ReconnectConfig{
@@ -334,137 +336,52 @@ func TestReconnector_QuiesceDuringDialBackoff(t *testing.T) {
 	require.LessOrEqual(t, dials.Load(), int32(2), "loop kept dialing after Quiesce")
 }
 
-// TestApplyJitter_WithinBand samples the jitter helper many times and
-// asserts results land inside the expected symmetric window.
-func TestApplyJitter_WithinBand(t *testing.T) {
-	base := 100 * time.Millisecond
-	frac := 0.2
-	const N = 4096
-
-	var minV, maxV time.Duration = math.MaxInt64, math.MinInt64
-	var sum float64
-	for i := 0; i < N; i++ {
-		d := applyJitter(base, frac)
-		if d < minV {
-			minV = d
-		}
-		if d > maxV {
-			maxV = d
-		}
-		sum += float64(d)
-	}
-
-	lo := time.Duration(float64(base) * (1 - frac))
-	hi := time.Duration(float64(base) * (1 + frac))
-	assert.GreaterOrEqual(t, minV, lo-time.Microsecond, "jitter min out of band: min=%v [want ≥%v]", minV, lo)
-	assert.LessOrEqual(t, maxV, hi+time.Microsecond, "jitter max out of band: max=%v [want ≤%v]", maxV, hi)
-
-	// With N=4096 samples and ±20% window, the empirical mean should be
-	// well within 1% of base. Centered uniform has low variance at this N.
-	mean := time.Duration(sum / float64(N))
-	drift := mean - base
-	if drift < 0 {
-		drift = -drift
-	}
-	assert.LessOrEqual(t, drift, time.Duration(float64(base)*0.02),
-		"mean drifted too far: mean=%v base=%v drift=%v", mean, base, drift)
-
-	// And at least one sample should have landed in the lower half and
-	// one in the upper half — the distribution is symmetric.
-	assert.Less(t, minV, base, "no sample below base; jitter not applied symmetrically")
-	assert.Greater(t, maxV, base, "no sample above base; jitter not applied symmetrically")
-}
-
-// TestApplyJitter_ZeroFractionIsIdentity: frac=0 must return base as-is.
-func TestApplyJitter_ZeroFractionIsIdentity(t *testing.T) {
-	base := 250 * time.Millisecond
-	for i := 0; i < 16; i++ {
-		assert.Equal(t, base, applyJitter(base, 0), "applyJitter(base, 0)")
-	}
-}
-
-// TestApplyJitter_ClampedExtreme: a wildly out-of-range JitterFraction
-// (5.0) must be clamped by ReconnectConfig.normalize to 1.0. After
-// normalize, applyJitter samples are bounded by [0, 2*base].
-//
-// We call normalize directly rather than StartReconnector because we only
-// need the clamped fraction value — standing up a full Reconnector would
-// pull in Dial/NewSession stubs for no benefit.
-func TestApplyJitter_ClampedExtreme(t *testing.T) {
-	cfg := ReconnectConfig{JitterFraction: 5.0}
-	cfg.normalize()
-	require.Equal(t, 1.0, cfg.JitterFraction, "normalize clamped fraction")
-	// Negative values clamp to 0.
-	neg := ReconnectConfig{JitterFraction: -3.0}
-	neg.normalize()
-	require.Equal(t, 0.0, neg.JitterFraction, "normalize clamped negative")
-
-	base := 100 * time.Millisecond
-	const N = 10000
-	for i := 0; i < N; i++ {
-		d := applyJitter(base, cfg.JitterFraction)
-		require.GreaterOrEqual(t, d, time.Duration(0), "sample %d: negative duration %v", i, d)
-		require.LessOrEqual(t, d, 2*base, "sample %d: %v exceeds 2*base=%v", i, d, 2*base)
-	}
-}
-
-// TestApplyJitter_NeverNegative: the smallest meaningful base (1 ns)
-// with maximum fraction (1.0) must never produce a negative duration
-// across 10k samples. Exercises the integer-arithmetic boundary where
-// the float-based formula was prone to return small negatives.
-func TestApplyJitter_NeverNegative(t *testing.T) {
-	base := time.Duration(1) // 1 ns, smallest meaningful positive base
-	const N = 10000
-	for i := 0; i < N; i++ {
-		d := applyJitter(base, 1.0)
-		require.GreaterOrEqual(t, d, time.Duration(0),
-			"sample %d: negative duration %v for base=%v frac=1.0", i, d, base)
-	}
-
-	// Also check a few larger bases at frac=1.0 — the entire range
-	// [0, 2*base) must be non-negative.
-	for _, b := range []time.Duration{
-		10 * time.Nanosecond,
-		1 * time.Microsecond,
-		1 * time.Millisecond,
-		1 * time.Second,
+// TestApplyJitter: every sample lands in [base-base*frac, base+base*frac],
+// never below zero, the distribution is symmetric about base, and
+// normalize clamps the fraction into [0, 1] first.
+func TestApplyJitter(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		base      time.Duration
+		frac      float64 // as configured; normalize clamps it
+		symmetric bool    // expect samples on both sides of base
+	}{
+		{"20 percent", 100 * time.Millisecond, 0.2, true},
+		{"zero is identity", 250 * time.Millisecond, 0, false},
+		{"full fraction at 1ns", time.Nanosecond, 1.0, false},
+		{"clamped above", 100 * time.Millisecond, 5.0, true},
+		{"clamped below", 100 * time.Millisecond, -3.0, false},
 	} {
-		for i := 0; i < 1000; i++ {
-			require.GreaterOrEqual(t, applyJitter(b, 1.0), time.Duration(0),
-				"base=%v sample=%d: negative", b, i)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := ReconnectConfig{JitterFraction: tc.frac}
+			cfg.normalize()
+			frac := min(max(tc.frac, 0), 1)
+			require.Equal(t, frac, cfg.JitterFraction, "normalize clamp")
+			lo, hi := tc.base-time.Duration(float64(tc.base)*frac), tc.base+time.Duration(float64(tc.base)*frac)
+			var sum float64
+			var sawBelow, sawAbove bool
+			const n = 10000
+			for i := 0; i < n; i++ {
+				d := applyJitter(tc.base, cfg.JitterFraction)
+				require.GreaterOrEqual(t, d, max(lo, 0), "sample %d", i)
+				require.LessOrEqual(t, d, hi, "sample %d", i)
+				sum += float64(d)
+				sawBelow, sawAbove = sawBelow || d < tc.base, sawAbove || d > tc.base
+			}
+			if tc.symmetric {
+				require.True(t, sawBelow && sawAbove, "samples on both sides of base")
+				mean := time.Duration(sum / n)
+				require.Less(t, (mean - tc.base).Abs(), time.Duration(float64(tc.base)*0.02), "mean drift")
+			}
+		})
 	}
-}
-
-// TestApplyJitter_InRange: fraction=0.2, base=100ms, 10k samples must
-// all land in [80ms, 120ms]. Verifies the integer-arithmetic window is
-// correct.
-func TestApplyJitter_InRange(t *testing.T) {
-	base := 100 * time.Millisecond
-	frac := 0.2
-	lo := base - time.Duration(float64(base)*frac) // 80ms
-	hi := base + time.Duration(float64(base)*frac) // 120ms
-
-	const N = 10000
-	var sawBelow, sawAbove bool
-	for i := 0; i < N; i++ {
-		d := applyJitter(base, frac)
-		require.GreaterOrEqual(t, d, lo, "sample %d: %v below [%v, %v]", i, d, lo, hi)
-		require.LessOrEqual(t, d, hi, "sample %d: %v above [%v, %v]", i, d, lo, hi)
-		if d < base {
-			sawBelow = true
-		}
-		if d > base {
-			sawAbove = true
-		}
-	}
-	// Symmetry sanity: with 10k samples we should see both sides.
-	assert.True(t, sawBelow, "no sample below base; distribution not symmetric")
-	assert.True(t, sawAbove, "no sample above base; distribution not symmetric")
 }
 
 // TestNextBackoff covers the exponential-doubling and cap logic.
 func TestNextBackoff(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name     string
 		base     time.Duration
@@ -478,6 +395,7 @@ func TestNextBackoff(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got := nextBackoff(tc.base, tc.maxCap)
 			assert.Equal(t, tc.wantNext, got, "nextBackoff(%v,%v)", tc.base, tc.maxCap)
 		})

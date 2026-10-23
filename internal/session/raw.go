@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -82,7 +83,7 @@ func (s *Session) writeRaw(m *msg.Msg) bool {
 	if len(body) > 0 && err == nil {
 		return true
 	}
-	if err != nil && !isShutdownErr(err) {
+	if err != nil && !zmqerr.IsShutdown(err) {
 		s.cfg.Logger.Debug("gozmq/session: raw write", "err", err)
 	}
 	s.shutdown()

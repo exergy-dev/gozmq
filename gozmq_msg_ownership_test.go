@@ -13,6 +13,7 @@ import (
 	"go.uber.org/goleak"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // Message-ownership regressions. Received frames used to be backed by a
@@ -376,7 +377,7 @@ func TestRecvBufferPool_LentOnlyForLargeFrames(t *testing.T) {
 	for _, mode := range recvModes {
 		t.Run(mode.name, func(t *testing.T) {
 			_, push, pull := newSocketPairTypes(t, gozmq.Push, gozmq.Pull, "tcp://127.0.0.1:0", nil, mode.opts)
-			ctx := testCtx(t)
+			ctx := testutil.Ctx(t)
 			for _, size := range []int{100, 4 << 10, 4<<10 + 1, 1 << 20} {
 				require.NoError(t, push.SendMsg(ctx, gozmq.NewMsgFromBytes(largePayload(size, size))))
 				m, err := pull.RecvMsg(ctx)
@@ -397,7 +398,7 @@ func TestRecvBufferPool_RetainedUntilRelease(t *testing.T) {
 	verifyNoLeaks(t)
 	pool := []gozmq.Option{gozmq.WithRecvBufferPool(true)}
 	_, push, pull := newSocketPairTypes(t, gozmq.Push, gozmq.Pull, "tcp://127.0.0.1:0", nil, pool)
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	const size = 64 << 10
 	send := func(i int) {
@@ -452,7 +453,7 @@ func TestRecvBufferPool_OverRelease(t *testing.T) {
 	pool := []gozmq.Option{gozmq.WithRecvBufferPool(true)}
 	_, push, pull := newSocketPairTypes(t, gozmq.Push, gozmq.Pull, "tcp://127.0.0.1:0", nil, pool)
 	_, dst, out := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "tcp://127.0.0.1:0", pool, nil)
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	const n, size = 20, 64 << 10
 	for i := 0; i < n; i++ {
@@ -560,7 +561,7 @@ func TestRecvBufferPool_RepLentEnvelope(t *testing.T) {
 	pool := []gozmq.Option{gozmq.WithRecvBufferPool(true)}
 	_, rep, dealer := newSocketPairTypes(t, gozmq.Rep, gozmq.Dealer, "tcp://127.0.0.1:0", pool, pool)
 	_, churnIn, churnOut := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "tcp://127.0.0.1:0", pool, nil)
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	const size = 64 << 10
 	for i := 0; i < 20; i++ {

@@ -16,7 +16,7 @@ import (
 const ipcScheme = "ipc"
 
 // IPCTransport implements Transport over Unix domain sockets,
-// matching libzmq's "ipc" scheme (design §7.2). Endpoint syntax:
+// matching libzmq's "ipc" scheme. Endpoint syntax:
 //
 //	ipc:///path/to/file.sock   — filesystem-namespace socket
 //	ipc://@name                — abstract-namespace socket (Linux only)
@@ -48,19 +48,16 @@ func (t *IPCTransport) Scheme() string { return ipcScheme }
 
 // Dial connects to endpoint. Respects ctx via net.Dialer.DialContext.
 func (t *IPCTransport) Dial(ctx context.Context, endpoint string) (Conn, error) {
-	path, abstract, err := parseIPCAddress(endpoint)
+	path, _, err := parseIPCAddress(endpoint)
 	if err != nil {
 		return nil, err
-	}
-	if abstract && runtime.GOOS != "linux" {
-		return nil, fmt.Errorf("%w: abstract-namespace ipc is Linux-only", zmqerr.ErrEndpointInvalid)
 	}
 	var d net.Dialer
 	c, err := d.DialContext(ctx, "unix", path)
 	if err != nil {
 		return nil, err
 	}
-	return newIPCConn(c, "ipc://"+path, "ipc://"+path), nil
+	return &conn{Conn: c, local: "ipc://" + path, remote: "ipc://" + path}, nil
 }
 
 // Listen binds endpoint. For filesystem paths we create the socket inode
@@ -70,9 +67,6 @@ func (t *IPCTransport) Listen(ctx context.Context, endpoint string) (Listener, e
 	path, abstract, err := parseIPCAddress(endpoint)
 	if err != nil {
 		return nil, err
-	}
-	if abstract && runtime.GOOS != "linux" {
-		return nil, fmt.Errorf("%w: abstract-namespace ipc is Linux-only", zmqerr.ErrEndpointInvalid)
 	}
 	var lc net.ListenConfig
 	l, err := lc.Listen(ctx, "unix", path)
@@ -90,9 +84,7 @@ func (t *IPCTransport) Listen(ctx context.Context, endpoint string) (Listener, e
 		}
 	}
 	endpoint = "ipc://" + path
-	return newNetListener(l, endpoint, func(c net.Conn) Conn {
-		return newIPCConn(c, endpoint, endpoint)
-	}), nil
+	return newNetListener(l, endpoint, func(c net.Conn) Conn { return &conn{Conn: c, local: endpoint, remote: endpoint} }), nil
 }
 
 // reclaimStaleSocket removes the socket file at path if nothing is listening
@@ -131,38 +123,16 @@ func parseIPCAddress(endpoint string) (path string, abstract bool, err error) {
 		return "", false, fmt.Errorf("%w: empty ipc path", zmqerr.ErrEndpointInvalid)
 	}
 	if raw[0] == '@' {
-		if len(raw) == 1 {
+		switch {
+		case len(raw) == 1:
 			return "", false, fmt.Errorf("%w: empty abstract-namespace name", zmqerr.ErrEndpointInvalid)
+		case runtime.GOOS != "linux":
+			return "", false, fmt.Errorf("%w: abstract-namespace ipc is Linux-only", zmqerr.ErrEndpointInvalid)
 		}
 		return raw, true, nil
 	}
 	return raw, false, nil
 }
 
-// --------------------------------------------------------------------------
-// ipcConn — Conn over a net.Conn (Unix socket).
-// --------------------------------------------------------------------------
-
-// ipcConn wraps a net.Conn and reports ipc:// endpoints. The embedded
-// Conn's Read/Write already honor deadlines and ctx-via-deadline patterns.
-type ipcConn struct {
-	net.Conn
-	local, remote string
-}
-
-func newIPCConn(c net.Conn, local, remote string) *ipcConn {
-	return &ipcConn{Conn: c, local: local, remote: remote}
-}
-
-func (c *ipcConn) LocalEndpoint() string  { return c.local }
-func (c *ipcConn) RemoteEndpoint() string { return c.remote }
-
-func (c *ipcConn) WriteBuffers(buffers *net.Buffers) (int64, error) {
-	return buffers.WriteTo(c.Conn)
-}
-
 // Compile-time interface checks.
-var (
-	_ Transport = (*IPCTransport)(nil)
-	_ Conn      = (*ipcConn)(nil)
-)
+var _ Transport = (*IPCTransport)(nil)

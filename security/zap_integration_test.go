@@ -9,9 +9,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	gozmq "github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/security"
-	"github.com/exergy-dev/gozmq/security/curve"
 )
 
 func TestZapHandler_IntegratesWithPlainHandshake(t *testing.T) {
@@ -87,10 +87,8 @@ func TestZapHandler_IntegratesWithPlainHandshake(t *testing.T) {
 }
 
 func TestZapHandler_IntegratesWithCurveHandshake(t *testing.T) {
-	serverPub, serverSec, err := curve.GenerateKeyPair()
-	require.NoError(t, err, "server keypair")
-	clientPub, clientSec, err := curve.GenerateKeyPair()
-	require.NoError(t, err, "client keypair")
+	serverPub, serverSec := testutil.CurveKeys(t)
+	clientPub, clientSec := testutil.CurveKeys(t)
 
 	t.Run("accept", func(t *testing.T) {
 		handler := security.ZAPHandler(func(domain, address, mech string, credentials [][]byte) (string, map[string]string, error) {

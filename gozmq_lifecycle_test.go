@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // TestInprocCloseLingerEndsWhenConsumed: on the inproc direct-pipe path,
@@ -16,6 +17,7 @@ import (
 // whole linger, and a queued one must release Close as soon as the peer
 // reads it — not when linger expires, and not only when the peer closes.
 func TestInprocCloseLingerEndsWhenConsumed(t *testing.T) {
+	t.Parallel()
 	const (
 		linger = 3 * time.Second
 		n      = 50
@@ -45,7 +47,7 @@ func TestInprocCloseLingerEndsWhenConsumed(t *testing.T) {
 
 			t.Run(name+"/consumed", func(t *testing.T) {
 				push, pull := setup(t)
-				ctx := testCtx(t)
+				ctx := testutil.Ctx(t)
 				for i := 0; i < n; i++ {
 					require.NoError(t, push.SendBytes(ctx, []byte("x")))
 				}
@@ -67,7 +69,7 @@ func TestInprocCloseLingerEndsWhenConsumed(t *testing.T) {
 
 			t.Run(name+"/queued", func(t *testing.T) {
 				push, pull := setup(t)
-				ctx := testCtx(t)
+				ctx := testutil.Ctx(t)
 				for i := 0; i < n; i++ {
 					require.NoError(t, push.SendBytes(ctx, []byte("x")))
 				}
@@ -100,6 +102,7 @@ func TestInprocCloseLingerEndsWhenConsumed(t *testing.T) {
 // peer) must not report EventConnected or leave the session running
 // unattached; it backs off and retries like any other failed attempt.
 func TestConnectAttachFailureTearsDownSession(t *testing.T) {
+	t.Parallel()
 	zctx := gozmq.NewContext()
 	defer zctx.Close()
 	var eps []string
@@ -146,8 +149,9 @@ func TestConnectAttachFailureTearsDownSession(t *testing.T) {
 // TestRecvBytesMultipartWrapsSentinel: every returned error wraps a
 // sentinel (errors.go), including RecvBytes' multipart refusal.
 func TestRecvBytesMultipartWrapsSentinel(t *testing.T) {
+	t.Parallel()
 	_, a, b := newSocketPair(t, gozmq.Pair, "inproc://recvbytes-multipart")
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, a.SendMsg(ctx, gozmq.NewMsgFromFrames([]byte("a"), []byte("b"))))
 	_, err := b.RecvBytes(ctx)
 	require.ErrorIs(t, err, gozmq.ErrFSMViolation)

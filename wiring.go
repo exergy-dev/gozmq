@@ -76,12 +76,6 @@ type zapConfigurable interface {
 	ConfigureZAP(handler security.ZAPHandler, domain, address string)
 }
 
-func toKey(b []byte) curve.Key {
-	var k curve.Key
-	copy(k[:], b)
-	return k
-}
-
 // newMechanism picks the security mechanism for a new session based on
 // the socket's configured options, which validateSocketConfig has already
 // limited to at most one mechanism; with none configured it is NULL.
@@ -111,13 +105,13 @@ func (s *Socket) newMechanism(role security.Role) (security.Mech, error) {
 	}
 	switch {
 	case len(s.cfg.curveSecretKey) == 32 && s.cfg.curveServer:
-		m, err := curve.NewCurveServer(toKey(s.cfg.curveSecretKey), meta)
+		m, err := curve.NewCurveServer(curve.Key(s.cfg.curveSecretKey), meta)
 		if err != nil {
 			return nil, fmt.Errorf("gozmq: CURVE server mechanism: %w", err)
 		}
 		return m, nil
 	case len(s.cfg.curveSecretKey) == 32 && !s.cfg.curveServer && len(s.cfg.curveServerKey) == 32 && len(s.cfg.curvePublicKey) == 32:
-		m, err := curve.NewCurveClient(toKey(s.cfg.curveServerKey), toKey(s.cfg.curvePublicKey), toKey(s.cfg.curveSecretKey), meta)
+		m, err := curve.NewCurveClient(curve.Key(s.cfg.curveServerKey), curve.Key(s.cfg.curvePublicKey), curve.Key(s.cfg.curveSecretKey), meta)
 		if err != nil {
 			return nil, fmt.Errorf("gozmq: CURVE client mechanism: %w", err)
 		}

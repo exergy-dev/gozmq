@@ -10,4 +10,4 @@ import (
 // setup/teardown is leak-checked alongside the rest of the module (design
 // §10.5). Standalone main.go binaries under perf/local_lat, remote_lat,
 // etc. run to completion and are exempt from goleak.
-func TestMain(m *testing.M) { testutil.VerifyTestMain(m) }
+func TestMain(m *testing.M) { testutil.VerifyMain(m) }

@@ -8,37 +8,18 @@ withdrawn. Work the checklist.
 
 ## Pre-flight
 
-Everything green on the release commit:
+Run the pre-PR checklist in `CONTRIBUTING.md` on the release commit, plus:
 
 ```sh
-go mod tidy && git diff --exit-code go.mod go.sum
-go build ./... && CGO_ENABLED=0 go build ./...
-gofmt -l $(git ls-files '*.go')                   # must print nothing
-go vet ./... && go vet -tags interop,soak ./...
-golangci-lint run                                 # also builds the interop and soak tags
-deadcode -test ./...                              # golang.org/x/tools/cmd/deadcode; must print nothing
-go test -race -count=1 ./...
-go test -tags interop -race ./interop/...         # needs libzmq3-dev
 GOZMQ_SOAK_DURATION=10m go test -tags soak -run TestSoak -timeout 60m ./soak/...   # three tests, 10m each
-```
-
-If the release contains performance work, record the benchmark gate
-against the previous tag in `perf/REPORT.md`
-(`perf/benchgate.sh vPREVIOUS`): nothing may regress by more than 5%, and
-allocs/op may not rise.
-
-Confirm the last **nightly** run passed — the long fuzz and repeated race
-passes only run there, and they are the checks most likely to catch what a
-single PR run misses.
-
-Cross-compilation, since the pure-Go claim is the headline feature:
-
-```sh
 for target in linux/386 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 freebsd/amd64; do
-  GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go build ./... \
-    || echo "FAILED: $target"
+  GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go build ./... || echo "FAILED: $target"
 done
 ```
+
+If the release contains performance work, run `perf/benchgate.sh vPREVIOUS`
+and record the result in `perf/REPORT.md`. Confirm the last nightly run
+passed: the long fuzz and repeated race passes only run there.
 
 ## Public API review
 
@@ -47,7 +28,7 @@ type. This must print nothing (the error sentinels are `var X = zmqerr.X`
 aliases by design and are excluded):
 
 ```sh
-for p in . ./msg ./transport ./typed ./typed/codecjson ./security ./security/curve; do
+for p in . ./msg ./transport ./typed ./security ./security/curve; do
   go doc -all "$p" | grep -E "^\s*(func|type|const|var)?\s*[A-Z][A-Za-z0-9_]*(\(|\[| ).*\b(pipe|session|socket|zmqerr|zmtp|bufpool|testutil)\.[A-Z]" \
     | grep -v "= zmqerr\."
 done
@@ -58,7 +39,7 @@ confirm it matches the intended version bump:
 
 ```sh
 git worktree add /tmp/gozmq-prev vPREVIOUS
-for p in . ./msg ./transport ./typed ./typed/codecjson ./security ./security/curve; do
+for p in . ./msg ./transport ./typed ./security ./security/curve; do
   diff <(cd /tmp/gozmq-prev && go doc -all "$p") <(go doc -all "$p")
 done
 git worktree remove /tmp/gozmq-prev
@@ -78,9 +59,8 @@ Anything removed or changed in place is a **major** bump. Additions are a
   top of the section.
 - `docs/COMPATIBILITY.md` matches shipped behaviour, including any new
   divergence.
-- `README.md` version references and performance numbers are current.
-- Every example still runs: `for d in examples/*/; do go run "./$d" || break; done`
-  (some are interactive — check the output, do not just check exit codes).
+- `README.md` version references are current.
+- Every example still runs: `for d in examples/*/; do go run "./$d" || break; done`.
 
 ## Tag and publish
 

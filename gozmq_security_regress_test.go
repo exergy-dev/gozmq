@@ -1,7 +1,6 @@
 package gozmq_test
 
 import (
-	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -9,6 +8,7 @@ import (
 	"net"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/security"
 )
 
@@ -24,12 +25,26 @@ import (
 // configured mechanism was silently skipped or an unauthenticated peer could
 // make the server do unbounded work.
 
-// requireNoDelivery sends from src and asserts dst receives nothing within
-// the window: the peers must never have completed a handshake.
-func requireNoDelivery(t *testing.T, src, dst *gozmq.Socket, what string) {
+// handshakeFailed is the monitor mask the no-delivery tests watch.
+const handshakeFailed = gozmq.EventHandshakeFailedProtocol | gozmq.EventHandshakeFailedAuth
+
+// rejectedPair is newSocketPairTypes with both sockets reporting handshake
+// failures on the returned channel.
+func rejectedPair(t *testing.T, srvType, cliType gozmq.SocketType, srvOpts, cliOpts []gozmq.Option) (<-chan gozmq.Event, *gozmq.Socket, *gozmq.Socket) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
-	defer cancel()
+	events := make(chan gozmq.Event, 16)
+	mon := gozmq.WithMonitor(events, handshakeFailed)
+	_, srv, cli := newSocketPairTypes(t, srvType, cliType, "tcp://127.0.0.1:0",
+		append(srvOpts, mon), append(cliOpts, mon))
+	return events, srv, cli
+}
+
+// requireNoDelivery waits for a handshake failure on events, then sends from
+// src and asserts dst receives nothing: the peers never completed a handshake.
+func requireNoDelivery(t *testing.T, events <-chan gozmq.Event, src, dst *gozmq.Socket, what string) {
+	t.Helper()
+	testutil.WaitEvent(t, events, 5*time.Second, func(e gozmq.Event) bool { return e.Type&handshakeFailed != 0 })
+	ctx := testutil.Ctx(t, 100*time.Millisecond)
 	_ = src.SendBytes(ctx, []byte("unauthenticated"))
 	got, err := dst.RecvBytes(ctx)
 	require.Errorf(t, err, "%s: delivered %q without authentication", what, got)
@@ -50,32 +65,30 @@ func (*rejectMech) DecodeFrame(f uint8, b []byte) (uint8, []byte, error) { retur
 // exchange traffic with a peer that skipped its handshake. (Over inproc,
 // which runs no handshake, such a socket cannot Bind or Connect at all.)
 func TestSecurity_CustomMechNotBypassed(t *testing.T) {
+	t.Parallel()
 	t.Run("xor binder, NULL dialer", func(t *testing.T) {
 		var frames atomic.Int64
-		_, srv, cli := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "tcp://127.0.0.1:0",
-			[]gozmq.Option{gozmq.WithSecurityMech(newXORMech(&frames))}, nil)
-		requireNoDelivery(t, cli, srv, "custom-mech binder")
+		events, srv, cli := rejectedPair(t, gozmq.Pull, gozmq.Push, []gozmq.Option{gozmq.WithSecurityMech(newXORMech(&frames))}, nil)
+		requireNoDelivery(t, events, cli, srv, "custom-mech binder")
 	})
 	t.Run("rejecting binder, NULL dialer", func(t *testing.T) {
 		opt := gozmq.WithSecurityMech(func(r security.Role, m map[string]string) (security.Mech, error) {
 			return &rejectMech{security.NewMechBase(r, m)}, nil
 		})
-		_, srv, cli := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair, "tcp://127.0.0.1:0",
-			[]gozmq.Option{opt}, nil)
-		requireNoDelivery(t, cli, srv, "rejecting binder")
+		events, srv, cli := rejectedPair(t, gozmq.Pair, gozmq.Pair, []gozmq.Option{opt}, nil)
+		requireNoDelivery(t, events, cli, srv, "rejecting binder")
 	})
 	t.Run("NULL binder, xor dialer", func(t *testing.T) {
 		var frames atomic.Int64
-		_, srv, cli := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "tcp://127.0.0.1:0",
-			nil, []gozmq.Option{gozmq.WithSecurityMech(newXORMech(&frames))})
-		requireNoDelivery(t, cli, srv, "custom-mech dialer")
+		events, srv, cli := rejectedPair(t, gozmq.Pull, gozmq.Push, nil, []gozmq.Option{gozmq.WithSecurityMech(newXORMech(&frames))})
+		requireNoDelivery(t, events, cli, srv, "custom-mech dialer")
 	})
 	t.Run("xor both sides runs the mechanism", func(t *testing.T) {
 		var frames atomic.Int64
 		opt := gozmq.WithSecurityMech(newXORMech(&frames))
 		_, srv, cli := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "tcp://127.0.0.1:0",
 			[]gozmq.Option{opt}, []gozmq.Option{opt})
-		ctx := testCtx(t)
+		ctx := testutil.Ctx(t)
 		require.NoError(t, cli.SendBytes(ctx, []byte("hello")))
 		got, err := srv.RecvBytes(ctx)
 		require.NoError(t, err)
@@ -89,18 +102,17 @@ func TestSecurity_CustomMechNotBypassed(t *testing.T) {
 // Before the fix a WithPlainAuth socket that connected (or a WithPlainClient
 // socket that bound) fell back to NULL and authenticated nobody.
 func TestSecurity_PlainRoleFollowsOption(t *testing.T) {
+	t.Parallel()
 	const ep = "tcp://127.0.0.1:0"
 	t.Run("auth socket connects to NULL peer", func(t *testing.T) {
 		var called atomic.Bool
-		_, nullSrv, authed := newSocketPairTypes(t, gozmq.Push, gozmq.Pull, ep, nil,
-			[]gozmq.Option{gozmq.WithPlainAuth(func(string, string) bool { called.Store(true); return false })})
-		requireNoDelivery(t, nullSrv, authed, "WithPlainAuth connecting to NULL")
+		events, nullSrv, authed := rejectedPair(t, gozmq.Push, gozmq.Pull, nil, []gozmq.Option{gozmq.WithPlainAuth(func(string, string) bool { called.Store(true); return false })})
+		requireNoDelivery(t, events, nullSrv, authed, "WithPlainAuth connecting to NULL")
 		require.False(t, called.Load(), "NULL peer never sends HELLO")
 	})
 	t.Run("client socket binds, NULL peer connects", func(t *testing.T) {
-		_, plainCli, nullPeer := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, ep,
-			[]gozmq.Option{gozmq.WithPlainClient("alice", "pw")}, nil)
-		requireNoDelivery(t, nullPeer, plainCli, "WithPlainClient binding, NULL peer")
+		events, plainCli, nullPeer := rejectedPair(t, gozmq.Pull, gozmq.Push, []gozmq.Option{gozmq.WithPlainClient("alice", "pw")}, nil)
+		requireNoDelivery(t, events, nullPeer, plainCli, "WithPlainClient binding, NULL peer")
 	})
 	t.Run("auth socket connects to client socket", func(t *testing.T) {
 		var gotUser atomic.Value
@@ -110,7 +122,7 @@ func TestSecurity_PlainRoleFollowsOption(t *testing.T) {
 				gotUser.Store(u)
 				return u == "alice" && p == "pw"
 			})})
-		ctx := testCtx(t)
+		ctx := testutil.Ctx(t)
 		require.NoError(t, cliSide.SendBytes(ctx, []byte("hi")))
 		got, err := authSide.RecvBytes(ctx)
 		require.NoError(t, err)
@@ -118,10 +130,8 @@ func TestSecurity_PlainRoleFollowsOption(t *testing.T) {
 		require.Equal(t, "alice", gotUser.Load())
 	})
 	t.Run("auth socket connects and rejects", func(t *testing.T) {
-		_, cliSide, authSide := newSocketPairTypes(t, gozmq.Push, gozmq.Pull, ep,
-			[]gozmq.Option{gozmq.WithPlainClient("alice", "wrong")},
-			[]gozmq.Option{gozmq.WithPlainAuth(func(u, p string) bool { return false })})
-		requireNoDelivery(t, cliSide, authSide, "rejected PLAIN client")
+		events, cliSide, authSide := rejectedPair(t, gozmq.Push, gozmq.Pull, []gozmq.Option{gozmq.WithPlainClient("alice", "wrong")}, []gozmq.Option{gozmq.WithPlainAuth(func(u, p string) bool { return false })})
+		requireNoDelivery(t, events, cliSide, authSide, "rejected PLAIN client")
 	})
 }
 
@@ -191,6 +201,7 @@ func TestSecurity_PreAuthAllocationBounded(t *testing.T) {
 // server role, so a PLAIN server that Connects is still vetted by the
 // Context's ZAP handler.
 func TestSecurity_ZapConsultedForConnectingServer(t *testing.T) {
+	t.Parallel()
 	var zapCalls atomic.Int64
 	handler := security.ZAPHandler(func(string, string, string, [][]byte) (string, map[string]string, error) {
 		zapCalls.Add(1)
@@ -204,14 +215,15 @@ func TestSecurity_ZapConsultedForConnectingServer(t *testing.T) {
 	t.Cleanup(func() { _ = cliSide.Close() })
 	require.NoError(t, cliSide.Bind("tcp://127.0.0.1:0"))
 
+	events := make(chan gozmq.Event, 16)
 	authSide, err := zctx.NewSocket(gozmq.Pull,
 		gozmq.WithPlainAuth(func(string, string) bool { return true }),
-		gozmq.WithZAPDomain("global"))
+		gozmq.WithZAPDomain("global"), gozmq.WithMonitor(events, handshakeFailed))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = authSide.Close() })
 	require.NoError(t, authSide.Connect(cliSide.LastEndpoint()))
 
-	requireNoDelivery(t, cliSide, authSide, "ZAP-rejected PLAIN client")
+	requireNoDelivery(t, events, cliSide, authSide, "ZAP-rejected PLAIN client")
 	require.Positive(t, zapCalls.Load(), "ZAP handler never consulted")
 }
 
@@ -219,6 +231,7 @@ func TestSecurity_ZapConsultedForConnectingServer(t *testing.T) {
 // with a bare error (not wrapping ErrAuthFailed) is still reported as an
 // authorization failure on the server's monitor.
 func TestSecurity_ZAPPlainErrorReportsAuthFailure(t *testing.T) {
+	t.Parallel()
 	handler := security.ZAPHandler(func(string, string, string, [][]byte) (string, map[string]string, error) {
 		return "", nil, errors.New("not on the allowlist")
 	})
@@ -244,42 +257,6 @@ func TestSecurity_ZAPPlainErrorReportsAuthFailure(t *testing.T) {
 	})
 	require.True(t, hasType(collected, gozmq.EventHandshakeFailedAuth),
 		"ZAP rejection not reported as an auth failure; events=%v", eventTypes(collected))
-}
-
-// rawNullHandshake dials addr and completes a ZMTP 3.<minor> NULL handshake
-// by hand, advertising socketType and meta, returning the connection with the
-// server's READY consumed. It lets a test speak to a gozmq socket as an
-// arbitrary (possibly misbehaving) peer.
-func rawNullHandshake(t *testing.T, addr string, minor byte, socketType string, meta map[string]string) net.Conn {
-	t.Helper()
-	c, err := net.Dial("tcp", addr)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = c.Close() })
-	require.NoError(t, c.SetDeadline(time.Now().Add(10*time.Second)))
-	greet := make([]byte, 64)
-	greet[0], greet[9], greet[10], greet[11] = 0xFF, 0x7F, 3, minor
-	copy(greet[12:], "NULL")
-	_, err = c.Write(greet)
-	require.NoError(t, err)
-	var peerGreet [64]byte
-	_, err = io.ReadFull(c, peerGreet[:])
-	require.NoError(t, err, "server greeting")
-	props := map[string]string{"Socket-Type": socketType}
-	for k, v := range meta {
-		props[k] = v
-	}
-	ready := security.EncodeReady(props)
-	// NULL server is passive: the client sends READY first.
-	_, err = c.Write(append([]byte{0x04, byte(len(ready))}, ready...))
-	require.NoError(t, err)
-	// The server's READY proves the handshake completed on its side.
-	var hdr [2]byte
-	_, err = io.ReadFull(c, hdr[:])
-	require.NoError(t, err, "server READY header")
-	require.Equal(t, byte(0x04), hdr[0], "expected COMMAND frame")
-	_, err = io.ReadFull(c, make([]byte, int(hdr[1])))
-	require.NoError(t, err, "server READY body")
-	return c
 }
 
 // requireConnOpen asserts a short read on c times out (the session is up)
@@ -317,7 +294,7 @@ func TestSecurity_PostAuthStalledFrameAllocationBounded(t *testing.T) {
 	const conns = 8
 	cs := make([]net.Conn, 0, conns)
 	for range conns {
-		cs = append(cs, rawNullHandshake(t, addr, 0, "PUSH", nil))
+		cs = append(cs, testutil.RawNullHandshake(t, addr, 0, "PUSH", nil))
 	}
 
 	var before runtime.MemStats
@@ -341,9 +318,11 @@ func TestSecurity_PostAuthStalledFrameAllocationBounded(t *testing.T) {
 	t.Logf("HeapAlloc growth for %d stalled 64 MiB frames: %d KiB", conns, growth>>10)
 	require.Less(t, growth, int64(8<<20), "stalled frames allocated attacker-announced sizes")
 
+	var wg sync.WaitGroup
 	for i, c := range cs {
-		requireConnOpen(t, c, fmt.Sprintf("conn %d", i))
+		wg.Go(func() { requireConnOpen(t, c, fmt.Sprintf("conn %d", i)) })
 	}
+	wg.Wait()
 }
 
 // pingFrame builds a ZMTP PING command frame with the given context.
@@ -357,11 +336,12 @@ func pingFrame(context []byte) []byte {
 // authenticated peer queue PONGs up to MaxMessageSize each; now it is a
 // protocol error that ends the session.
 func TestSecurity_PingContextCapped(t *testing.T) {
+	t.Parallel()
 	_, srv := newTestSocket(t, gozmq.Pull)
 	require.NoError(t, srv.Bind("tcp://127.0.0.1:0"))
 	addr := strings.TrimPrefix(srv.LastEndpoint(), "tcp://")
 
-	ok := rawNullHandshake(t, addr, 1, "PUSH", nil)
+	ok := testutil.RawNullHandshake(t, addr, 1, "PUSH", nil)
 	_, err := ok.Write(pingFrame(make([]byte, 16)))
 	require.NoError(t, err)
 	// The PONG comes back: COMMAND frame, "\x04PONG" + 16 context bytes.
@@ -371,7 +351,7 @@ func TestSecurity_PingContextCapped(t *testing.T) {
 	require.NoError(t, err, "PONG for a 16-byte context")
 	require.Equal(t, []byte{0x04, 21, 4, 'P', 'O', 'N', 'G'}, pong[:7])
 
-	bad := rawNullHandshake(t, addr, 1, "PUSH", nil)
+	bad := testutil.RawNullHandshake(t, addr, 1, "PUSH", nil)
 	_, err = bad.Write(pingFrame(make([]byte, 17)))
 	require.NoError(t, err)
 	requireConnClosed(t, bad, "17-byte PING context")
@@ -382,11 +362,12 @@ func TestSecurity_PingContextCapped(t *testing.T) {
 // let a peer collide with the identities a ROUTER synthesizes and take over
 // another peer's routing slot.
 func TestSecurity_PeerIdentityValidated(t *testing.T) {
+	t.Parallel()
 	_, srv := newTestSocket(t, gozmq.Router)
 	require.NoError(t, srv.Bind("tcp://127.0.0.1:0"))
 	addr := strings.TrimPrefix(srv.LastEndpoint(), "tcp://")
 
-	good := rawNullHandshake(t, addr, 1, "DEALER", map[string]string{"Identity": "peer-a"})
+	good := testutil.RawNullHandshake(t, addr, 1, "DEALER", map[string]string{"Identity": "peer-a"})
 	requireConnOpen(t, good, "valid identity")
 
 	for name, id := range map[string]string{
@@ -397,9 +378,7 @@ func TestSecurity_PeerIdentityValidated(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = c.Close() })
 		require.NoError(t, c.SetDeadline(time.Now().Add(10*time.Second)))
-		greet := make([]byte, 64)
-		greet[0], greet[9], greet[10], greet[11] = 0xFF, 0x7F, 3, 1
-		copy(greet[12:], "NULL")
+		greet := testutil.Greeting("NULL", 1)
 		_, err = c.Write(greet)
 		require.NoError(t, err)
 		_, err = io.ReadFull(c, make([]byte, 64))

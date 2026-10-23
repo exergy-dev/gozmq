@@ -8,6 +8,64 @@ migration hint.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-23
+
+A cleanup release: the same wire behaviour and defaults as 0.1.1, with a
+smaller library, a faster test suite and shorter documentation. Breaking
+changes are listed first, each with a migration hint.
+
+### Breaking changes
+
+- **`typed/codecjson` is gone; use `typed.JSONCodec`.** The sixteen-line
+  package added an import path for a codec that needs no dependency.
+  Migration: replace `codecjson.Codec{}` with `typed.JSONCodec{}` and drop
+  the import.
+- **`Poller.Modify` is removed.** `Poller.Add` has always replaced the mask
+  of a registered socket, so `Modify` was an alias. Migration: call `Add`.
+- **`ErrHWM` is removed.** Nothing returned it; its own documentation said
+  so. Migration: delete any `errors.Is(err, gozmq.ErrHWM)` check, which
+  could never be true.
+- **The perf commands are one binary.** `perf/local_thr`, `remote_thr`,
+  `local_lat` and `remote_lat` are subcommands of `perf/zmqperf` with the
+  same flags and output: `go run ./perf/zmqperf local_thr ...`.
+
+### Changed
+
+- `Socket.Close` classifies "already shutting down" errors with `errors.Is`
+  only; the string match on "use of closed network connection" is gone. A
+  third-party `transport.Conn` whose Close error does not wrap
+  `net.ErrClosed` now surfaces that error from `Close`. The shared
+  classifier also treats `io.EOF`, a cancelled or expired context,
+  `ErrSocketClosed` and `ErrContextClosed` as expected teardown errors, which
+  `Close` previously would have surfaced.
+- A SUB socket replays its subscriptions to a newly connected publisher in
+  map order rather than subscription order. The set is identical; only the
+  order of the SUBSCRIBE frames on the wire changes.
+- Six of the twelve `examples/` programs duplicated the package's own
+  `Example*` functions and are gone; `security_plain` and `security_curve`
+  are one `examples/security` program with a `-mech` flag.
+
+### Fixed
+
+- `Close` now unblocks a ROUTER or STREAM `Send` parked at the peer's
+  high-water mark, as it already did for every other socket type; before,
+  only the call's context could end such a send.
+
+### Internal
+
+- One ZMTP command codec in `internal/zmtp` replaces the copies in the
+  session, PLAIN and CURVE; one shutdown-error classifier, one identity
+  framing type, one transport `Conn` adapter, and TLS reuses the TCP
+  dial/listen wiring. Standard-library replacements throughout (`slices`,
+  `maps`, `min`/`max`, `clear`, `box.Overhead`, `rand.N`).
+- Tests: every suite runs in parallel with shared helpers in
+  `internal/testutil`; duplicate tests at two levels, per-engine copies of
+  the conformance table and the per-transport copies of shared tests are
+  gone; `pgregory.net/rapid` is no longer a dependency. `go test ./...`
+  takes about 5 s instead of 29 s.
+- Docs: `design.md` is architecture only, `perf/REPORT.md` is the current
+  numbers and method, and CI runs race and coverage in one job.
+
 ## [0.1.1] - 2026-10-23
 
 First public release. A pure-Go implementation of the ZeroMQ socket patterns
@@ -86,5 +144,7 @@ pushed to GitHub or a module proxy. It has the memory-exhaustion, CURVE
 and crash issues listed under 0.1.1, so it is not available and should not
 be used; the first published version is 0.1.1.
 
-[Unreleased]: https://github.com/exergy-dev/gozmq/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/exergy-dev/gozmq/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/exergy-dev/gozmq/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/exergy-dev/gozmq/releases/tag/v0.1.1
+[0.1.0]: https://github.com/exergy-dev/gozmq/commit/62a43b78a3561a7b8db530ce710dc57dc09b0bcd

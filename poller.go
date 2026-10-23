@@ -6,7 +6,7 @@ import (
 	"sync"
 )
 
-// PollEvents is a bitmask of interest sets passed to Poller.Add / Modify
+// PollEvents is a bitmask of interest sets passed to Poller.Add
 // and surfaced inside [PollEvent] when Poll reports readiness. The bit
 // values match the libzmq ZMQ_POLLIN / ZMQ_POLLOUT convention so they
 // are easy to mentally translate between gozmq and zmq_poll-style code.
@@ -43,7 +43,7 @@ type PollEvent struct {
 // Poll to block until at least one has at least one of its registered
 // events ready.
 //
-// Concurrency: Add, Remove, Modify, and Poll are individually safe for
+// Concurrency: Add, Remove, and Poll are individually safe for
 // concurrent use by multiple goroutines (serialised by the Poller's
 // mutex). The conventional usage is still single-threaded — one
 // goroutine owns the Poller and uses Poll as its main event loop.
@@ -89,7 +89,7 @@ func NewPoller() *Poller {
 }
 
 // Add registers sock with the given interest mask. If sock is already
-// registered, Add replaces the existing mask (equivalent to Modify).
+// registered, Add replaces the existing mask.
 // events == 0 leaves the socket present in the registration table but
 // with no interest set — equivalent to Remove + Add(sock, 0). Most
 // callers prefer Remove for clarity.
@@ -117,12 +117,6 @@ func (p *Poller) Remove(sock *Socket) {
 	delete(p.entries, sock)
 	p.gen++
 	p.mu.Unlock()
-}
-
-// Modify changes the interest mask for an already-registered socket.
-// If sock is not currently registered, Modify is equivalent to Add.
-func (p *Poller) Modify(sock *Socket, events PollEvents) {
-	p.Add(sock, events)
 }
 
 // Poll blocks until at least one registered socket has at least one of

@@ -106,12 +106,7 @@ func (c *ReconnectConfig) normalize() {
 	if c.InitialBackoff <= 0 {
 		c.InitialBackoff = 100 * time.Millisecond
 	}
-	if c.JitterFraction < 0 {
-		c.JitterFraction = 0
-	}
-	if c.JitterFraction > 1 {
-		c.JitterFraction = 1
-	}
+	c.JitterFraction = min(max(c.JitterFraction, 0), 1)
 }
 
 // StartReconnector launches the dial loop in a new goroutine. The loop
@@ -240,38 +235,13 @@ func nextBackoff(base, maxCap time.Duration) time.Duration {
 	return n
 }
 
-// applyJitter returns base + delta where delta is uniform in
-// [-maxDelta, +maxDelta) and maxDelta = base * fraction. fraction is
-// assumed to be in [0, 1] — ReconnectConfig.normalize clamps it before
-// StartReconnector runs the loop, so we do not re-check here.
-//
-// This is integer-only arithmetic on time.Duration (which is int64 ns),
-// so there is no float rounding at the boundary. With fraction ≤ 1 the
-// output is mathematically guaranteed to be ≥ 0: the minimum delta is
-// -maxDelta = -base*fraction ≥ -base, so base + delta ≥ 0.
-//
-// The trailing "if out < 0" guard is kept as defense-in-depth in case
-// future callers bypass normalize() and pass an unclamped fraction; with
-// a clamped fraction it is unreachable.
+// applyJitter returns base plus a delta uniform in [-base*fraction,
+// +base*fraction). With fraction in [0, 1], which normalize guarantees, the
+// result is never negative.
 func applyJitter(base time.Duration, fraction float64) time.Duration {
-	if fraction <= 0 || base <= 0 {
-		return base
-	}
-	// Max jitter magnitude in nanoseconds. Truncation from the float
-	// multiply can only reduce magnitude, never flip the sign.
 	maxDelta := time.Duration(float64(base) * fraction)
 	if maxDelta <= 0 {
 		return base
 	}
-	// Pick delta ∈ [-maxDelta, +maxDelta) from a uniform integer draw.
-	// rand.Int64N is v2's replacement for Int63n and returns [0, n).
-	delta := time.Duration(rand.Int64N(int64(2*maxDelta))) - maxDelta
-	out := base + delta
-	if out < 0 {
-		// Defense-in-depth: unreachable when fraction ∈ [0, 1] because
-		// normalize() clamps, but keep the guard so the function can't
-		// ever return a negative time.Duration regardless of input.
-		return 0
-	}
-	return out
+	return base + rand.N(2*maxDelta) - maxDelta
 }

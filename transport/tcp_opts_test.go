@@ -14,6 +14,7 @@ import (
 // the size and disables Linux's receive/send buffer autotuning, so the
 // default must leave them alone.
 func TestTCP_BufferDefaultsKeepOSAutotuning(t *testing.T) {
+	t.Parallel()
 	for _, tr := range []*TCPTransport{NewTCPTransport(), NewTCP6Transport()} {
 		require.Zero(t, tr.ReadBufferSize, "%s ReadBufferSize", tr.Scheme())
 		require.Zero(t, tr.WriteBufferSize, "%s WriteBufferSize", tr.Scheme())
@@ -23,6 +24,7 @@ func TestTCP_BufferDefaultsKeepOSAutotuning(t *testing.T) {
 // TestTCP_WildcardPortListens: "tcp://*:*" (libzmq's "any interface, any
 // port") binds an ephemeral port.
 func TestTCP_WildcardPortListens(t *testing.T) {
+	t.Parallel()
 	addr, err := parseTCPEndpoint("tcp://*:*", "tcp", false)
 	require.NoError(t, err)
 	require.Equal(t, ":0", addr)

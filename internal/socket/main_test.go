@@ -1,9 +1,7 @@
 package socket_test
 
 import (
-	"context"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -12,14 +10,7 @@ import (
 	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
-func TestMain(m *testing.M) { testutil.VerifyTestMain(m) }
-
-func testCtx(t *testing.T) context.Context {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	t.Cleanup(cancel)
-	return ctx
-}
+func TestMain(m *testing.M) { testutil.VerifyMain(m) }
 
 func mustAttach(t *testing.T, eng socket.Engine, pipes ...*pipe.End) {
 	t.Helper()

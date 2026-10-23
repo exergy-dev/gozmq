@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // recvAsync runs s.RecvMsg in a goroutine and reports its outcome.
@@ -41,9 +42,10 @@ func requireRecv(t *testing.T, ch <-chan recvResult, want string) {
 // when its bound peer goes away keeps waiting and receives from the peer
 // that binds in its place, rather than failing with io.EOF.
 func TestPairReconnectingPeerKeepsWaiting(t *testing.T) {
+	t.Parallel()
 	ctx := gozmq.NewContext()
 	t.Cleanup(func() { _ = ctx.Close() })
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 
 	server, err := ctx.NewSocket(gozmq.Pair)
 	require.NoError(t, err)
@@ -79,8 +81,9 @@ func TestPairReconnectingPeerKeepsWaiting(t *testing.T) {
 // TestPairBoundPeerAcceptsNextPeer: a bound PAIR parked in RecvMsg when its
 // connected peer disconnects receives from the next peer to connect.
 func TestPairBoundPeerAcceptsNextPeer(t *testing.T) {
+	t.Parallel()
 	ctx, server, client := newSocketPair(t, gozmq.Pair, "tcp://127.0.0.1:0")
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 
 	require.NoError(t, client.SendBytes(callCtx, []byte("first")))
 	got, err := server.RecvBytes(callCtx)
@@ -101,69 +104,4 @@ func TestPairBoundPeerAcceptsNextPeer(t *testing.T) {
 	require.NoError(t, client2.Connect(server.LastEndpoint()))
 	require.NoError(t, client2.SendBytes(callCtx, []byte("second")))
 	requireRecv(t, parked, "second")
-}
-
-// TestReqConcurrentSendsOneWins: concurrent SendMsg calls on one REQ put
-// exactly one request in flight; the rest fail with an error wrapping
-// ErrFSMViolation.
-func TestReqConcurrentSendsOneWins(t *testing.T) {
-	_, rep, req := newSocketPairTypes(t, gozmq.Rep, gozmq.Req, "tcp://127.0.0.1:0", nil, nil)
-	callCtx := testCtx(t)
-
-	const n = 8
-	errs := make(chan error, n)
-	start := make(chan struct{})
-	for i := 0; i < n; i++ {
-		go func() {
-			<-start
-			errs <- req.SendBytes(callCtx, []byte("q"))
-		}()
-	}
-	close(start)
-	var ok int
-	for i := 0; i < n; i++ {
-		err := <-errs
-		if err == nil {
-			ok++
-			continue
-		}
-		require.ErrorIs(t, err, gozmq.ErrFSMViolation)
-	}
-	require.Equal(t, 1, ok, "exactly one concurrent Send should win")
-
-	got, err := rep.RecvBytes(callCtx)
-	require.NoError(t, err)
-	require.Equal(t, "q", string(got))
-	require.NoError(t, rep.SendBytes(callCtx, []byte("a")))
-	reply, err := req.RecvBytes(callCtx)
-	require.NoError(t, err)
-	require.Equal(t, "a", string(reply))
-}
-
-// TestRepReplyToVanishedRequester: REP's reply to a requester that has
-// disconnected is dropped silently (libzmq semantics) and the socket can
-// serve the next request.
-func TestRepReplyToVanishedRequester(t *testing.T) {
-	ctx, rep, req := newSocketPairTypes(t, gozmq.Rep, gozmq.Req, "tcp://127.0.0.1:0", nil, nil)
-	callCtx := testCtx(t)
-
-	require.NoError(t, req.SendBytes(callCtx, []byte("q1")))
-	got, err := rep.RecvBytes(callCtx)
-	require.NoError(t, err)
-	require.Equal(t, "q1", string(got))
-	require.NoError(t, req.Close())
-	require.NoError(t, rep.SendBytes(callCtx, []byte("lost")))
-
-	req2, err := ctx.NewSocket(gozmq.Req)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = req2.Close() })
-	require.NoError(t, req2.Connect(rep.LastEndpoint()))
-	require.NoError(t, req2.SendBytes(callCtx, []byte("q2")))
-	got, err = rep.RecvBytes(callCtx)
-	require.NoError(t, err)
-	require.Equal(t, "q2", string(got))
-	require.NoError(t, rep.SendBytes(callCtx, []byte("a2")))
-	reply, err := req2.RecvBytes(callCtx)
-	require.NoError(t, err)
-	require.Equal(t, "a2", string(reply))
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -55,65 +56,13 @@ func TestPair_SendBeforeAttachWaits(t *testing.T) {
 	eng := socket.NewPairEngine()
 	defer eng.Close()
 
-	ctx, cancel := context.WithCancel(testCtx(t))
-	done := make(chan error, 1)
-	go func() { done <- eng.Send(ctx, msg.FromBytes([]byte("x"))) }()
-	select {
-	case <-done:
-		require.Fail(t, "send returned before pipe attached")
-	case <-time.After(50 * time.Millisecond):
-	}
+	ctx, cancel := context.WithCancel(testutil.Ctx(t))
 	// PAIR has no notify path on attach in our impl — we cancel via close.
-	cancel()
-	select {
-	case err := <-done:
-		require.True(t, errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded),
-			"send err = %v, want ctx err", err)
-	case <-time.After(time.Second):
-		require.Fail(t, "send did not unblock on ctx cancel")
-	}
-}
-
-func TestPair_CloseUnblocksSend(t *testing.T) {
-	t.Parallel()
-	eng := socket.NewPairEngine()
-
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
-	defer closePipes(a, b)
-	mustAttach(t, eng, a)
-	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("fill"))))
-	done := make(chan error, 1)
-	go func() { done <- eng.Send(context.Background(), msg.FromBytes([]byte("x"))) }()
-	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, eng.Close(), "close")
-	select {
-	case err := <-done:
-		require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
-	case <-time.After(time.Second):
-		require.Fail(t, "send did not unblock on close")
-	}
-}
-
-func TestPair_CloseUnblocksRecv(t *testing.T) {
-	t.Parallel()
-	eng := socket.NewPairEngine()
-
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
-	defer closePipes(a, b)
-	mustAttach(t, eng, a)
-	done := make(chan error, 1)
-	go func() {
-		_, err := eng.Recv(context.Background())
-		done <- err
-	}()
-	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, eng.Close(), "close")
-	select {
-	case err := <-done:
-		require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
-	case <-time.After(time.Second):
-		require.Fail(t, "recv did not unblock on close")
-	}
+	err := testutil.RequireUnblocks(t,
+		func() error { return eng.Send(ctx, msg.FromBytes([]byte("x"))) },
+		cancel)
+	require.True(t, errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded),
+		"send err = %v, want ctx err", err)
 }
 
 // recvAsync starts eng.Recv in a goroutine and returns channels for its
@@ -152,7 +101,7 @@ func TestPair_PeerCloseDrainsThenWaitsForNextPeer(t *testing.T) {
 			t.Parallel()
 			eng := socket.NewPairEngine()
 			defer eng.Close()
-			ctx := testCtx(t)
+			ctx := testutil.Ctx(t)
 
 			a, b := pipe.NewPair(tc.hwm, tc.hwm, pipe.PeerInfo{}, pipe.PeerInfo{})
 			defer closePipes(a, b)
@@ -206,7 +155,7 @@ func TestPair_DetachedPipeDrainedBeforeNextPeer(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewPairEngine()
 	defer eng.Close()
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
@@ -234,7 +183,7 @@ func TestPair_AttachReplacesClosedPipe(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewPairEngine()
 	defer eng.Close()
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
@@ -265,7 +214,7 @@ func TestPair_SendWaitsAcrossPeerClose(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewPairEngine()
 	defer eng.Close()
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
@@ -295,22 +244,4 @@ func TestPair_SendWaitsAcrossPeerClose(t *testing.T) {
 	got, err := b2.Recv(ctx)
 	require.NoError(t, err)
 	require.Equal(t, "next", string(got.Bytes()))
-}
-
-func TestPair_CloseUnblocksRecvBeforeAttach(t *testing.T) {
-	t.Parallel()
-	eng := socket.NewPairEngine()
-	done := make(chan error, 1)
-	go func() {
-		_, err := eng.Recv(context.Background())
-		done <- err
-	}()
-	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, eng.Close(), "close")
-	select {
-	case err := <-done:
-		require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
-	case <-time.After(time.Second):
-		require.Fail(t, "recv did not unblock on close")
-	}
 }

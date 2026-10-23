@@ -208,10 +208,7 @@ func apply(opts []Option) options {
 }
 
 func (o *options) report(err error) error {
-	if err == nil {
-		return nil
-	}
-	if o.onError == nil {
+	if err == nil || o.onError == nil {
 		return nil
 	}
 	return o.onError(err)

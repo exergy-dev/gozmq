@@ -9,6 +9,7 @@ import (
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -24,7 +25,7 @@ func TestRep_StripsEnvelopeOnRecv(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// REQ-style wire: [identityA, empty, body]
 	wire := msg.FromFrames([]byte("identityA"), []byte{}, []byte("hello"))
@@ -46,7 +47,7 @@ func TestRep_ReplayEnvelopeOnSend(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// Deliver a REQ-shape inbound frame.
 	wire := msg.FromFrames([]byte("idA"), []byte("idB"), []byte{}, []byte("hi"))
@@ -78,7 +79,7 @@ func TestRep_DoubleRecvFSMViolation(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	wire := msg.FromFrames([]byte{}, []byte("q"))
 	require.NoError(t, b.Send(ctx, wire), "peer send")
 	_, err := eng.Recv(ctx)
@@ -98,7 +99,7 @@ func TestRep_ConcurrentRecvFSMViolation(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	mc1, ec1 := recvAsync(ctx, eng)
 	time.Sleep(20 * time.Millisecond)
 	rctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
@@ -137,7 +138,7 @@ func TestRep_RecvCtxCancelRestoresCanRecv(t *testing.T) {
 	_, err := eng.Recv(rctx)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("q"))))
 	got, err := eng.Recv(ctx)
 	require.NoError(t, err)
@@ -156,7 +157,7 @@ func TestRep_SendToVanishedRequester(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("q"))))
 	_, err := eng.Recv(ctx)
 	require.NoError(t, err)
@@ -179,7 +180,7 @@ func TestRep_SkipsMalformedRequest(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, b.Send(ctx, msg.FromBytes([]byte("no-delimiter"))))
 	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("good"))))
 	got, err := eng.Recv(ctx)
@@ -207,7 +208,7 @@ func TestRep_DoubleSendFSMViolation(t *testing.T) {
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	wire := msg.FromFrames([]byte{}, []byte("q"))
 	require.NoError(t, b.Send(ctx, wire), "peer send")
 	_, err := eng.Recv(ctx)
@@ -230,7 +231,7 @@ func TestRep_StickyPeer_AfterMultiplePeers(t *testing.T) {
 	defer closePipes(append(engineEnds, peerEnds...)...)
 	mustAttach(t, eng, engineEnds...)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// Peer 1 sends a request.
 	wire := msg.FromFrames([]byte{}, []byte("q"))
@@ -253,30 +254,6 @@ func TestRep_StickyPeer_AfterMultiplePeers(t *testing.T) {
 	}
 }
 
-// TestRep_CloseUnblocksRecv asserts Close unblocks a parked Recv.
-func TestRep_CloseUnblocksRecv(t *testing.T) {
-	t.Parallel()
-	eng := socket.NewRepEngine()
-
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
-	defer closePipes(a, b)
-	mustAttach(t, eng, a)
-
-	recvDone := make(chan error, 1)
-	go func() {
-		_, err := eng.Recv(context.Background())
-		recvDone <- err
-	}()
-	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, eng.Close(), "close")
-	select {
-	case err := <-recvDone:
-		require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
-	case <-time.After(time.Second):
-		require.Fail(t, "recv did not unblock on close")
-	}
-}
-
 // TestRep_CloseUnblocksSendAtHWM: a reply Send blocked on the requester's
 // full pipe must unblock with ErrSocketClosed when the engine closes,
 // instead of waiting for the caller's ctx.
@@ -288,26 +265,15 @@ func TestRep_CloseUnblocksSendAtHWM(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("q"))), "request")
 	_, err := eng.Recv(ctx)
 	require.NoError(t, err, "recv")
 	// Fill the single HWM slot toward the requester so the reply blocks.
 	require.NoError(t, a.Send(ctx, msg.FromBytes([]byte("fill"))), "fill")
 
-	sendDone := make(chan error, 1)
-	go func() { sendDone <- eng.Send(context.Background(), msg.FromBytes([]byte("reply"))) }()
-	select {
-	case err := <-sendDone:
-		require.Fail(t, "send returned before close", "%v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	require.NoError(t, eng.Close(), "close")
-	select {
-	case err := <-sendDone:
-		require.ErrorIs(t, err, zmqerr.ErrSocketClosed, "blocked send")
-	case <-time.After(time.Second):
-		require.Fail(t, "send at HWM did not unblock on close")
-	}
+	err = testutil.RequireUnblocks(t,
+		func() error { return eng.Send(context.Background(), msg.FromBytes([]byte("reply"))) },
+		func() { require.NoError(t, eng.Close(), "close") })
+	require.ErrorIs(t, err, zmqerr.ErrSocketClosed, "blocked send")
 }

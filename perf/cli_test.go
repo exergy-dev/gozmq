@@ -7,190 +7,90 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
-// TestCLI_LocalLat_RemoteLat exercises the two latency-measurement binaries
-// end-to-end: local_lat binds REP on a random port, remote_lat runs REQ
-// against it for a small count. We assert both exit cleanly and that
-// remote_lat emits the libzmq-style banner + summary lines.
-//
-// The binaries are built via `go build` to a temp dir at test-time; this
-// exercises the real main packages (not just the import graph) without
-// requiring the user to have run `go install` first.
-func TestCLI_LocalLat_RemoteLat(t *testing.T) {
-	bin := buildCLIs(t, "local_lat", "remote_lat")
-	port := freeTCPPort(t)
-	endpoint := fmt.Sprintf("tcp://127.0.0.1:%d", port)
-	bindEndpoint := fmt.Sprintf("tcp://*:%d", port)
-
-	// Server side: local_lat binds, echoes -count messages, exits.
-	serverOut := &bytes.Buffer{}
-	server := exec.Command(bin["local_lat"], "-endpoint", bindEndpoint, "-size", "32", "-count", "100")
-	server.Stdout = serverOut
-	server.Stderr = serverOut
-	if err := server.Start(); err != nil {
-		t.Fatalf("start local_lat: %v", err)
-	}
-	serverDone := make(chan error, 1)
-	go func() { serverDone <- server.Wait() }()
-
-	// Give the bind a beat to land before we connect.
-	time.Sleep(100 * time.Millisecond)
-
-	clientOut := &bytes.Buffer{}
-	client := exec.Command(bin["remote_lat"], "-endpoint", endpoint, "-size", "32", "-count", "100")
-	client.Stdout = clientOut
-	client.Stderr = clientOut
-	if err := client.Run(); err != nil {
-		t.Fatalf("remote_lat failed: %v\noutput:\n%s", err, clientOut.String())
-	}
-
-	select {
-	case err := <-serverDone:
-		if err != nil {
-			t.Fatalf("local_lat exit: %v\noutput:\n%s", err, serverOut.String())
-		}
-	case <-time.After(10 * time.Second):
-		_ = server.Process.Kill()
-		t.Fatalf("local_lat did not exit within 10s\noutput:\n%s", serverOut.String())
-	}
-
-	out := clientOut.String()
-	for _, want := range []string{
-		"message size: 32 [B]",
-		"roundtrip count: 100",
-		"average latency:",
-		"roundtrip rate:",
+// TestCLI runs each zmqperf pair end to end over a loopback port: the local
+// side binds and the remote side drives a small count, and both must exit
+// cleanly with the libzmq-style banner and summary lines (and, for the
+// throughput pair, the requested profiles).
+func TestCLI(t *testing.T) {
+	bin := buildZmqperf(t)
+	for _, tc := range []struct {
+		local, remote string
+		wantRemote    []string // in the remote's output
+		wantLocal     []string // in the local's output
+	}{
+		{"local_lat", "remote_lat", []string{"message size: 32 [B]", "roundtrip count: 100", "average latency:", "roundtrip rate:"}, nil},
+		{"local_thr", "remote_thr", nil, []string{"message size: 32 [B]", "message count: 100", "mean throughput:", "[msg/s]", "[Mb/s]"}},
 	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("remote_lat output missing %q:\n%s", want, out)
-		}
+		t.Run(tc.local, func(t *testing.T) {
+			port := freeTCPPort(t)
+			profiles := t.TempDir()
+			args := func(side string, ep string) []string {
+				a := []string{side, "-endpoint", ep, "-size", "32", "-count", "100"}
+				if tc.local == "local_thr" {
+					a = append(a, "-cpuprofile", filepath.Join(profiles, side+".cpu"), "-memprofile", filepath.Join(profiles, side+".mem"))
+				}
+				return a
+			}
+			localOut, remoteOut := &bytes.Buffer{}, &bytes.Buffer{}
+			local := exec.Command(bin, args(tc.local, fmt.Sprintf("tcp://*:%d", port))...)
+			local.Stdout, local.Stderr = localOut, localOut
+			require.NoError(t, local.Start())
+			localDone := make(chan error, 1)
+			go func() { localDone <- local.Wait() }()
+			time.Sleep(100 * time.Millisecond) // let the bind land
+
+			remote := exec.Command(bin, args(tc.remote, fmt.Sprintf("tcp://127.0.0.1:%d", port))...)
+			remote.Stdout, remote.Stderr = remoteOut, remoteOut
+			require.NoError(t, remote.Run(), "%s: %s", tc.remote, remoteOut)
+			select {
+			case err := <-localDone:
+				require.NoError(t, err, "%s: %s", tc.local, localOut)
+			case <-time.After(30 * time.Second):
+				_ = local.Process.Kill()
+				t.Fatalf("%s did not exit:\n%s", tc.local, localOut)
+			}
+			for _, want := range tc.wantRemote {
+				require.Contains(t, remoteOut.String(), want)
+			}
+			for _, want := range tc.wantLocal {
+				require.Contains(t, localOut.String(), want)
+			}
+			if tc.local == "local_thr" {
+				for _, p := range []string{"local_thr.cpu", "local_thr.mem", "remote_thr.cpu", "remote_thr.mem"} {
+					info, err := os.Stat(filepath.Join(profiles, p))
+					require.NoError(t, err, "profile %s", p)
+					require.NotZero(t, info.Size(), "profile %s is empty", p)
+				}
+			}
+		})
 	}
 }
 
-// TestCLI_LocalThr_RemoteThr exercises the throughput binaries end-to-end.
-// local_thr binds PULL, remote_thr connects PUSH and blasts -count
-// messages. local_thr reports mean throughput; remote_thr exits silently.
-func TestCLI_LocalThr_RemoteThr(t *testing.T) {
-	bin := buildCLIs(t, "local_thr", "remote_thr")
-	profiles := t.TempDir()
-	port := freeTCPPort(t)
-	endpoint := fmt.Sprintf("tcp://127.0.0.1:%d", port)
-	bindEndpoint := fmt.Sprintf("tcp://*:%d", port)
-	localCPU := filepath.Join(profiles, "local.cpu")
-	localMem := filepath.Join(profiles, "local.mem")
-	remoteCPU := filepath.Join(profiles, "remote.cpu")
-	remoteMem := filepath.Join(profiles, "remote.mem")
-
-	serverOut := &bytes.Buffer{}
-	server := exec.Command(bin["local_thr"],
-		"-endpoint", bindEndpoint,
-		"-size", "32",
-		"-count", "100",
-		"-cpuprofile", localCPU,
-		"-memprofile", localMem,
-	)
-	server.Stdout = serverOut
-	server.Stderr = serverOut
-	if err := server.Start(); err != nil {
-		t.Fatalf("start local_thr: %v", err)
-	}
-	serverDone := make(chan error, 1)
-	go func() { serverDone <- server.Wait() }()
-
-	time.Sleep(100 * time.Millisecond)
-
-	clientOut := &bytes.Buffer{}
-	client := exec.Command(bin["remote_thr"],
-		"-endpoint", endpoint,
-		"-size", "32",
-		"-count", "100",
-		"-cpuprofile", remoteCPU,
-		"-memprofile", remoteMem,
-	)
-	client.Stdout = clientOut
-	client.Stderr = clientOut
-	if err := client.Run(); err != nil {
-		t.Fatalf("remote_thr failed: %v\noutput:\n%s", err, clientOut.String())
-	}
-	t.Logf("remote_thr output:\n%s", clientOut.String())
-
-	select {
-	case err := <-serverDone:
-		if err != nil {
-			t.Fatalf("local_thr exit: %v\noutput:\n%s", err, serverOut.String())
-		}
-	case <-time.After(30 * time.Second):
-		_ = server.Process.Kill()
-		t.Fatalf("local_thr did not exit within 30s\noutput:\n%s", serverOut.String())
-	}
-
-	out := serverOut.String()
-	for _, want := range []string{
-		"message size: 32 [B]",
-		"message count: 100",
-		"mean throughput:",
-		"[msg/s]",
-		"[Mb/s]",
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("local_thr output missing %q:\n%s", want, out)
-		}
-	}
-	for _, path := range []string{localCPU, localMem, remoteCPU, remoteMem} {
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatalf("profile %s not created: %v", path, err)
-		}
-		if info.Size() == 0 {
-			t.Fatalf("profile %s is empty", path)
-		}
-	}
-}
-
-// buildCLIs builds each named binary in perf/<name>/ into a tempdir and
-// returns {name: absolute path}. Uses `go build`; skips the test if the
-// go toolchain is unavailable.
-func buildCLIs(t *testing.T, names ...string) map[string]string {
+// buildZmqperf builds perf/zmqperf into a temp dir with CGO off and returns
+// the binary's path.
+func buildZmqperf(t *testing.T) string {
 	t.Helper()
-	goBin, err := exec.LookPath("go")
-	if err != nil {
-		t.Skipf("go toolchain not available: %v", err)
-	}
-	dir := t.TempDir()
-	out := make(map[string]string, len(names))
-	for _, n := range names {
-		target := filepath.Join(dir, n)
-		cmd := exec.Command(goBin, "build", "-o", target, "./perf/"+n)
-		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
-		// Run from the module root. The tests run from the perf/ dir by
-		// default, so step up one level to find ./perf/<name>.
-		cmd.Dir = ".."
-		buf := &bytes.Buffer{}
-		cmd.Stdout = buf
-		cmd.Stderr = buf
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("go build perf/%s: %v\n%s", n, err, buf.String())
-		}
-		out[n] = target
-	}
-	return out
+	target := filepath.Join(t.TempDir(), "zmqperf")
+	cmd := exec.Command("go", "build", "-o", target, "./perf/zmqperf")
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+	cmd.Dir = ".." // tests run in perf/
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "go build perf/zmqperf: %s", out)
+	return target
 }
 
-// freeTCPPort returns a currently-unused ephemeral TCP port by asking the
-// kernel and immediately closing the listener. There's a tiny race window
-// between this call and the CLI binding; the surrounding tests tolerate
-// that via retries in the 100ms sleep. For a two-process loopback test
-// this is the standard idiom.
+// freeTCPPort asks the kernel for an unused port and releases it; the short
+// window before the CLI binds is tolerated by the tests' 100 ms settle.
 func freeTCPPort(t *testing.T) int {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	require.NoError(t, err)
 	defer l.Close()
 	return l.Addr().(*net.TCPAddr).Port
 }

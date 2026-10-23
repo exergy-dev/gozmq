@@ -93,7 +93,7 @@ func TestCurveHandshakeEndToEnd(t *testing.T) {
 	require.Equal(t, serverMeta, cImpl.PeerMetadata(), "client peer meta")
 	require.Equal(t, clientMeta, sImpl.PeerMetadata(), "server peer meta")
 	// Server learned the client long-term key during INITIATE.
-	require.Equal(t, clientPub, sImpl.PeerLongTermPublic(), "server did not recover client long-term public")
+	require.Equal(t, clientPub, sImpl.peerPublic, "server did not recover client long-term public")
 
 	// Traffic phase: exchange multiple frames in both directions and
 	// assert round-trip fidelity.
@@ -275,31 +275,6 @@ func TestCurveClientSeedRejectsNonNil(t *testing.T) {
 	require.ErrorIs(t, err, zmqerr.ErrMalformedFrame, "non-nil seed input")
 }
 
-// TestCurveWelcomeTampering flips a byte in WELCOME and asserts the
-// client's box.Open fails with ErrAuthFailed.
-func TestCurveWelcomeTampering(t *testing.T) {
-	client, server := newMechPair(t)
-	welcome := driveToWelcome(t, client, server)
-	// Flip a byte in the encrypted region (skip past command name + nonce
-	// prefix; index 32 sits inside the welcome box).
-	welcome[32] ^= 0xFF
-	_, _, err := client.NextHandshake(welcome)
-	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "tampered WELCOME")
-}
-
-// TestCurveInitiateTampering flips a byte in INITIATE and asserts the
-// server's box.Open fails with ErrAuthFailed.
-func TestCurveInitiateTampering(t *testing.T) {
-	client, server := newMechPair(t)
-	welcome := driveToWelcome(t, client, server)
-	initiate, _, err := client.NextHandshake(welcome)
-	require.NoError(t, err, "INITIATE")
-	// Flip a byte well past the fixed header into the initiate box.
-	initiate[len(initiate)-8] ^= 0x01
-	_, _, err = server.NextHandshake(initiate)
-	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "tampered INITIATE")
-}
-
 // TestCurveMessageTampering flips a byte in a MESSAGE payload and asserts
 // DecodeFrame returns ErrMalformedFrame.
 func TestCurveMessageTampering(t *testing.T) {
@@ -476,44 +451,20 @@ func TestCurve_NonceExhaustion_Recv(t *testing.T) {
 	require.ErrorIs(t, err, zmqerr.ErrNonceExhausted, "client accepted MESSAGE with MaxUint64 counter")
 }
 
-// TestCurve_RejectsZeroClientLongKey: the server must refuse an
-// INITIATE whose client long-term public (C) field is all zero, even
-// if the vouch would otherwise open. Without this check, a peer could
-// complete the handshake with a key whose shared secret with any
-// server is a small-subgroup element.
-func TestCurve_RejectsZeroClientLongKey(t *testing.T) {
-	client, server := newMechPair(t)
-	welcome := driveToWelcome(t, client, server)
-	// Before building INITIATE, overwrite the client's own long-term
-	// public key to all zeros. buildInitiate will embed the zero key
-	// in the INITIATE plaintext; the server must reject at the
-	// validatePeerPublicKey check before attempting vouch open.
-	cImpl := client.(*curveMech)
-	cImpl.ourPublic = Key{}
-	initiate, _, err := client.NextHandshake(welcome)
-	require.NoError(t, err, "client INITIATE build")
-	_, _, err = server.NextHandshake(initiate)
-	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "server accepted zero client long-term key")
-	// Server must not have reached stateDone.
-	sImpl := server.(*curveMech)
-	require.NotEqual(t, stateDone, sImpl.state, "server reached stateDone despite invalid client key")
-}
-
-// TestCurve_RejectsLowOrderClientLongKey: same as above but uses a
-// known order-8 point rather than zero, so the rejection cannot come from
-// an all-zero special case.
+// TestCurve_RejectsLowOrderClientLongKey: the server rejects an INITIATE
+// whose advertised long-term client key is any low-order encoding (zero,
+// the order-8 points, ...) before it tries to open the vouch.
 func TestCurve_RejectsLowOrderClientLongKey(t *testing.T) {
-	client, server := newMechPair(t)
-	welcome := driveToWelcome(t, client, server)
-	// Inject an order-8 point as the client's advertised C.
-	cImpl := client.(*curveMech)
-	cImpl.ourPublic = lowOrderEncodings(t)["order8a"]
-	initiate, _, err := client.NextHandshake(welcome)
-	require.NoError(t, err, "client INITIATE build")
-	_, _, err = server.NextHandshake(initiate)
-	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "server accepted order-8 client long-term key")
-	sImpl := server.(*curveMech)
-	require.NotEqual(t, stateDone, sImpl.state, "server reached stateDone despite low-order client key")
+	for name, k := range lowOrderEncodings(t) {
+		client, server := newMechPair(t)
+		welcome := driveToWelcome(t, client, server)
+		client.(*curveMech).ourPublic = k // embedded in the INITIATE plaintext
+		initiate, _, err := client.NextHandshake(welcome)
+		require.NoError(t, err, "%s: client INITIATE build", name)
+		_, _, err = server.NextHandshake(initiate)
+		require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "%s: server accepted a low-order client key", name)
+		require.NotEqual(t, stateDone, server.(*curveMech).state, "%s: server reached stateDone", name)
+	}
 }
 
 // TestCurve_RejectsZeroClientEphemeralKey: the server must refuse a
@@ -530,16 +481,6 @@ func TestCurve_RejectsZeroClientEphemeralKey(t *testing.T) {
 	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "server accepted HELLO with zero C'")
 }
 
-// TestCurve_RejectsZeroServerKey: the client constructor must fail
-// fast when given an all-zero server public key, surfacing
-// ErrAuthFailed without reaching the handshake.
-func TestCurve_RejectsZeroServerKey(t *testing.T) {
-	clientPub, clientSec := genPair(t)
-	var zero Key
-	_, err := NewCurveClient(zero, clientPub, clientSec, nil)
-	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "NewCurveClient accepted zero server key")
-}
-
 // TestCurve_RejectsLowOrderServerKey: the client constructor must
 // also reject each of the canonical Curve25519 low-order points.
 func TestCurve_RejectsLowOrderServerKey(t *testing.T) {
@@ -550,33 +491,43 @@ func TestCurve_RejectsLowOrderServerKey(t *testing.T) {
 	}
 }
 
-// TestCurve_ValidatePeerPublicKey_Length_Happy exercises the validator
-// directly — odd lengths must be rejected, and a fresh random key must
-// pass.
-func TestCurve_ValidatePeerPublicKey_Length_Happy(t *testing.T) {
-	require.Error(t, validatePeerPublicKey(nil), "nil key accepted")
-	require.Error(t, validatePeerPublicKey(make([]byte, 31)), "31-byte key accepted")
-	pub, _ := genPair(t)
-	require.NoError(t, validatePeerPublicKey(pub[:]), "fresh random key rejected")
-}
-
-// TestCurveInitiateCorruptedCookie flips a byte inside the echoed cookie
-// field of INITIATE and asserts the server's secretbox open of the cookie
-// fails with ErrAuthFailed (curve.go parseInitiate cookie-open path).
-func TestCurveInitiateCorruptedCookie(t *testing.T) {
-	client, server := newMechPair(t)
-	welcome := driveToWelcome(t, client, server)
-	initiate, _, err := client.NextHandshake(welcome)
-	require.NoError(t, err, "INITIATE build")
-
-	// Cookie field layout: [1+len("INITIATE")] .. +cookieSize, of which the
-	// first 16 bytes are the cookie nonce. Offset +20 sits inside the
-	// secretbox ciphertext.
-	initiate[1+len(cmdInitiate)+20] ^= 0xFF
-	_, _, err = server.NextHandshake(initiate)
-	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "corrupted cookie accepted")
-	require.ErrorContains(t, err, "cookie open failed")
-	require.NotEqual(t, stateDone, server.(*curveMech).state, "server reached stateDone despite corrupted cookie")
+// TestCurveHandshakeTampering: a flipped byte anywhere under a handshake
+// box (WELCOME box, INITIATE box, the cookie inside INITIATE) fails that
+// step with ErrAuthFailed and leaves the server short of stateDone.
+func TestCurveHandshakeTampering(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		initiate bool           // tamper with INITIATE (server side) rather than WELCOME (client side)
+		mutate   func(b []byte) // the flip
+		contains string         // extra error text, if any
+	}{
+		{"welcome box", false, func(b []byte) { b[32] ^= 0xFF }, ""},
+		{"initiate box", true, func(b []byte) { b[len(b)-8] ^= 0x01 }, ""},
+		// The cookie field starts after the command name; its first 16
+		// bytes are the nonce, so +20 is inside the secretbox ciphertext.
+		{"initiate cookie", true, func(b []byte) { b[1+len(cmdInitiate)+20] ^= 0xFF }, "cookie open failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, server := newMechPair(t)
+			welcome := driveToWelcome(t, client, server)
+			var err error
+			if tc.initiate {
+				var initiate []byte
+				initiate, _, err = client.NextHandshake(welcome)
+				require.NoError(t, err, "INITIATE build")
+				tc.mutate(initiate)
+				_, _, err = server.NextHandshake(initiate)
+			} else {
+				tc.mutate(welcome)
+				_, _, err = client.NextHandshake(welcome)
+			}
+			require.ErrorIs(t, err, zmqerr.ErrAuthFailed)
+			if tc.contains != "" {
+				require.ErrorContains(t, err, tc.contains)
+			}
+			require.NotEqual(t, stateDone, server.(*curveMech).state, "server reached stateDone")
+		})
+	}
 }
 
 // TestCurveVouchWrongServerKeyRejected tampers the C'||S binding inside the

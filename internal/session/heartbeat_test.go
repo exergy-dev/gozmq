@@ -9,15 +9,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
 )
 
-// --------------------------------------------------------------------------
 // fakeClock: deterministic Config.Now source. The heartbeat timer
 // still runs on real time (we keep intervals to a few ms), but all
 // idle-time arithmetic flows through the injected clock, so tests control
 // "how long the peer has been silent" exactly.
-// --------------------------------------------------------------------------
 
 type fakeClock struct{ ns atomic.Int64 }
 
@@ -32,13 +31,11 @@ func newFakeClock() *fakeClock {
 func (c *fakeClock) Now() int64              { return c.ns.Load() }
 func (c *fakeClock) Advance(d time.Duration) { c.ns.Add(int64(d)) }
 
-// --------------------------------------------------------------------------
 // manualPeer drives the remote side of a session by hand: real greeting
 // bytes, the one-round fakeMech-style handshake, then raw fakeCodec frames
 // under test control. Unlike a full peer session it never replies to
 // PINGs unless the test says so — which is exactly what heartbeat-timeout
 // tests need.
-// --------------------------------------------------------------------------
 
 type manualPeer struct {
 	t    *testing.T
@@ -194,14 +191,11 @@ func requireAlive(t *testing.T, s *tSession, wait time.Duration, msg string) {
 	}
 }
 
-// --------------------------------------------------------------------------
-// Tests
-// --------------------------------------------------------------------------
-
 // TestHeartbeat_PingCadenceAndTTL: with the fake clock frozen (idle
 // always 0) the scheduler must emit a PING every interval, carrying our
 // timeout as the TTL in deciseconds, and never tear the session down.
 func TestHeartbeat_PingCadenceAndTTL(t *testing.T) {
+	t.Parallel()
 	clk := newFakeClock()
 	s, peer := newHeartbeatSession(t, clk, 10*time.Millisecond, 2*time.Second, 8)
 	frames := peer.startReadLoop()
@@ -218,6 +212,7 @@ func TestHeartbeat_PingCadenceAndTTL(t *testing.T) {
 // TestHeartbeat_TimeoutTearsDown: a peer that goes silent past the
 // timeout (in fake time) gets the session torn down on the next tick.
 func TestHeartbeat_TimeoutTearsDown(t *testing.T) {
+	t.Parallel()
 	clk := newFakeClock()
 	s, peer := newHeartbeatSession(t, clk, 5*time.Millisecond, time.Second, 8)
 	frames := peer.startReadLoop()
@@ -231,12 +226,13 @@ func TestHeartbeat_TimeoutTearsDown(t *testing.T) {
 // re-stamps the idle clock, so a chatty link never times out even when
 // no PONGs are sent.
 func TestHeartbeat_InboundTrafficSuppressesTimeout(t *testing.T) {
+	t.Parallel()
 	clk := newFakeClock()
 	s, peer := newHeartbeatSession(t, clk, 5*time.Millisecond, time.Second, 8)
 	frames := peer.startReadLoop()
 	_ = frames
 
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	// Walk fake time forward in sub-timeout steps, sending traffic at
 	// each step. idle never reaches the 1s timeout.
 	for i := 0; i < 3; i++ {
@@ -259,6 +255,7 @@ func TestHeartbeat_InboundTrafficSuppressesTimeout(t *testing.T) {
 // skip teardown while the reader is parked, and resume normally (with a
 // fresh idle window) once the engine drains.
 func TestHeartbeat_ReaderParkedOnBackpressureIsNotTimeout(t *testing.T) {
+	t.Parallel()
 	clk := newFakeClock()
 	// RecvHWM 1: the second inbound message parks the reader because
 	// nothing drains the engine-facing pipe.
@@ -278,7 +275,7 @@ func TestHeartbeat_ReaderParkedOnBackpressureIsNotTimeout(t *testing.T) {
 
 	// Drain the engine side: the reader unparks and re-stamps the idle
 	// clock, so the stale 5s gap must not be charged against the peer.
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	for _, want := range []string{"m1", "m2"} {
 		m, err := s.Pipe().Recv(ctx)
 		require.NoError(t, err, "Recv %s", want)
@@ -295,6 +292,7 @@ func TestHeartbeat_ReaderParkedOnBackpressureIsNotTimeout(t *testing.T) {
 // 3× the interval (the documented 90 s for the 30 s default interval),
 // visible as the PING TTL.
 func TestHeartbeat_DefaultTimeoutIsThreeIntervals(t *testing.T) {
+	t.Parallel()
 	clk := newFakeClock()
 	_, peer := newHeartbeatSession(t, clk, 100*time.Millisecond, 0, 8)
 	frames := peer.startReadLoop()

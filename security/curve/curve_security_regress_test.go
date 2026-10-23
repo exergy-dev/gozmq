@@ -10,6 +10,7 @@ import (
 	"golang.org/x/crypto/nacl/box"
 
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/zmtp"
 	"github.com/exergy-dev/gozmq/security"
 )
 
@@ -41,11 +42,13 @@ func lowOrderEncodings(t testing.TB) map[string]Key {
 	return out
 }
 
-// TestCurve_ValidateRejectsAllLowOrderEncodings: validatePeerPublicKey must
-// reject every low-order encoding, including those with the high bit set
-// (the old table missed 31 zero bytes + 0x80). Cross-checked against
-// X25519's own low-order rejection.
-func TestCurve_ValidateRejectsAllLowOrderEncodings(t *testing.T) {
+// TestCurve_ValidatePeerPublicKey: validatePeerPublicKey rejects wrong
+// lengths and every low-order encoding, including those with the high bit
+// set (the old table missed 31 zero bytes + 0x80), cross-checked against
+// X25519's own low-order rejection; it accepts a real key in either encoding.
+func TestCurve_ValidatePeerPublicKey(t *testing.T) {
+	require.Error(t, validatePeerPublicKey(nil), "nil key accepted")
+	require.Error(t, validatePeerPublicKey(make([]byte, 31)), "31-byte key accepted")
 	_, sec := genPair(t)
 	for name, k := range lowOrderEncodings(t) {
 		_, xerr := curve25519.X25519(sec[:], k[:])
@@ -56,16 +59,6 @@ func TestCurve_ValidateRejectsAllLowOrderEncodings(t *testing.T) {
 	require.NoError(t, validatePeerPublicKey(pub[:]))
 	pub[31] |= 0x80 // same point, non-canonical encoding: still fine
 	require.NoError(t, validatePeerPublicKey(pub[:]))
-}
-
-// TestCurve_RejectsHighBitLowOrderServerKey: the client constructor rejects a
-// server key that is low order only after masking bit 255.
-func TestCurve_RejectsHighBitLowOrderServerKey(t *testing.T) {
-	clientPub, clientSec := genPair(t)
-	var k Key
-	k[31] = 0x80
-	_, err := NewCurveClient(k, clientPub, clientSec, nil)
-	require.ErrorIs(t, err, zmqerr.ErrAuthFailed)
 }
 
 // TestCurve_ForgedVouchLowOrderClientKey: without the high-bit check, a
@@ -111,7 +104,7 @@ func TestCurve_ForgedVouchLowOrderClientKey(t *testing.T) {
 	_, done, err := srv.NextHandshake(body)
 	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "server accepted a forged vouch for a low-order C")
 	require.False(t, done)
-	require.Equal(t, Key{}, srv.PeerLongTermPublic())
+	require.Equal(t, Key{}, srv.peerPublic)
 }
 
 // TestCurve_ClientReportsServerError: a server that rejects the client via
@@ -140,7 +133,7 @@ func TestCurve_ClientReportsServerError(t *testing.T) {
 // mis-encoded ERROR name the way PLAIN does.
 func TestCurve_ClientReportsErrorInsteadOfWelcome(t *testing.T) {
 	for name, body := range map[string][]byte{
-		"well-formed":   errorCommand("Invalid key"),
+		"well-formed":   zmtp.EncodeError("Invalid key"),
 		"libzmq broken": {0x5E, 'R', 'R', 'O', 'R', 0x03, '4', '0', '0'},
 	} {
 		t.Run(name, func(t *testing.T) {

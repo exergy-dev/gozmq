@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
@@ -111,11 +112,8 @@ func (e *pairEngine) retireLocked(p *pipe.End) {
 func (e *pairEngine) dropRetired(p *pipe.End) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	for i, r := range e.retired {
-		if r == p {
-			e.retired = append(e.retired[:i], e.retired[i+1:]...)
-			return
-		}
+	if i := slices.Index(e.retired, p); i >= 0 {
+		e.retired = slices.Delete(e.retired, i, i+1)
 	}
 }
 

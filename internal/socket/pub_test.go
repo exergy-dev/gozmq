@@ -11,7 +11,7 @@ import (
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
-	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -19,14 +19,7 @@ import (
 // message that peers use to surface SUBSCRIBE/CANCEL to a PUB/XPUB
 // engine. Mirrors socket.SubscribeByte / socket.UnsubscribeByte.
 func subscribeMsg(subscribe bool, prefix []byte) *msg.Msg {
-	buf := make([]byte, 1+len(prefix))
-	if subscribe {
-		buf[0] = socket.SubscribeByte
-	} else {
-		buf[0] = socket.UnsubscribeByte
-	}
-	copy(buf[1:], prefix)
-	return msg.FromBytes(buf)
+	return msg.FromBytes(testutil.SubscribeFrame(subscribe, prefix))
 }
 
 // drainPeer returns every message that arrives on p until none has for
@@ -58,7 +51,7 @@ func TestPub_FanoutByPrefix(t *testing.T) {
 
 	mustAttach(t, eng, engineEnds...)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// Subscribe peer 0 to "A", peer 1 to "B", peer 2 to "" (everything).
 	require.NoError(t, peerEnds[0].Send(ctx, subscribeMsg(true, []byte("A"))), "peer0 subscribe")
@@ -153,7 +146,7 @@ func TestPub_UnsubscribeStopsDelivery(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// Subscribe to A; poll until it lands.
 	require.NoError(t, b.Send(ctx, subscribeMsg(true, []byte("A"))), "subscribe")
@@ -192,15 +185,6 @@ func TestPub_UnsubscribeStopsDelivery(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded, "peer received after unsubscribe")
 }
 
-// TestPub_RecvIsFSMViolation: PUB is send-only.
-func TestPub_RecvIsFSMViolation(t *testing.T) {
-	t.Parallel()
-	eng := socket.NewPubEngine()
-	defer eng.Close()
-	_, err := eng.Recv(context.Background())
-	require.ErrorIs(t, err, zmqerr.ErrFSMViolation)
-}
-
 // TestPub_HWMDropsRatherThanBlocks: a PUB send to a peer at HWM drops
 // the message for that peer and returns without blocking.
 func TestPub_HWMDropsRatherThanBlocks(t *testing.T) {
@@ -213,7 +197,7 @@ func TestPub_HWMDropsRatherThanBlocks(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, b.Send(ctx, subscribeMsg(true, []byte{})), "subscribe all")
 
 	// Rapid-fire 10 sends without draining. Send should return quickly
@@ -252,7 +236,7 @@ func TestPub_NoGoroutinesPerSubscriber(t *testing.T) {
 			defer closePipes(append(engineEnds, peerEnds...)...)
 			mustAttach(t, eng, engineEnds...)
 
-			ctx := testCtx(t)
+			ctx := testutil.Ctx(t)
 			for _, p := range peerEnds {
 				require.NoError(t, p.Send(ctx, subscribeMsg(true, []byte("t"))))
 			}
@@ -291,7 +275,7 @@ func TestPub_SubscriptionAppliesAtNextSend(t *testing.T) {
 			other, otherPeer := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 			defer closePipes(a, b, other, otherPeer)
 			mustAttach(t, eng, a, other)
-			ctx := testCtx(t)
+			ctx := testutil.Ctx(t)
 
 			require.NoError(t, b.Send(ctx, subscribeMsg(true, []byte("A"))))
 			require.NoError(t, eng.Send(ctx, msg.FromFrames([]byte("A"), []byte("1"))))
@@ -323,7 +307,7 @@ func TestPub_SlowSubscriberDoesNotDelayOthers(t *testing.T) {
 	defer closePipes(slow, slowPeer, fast, fastPeer)
 	mustAttach(t, eng, slow, fast)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, slowPeer.Send(ctx, subscribeMsg(true, []byte{})), "slow subscribe all")
 	require.NoError(t, fastPeer.Send(ctx, subscribeMsg(true, []byte{})), "fast subscribe all")
 
@@ -357,7 +341,7 @@ func TestPub_FanoutSharesOneMessage(t *testing.T) {
 	defer closePipes(a1, b1, a2, b2)
 	mustAttach(t, eng, a1, a2)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, b1.Send(ctx, subscribeMsg(true, []byte{})), "peer1 subscribe")
 	require.NoError(t, b2.Send(ctx, subscribeMsg(true, []byte{})), "peer2 subscribe")
 

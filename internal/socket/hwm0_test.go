@@ -8,6 +8,7 @@ import (
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -32,7 +33,7 @@ func seqOf(m *msg.Msg) (src, i int) {
 func sendBacklog(t *testing.T, p *pipe.End, src, n int) {
 	t.Helper()
 	for i := 0; i < n; i++ {
-		require.NoError(t, p.Send(testCtx(t), seqMsg(src, i)))
+		require.NoError(t, p.Send(testutil.Ctx(t), seqMsg(src, i)))
 	}
 }
 
@@ -46,7 +47,7 @@ func TestHWM0_FairQueueSingle(t *testing.T) {
 
 	sendBacklog(t, b, 0, hwm0Backlog)
 	for i := 0; i < hwm0Backlog; i++ {
-		m, err := fq.Recv(testCtx(t))
+		m, err := fq.Recv(testutil.Ctx(t))
 		require.NoError(t, err)
 		_, got := seqOf(m)
 		require.Equal(t, i, got)
@@ -73,7 +74,7 @@ func TestHWM0_FairQueueMulti(t *testing.T) {
 
 	next := make([]int, 2)
 	for n := 0; n < 2*hwm0Backlog; n++ {
-		m, err := fq.Recv(testCtx(t))
+		m, err := fq.Recv(testutil.Ctx(t))
 		require.NoError(t, err, "after %d", n)
 		src, i := seqOf(m)
 		require.Equal(t, next[src], i, "peer %d order", src)
@@ -91,7 +92,7 @@ func TestHWM0_Pair(t *testing.T) {
 
 	sendBacklog(t, b, 0, hwm0Backlog)
 	for i := 0; i < hwm0Backlog/2; i++ {
-		m, err := eng.Recv(testCtx(t))
+		m, err := eng.Recv(testutil.Ctx(t))
 		require.NoError(t, err)
 		_, got := seqOf(m)
 		require.Equal(t, i, got)
@@ -100,7 +101,7 @@ func TestHWM0_Pair(t *testing.T) {
 	require.NoError(t, b.Close())
 	require.NoError(t, eng.DetachPipe(a))
 	for i := hwm0Backlog / 2; i < hwm0Backlog; i++ {
-		m, err := eng.Recv(testCtx(t))
+		m, err := eng.Recv(testutil.Ctx(t))
 		require.NoError(t, err)
 		_, got := seqOf(m)
 		require.Equal(t, i, got)
@@ -119,7 +120,7 @@ func TestHWM0_ReqDiscardsWholeStaleBacklog(t *testing.T) {
 	a, b := pipe.NewPair(0, 0, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q1"))))
 	_, err := b.Recv(ctx)

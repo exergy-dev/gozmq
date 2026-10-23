@@ -11,7 +11,6 @@ run:
 linters:
   default: none
   enable:
-    - bodyclose
     - copyloopvar
     - errcheck
     - errorlint
@@ -95,8 +94,7 @@ linters:
         linters:
           - errcheck
           - gosec
-          - bodyclose
-      # The perf CLIs and examples are demonstration programs: terse
+            # The perf CLIs and examples are demonstration programs: terse
       # error handling there is the point.
       - path: (^perf/|^examples/)
         linters:

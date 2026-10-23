@@ -10,21 +10,17 @@ import (
 	"fmt"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 const scaleMsgSize = 64
 
-// -----------------------------------------------------------------------------
-// PUSH fan-in: one PULL fed by many concurrent PUSH sockets.
-// -----------------------------------------------------------------------------
-
 func BenchmarkPushPullFanIn_Inproc(b *testing.B) {
 	for _, n := range []int{2, 16, 256} {
 		b.Run(fmt.Sprintf("pushers=%d", n), func(b *testing.B) {
-			benchPushPullFanIn(b, n, inprocName(b, fmt.Sprintf("fanin-inproc-%d", n)))
+			benchPushPullFanIn(b, n, inprocEndpoint())
 		})
 	}
 }
@@ -32,7 +28,7 @@ func BenchmarkPushPullFanIn_Inproc(b *testing.B) {
 func BenchmarkPushPullFanIn_TCP(b *testing.B) {
 	for _, n := range []int{2, 16} {
 		b.Run(fmt.Sprintf("pushers=%d", n), func(b *testing.B) {
-			benchPushPullFanIn(b, n, freeTCPEndpoint)
+			benchPushPullFanIn(b, n, tcpEndpoint())
 		})
 	}
 }
@@ -45,55 +41,29 @@ func benchPushPullFanIn(b *testing.B, nPush int, endpoint string) {
 	b.Helper()
 	b.StopTimer()
 
-	ctxZmq := gozmq.NewContext()
-	defer ctxZmq.Close()
-
-	pull, err := ctxZmq.NewSocket(gozmq.Pull)
-	if err != nil {
-		b.Fatalf("new pull: %v", err)
-	}
-	defer pull.Close()
-	if err := pull.Bind(endpoint); err != nil {
-		b.Fatalf("bind: %v", err)
-	}
-
+	pull := bind(b, gozmq.Pull, endpoint)
 	pushers := make([]*gozmq.Socket, nPush)
-	defer func() {
-		for _, p := range pushers {
-			if p != nil {
-				_ = p.Close()
-			}
-		}
-	}()
 	for i := range pushers {
-		p, err := ctxZmq.NewSocket(gozmq.Push)
-		if err != nil {
-			b.Fatalf("new push[%d]: %v", i, err)
-		}
-		pushers[i] = p
-		if err := p.Connect(pull.LastEndpoint()); err != nil {
-			b.Fatalf("connect[%d]: %v", i, err)
-		}
+		pushers[i] = pull.connect(gozmq.Push)
 	}
 
 	payload := newPayload(scaleMsgSize)
 
-	warmCtx, warmCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer warmCancel()
+	warmCtx := testutil.Ctx(b, setupTimeout)
 	for i, p := range pushers {
 		if err := p.SendMsg(warmCtx, gozmq.NewMsgFromBytes(payload)); err != nil {
 			b.Fatalf("warmup send[%d]: %v", i, err)
 		}
 	}
 	for i := range pushers {
-		m, err := pull.RecvMsg(warmCtx)
+		m, err := pull.sock.RecvMsg(warmCtx)
 		if err != nil {
 			b.Fatalf("warmup recv[%d]: %v", i, err)
 		}
 		m.Release()
 	}
 
-	runCtx, runCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	runCtx, runCancel := context.WithTimeout(context.Background(), benchTimeout)
 	defer runCancel()
 
 	start := make(chan struct{})
@@ -124,7 +94,7 @@ func benchPushPullFanIn(b *testing.B, nPush int, endpoint string) {
 	close(start)
 
 	for i := 0; i < b.N; i++ {
-		m, err := pull.RecvMsg(runCtx)
+		m, err := pull.sock.RecvMsg(runCtx)
 		if err != nil {
 			b.StopTimer()
 			runCancel()
@@ -143,145 +113,53 @@ func benchPushPullFanIn(b *testing.B, nPush int, endpoint string) {
 	sendWG.Wait()
 }
 
-// -----------------------------------------------------------------------------
-// ROUTER receive cost with many idle peers attached.
-// -----------------------------------------------------------------------------
-
 // BenchmarkRouterIdlePeers_Inproc round-trips 64B between one DEALER and a
 // ROUTER echo while idle DEALERs are also attached to the ROUTER. The
 // per-round-trip cost should not grow with the number of idle peers.
 func BenchmarkRouterIdlePeers_Inproc(b *testing.B) {
 	for _, n := range []int{0, 1000} {
 		b.Run(fmt.Sprintf("idle=%d", n), func(b *testing.B) {
-			benchRouterIdlePeers(b, n, inprocName(b, fmt.Sprintf("router-idle-%d", n)))
+			benchRouterIdlePeers(b, n, inprocEndpoint())
 		})
 	}
 }
 
+// benchRouterIdlePeers attaches nIdle DEALERs to the ROUTER before the
+// active one connects. Each idle DEALER sends one hello that the ROUTER
+// consumes, proving the link is attached; afterwards the DEALER stays
+// silent.
 func benchRouterIdlePeers(b *testing.B, nIdle int, endpoint string) {
 	b.Helper()
 	b.StopTimer()
 
-	ctxZmq := gozmq.NewContext()
-	defer ctxZmq.Close()
+	router := bind(b, gozmq.Router, endpoint)
 
-	router, err := ctxZmq.NewSocket(gozmq.Router)
-	if err != nil {
-		b.Fatalf("new router: %v", err)
-	}
-	defer router.Close()
-	if err := router.Bind(endpoint); err != nil {
-		b.Fatalf("bind: %v", err)
-	}
-
-	setupCtx, setupCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer setupCancel()
-
-	// Each idle DEALER sends one hello that the ROUTER consumes, proving
-	// the link is attached; afterwards the DEALER stays silent.
-	idle := make([]*gozmq.Socket, nIdle)
-	defer func() {
-		for _, d := range idle {
-			if d != nil {
-				_ = d.Close()
-			}
-		}
-	}()
+	setupCtx := testutil.Ctx(b, setupTimeout)
 	hello := []byte("hello")
-	for i := range idle {
-		d, err := ctxZmq.NewSocket(gozmq.Dealer)
-		if err != nil {
-			b.Fatalf("new idle dealer[%d]: %v", i, err)
-		}
-		idle[i] = d
-		if err := d.Connect(endpoint); err != nil {
-			b.Fatalf("idle connect[%d]: %v", i, err)
-		}
+	for i := 0; i < nIdle; i++ {
+		d := router.connect(gozmq.Dealer)
 		if err := d.SendMsg(setupCtx, gozmq.NewMsgFromBytes(hello)); err != nil {
 			b.Fatalf("idle hello[%d]: %v", i, err)
 		}
 	}
-	for i := range idle {
-		if _, err := router.RecvMsg(setupCtx); err != nil {
+	for i := 0; i < nIdle; i++ {
+		if _, err := router.sock.RecvMsg(setupCtx); err != nil {
 			b.Fatalf("router recv hello[%d]: %v", i, err)
 		}
 	}
 
-	dealer, err := ctxZmq.NewSocket(gozmq.Dealer, gozmq.WithIdentity([]byte("bench-dealer")))
-	if err != nil {
-		b.Fatalf("new dealer: %v", err)
-	}
-	defer dealer.Close()
-	if err := dealer.Connect(endpoint); err != nil {
-		b.Fatalf("connect: %v", err)
-	}
-
-	runCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	var echoWG sync.WaitGroup
-	echoWG.Add(1)
-	go func() {
-		defer echoWG.Done()
-		for {
-			m, err := router.RecvMsg(runCtx)
-			if err != nil {
-				return
-			}
-			if err := router.SendMsg(runCtx, gozmq.NewMsgFromFrames(m.Frames()...)); err != nil {
-				return
-			}
-		}
-	}()
-
-	payload := newPayload(scaleMsgSize)
-
-	callCtx, callCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer callCancel()
-	for i := 0; i < 2; i++ {
-		if err := dealer.SendMsg(callCtx, gozmq.NewMsgFromBytes(payload)); err != nil {
-			b.Fatalf("warmup send: %v", err)
-		}
-		if _, err := dealer.RecvMsg(callCtx); err != nil {
-			b.Fatalf("warmup recv: %v", err)
-		}
-	}
-
-	b.SetBytes(scaleMsgSize)
-	b.ResetTimer()
-	b.StartTimer()
-
-	for i := 0; i < b.N; i++ {
-		if err := dealer.SendMsg(callCtx, gozmq.NewMsgFromBytes(payload)); err != nil {
-			b.Fatalf("send[%d]: %v", i, err)
-		}
-		if _, err := dealer.RecvMsg(callCtx); err != nil {
-			b.Fatalf("recv[%d]: %v", i, err)
-		}
-	}
-
-	b.StopTimer()
-	cancel()
-	_ = router.Close()
-	echoWG.Wait()
+	dealer := router.connect(gozmq.Dealer, gozmq.WithIdentity([]byte("bench-dealer")))
+	echoRoundTrips(b, router.sock, dealer, scaleMsgSize)
 }
-
-// -----------------------------------------------------------------------------
-// Wide PUB fanout.
-// -----------------------------------------------------------------------------
 
 // BenchmarkPubSubFanoutWide_Inproc is BenchmarkPubSubFanout_Inproc at 64
 // subscribers, where per-subscriber costs in the PUB dominate.
 func BenchmarkPubSubFanoutWide_Inproc(b *testing.B) {
 	const nSub = 64
 	b.Run(fmt.Sprintf("subs=%d", nSub), func(b *testing.B) {
-		benchPubSubFanout(b, scaleMsgSize, inprocName(b, "pubsub-wide-inproc"), nSub)
+		benchPubSubFanout(b, inprocEndpoint(), scaleMsgSize, nSub)
 	})
 }
-
-// -----------------------------------------------------------------------------
-// XPUB subscription churn.
-// -----------------------------------------------------------------------------
 
 // BenchmarkXPubSubscribeChurn_Inproc times one subscription event per
 // iteration: an XSUB alternately subscribes to and cancels a rotating set
@@ -289,38 +167,18 @@ func BenchmarkPubSubFanoutWide_Inproc(b *testing.B) {
 func BenchmarkXPubSubscribeChurn_Inproc(b *testing.B) {
 	b.StopTimer()
 
-	ctxZmq := gozmq.NewContext()
-	defer ctxZmq.Close()
-
-	xpub, err := ctxZmq.NewSocket(gozmq.XPub, gozmq.WithXPubVerbose(true))
-	if err != nil {
-		b.Fatalf("new xpub: %v", err)
-	}
-	defer xpub.Close()
-	endpoint := inprocName(b, "xpub-churn")
-	if err := xpub.Bind(endpoint); err != nil {
-		b.Fatalf("bind: %v", err)
-	}
-
-	xsub, err := ctxZmq.NewSocket(gozmq.XSub)
-	if err != nil {
-		b.Fatalf("new xsub: %v", err)
-	}
-	defer xsub.Close()
-	if err := xsub.Connect(endpoint); err != nil {
-		b.Fatalf("connect: %v", err)
-	}
+	xpub, xsub := newPair(b, gozmq.XPub, gozmq.XSub,
+		[]gozmq.Option{gozmq.WithXPubVerbose(true)}, nil, inprocEndpoint())
 
 	const nPrefix = 64
 	var frames [nPrefix][2][]byte // [prefix][0=cancel, 1=subscribe]
 	for i := range frames {
 		topic := fmt.Appendf(nil, "topic-%02d", i)
-		frames[i][0] = append([]byte{0x00}, topic...)
-		frames[i][1] = xsubSubscribeFrame(topic)
+		frames[i][0] = testutil.SubscribeFrame(false, topic)
+		frames[i][1] = testutil.SubscribeFrame(true, topic)
 	}
 
-	callCtx, callCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer callCancel()
+	callCtx := testutil.Ctx(b, benchTimeout)
 
 	// event sends the i-th churn event and receives it on the XPUB.
 	event := func(i int) error {
@@ -356,10 +214,6 @@ func BenchmarkXPubSubscribeChurn_Inproc(b *testing.B) {
 	b.StopTimer()
 }
 
-// -----------------------------------------------------------------------------
-// TCP connection setup.
-// -----------------------------------------------------------------------------
-
 // BenchmarkConnectHandshake_TCP times one connection lifetime per
 // iteration: create a PUSH, connect it to a bound PULL (dial plus NULL
 // handshake), deliver one message and close the PUSH. The Context and the
@@ -367,28 +221,16 @@ func BenchmarkXPubSubscribeChurn_Inproc(b *testing.B) {
 func BenchmarkConnectHandshake_TCP(b *testing.B) {
 	b.StopTimer()
 
-	ctxZmq := gozmq.NewContext()
-	defer ctxZmq.Close()
-
-	pull, err := ctxZmq.NewSocket(gozmq.Pull)
-	if err != nil {
-		b.Fatalf("new pull: %v", err)
-	}
-	defer pull.Close()
-	if err := pull.Bind(freeTCPEndpoint); err != nil {
-		b.Fatalf("bind: %v", err)
-	}
-	ep := pull.LastEndpoint()
+	pull := bind(b, gozmq.Pull, tcpEndpoint())
+	ep := pull.sock.LastEndpoint()
 
 	payload := newPayload(scaleMsgSize)
-
-	callCtx, callCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer callCancel()
+	callCtx := testutil.Ctx(b, benchTimeout)
 
 	b.ResetTimer()
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {
-		push, err := ctxZmq.NewSocket(gozmq.Push)
+		push, err := pull.ctx.NewSocket(gozmq.Push)
 		if err != nil {
 			b.Fatalf("new push[%d]: %v", i, err)
 		}
@@ -400,7 +242,7 @@ func BenchmarkConnectHandshake_TCP(b *testing.B) {
 			_ = push.Close()
 			b.Fatalf("send[%d]: %v", i, err)
 		}
-		m, err := pull.RecvMsg(callCtx)
+		m, err := pull.sock.RecvMsg(callCtx)
 		if err != nil {
 			_ = push.Close()
 			b.Fatalf("recv[%d]: %v", i, err)

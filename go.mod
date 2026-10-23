@@ -6,7 +6,6 @@ require (
 	github.com/stretchr/testify v1.12.1
 	go.uber.org/goleak v1.3.0
 	golang.org/x/crypto v0.52.0
-	pgregory.net/rapid v1.3.0
 )
 
 require (

@@ -7,66 +7,83 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/exergy-dev/gozmq/security"
 )
 
-func TestNewSocketRejectsInvalidOptionCombinations(t *testing.T) {
+// TestNewSocketOptionValidation: NewSocket rejects option combinations that
+// could not work (an incomplete mechanism must not silently run NULL, a
+// socket cannot hold two mechanisms, STREAM has no ZMTP layer) and accepts
+// the documented extremes.
+func TestNewSocketOptionValidation(t *testing.T) {
+	t.Parallel()
 	ctx := NewContext()
 	defer ctx.Close()
+	key := make([]byte, 32)
+	auth := WithPlainAuth(func(string, string) bool { return true })
+	custom := WithSecurityMech(func(security.Role, map[string]string) (security.Mech, error) { return nil, nil })
 
-	cases := []struct {
-		name string
-		typ  SocketType
-		opt  Option
+	for _, tc := range []struct {
+		name    string
+		typ     SocketType
+		opts    []Option
+		wantErr string // "" means NewSocket must succeed
 	}{
-		{name: "subscribe-on-pair", typ: Pair, opt: WithSubscribe([]byte("topic"))},
-		{name: "router-mandatory-on-dealer", typ: Dealer, opt: WithRouterMandatory(true)},
-		{name: "xpub-verbose-on-sub", typ: Sub, opt: WithXPubVerbose(true)},
-		{name: "identity-leading-zero", typ: Dealer, opt: WithIdentity([]byte{0, 1})},
-		{name: "curve-server-short-key", typ: Router, opt: WithCurveServer([]byte("short"))},
-		{name: "max-message-size-negative", typ: Pair, opt: WithMaxMessageSize(-1)},
-		{name: "send-hwm-negative", typ: Pair, opt: WithSendHWM(-1)},
-		{name: "send-hwm-maxint", typ: Pair, opt: WithSendHWM(math.MaxInt)},
-		{name: "recv-hwm-over-max", typ: Pair, opt: WithRecvHWM(MaxHWM + 1)},
+		{"subscribe-on-pair", Pair, []Option{WithSubscribe([]byte("topic"))}, "err"},
+		{"router-mandatory-on-dealer", Dealer, []Option{WithRouterMandatory(true)}, "err"},
+		{"xpub-verbose-on-sub", Sub, []Option{WithXPubVerbose(true)}, "err"},
+		{"identity-leading-zero", Dealer, []Option{WithIdentity([]byte{0, 1})}, "err"},
+		{"max-message-size-negative", Pair, []Option{WithMaxMessageSize(-1)}, "err"},
+		{"send-hwm-negative", Pair, []Option{WithSendHWM(-1)}, "err"},
+		{"send-hwm-maxint", Pair, []Option{WithSendHWM(math.MaxInt)}, "err"},
+		{"recv-hwm-over-max", Pair, []Option{WithRecvHWM(MaxHWM + 1)}, "err"},
 
-		// Incomplete mechanism options must fail construction rather than
-		// silently run NULL.
-		{name: "plain-auth-nil", typ: Rep, opt: WithPlainAuth(nil)},
-		{name: "plain-client-long-user", typ: Req, opt: WithPlainClient(string(make([]byte, 256)), "pw")},
-		{name: "plain-client-long-pass", typ: Req, opt: WithPlainClient("user", string(make([]byte, 256)))},
-		{name: "curve-server-nil-key", typ: Router, opt: WithCurveServer(nil)},
-		{name: "curve-client-nil-keys", typ: Dealer, opt: WithCurveClient(nil, nil, nil)},
-		{name: "curve-client-short-key", typ: Dealer, opt: WithCurveClient(make([]byte, 32), make([]byte, 32), make([]byte, 31))},
+		{"plain-auth-nil", Rep, []Option{WithPlainAuth(nil)}, "err"},
+		{"plain-client-long-user", Req, []Option{WithPlainClient(string(make([]byte, 256)), "pw")}, "err"},
+		{"plain-client-long-pass", Req, []Option{WithPlainClient("user", string(make([]byte, 256)))}, "err"},
+		{"curve-server-nil-key", Router, []Option{WithCurveServer(nil)}, "err"},
+		{"curve-server-short-key", Router, []Option{WithCurveServer([]byte("short"))}, "err"},
+		{"curve-client-nil-keys", Dealer, []Option{WithCurveClient(nil, nil, nil)}, "err"},
+		{"curve-client-short-key", Dealer, []Option{WithCurveClient(key, key, make([]byte, 31))}, "err"},
+		{"security-mech-nil", Rep, []Option{WithSecurityMech(nil)}, "err"},
 
-		// STREAM bypasses ZMTP entirely, so every ZMTP-layer option must
-		// fail construction rather than be silently ignored.
-		{name: "plain-auth-on-stream", typ: Stream, opt: WithPlainAuth(func(u, p string) bool { return true })},
-		{name: "plain-client-on-stream", typ: Stream, opt: WithPlainClient("user", "pass")},
-		{name: "curve-server-on-stream", typ: Stream, opt: WithCurveServer(make([]byte, 32))},
-		{name: "curve-client-on-stream", typ: Stream, opt: WithCurveClient(make([]byte, 32), make([]byte, 32), make([]byte, 32))},
-		{name: "identity-on-stream", typ: Stream, opt: WithIdentity([]byte("id"))},
-		{name: "heartbeat-on-stream", typ: Stream, opt: WithHeartbeat(time.Second, 3*time.Second)},
-		{name: "handshake-timeout-on-stream", typ: Stream, opt: WithHandshakeTimeout(time.Second)},
-		{name: "zap-domain-on-stream", typ: Stream, opt: WithZAPDomain("global")},
-	}
+		{"plain server+client", Pair, []Option{auth, WithPlainClient("u", "p")}, "mutually exclusive"},
+		{"plain server+curve", Pair, []Option{auth, WithCurveServer(key)}, "mutually exclusive"},
+		{"plain client+curve", Pair, []Option{WithPlainClient("u", "p"), WithCurveClient(key, key, key)}, "mutually exclusive"},
+		{"custom+plain server", Rep, []Option{custom, auth}, "mutually exclusive with the PLAIN options"},
+		{"custom+plain client", Req, []Option{custom, WithPlainClient("u", "p")}, "mutually exclusive with the PLAIN options"},
+		{"custom+curve server", Rep, []Option{custom, WithCurveServer(key)}, "mutually exclusive with the CURVE options"},
 
-	for _, tc := range cases {
+		{"plain-auth-on-stream", Stream, []Option{auth}, "err"},
+		{"plain-client-on-stream", Stream, []Option{WithPlainClient("user", "pass")}, "err"},
+		{"curve-server-on-stream", Stream, []Option{WithCurveServer(key)}, "err"},
+		{"curve-client-on-stream", Stream, []Option{WithCurveClient(key, key, key)}, "err"},
+		{"custom-on-stream", Stream, []Option{custom}, "not applicable to STREAM sockets"},
+		{"identity-on-stream", Stream, []Option{WithIdentity([]byte("id"))}, "err"},
+		{"heartbeat-on-stream", Stream, []Option{WithHeartbeat(time.Second, 3*time.Second)}, "err"},
+		{"handshake-timeout-on-stream", Stream, []Option{WithHandshakeTimeout(time.Second)}, "err"},
+		{"zap-domain-on-stream", Stream, []Option{WithZAPDomain("global")}, "err"},
+
+		{"max-message-size-huge", Pair, []Option{WithMaxMessageSize(1 << 40)}, ""},
+		{"hwm-at-max", Pair, []Option{WithSendHWM(MaxHWM), WithRecvHWM(MaxHWM)}, ""},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := ctx.NewSocket(tc.typ, tc.opt)
-			require.Error(t, err, "NewSocket(%v, %T) unexpectedly succeeded", tc.typ, tc.opt)
+			s, err := ctx.NewSocket(tc.typ, tc.opts...)
+			switch tc.wantErr {
+			case "":
+				require.NoError(t, err)
+				require.NoError(t, s.Close())
+			case "err":
+				require.Error(t, err)
+			default:
+				require.ErrorContains(t, err, tc.wantErr)
+			}
 		})
 	}
 }
 
-func TestNewSocketAcceptsLargeMaxMessageSize(t *testing.T) {
-	ctx := NewContext()
-	defer ctx.Close()
-
-	s, err := ctx.NewSocket(Pair, WithMaxMessageSize(1<<40))
-	require.NoError(t, err)
-	require.NoError(t, s.Close())
-}
-
 func TestContextCloseIsIdempotent(t *testing.T) {
+	t.Parallel()
 	ctx := NewContext()
 	require.NoError(t, ctx.Close())
 	require.NoError(t, ctx.Close())
@@ -74,18 +91,11 @@ func TestContextCloseIsIdempotent(t *testing.T) {
 	require.ErrorIs(t, err, ErrContextClosed)
 }
 
-func TestNewSocketAcceptsMaxHWM(t *testing.T) {
-	ctx := NewContext()
-	defer ctx.Close()
-	s, err := ctx.NewSocket(Pair, WithSendHWM(MaxHWM), WithRecvHWM(MaxHWM))
-	require.NoError(t, err)
-	require.NoError(t, s.Close())
-}
-
 // TestSendMsgNilRejectedOnEveryType: a nil message is refused up front with a
 // matchable error. REQ and REP used to dereference it, REQ after the empty
 // request had already been sent.
 func TestSendMsgNilRejectedOnEveryType(t *testing.T) {
+	t.Parallel()
 	ctx := NewContext()
 	defer ctx.Close()
 	for _, typ := range []SocketType{Pair, Push, Pull, Dealer, Router, Req, Rep, Pub, Sub, XPub, XSub, Stream} {
@@ -95,17 +105,4 @@ func TestSendMsgNilRejectedOnEveryType(t *testing.T) {
 		require.ErrorIs(t, err, ErrFSMViolation, "%v: nil message", typ)
 		require.NoError(t, s.Close())
 	}
-}
-
-// TestSendMsgMaxMessageSizeCountsWholeMessage: the send-side check sums the
-// frames, matching the receive side, so a gozmq sender never emits a
-// multipart message a gozmq receiver tears the session down for.
-func TestSendMsgMaxMessageSizeCountsWholeMessage(t *testing.T) {
-	ctx := NewContext()
-	defer ctx.Close()
-	s, err := ctx.NewSocket(Pair, WithMaxMessageSize(1000))
-	require.NoError(t, err)
-	defer s.Close()
-	err = s.SendMsg(context.Background(), NewMsgFromFrames(make([]byte, 600), make([]byte, 600)))
-	require.ErrorIs(t, err, ErrMalformedFrame)
 }

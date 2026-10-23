@@ -3,11 +3,11 @@ package socket_test
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -32,7 +32,7 @@ func TestFairQueue_RecvWithSource(t *testing.T) {
 	require.NoError(t, fq.Attach(aEng), "attach A")
 	require.NoError(t, fq.Attach(bEng), "attach B")
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// Send from B first; assert source is bEng.
 	require.NoError(t, bPeer.Send(ctx, msg.FromBytes([]byte("from-B"))), "bPeer send")
@@ -55,21 +55,9 @@ func TestFairQueue_RecvWithSource_CloseError(t *testing.T) {
 	t.Parallel()
 	fq := newFQ()
 
-	ctx := context.Background()
-	type result struct {
-		err error
-	}
-	done := make(chan result, 1)
-	go func() {
-		_, _, err := fq.RecvWithSource(ctx)
-		done <- result{err: err}
-	}()
-	time.Sleep(30 * time.Millisecond)
-	require.NoError(t, fq.Close(), "close")
-	select {
-	case r := <-done:
-		require.ErrorIs(t, r.err, zmqerr.ErrSocketClosed)
-	case <-time.After(time.Second):
-		require.Fail(t, "recv did not unblock on close")
-	}
+	err := testutil.RequireUnblocks(t, func() error {
+		_, _, err := fq.RecvWithSource(context.Background())
+		return err
+	}, func() { require.NoError(t, fq.Close(), "close") })
+	require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
 }

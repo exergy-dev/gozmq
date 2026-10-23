@@ -7,6 +7,7 @@ import (
 	"net"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -37,7 +38,7 @@ const (
 // the reader and the heartbeat arrive via cmdCh and are written here (see
 // writerNext).
 //
-// Throughput optimization (design §11): after receiving the first
+// Throughput optimization: after receiving the first
 // message, the writer tries a non-blocking Recv for additional queued
 // messages. All accumulated frame blobs are written in a single writev
 // syscall via net.Buffers — preserving the interactive single-message
@@ -72,7 +73,7 @@ func (s *Session) runWriter() {
 				// burst cannot race teardown.
 				s.drainSessionPipe()
 			} else {
-				if !isShutdownErr(err) {
+				if !zmqerr.IsShutdown(err) {
 					s.cfg.Logger.Debug("gozmq/session: writer recv exit", "err", err)
 				}
 				s.shutdown()
@@ -165,7 +166,7 @@ func (s *Session) writeBatchFrom(batch *writerBatch, first *msg.Msg) error {
 	}
 	batch.release()
 	if err != nil {
-		if !isShutdownErr(err) {
+		if !zmqerr.IsShutdown(err) {
 			s.cfg.Logger.Debug("gozmq/session: writer batch exit", "err", err)
 			s.shutdown()
 		}

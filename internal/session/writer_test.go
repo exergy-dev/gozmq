@@ -13,14 +13,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
-// --------------------------------------------------------------------------
 // countingConn wraps a fakeConn and records every Write call: count,
 // per-call byte lengths, and an accumulated byte buffer of the full
 // stream. It is the instrumented receiver used by writer-batching tests.
-// --------------------------------------------------------------------------
 
 type countingConn struct {
 	*fakeConn
@@ -56,7 +55,6 @@ func (c *countingConn) Sizes() []int {
 	return out
 }
 
-// --------------------------------------------------------------------------
 // writevConn extends countingConn with WriteBuffers — the bufferWriter
 // fast path flushBatch prefers — emulating writev(2): every buffer in a
 // batch lands in ONE Write call on the underlying countingConn, making
@@ -67,7 +65,6 @@ func (c *countingConn) Sizes() []int {
 // flushes go through WriteBuffers (greeting/handshake writes use plain
 // Write), the gate exerts wire backpressure without wedging the
 // handshake — the phase distinction the old Write-level gate lacked.
-// --------------------------------------------------------------------------
 
 type writevConn struct {
 	*countingConn
@@ -107,12 +104,10 @@ func (c *writevConn) WriteBuffers(bufs *net.Buffers) (int64, error) {
 	return int64(n), err
 }
 
-// --------------------------------------------------------------------------
 // newWriterTestPair builds two sessions A→B over a countingConn on the
 // A side and plain fakeConn on the B side, runs both handshakes, and
 // returns (sA, sB, countingConn). B drains via a goroutine that just
 // calls Recv so the pipe doesn't stall.
-// --------------------------------------------------------------------------
 
 func newWriterTestPair(t *testing.T, sendHWM, recvHWM int) (sA, sB *tSession, ccA *countingConn) {
 	t.Helper()
@@ -148,14 +143,12 @@ func (c *countingConn) resetWriteCounters() {
 	c.mu.Unlock()
 }
 
-// --------------------------------------------------------------------------
 // TestWriter_BatchRetainsBufferCapacityAcrossFlushes: net.Buffers.WriteTo
 // and the tcpConn WriteBuffers fast path CONSUME the slice header they
 // are handed (*v = (*v)[i:]), so flushBatch must be given a COPY of the
 // batch's buffers header. Regression check: the batch's backing array
 // must survive flushes — before the fix, release() truncated the
 // consumed (empty) tail and every batch re-grew from zero capacity.
-// --------------------------------------------------------------------------
 
 // consumeWritevConn emulates the consume semantics of net.Buffers.WriteTo
 // faithfully: the passed slice header is advanced past everything written.
@@ -171,6 +164,7 @@ func (c *consumeWritevConn) WriteBuffers(bufs *net.Buffers) (int64, error) {
 }
 
 func TestWriter_BatchRetainsBufferCapacityAcrossFlushes(t *testing.T) {
+	t.Parallel()
 	connA, _ := newFakeConnPair()
 	// Never started: the test drives writeBatchFrom directly.
 	s := New(Config{
@@ -202,7 +196,6 @@ func TestWriter_BatchRetainsBufferCapacityAcrossFlushes(t *testing.T) {
 	require.Zero(t, cap(batch.scratch), "oversized scratch retained after flush")
 }
 
-// --------------------------------------------------------------------------
 // TestWriter_BatchCoalescesMultipleMessages: enqueue many messages
 // rapidly; verify the writer coalesces them into fewer writev calls than
 // messages via net.Buffers.
@@ -211,9 +204,9 @@ func TestWriter_BatchRetainsBufferCapacityAcrossFlushes(t *testing.T) {
 // first traffic-phase flush, queue all N messages into the sessionPipe
 // while it is parked, then unblock the gate — at most one more
 // writer-loop iteration coalesces everything still queued.
-// --------------------------------------------------------------------------
 
 func TestWriter_BatchCoalescesMultipleMessages(t *testing.T) {
+	t.Parallel()
 	const HWM = 64
 	sA, sB, wcA := newWritevTestPair(t, HWM, HWM)
 
@@ -222,7 +215,7 @@ func TestWriter_BatchCoalescesMultipleMessages(t *testing.T) {
 	wcA.resetWriteCounters()
 
 	const N = 5
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	// First send: the writer pulls it and parks in the gated writev.
 	require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("msg-0"))), "Send[0]")
 	require.Eventually(t, func() bool { return wcA.gateWaiting.Load() == 1 },
@@ -254,20 +247,19 @@ func TestWriter_BatchCoalescesMultipleMessages(t *testing.T) {
 	t.Logf("batched %d messages into %d writev calls (sizes=%v)", N, writes, wcA.Sizes())
 }
 
-// --------------------------------------------------------------------------
 // TestWriter_InteractiveSingleMessage: a solo message should be written
 // immediately, NOT wait for a batch to fill. We assert latency is low
 // AND the message is received promptly.
-// --------------------------------------------------------------------------
 
 func TestWriter_InteractiveSingleMessage(t *testing.T) {
+	t.Parallel()
 	sA, sB, ccA := newWriterTestPair(t, 4, 4)
 	defer func() { _ = sA.Stop(); _ = sB.Stop() }()
 
 	time.Sleep(20 * time.Millisecond)
 	ccA.resetWriteCounters()
 
-	ctx := testCtx(t, time.Second)
+	ctx := testutil.Ctx(t, time.Second)
 
 	start := time.Now()
 	require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("solo"))), "Send")
@@ -281,18 +273,17 @@ func TestWriter_InteractiveSingleMessage(t *testing.T) {
 	assert.LessOrEqual(t, elapsed, 200*time.Millisecond, "solo round-trip expected <200ms (no coalescing delay)")
 }
 
-// --------------------------------------------------------------------------
 // TestWriter_OrderPreservation: enqueue 20 messages with sequential
 // payloads; capture bytes at the wire; decode frames; assert original
 // order.
-// --------------------------------------------------------------------------
 
 func TestWriter_OrderPreservation(t *testing.T) {
+	t.Parallel()
 	sA, sB, _ := newWriterTestPair(t, 64, 64)
 	defer func() { _ = sA.Stop(); _ = sB.Stop() }()
 
 	const N = 20
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 
 	// Producer
 	go func() {
@@ -313,14 +304,13 @@ func TestWriter_OrderPreservation(t *testing.T) {
 	}
 }
 
-// --------------------------------------------------------------------------
 // TestWriter_Backpressure: with a gated Conn.Write, the writer stalls
 // after draining its in-flight batch. Subsequent Send calls must block
 // once the pipe HWM fills — this is the fundamental backpressure
 // guarantee: batching must not drain the pipe to empty ahead of writes.
-// --------------------------------------------------------------------------
 
 func TestWriter_Backpressure(t *testing.T) {
+	t.Parallel()
 	const HWM = 4
 	sA, sB, wcA := newWritevTestPair(t, HWM, HWM)
 	_ = sB
@@ -343,7 +333,7 @@ func TestWriter_Backpressure(t *testing.T) {
 	// writev (otherwise the writer's coalescing TryRecv loop can keep
 	// pace with the pusher and swallow everything into one large batch
 	// before flushing, hiding the HWM).
-	primeCtx := testCtx(t, 2*time.Second)
+	primeCtx := testutil.Ctx(t, 2*time.Second)
 	require.NoError(t, sA.Pipe().Send(primeCtx, msg.FromBytes([]byte("bp-prime"))), "Send(prime)")
 	require.Eventually(t, func() bool { return wcA.gateWaiting.Load() == 1 },
 		2*time.Second, time.Millisecond, "writer did not park in the gated writev")
@@ -351,7 +341,7 @@ func TestWriter_Backpressure(t *testing.T) {
 	// With the writer parked, further Sends accumulate in the pipe until
 	// its capacity (HWM) is reached, after which Send MUST block —
 	// batching must not drain the pipe to empty ahead of the wire.
-	pushCtx := testCtx(t, 200*time.Millisecond)
+	pushCtx := testutil.Ctx(t, 200*time.Millisecond)
 
 	var pushed int
 	for i := 0; i < 4*HWM; i++ {
@@ -369,14 +359,13 @@ func TestWriter_Backpressure(t *testing.T) {
 	t.Logf("backpressure kicked in after %d pushes (HWM=%d, batch cap=%d)", pushed, HWM, maxBatchMessages)
 }
 
-// --------------------------------------------------------------------------
 // TestWriter_BatchCap: enqueue more than maxBatchMessages rapidly and
 // verify multiple batches are emitted, and each batch's bytes are under
 // the size cap. This also exercises the loop's re-arm path (after one
 // batch it goes back to blocking Recv).
-// --------------------------------------------------------------------------
 
 func TestWriter_BatchCap(t *testing.T) {
+	t.Parallel()
 	// SendHWM large enough that we can enqueue well past maxBatchMessages
 	// before the writer drains them.
 	sA, sB, ccA := newWriterTestPair(t, maxBatchMessages*4, maxBatchMessages*4)
@@ -388,7 +377,7 @@ func TestWriter_BatchCap(t *testing.T) {
 	// Enqueue exactly 2.5× maxBatchMessages so we're guaranteed to
 	// exceed the cap in at least one batch boundary.
 	N := maxBatchMessages*5/2 + 1
-	ctx := testCtx(t, 5*time.Second)
+	ctx := testutil.Ctx(t, 5*time.Second)
 	for i := 0; i < N; i++ {
 		require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte(fmt.Sprintf("c-%d", i)))), "Send[%d]", i)
 	}
@@ -413,13 +402,12 @@ func TestWriter_BatchCap(t *testing.T) {
 	t.Logf("N=%d messages emitted in %d batches, sizes=%v", N, len(sizes), sizes)
 }
 
-// --------------------------------------------------------------------------
 // TestWriter_BatchLingerDrain: cancel writerCtx while messages are
 // queued; assert drainSessionPipe flushes everything using the
 // batched path.
-// --------------------------------------------------------------------------
 
 func TestWriter_BatchLingerDrain(t *testing.T) {
+	t.Parallel()
 	sA, sB, ccA := newWriterTestPair(t, 64, 64)
 	// Note: we Stop manually below after verifying drain semantics.
 	defer func() { _ = sA.Stop(); _ = sB.Stop() }()
@@ -430,7 +418,7 @@ func TestWriter_BatchLingerDrain(t *testing.T) {
 	// Enqueue messages WITHOUT having B drain: the writer runs normally
 	// and sends them. We want them on the wire before the Drain.
 	const N = 10
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	for i := 0; i < N; i++ {
 		require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte(fmt.Sprintf("d-%d", i)))), "Send[%d]", i)
 	}
@@ -461,17 +449,16 @@ func TestWriter_BatchLingerDrain(t *testing.T) {
 	}
 }
 
-// --------------------------------------------------------------------------
 // TestWriter_EmptyMessageStillEmitted: an empty Msg (no frames) must
 // still emit one zero-length non-MORE frame so the peer sees a
 // message boundary.
-// --------------------------------------------------------------------------
 
 func TestWriter_EmptyMessageStillEmitted(t *testing.T) {
+	t.Parallel()
 	sA, sB, _ := newWriterTestPair(t, 4, 4)
 	defer func() { _ = sA.Stop(); _ = sB.Stop() }()
 
-	ctx := testCtx(t, time.Second)
+	ctx := testutil.Ctx(t, time.Second)
 
 	require.NoError(t, sA.Pipe().Send(ctx, msg.New()), "Send(empty)")
 	got, err := sB.Pipe().Recv(ctx)
@@ -480,16 +467,15 @@ func TestWriter_EmptyMessageStillEmitted(t *testing.T) {
 	require.Empty(t, got.Frames()[0], "frame not zero-length")
 }
 
-// --------------------------------------------------------------------------
 // TestWriter_MultipartBatched: multipart messages must be batched as a
 // single contiguous sequence of frames with MORE flags preserved.
-// --------------------------------------------------------------------------
 
 func TestWriter_MultipartBatched(t *testing.T) {
+	t.Parallel()
 	sA, sB, _ := newWriterTestPair(t, 16, 16)
 	defer func() { _ = sA.Stop(); _ = sB.Stop() }()
 
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 
 	// Send 4 multipart messages; each has 3 frames.
 	for i := 0; i < 4; i++ {
@@ -516,15 +502,14 @@ func TestWriter_MultipartBatched(t *testing.T) {
 	}
 }
 
-// --------------------------------------------------------------------------
 // TestReader_HandlesPingWhileWriterBlocked: regression for the
 // reader-writes-PONG-inline deadlock. With the writer goroutine wedged
 // in a conn write (peer not draining), an incoming
 // PING must NOT stall the reader — the PONG is routed to the writer via
 // the command channel and the reader keeps reading.
-// --------------------------------------------------------------------------
 
 func TestReader_HandlesPingWhileWriterBlocked(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	wcA := newWritevConn(connA)
 	sA := startTestSession(Config{
@@ -540,7 +525,7 @@ func TestReader_HandlesPingWhileWriterBlocked(t *testing.T) {
 	// message so the writer parks inside WriteBuffers.
 	gate := make(chan struct{})
 	wcA.setGate(gate)
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("stall"))), "Send(stall)")
 	require.Eventually(t, func() bool { return wcA.gateWaiting.Load() == 1 },
 		2*time.Second, time.Millisecond, "writer did not park in the gated writev")
@@ -550,7 +535,7 @@ func TestReader_HandlesPingWhileWriterBlocked(t *testing.T) {
 	peer.sendPing(0, []byte("ctx1"))
 	// ... proven by data sent AFTER the PING still flowing to the engine.
 	peer.sendData([]byte("after-ping"))
-	got, err := sA.Pipe().Recv(testCtx(t, 2*time.Second))
+	got, err := sA.Pipe().Recv(testutil.Ctx(t, 2*time.Second))
 	require.NoError(t, err, "reader blocked behind the wedged writer")
 	require.Equal(t, "after-ping", string(got.Bytes()))
 
@@ -561,18 +546,18 @@ func TestReader_HandlesPingWhileWriterBlocked(t *testing.T) {
 		"PONG must echo the PING context")
 }
 
-// --------------------------------------------------------------------------
 // TestWriter_LingerDrainUnboundedQueue: with SendHWM 0 most of a large
 // outbound backlog sits in the pipe's overflow, past its channel. The
 // linger drain must flush every queued message.
-// --------------------------------------------------------------------------
 
 func TestWriter_LingerDrainUnboundedQueue(t *testing.T) {
+	t.Parallel()
 	for _, hwm := range []int{0, 64} {
 		t.Run(fmt.Sprintf("sendHWM=%d", hwm), func(t *testing.T) {
+			t.Parallel()
 			sA, sB, _ := newWriterTestPair(t, hwm, 0)
 			const N = 5000
-			ctx := testCtx(t, 5*time.Second)
+			ctx := testutil.Ctx(t, 5*time.Second)
 			got := make(chan int, 1)
 			go func() {
 				k := 0

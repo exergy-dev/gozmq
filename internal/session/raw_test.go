@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -42,6 +43,7 @@ func startRaw(t *testing.T, conn *fakeConn, hwm int) *rawSession {
 // TestRaw_InboundChunking: every byte the peer writes surfaces, in order,
 // as single-frame messages (the OS decides the read boundaries).
 func TestRaw_InboundChunking(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	rs := startRaw(t, connA, 0)
 	payload := bytes.Repeat([]byte("HELLO WORLD\n"), 300)
@@ -50,7 +52,7 @@ func TestRaw_InboundChunking(t *testing.T) {
 		_ = connB.Close()
 	}()
 
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	var got bytes.Buffer
 	for got.Len() < len(payload) {
 		m, err := rs.pipe.Recv(ctx)
@@ -65,11 +67,12 @@ func TestRaw_InboundChunking(t *testing.T) {
 // 1-byte read does not pin the 32 KiB read buffer, and chunks do not alias
 // a reused buffer.
 func TestRaw_InboundChunkSized(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	defer connB.Close()
 	rs := startRaw(t, connA, 0)
 
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	var chunks []*msg.Msg
 	for _, b := range []string{"a", "b"} {
 		_, err := connB.Write([]byte(b))
@@ -87,12 +90,13 @@ func TestRaw_InboundChunkSized(t *testing.T) {
 // TestRaw_OutboundVerbatim: a message's body reaches the peer as is, with
 // no greeting or framing ahead of it.
 func TestRaw_OutboundVerbatim(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	defer connB.Close()
 	rs := startRaw(t, connA, 0)
 
 	const body = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
-	require.NoError(t, rs.pipe.Send(testCtx(t, 2*time.Second), msg.FromBytes([]byte(body))))
+	require.NoError(t, rs.pipe.Send(testutil.Ctx(t, 2*time.Second), msg.FromBytes([]byte(body))))
 	buf := make([]byte, len(body))
 	_, err := io.ReadFull(connB, buf)
 	require.NoError(t, err)
@@ -103,10 +107,11 @@ func TestRaw_OutboundVerbatim(t *testing.T) {
 // queued ahead of it is written first, then the conn closes and the
 // session ends, attached.
 func TestRaw_EmptyBodyCloses(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	rs := startRaw(t, connA, 0)
 
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	require.NoError(t, rs.pipe.Send(ctx, msg.FromBytes([]byte("last-packet"))))
 	require.NoError(t, rs.pipe.Send(ctx, msg.FromBytes(nil)))
 
@@ -120,11 +125,12 @@ func TestRaw_EmptyBodyCloses(t *testing.T) {
 // TestRaw_PeerEOFClosesPipe: the peer closing its end closes the engine
 // pipe (the engine's cue to detach) and ends the session.
 func TestRaw_PeerEOFClosesPipe(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	rs := startRaw(t, connA, 0)
 	_ = connB.Close()
 
-	_, err := rs.pipe.Recv(testCtx(t, 2*time.Second))
+	_, err := rs.pipe.Recv(testutil.Ctx(t, 2*time.Second))
 	require.ErrorIs(t, err, io.EOF)
 	waitClosed(t, rs.Done(), 2*time.Second, "session did not end after peer EOF")
 }
@@ -132,12 +138,13 @@ func TestRaw_PeerEOFClosesPipe(t *testing.T) {
 // TestRaw_DrainFlushesThenKeepsConn: Drain writes everything queued and
 // leaves the conn open until Stop, as in ZMTP mode.
 func TestRaw_DrainFlushesThenKeepsConn(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	defer connB.Close()
 	rs := startRaw(t, connA, 0)
 
 	const n = 50
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	var want bytes.Buffer
 	for i := range n {
 		b := []byte{byte('a' + i%26)}
@@ -162,6 +169,7 @@ func TestRaw_DrainFlushesThenKeepsConn(t *testing.T) {
 
 // TestRaw_HWMZeroUnlimited: HWM 0 queues without bound in both directions.
 func TestRaw_HWMZeroUnlimited(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	defer connB.Close()
 	rs := startRaw(t, connA, 0)
@@ -187,6 +195,7 @@ func TestRaw_TwoGoroutines(t *testing.T) {
 // TestRaw_OnReadyErrorTearsDown: a refused pipe ends the session unattached
 // and closes the conn.
 func TestRaw_OnReadyErrorTearsDown(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	defer connB.Close()
 	attached := true
@@ -203,6 +212,7 @@ func TestRaw_OnReadyErrorTearsDown(t *testing.T) {
 
 // TestRaw_ConcurrentStop: Stop is idempotent under concurrency.
 func TestRaw_ConcurrentStop(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	defer connB.Close()
 	rs := startRaw(t, connA, 0)

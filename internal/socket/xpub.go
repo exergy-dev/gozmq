@@ -7,6 +7,7 @@ import (
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/zmtp"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -121,7 +122,7 @@ func (e *xpubEngine) DetachPipe(p *pipe.End) error {
 	for prefix, count := range e.peerSubs[p] {
 		if e.prefRefs[prefix] -= count; e.prefRefs[prefix] <= 0 {
 			delete(e.prefRefs, prefix)
-			e.pending = append(e.pending, msg.FromBytes(subscriptionFrame(false, []byte(prefix))))
+			e.pending = append(e.pending, msg.FromBytes(zmtp.SubscriptionFrame(false, []byte(prefix))))
 			queued = true
 		}
 	}

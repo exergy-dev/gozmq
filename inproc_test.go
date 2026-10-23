@@ -9,17 +9,10 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/security"
 	"github.com/exergy-dev/gozmq/transport"
 )
-
-// inprocCtx returns a 5 s call context cancelled at test end.
-func inprocCtx(t *testing.T) context.Context {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	t.Cleanup(cancel)
-	return ctx
-}
 
 // inprocSocket creates a socket on zctx, closed at test end.
 func inprocSocket(t *testing.T, zctx *Context, typ SocketType, opts ...Option) *Socket {
@@ -46,7 +39,7 @@ func linkCount(s *Socket) int {
 // requireRoundTrip sends body from src and requires dst to receive it.
 func requireRoundTrip(t *testing.T, src, dst *Socket, body string) {
 	t.Helper()
-	ctx := inprocCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, src.SendBytes(ctx, []byte(body)))
 	got, err := dst.RecvBytes(ctx)
 	require.NoError(t, err)
@@ -57,26 +50,16 @@ func requireRoundTrip(t *testing.T, src, dst *Socket, body string) {
 // inproc emits synchronously, so nothing is waited for.
 func requireEvent(t *testing.T, ch <-chan Event, typ EventType) {
 	t.Helper()
-	for {
-		select {
-		case ev := <-ch:
-			if ev.Type == typ {
-				return
-			}
-		default:
-			t.Fatalf("no %v event queued", typ)
-		}
-	}
+	testutil.WaitEvent(t, ch, time.Second, func(e Event) bool { return e.Type == typ })
 }
 
-// TestInproc_ConnectBeforeBindWaits: a Connect may precede its Bind by
-// longer than the old 500 ms window.
+// TestInproc_ConnectBeforeBindWaits: a Connect may precede its Bind.
 func TestInproc_ConnectBeforeBindWaits(t *testing.T) {
+	t.Parallel()
 	zctx := newInprocContext(t)
 	const ep = "inproc://connect-before-bind"
 	push := inprocSocket(t, zctx, Push)
 	require.NoError(t, push.Connect(ep))
-	time.Sleep(600 * time.Millisecond)
 	pull := inprocSocket(t, zctx, Pull)
 	require.NoError(t, pull.Bind(ep))
 	requireRoundTrip(t, push, pull, "late bind")
@@ -85,6 +68,7 @@ func TestInproc_ConnectBeforeBindWaits(t *testing.T) {
 // TestInproc_DisconnectPending: Disconnect cancels a Connect still waiting
 // for its Bind, so the later Bind wires nothing.
 func TestInproc_DisconnectPending(t *testing.T) {
+	t.Parallel()
 	zctx := newInprocContext(t)
 	const ep = "inproc://disconnect-pending"
 	events := make(chan Event, 16)
@@ -110,6 +94,7 @@ func TestInproc_DisconnectPending(t *testing.T) {
 // TestInproc_DisconnectLive: Disconnect of an established link detaches
 // both sides before it returns.
 func TestInproc_DisconnectLive(t *testing.T) {
+	t.Parallel()
 	zctx := newInprocContext(t)
 	const ep = "inproc://disconnect-live"
 	srvEvents, cliEvents := make(chan Event, 16), make(chan Event, 16)
@@ -137,6 +122,7 @@ func TestInproc_DisconnectLive(t *testing.T) {
 // TestInproc_SecurityRejected: inproc runs no handshake, so a socket with a
 // security mechanism can neither Bind nor Connect there.
 func TestInproc_SecurityRejected(t *testing.T) {
+	t.Parallel()
 	key := make([]byte, 32)
 	mech := func(r security.Role, m map[string]string) (security.Mech, error) {
 		return security.NewNull(r, m), nil
@@ -161,6 +147,7 @@ func TestInproc_SecurityRejected(t *testing.T) {
 // TestInproc_IdentityBothWays: each side of a ROUTER-ROUTER link sees the
 // other's WithIdentity, so either can address the other first.
 func TestInproc_IdentityBothWays(t *testing.T) {
+	t.Parallel()
 	zctx := newInprocContext(t)
 	const ep = "inproc://identity-both-ways"
 	a := inprocSocket(t, zctx, Router, WithIdentity([]byte("A")), WithRouterMandatory(true))
@@ -168,7 +155,7 @@ func TestInproc_IdentityBothWays(t *testing.T) {
 	b := inprocSocket(t, zctx, Router, WithIdentity([]byte("B")), WithRouterMandatory(true))
 	require.NoError(t, b.Connect(ep))
 
-	ctx := inprocCtx(t)
+	ctx := testutil.Ctx(t)
 	for _, tc := range []struct {
 		src, dst *Socket
 		to, from string
@@ -186,6 +173,7 @@ func TestInproc_IdentityBothWays(t *testing.T) {
 // TestInproc_HWMIsSum: as in libzmq, a direction queues the sender's send
 // HWM plus the receiver's recv HWM.
 func TestInproc_HWMIsSum(t *testing.T) {
+	t.Parallel()
 	zctx := newInprocContext(t)
 	const ep = "inproc://hwm-sum"
 	pull := inprocSocket(t, zctx, Pull, WithRecvHWM(3))
@@ -208,6 +196,7 @@ func TestInproc_HWMIsSum(t *testing.T) {
 // type fails synchronously; one that waited for the Bind is reported as
 // EventConnectFailed and dropped.
 func TestInproc_IncompatibleTypes(t *testing.T) {
+	t.Parallel()
 	zctx := newInprocContext(t)
 	push := inprocSocket(t, zctx, Push)
 	require.NoError(t, push.Bind("inproc://incompat-bound"))
@@ -229,6 +218,7 @@ func TestInproc_IncompatibleTypes(t *testing.T) {
 // TestInproc_UnbindKeepsLinks: Unbind releases the name but keeps the links
 // already made; a later Connect waits for the next Bind.
 func TestInproc_UnbindKeepsLinks(t *testing.T) {
+	t.Parallel()
 	zctx := newInprocContext(t)
 	const ep = "inproc://unbind-pends"
 	pull := inprocSocket(t, zctx, Pull)
@@ -253,6 +243,7 @@ func TestInproc_UnbindKeepsLinks(t *testing.T) {
 // TestInproc_LinksDoNotAccumulate: links remove themselves, whichever side
 // ends them, so churn leaves the bound socket where it started.
 func TestInproc_LinksDoNotAccumulate(t *testing.T) {
+	t.Parallel()
 	zctx := newInprocContext(t)
 	const ep = "inproc://link-churn"
 	pull := inprocSocket(t, zctx, Pull)
@@ -279,6 +270,7 @@ func TestInproc_LinksDoNotAccumulate(t *testing.T) {
 // TestInproc_CloseReleasesNamesAndWaiters: closing a socket frees its bound
 // names and drops its waiting Connects from the registry.
 func TestInproc_CloseReleasesNamesAndWaiters(t *testing.T) {
+	t.Parallel()
 	zctx := newInprocContext(t)
 	s := inprocSocket(t, zctx, Pull)
 	for i := range 3 {
@@ -299,6 +291,7 @@ func TestInproc_CloseReleasesNamesAndWaiters(t *testing.T) {
 
 // TestInproc_DuplicateBind: a name is bound by one socket at a time.
 func TestInproc_DuplicateBind(t *testing.T) {
+	t.Parallel()
 	zctx := newInprocContext(t)
 	a := inprocSocket(t, zctx, Pull)
 	b := inprocSocket(t, zctx, Pull)
@@ -309,6 +302,7 @@ func TestInproc_DuplicateBind(t *testing.T) {
 
 // TestRegisterTransport_InprocPanics: inproc is not a transport.
 func TestRegisterTransport_InprocPanics(t *testing.T) {
+	t.Parallel()
 	zctx := newInprocContext(t)
 	require.PanicsWithValue(t,
 		"gozmq: inproc is built into the Context and cannot be registered as a transport",

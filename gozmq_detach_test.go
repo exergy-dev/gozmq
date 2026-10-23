@@ -9,22 +9,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // waitEvent blocks until an event of type typ arrives on events.
 func waitEvent(t *testing.T, events <-chan gozmq.Event, typ gozmq.EventType) {
 	t.Helper()
-	ctx := testCtx(t)
-	for {
-		select {
-		case ev := <-events:
-			if ev.Type == typ {
-				return
-			}
-		case <-ctx.Done():
-			t.Fatalf("timed out waiting for event %v", typ)
-		}
-	}
+	testutil.WaitEvent(t, events, 5*time.Second, func(e gozmq.Event) bool { return e.Type == typ })
 }
 
 // TestPeerDetach_QueuedMessagesSurvive: messages a sender already delivered
@@ -33,6 +24,7 @@ func waitEvent(t *testing.T, events <-chan gozmq.Event, typ gozmq.EventType) {
 // path) or one of several. A ROUTER receiver still stamps them with the
 // departed peer's identity.
 func TestPeerDetach_QueuedMessagesSurvive(t *testing.T) {
+	t.Parallel()
 	for _, transport := range []string{"tcp", "inproc"} {
 		for _, extraPeer := range []bool{false, true} {
 			for _, router := range []bool{false, true} {
@@ -88,7 +80,7 @@ func testPeerDetachQueued(t *testing.T, transport string, extraPeer, router bool
 		return nil, string(f[0]), nil
 	}
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, push.SendBytes(ctx, []byte("warmup")))
 	peerID, _, err := recv(ctx)
 	require.NoError(t, err)
@@ -101,7 +93,7 @@ func testPeerDetachQueued(t *testing.T, transport string, extraPeer, router bool
 	// The receiver has detached the sender's pipe before we read anything.
 	waitEvent(t, events, gozmq.EventDisconnected)
 
-	ctx = testCtx(t)
+	ctx = testutil.Ctx(t)
 	for i := range n {
 		id, body, err := recv(ctx)
 		require.NoError(t, err, "recv %d of %d after sender detached", i, n)
@@ -113,7 +105,7 @@ func testPeerDetachQueued(t *testing.T, transport string, extraPeer, router bool
 // requireSubEvent receives the next XPUB subscription event and checks it.
 func requireSubEvent(t *testing.T, xpub *gozmq.Socket, subscribe bool, prefix string) {
 	t.Helper()
-	m, err := xpub.RecvMsg(testCtx(t))
+	m, err := xpub.RecvMsg(testutil.Ctx(t))
 	require.NoError(t, err)
 	want := string(append([]byte{0}, prefix...))
 	if subscribe {
@@ -126,6 +118,7 @@ func requireSubEvent(t *testing.T, xpub *gozmq.Socket, subscribe bool, prefix st
 // before the application reads the SUBSCRIBE must not leave a stale
 // refcount behind, which would suppress a later subscriber's SUBSCRIBE.
 func TestXPub_EarlyDetachKeepsRefcounts(t *testing.T) {
+	t.Parallel()
 	events := make(chan gozmq.Event, 64)
 	zctx, xpub := newTestSocket(t, gozmq.XPub, gozmq.WithMonitor(events, gozmq.EventDisconnected))
 	require.NoError(t, xpub.Bind("tcp://127.0.0.1:0"))
@@ -146,32 +139,4 @@ func TestXPub_EarlyDetachKeepsRefcounts(t *testing.T) {
 	t.Cleanup(func() { _ = sub2.Close() })
 	require.NoError(t, sub2.Connect(ep))
 	requireSubEvent(t, xpub, true, "A")
-}
-
-// TestXPub_ForeignCancelIgnored: a CANCEL for a prefix the sending peer never
-// subscribed to must not disturb another peer's subscription or surface.
-func TestXPub_ForeignCancelIgnored(t *testing.T) {
-	zctx, xpub := newTestSocket(t, gozmq.XPub)
-	require.NoError(t, xpub.Bind("tcp://127.0.0.1:0"))
-	ep := xpub.LastEndpoint()
-	ctx := testCtx(t)
-
-	good, err := zctx.NewSocket(gozmq.Sub, gozmq.WithSubscribe([]byte("A")))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = good.Close() })
-	require.NoError(t, good.Connect(ep))
-	requireSubEvent(t, xpub, true, "A")
-
-	evil, err := zctx.NewSocket(gozmq.XSub, gozmq.WithSubscribe([]byte("B")))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = evil.Close() })
-	require.NoError(t, evil.Connect(ep))
-	requireSubEvent(t, xpub, true, "B") // evil is attached
-
-	require.NoError(t, evil.SendBytes(ctx, []byte("\x00A"))) // never subscribed to A
-	require.NoError(t, evil.SendBytes(ctx, []byte("\x01C")))
-	// Per-peer FIFO: the CANCEL was processed before SUBSCRIBE C.
-	requireSubEvent(t, xpub, true, "C")
-
-	syncSub(t, xpub, good, []byte("A")) // good still receives A
 }

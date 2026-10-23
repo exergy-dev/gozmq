@@ -9,6 +9,7 @@ import (
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -24,7 +25,7 @@ func TestXSub_SendSubscribeViaMessage(t *testing.T) {
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	require.NoError(t, eng.Send(ctx, subscribeMsg(true, []byte("topic"))), "xsub send")
 	// Peer should receive the synthetic SUBSCRIBE forwarded by XSUB.
@@ -54,7 +55,7 @@ func TestXSub_SendDuplicateSubscribeForwardsTwice(t *testing.T) {
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	sub := subscribeMsg(true, []byte("topic"))
 	require.NoError(t, eng.Send(ctx, sub), "xsub send #1")
@@ -90,7 +91,7 @@ func TestXSub_RecvFiltersByLocalSubscription(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	require.NoError(t, eng.Send(ctx, subscribeMsg(true, []byte("ok"))), "xsub subscribe")
 	// Drain the forwarded subscription so it doesn't collide with data.
@@ -121,7 +122,7 @@ func TestSubXSub_SubscriptionShapedData(t *testing.T) {
 			} else {
 				eng, sub = socket.NewSubEngine()
 			}
-			ctx := testCtx(t)
+			ctx := testutil.Ctx(t)
 			ends, peerEnds := makePairs(peers, 16, 16)
 			mustAttach(t, eng, ends...)
 			require.NoError(t, sub.Subscribe([]byte("\x01d")))

@@ -48,11 +48,10 @@ func TestMetadataEncodeDecode(t *testing.T) {
 		}},
 	}
 
-	codec := MetadataCodec
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			wire := codec.Encode(tc.props)
-			got, err := codec.Decode(wire)
+			wire := EncodeMetadata(tc.props)
+			got, err := DecodeMetadata(wire)
 			require.NoError(t, err, "Decode")
 			require.Len(t, got, len(tc.props), "roundtrip prop count")
 			for k, v := range tc.props {
@@ -64,9 +63,8 @@ func TestMetadataEncodeDecode(t *testing.T) {
 
 func TestMetadataEncodeLongValueOver255Bytes(t *testing.T) {
 	// Values >255 bytes exercise the 4-byte value-length encoding path.
-	codec := MetadataCodec
 	big := strings.Repeat("x", 1000)
-	wire := codec.Encode(map[string]string{"Big": big})
+	wire := EncodeMetadata(map[string]string{"Big": big})
 
 	// Expect: 1 (name-len) + 3 ("Big") + 4 (value-len) + 1000 = 1008.
 	require.Equal(t, 1008, len(wire), "wire length")
@@ -74,7 +72,7 @@ func TestMetadataEncodeLongValueOver255Bytes(t *testing.T) {
 	vln := binary.BigEndian.Uint32(wire[1+3 : 1+3+4])
 	require.Equal(t, uint32(1000), vln, "wire value-length")
 
-	got, err := codec.Decode(wire)
+	got, err := DecodeMetadata(wire)
 	require.NoError(t, err, "Decode")
 	require.Equal(t, big, got["Big"], "roundtrip long value")
 }
@@ -87,7 +85,7 @@ func TestMetadataDecodeCaseInsensitiveDuplicate(t *testing.T) {
 		encodeProp("socket-type", []byte("REP")),
 	}, nil)
 
-	_, err := MetadataCodec.Decode(wire)
+	_, err := DecodeMetadata(wire)
 	require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
 }
 
@@ -111,7 +109,7 @@ func TestMetadataDecodeTruncatedInputs(t *testing.T) {
 			continue
 		}
 		t.Run(fmt.Sprintf("truncate-at-%d", i), func(t *testing.T) {
-			_, err := MetadataCodec.Decode(good[:i])
+			_, err := DecodeMetadata(good[:i])
 			require.ErrorIs(t, err, zmqerr.ErrMalformedFrame, "Decode(truncated)")
 		})
 	}
@@ -119,10 +117,10 @@ func TestMetadataDecodeTruncatedInputs(t *testing.T) {
 
 func TestMetadataDecodeEmptyIsNotDuplicate(t *testing.T) {
 	// Zero-length property list decodes to an empty map without error.
-	got, err := MetadataCodec.Decode(nil)
+	got, err := DecodeMetadata(nil)
 	require.NoError(t, err, "Decode(nil)")
 	require.Empty(t, got, "Decode(nil)")
-	got, err = MetadataCodec.Decode([]byte{})
+	got, err = DecodeMetadata([]byte{})
 	require.NoError(t, err, "Decode(empty)")
 	require.Empty(t, got, "Decode(empty)")
 }
@@ -132,7 +130,7 @@ func TestMetadataDecodeZeroLengthName(t *testing.T) {
 	// on the wire (ZMTP doesn't forbid it). It must decode to a map entry
 	// with the empty-string key.
 	wire := encodeProp("", []byte{})
-	got, err := MetadataCodec.Decode(wire)
+	got, err := DecodeMetadata(wire)
 	require.NoError(t, err, "Decode")
 	require.Len(t, got, 1, "Decode prop count")
 	v, ok := got[""]
@@ -144,7 +142,6 @@ func TestMetadataDecodeZeroLengthName(t *testing.T) {
 // check. Generates property maps with random ASCII names and random-length
 // values, encodes, decodes, and asserts equality.
 func TestMetadataRoundtripRandom(t *testing.T) {
-	codec := MetadataCodec
 	rng := rand.New(rand.NewSource(1))
 
 	for iter := 0; iter < 200; iter++ {
@@ -161,8 +158,8 @@ func TestMetadataRoundtripRandom(t *testing.T) {
 			}
 			props[name] = string(value)
 		}
-		wire := codec.Encode(props)
-		got, err := codec.Decode(wire)
+		wire := EncodeMetadata(props)
+		got, err := DecodeMetadata(wire)
 		require.NoError(t, err, "iter %d: Decode", iter)
 		require.Len(t, got, len(props), "iter %d: prop count", iter)
 		for k, v := range props {
@@ -189,17 +186,16 @@ func FuzzMetadata(f *testing.F) {
 		encodeProp("socket-type", []byte("REP")),
 	}, nil))
 
-	codec := MetadataCodec
 	f.Fuzz(func(t *testing.T, raw []byte) {
-		props, err := codec.Decode(raw)
+		props, err := DecodeMetadata(raw)
 		if err != nil {
 			// Every decode error must wrap ErrMalformedFrame.
 			require.ErrorIs(t, err, zmqerr.ErrMalformedFrame, "Decode error does not wrap ErrMalformedFrame")
 			return
 		}
 		// Successful decode: re-encode and redecode; result must equal.
-		wire := codec.Encode(props)
-		props2, err := codec.Decode(wire)
+		wire := EncodeMetadata(props)
+		props2, err := DecodeMetadata(wire)
 		require.NoError(t, err, "re-Decode of re-Encode failed")
 		require.Len(t, props2, len(props), "prop count mismatch")
 		for k, v := range props {

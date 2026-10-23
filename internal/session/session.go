@@ -13,7 +13,6 @@ package session
 import (
 	"bufio"
 	"context"
-	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -21,6 +20,7 @@ import (
 
 	"github.com/exergy-dev/gozmq/internal/bufpool"
 	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
 	"github.com/exergy-dev/gozmq/security"
 	"github.com/exergy-dev/gozmq/transport"
@@ -206,20 +206,11 @@ const sessionCmdBacklog = 4
 // stalled behind a peer that is itself still writing.
 const hsOutBacklog = 4
 
-// monoEpoch is a fixed reference point captured once at package init.
-// monoNow returns time.Since(monoEpoch) as int64 nanoseconds, which
-// uses Go's monotonic clock (runtime.nanotime) -- cheaper than
-// time.Now().UnixNano() because it skips the wall-clock vDSO read and
-// subsequent conversion. The heartbeat timeout is 90 s, so monotonic
-// precision is more than adequate.
+// monoEpoch anchors monoNow, a monotonic-clock timestamp that is cheaper
+// than time.Now().UnixNano() on the per-frame path.
 var monoEpoch = time.Now()
 
-// monoNow returns a monotonic nanosecond timestamp relative to
-// monoEpoch. Strictly cheaper than time.Now().UnixNano() on the
-// hot path because time.Since uses the monotonic clock directly.
-func monoNow() int64 {
-	return int64(time.Since(monoEpoch))
-}
+func monoNow() int64 { return int64(time.Since(monoEpoch)) }
 
 // recvBufPool adapts the package-level bufpool to zmtp.BodyPool.
 type recvBufPool struct{}
@@ -276,18 +267,12 @@ type identityFramer interface {
 // called "NULL" or "PLAIN".
 func sessionFramePaths(mech security.Mech) (frameEncoder, frameDecoder, bool) {
 	if f, ok := mech.(identityFramer); ok && f.IdentityFraming() {
-		return identityEncodeFrame, identityDecodeFrame, true
+		return identityFrame, identityFrame, true
 	}
 	return mech.EncodeFrame, mech.DecodeFrame, false
 }
 
-func identityEncodeFrame(flags uint8, body []byte) (uint8, []byte, error) {
-	return flags, body, nil
-}
-
-func identityDecodeFrame(flags uint8, body []byte) (uint8, []byte, error) {
-	return flags, body, nil
-}
+func identityFrame(flags uint8, body []byte) (uint8, []byte, error) { return flags, body, nil }
 
 // New constructs a Session around cfg.Conn; Start runs it. New lets the
 // caller register the session (for Close) before any callback can fire.
@@ -375,7 +360,7 @@ func (s *Session) Stop() error {
 	// net.ErrClosed of a conn the session already closed itself.
 	err := s.cfg.Conn.Close()
 	<-s.done
-	if err != nil && !isShutdownErr(err) {
+	if err != nil && !zmqerr.IsShutdown(err) {
 		return err
 	}
 	return nil
@@ -411,43 +396,16 @@ func (s *Session) exit() {
 	close(s.done)
 }
 
-// identityFromMetadata pulls the ZMTP "Identity" property out of the
-// PEER mechanism's stashed READY metadata — that's what ROUTER expects
-// on AttachPipe for routing. It is only called after finalizePeerMetadata
-// has succeeded, so peerMetadataFromMechanism cannot fail here in
-// practice; a probe failure just means no identity.
-func identityFromMetadata(m security.Mech) []byte {
-	props, err := peerMetadataFromMechanism(m)
-	if err != nil {
-		return nil
-	}
-	if v, ok := props["Identity"]; ok {
-		return []byte(v)
-	}
-	return nil
-}
-
-// enqueueCommand serialises a ZMTP command (1-byte name length + name +
-// body) and hands it to the writer goroutine via cmdCh — the reader and
-// heartbeat must never write to the wire themselves (see the cmdCh field
-// doc). The body bytes are copied during serialization, so callers may
+// enqueueCommand serialises a ZMTP command and hands it to the writer
+// goroutine via cmdCh: the reader and heartbeat never write to the wire
+// themselves (see the cmdCh field doc). The body is copied, so callers may
 // pass slices aliasing the reader's scratch buffer.
 //
 // If the channel is full the command is dropped: PING/PONG are advisory
 // keep-alives — the peer (or our next tick) simply retries — and
 // dropping is the price of never blocking the reader on the writer.
 func (s *Session) enqueueCommand(name string, body []byte) {
-	if len(name) > zmtp.MaxCommandNameLen {
-		// Same contract as zmtp.EncodeCommand, which this path
-		// deliberately open-codes to control buffer ownership: a name
-		// that does not fit the single length byte would be silently
-		// truncated into a malformed frame.
-		panic(fmt.Sprintf("gozmq/session: command name %q exceeds %d bytes", name, zmtp.MaxCommandNameLen))
-	}
-	buf := make([]byte, 0, 1+len(name)+len(body))
-	buf = append(buf, byte(len(name)))
-	buf = append(buf, name...)
-	buf = append(buf, body...)
+	buf := zmtp.EncodeCommand(zmtp.Command{Name: name, Body: body})
 	select {
 	case s.cmdCh <- buf:
 		select {

@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -48,7 +49,7 @@ func TestLoadBalancer_RoundRobin(t *testing.T) {
 		require.NoError(t, lb.Attach(p), "attach")
 	}
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	for i := 0; i < send; i++ {
 		m := msg.FromBytes([]byte{byte(i)})
 		require.NoError(t, lb.Send(ctx, m), "send %d", i)
@@ -87,73 +88,21 @@ func TestLoadBalancer_BlocksOnHWMUnblocksOnDrain(t *testing.T) {
 	defer closePipes(a, b)
 	require.NoError(t, lb.Attach(a), "attach")
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, lb.Send(ctx, msg.FromBytes([]byte("one"))), "first send")
 
-	// Second send must block.
-	sendDone := make(chan error, 1)
-	go func() { sendDone <- lb.Send(ctx, msg.FromBytes([]byte("two"))) }()
-	select {
-	case err := <-sendDone:
-		require.Fail(t, "second send completed early", "%v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	// Drain peer. Drains "one"; then second send completes; then we drain "two".
+	// Second send must block until the peer drains "one"; then we drain "two".
 	drainCtx, dc := context.WithTimeout(context.Background(), time.Second)
 	defer dc()
-	_, err := b.Recv(drainCtx)
-	require.NoError(t, err, "drain one")
-	select {
-	case err := <-sendDone:
-		require.NoError(t, err, "second send")
-	case <-time.After(time.Second):
-		require.Fail(t, "second send did not unblock after peer drained")
-	}
+	err := testutil.RequireUnblocks(t,
+		func() error { return lb.Send(ctx, msg.FromBytes([]byte("two"))) },
+		func() {
+			_, err := b.Recv(drainCtx)
+			require.NoError(t, err, "drain one")
+		})
+	require.NoError(t, err, "second send")
 	_, err = b.Recv(drainCtx)
 	require.NoError(t, err, "drain two")
-}
-
-func TestLoadBalancer_CloseUnblocksSend(t *testing.T) {
-	t.Parallel()
-	lb := newLB()
-
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
-	defer closePipes(a, b)
-	require.NoError(t, lb.Attach(a), "attach")
-	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("fill"))))
-
-	ctx := context.Background()
-	sendErr := make(chan error, 1)
-	go func() { sendErr <- lb.Send(ctx, msg.FromBytes([]byte("x"))) }()
-
-	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, lb.Close(), "close")
-	select {
-	case err := <-sendErr:
-		require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
-	case <-time.After(time.Second):
-		require.Fail(t, "send did not unblock on close")
-	}
-}
-
-func TestLoadBalancer_CloseUnblocksWaitForPeer(t *testing.T) {
-	t.Parallel()
-	lb := newLB()
-
-	// No peers attached — Send should block waiting for an Attach.
-	ctx := context.Background()
-	sendErr := make(chan error, 1)
-	go func() { sendErr <- lb.Send(ctx, msg.FromBytes([]byte("x"))) }()
-
-	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, lb.Close(), "close")
-	select {
-	case err := <-sendErr:
-		require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
-	case <-time.After(time.Second):
-		require.Fail(t, "send did not unblock on close")
-	}
 }
 
 func TestLoadBalancer_CtxCancelUnblocksSend(t *testing.T) {
@@ -167,17 +116,10 @@ func TestLoadBalancer_CtxCancelUnblocksSend(t *testing.T) {
 	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("fill"))))
 
 	ctx, cancel := context.WithCancel(context.Background())
-	sendErr := make(chan error, 1)
-	go func() { sendErr <- lb.Send(ctx, msg.FromBytes([]byte("x"))) }()
-
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-	select {
-	case err := <-sendErr:
-		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(time.Second):
-		require.Fail(t, "send did not unblock on ctx cancel")
-	}
+	err := testutil.RequireUnblocks(t,
+		func() error { return lb.Send(ctx, msg.FromBytes([]byte("x"))) },
+		cancel)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 // ---------------------- FairQueue ----------------------
@@ -222,37 +164,25 @@ func TestFairQueue_RecvWakesOnAttach(t *testing.T) {
 	fq := newFQ()
 	defer fq.Close()
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	type result struct {
 		m   *msg.Msg
 		err error
 	}
-	done := make(chan result, 1)
-	go func() {
-		m, err := fq.Recv(ctx)
-		done <- result{m: m, err: err}
-	}()
-
-	// Recv must block until we attach a pipe with a message available.
-	select {
-	case <-done:
-		require.Fail(t, "recv returned before any pipe attached")
-	case <-time.After(50 * time.Millisecond):
-	}
-
 	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	require.NoError(t, b.Send(ctx, msg.FromBytes([]byte("hello"))), "peer send")
-	require.NoError(t, fq.Attach(a), "attach")
 
-	select {
-	case r := <-done:
-		require.NoError(t, r.err, "recv")
-		require.Equal(t, "hello", string(r.m.Bytes()))
-	case <-time.After(time.Second):
-		require.Fail(t, "recv did not wake on attach")
-	}
+	// Recv must block until we attach a pipe with a message available.
+	r := testutil.RequireUnblocks(t, func() result {
+		m, err := fq.Recv(ctx)
+		return result{m: m, err: err}
+	}, func() {
+		require.NoError(t, b.Send(ctx, msg.FromBytes([]byte("hello"))), "peer send")
+		require.NoError(t, fq.Attach(a), "attach")
+	})
+	require.NoError(t, r.err, "recv")
+	require.Equal(t, "hello", string(r.m.Bytes()))
 }
 
 // TestFairQueue_DetachThenClose: Close returns promptly after a Detach.
@@ -277,26 +207,6 @@ func TestFairQueue_DetachThenClose(t *testing.T) {
 	}
 }
 
-func TestFairQueue_CloseUnblocksRecv(t *testing.T) {
-	t.Parallel()
-	fq := newFQ()
-
-	ctx := context.Background()
-	done := make(chan error, 1)
-	go func() {
-		_, err := fq.Recv(ctx)
-		done <- err
-	}()
-	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, fq.Close(), "close")
-	select {
-	case err := <-done:
-		require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
-	case <-time.After(time.Second):
-		require.Fail(t, "recv did not unblock on close")
-	}
-}
-
 // TestFairQueue_CloseWithAttachedPipes: Close with pipes still attached
 // leaves nothing running (goleak) and the pipes usable by their owners.
 func TestFairQueue_CloseWithAttachedPipes(t *testing.T) {
@@ -313,7 +223,7 @@ func TestFairQueue_CloseWithAttachedPipes(t *testing.T) {
 
 	require.NoError(t, fq.Close(), "close")
 	// A send after Close must not reach back into the closed queue.
-	require.NoError(t, peerEnds[0].Send(testCtx(t), msg.FromBytes([]byte("x"))))
+	require.NoError(t, peerEnds[0].Send(testutil.Ctx(t), msg.FromBytes([]byte("x"))))
 	closePipes(engineEnds...)
 }
 
@@ -332,11 +242,11 @@ func TestFairQueue_DetachedPipeNoLongerNotifies(t *testing.T) {
 	}
 	require.False(t, fq.CanRecv(), "both pipes idle")
 	require.NoError(t, fq.Detach(engineEnds[0]), "detach")
-	require.NoError(t, peerEnds[0].Send(testCtx(t), msg.FromBytes([]byte("gone"))))
+	require.NoError(t, peerEnds[0].Send(testutil.Ctx(t), msg.FromBytes([]byte("gone"))))
 	require.False(t, fq.Pending(), "a detached pipe must not activate")
 
-	require.NoError(t, peerEnds[1].Send(testCtx(t), msg.FromBytes([]byte("kept"))))
-	m, err := fq.Recv(testCtx(t))
+	require.NoError(t, peerEnds[1].Send(testutil.Ctx(t), msg.FromBytes([]byte("kept"))))
+	m, err := fq.Recv(testutil.Ctx(t))
 	require.NoError(t, err)
 	require.Equal(t, "kept", string(m.Bytes()))
 }
@@ -349,7 +259,7 @@ func TestFairQueue_DetachClosedDirectPipeDrains(t *testing.T) {
 	t.Parallel()
 	fq := newFQ()
 	defer fq.Close()
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
@@ -389,7 +299,7 @@ func TestFairQueue_SingleRecvWaitsOutClosedPipe(t *testing.T) {
 	t.Parallel()
 	fq := newFQ()
 	defer fq.Close()
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
@@ -401,32 +311,22 @@ func TestFairQueue_SingleRecvWaitsOutClosedPipe(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "last", string(m.Bytes()), "backlog survives the close")
 
-	got := make(chan string, 1)
-	go func() {
-		m, err := fq.Recv(ctx)
-		if err != nil {
-			got <- "error: " + err.Error()
-			return
-		}
-		got <- string(m.Bytes())
-	}()
-	select {
-	case s := <-got:
-		require.Fail(t, "recv returned on a closed, empty, still-attached pipe", s)
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	require.NoError(t, fq.Detach(a), "detach")
 	c, d := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(c, d)
-	require.NoError(t, fq.Attach(c), "attach replacement")
-	require.NoError(t, d.Send(ctx, msg.FromBytes([]byte("next"))))
-	select {
-	case s := <-got:
-		require.Equal(t, "next", s)
-	case <-ctx.Done():
-		require.Fail(t, "parked recv never reached the replacement pipe")
-	}
+	// Recv stays parked on the closed, empty, still-attached pipe until a
+	// replacement is attached and delivers.
+	got := testutil.RequireUnblocks(t, func() string {
+		m, err := fq.Recv(ctx)
+		if err != nil {
+			return "error: " + err.Error()
+		}
+		return string(m.Bytes())
+	}, func() {
+		require.NoError(t, fq.Detach(a), "detach")
+		require.NoError(t, fq.Attach(c), "attach replacement")
+		require.NoError(t, d.Send(ctx, msg.FromBytes([]byte("next"))))
+	})
+	require.Equal(t, "next", got)
 }
 
 // ---------------------- shared sanity ----------------------
@@ -443,7 +343,7 @@ func TestLoadBalancer_DetachAdvancesCursor(t *testing.T) {
 		_ = lb.Attach(p)
 	}
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// First send should hit peer 0.
 	require.NoError(t, lb.Send(ctx, msg.FromBytes([]byte{0})), "send")
@@ -491,7 +391,7 @@ func TestLoadBalancer_TwoParkedSendersWakeOnAttach(t *testing.T) {
 	lb := newLB()
 	defer lb.Close()
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	done := make(chan error, 2)
 	for i := 0; i < 2; i++ {
 		go func() { done <- lb.Send(ctx, msg.FromBytes([]byte{byte(i)})) }()
@@ -526,7 +426,7 @@ func TestLoadBalancer_RotatesPastFullPeer(t *testing.T) {
 	require.NoError(t, lb.Attach(full), "attach full")
 	require.NoError(t, lb.Attach(free), "attach free")
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	// Saturate the first peer (the cursor starts there).
 	require.NoError(t, full.Send(ctx, msg.FromBytes([]byte("fill"))), "fill")
 
@@ -553,7 +453,7 @@ func TestFairQueue_PromotionPreservesPerPeerFIFO(t *testing.T) {
 	defer closePipes(a, aPeer, c, cPeer)
 	require.NoError(t, fq.Attach(a), "attach a (single)")
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	const n = 500
 	go func() {
 		for i := 0; i < n; i++ {

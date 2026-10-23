@@ -36,12 +36,7 @@ func (s *Session) startHeartbeat() {
 	// ignore the peer's TTL and rely on our configured timeout.) The
 	// context is empty — peers echo whatever we send, but we don't
 	// correlate.
-	ttlDeciseconds := timeout / (100 * time.Millisecond)
-	if ttlDeciseconds > 0xFFFF {
-		ttlDeciseconds = 0xFFFF
-	}
-	pingBody := make([]byte, 2)
-	binary.BigEndian.PutUint16(pingBody, uint16(ttlDeciseconds))
+	pingBody := binary.BigEndian.AppendUint16(nil, uint16(min(timeout/(100*time.Millisecond), 0xFFFF)))
 
 	s.hbMu.Lock()
 	defer s.hbMu.Unlock()

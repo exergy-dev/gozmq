@@ -9,17 +9,15 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
-	"github.com/exergy-dev/gozmq/security/curve"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // curveOpts returns matching WithCurveServer / WithCurveClient options for a
 // fresh server and client keypair.
 func curveOpts(t *testing.T) (server, client gozmq.Option) {
 	t.Helper()
-	serverPub, serverSec, err := curve.GenerateKeyPair()
-	require.NoError(t, err)
-	clientPub, clientSec, err := curve.GenerateKeyPair()
-	require.NoError(t, err)
+	serverPub, serverSec := testutil.CurveKeys(t)
+	clientPub, clientSec := testutil.CurveKeys(t)
 	return gozmq.WithCurveServer(serverSec[:]), gozmq.WithCurveClient(serverPub[:], clientPub[:], clientSec[:])
 }
 
@@ -27,11 +25,12 @@ func curveOpts(t *testing.T) (server, client gozmq.Option) {
 // INITIATE is ~280 bytes) are bounded independently of WithMaxMessageSize,
 // which used to cap the handshake writer too and break CURVE below ~300 B.
 func TestCurve_SmallMaxMessageSizeStillHandshakes(t *testing.T) {
+	t.Parallel()
 	srvOpt, cliOpt := curveOpts(t)
 	_, srv, cli := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair, "tcp://127.0.0.1:0",
 		[]gozmq.Option{srvOpt, gozmq.WithMaxMessageSize(128)},
 		[]gozmq.Option{cliOpt, gozmq.WithMaxMessageSize(128)})
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, cli.SendBytes(ctx, make([]byte, 100)))
 	got, err := srv.RecvBytes(ctx)
 	require.NoError(t, err)
@@ -44,12 +43,13 @@ func TestCurve_SmallMaxMessageSizeStillHandshakes(t *testing.T) {
 // down after SendMsg had accepted it), one byte more is a synchronous error,
 // and the session stays up.
 func TestCurve_MaxMessageSizeBoundsPlaintext(t *testing.T) {
+	t.Parallel()
 	const limit = 1000
 	srvOpt, cliOpt := curveOpts(t)
 	_, srv, cli := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair, "tcp://127.0.0.1:0",
 		[]gozmq.Option{srvOpt, gozmq.WithMaxMessageSize(limit)},
 		[]gozmq.Option{cliOpt, gozmq.WithMaxMessageSize(limit)})
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	for i := 0; i < 2; i++ {
 		require.NoError(t, cli.SendBytes(ctx, make([]byte, limit)), "send #%d of exactly the cap", i)
 		got, err := srv.RecvBytes(ctx)
@@ -64,10 +64,9 @@ func TestCurve_MaxMessageSizeBoundsPlaintext(t *testing.T) {
 // WithHandshakeTimeout (30 s by default). The greeting's as-server flags
 // now expose the misconfiguration immediately.
 func TestCurve_TwoServersFailFast(t *testing.T) {
-	_, serverSec, err := curve.GenerateKeyPair()
-	require.NoError(t, err)
-	_, otherSec, err := curve.GenerateKeyPair()
-	require.NoError(t, err)
+	t.Parallel()
+	_, serverSec := testutil.CurveKeys(t)
+	_, otherSec := testutil.CurveKeys(t)
 	ctx := gozmq.NewContext()
 	t.Cleanup(func() { _ = ctx.Close() })
 	srv, err := ctx.NewSocket(gozmq.Router, gozmq.WithCurveServer(serverSec[:]))
@@ -90,8 +89,9 @@ func TestCurve_TwoServersFailFast(t *testing.T) {
 // TestCloseCtx_NilContext: a nil ctx must behave as context.Background,
 // not panic after the socket is already marked closed.
 func TestCloseCtx_NilContext(t *testing.T) {
+	t.Parallel()
 	_, _, cli := newSocketPair(t, gozmq.Pair, "tcp://127.0.0.1:0")
-	require.NoError(t, cli.SendBytes(testCtx(t), []byte("x")))
+	require.NoError(t, cli.SendBytes(testutil.Ctx(t), []byte("x")))
 	var nilCtx context.Context // a nil interface, as a careless caller would pass
 	require.NoError(t, cli.CloseCtx(nilCtx))
 	require.NoError(t, cli.CloseCtx(context.Background()))
@@ -102,9 +102,10 @@ func TestCloseCtx_NilContext(t *testing.T) {
 // another must not leave the binder with a dead pipe attached. For a PUB
 // binder such a pipe counted a drop on every later publish.
 func TestInproc_WiringRaceLeavesNoStalePeer(t *testing.T) {
+	t.Parallel()
 	ctx := gozmq.NewContext()
 	t.Cleanup(func() { _ = ctx.Close() })
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 	for i := 0; i < 200; i++ {
 		ep := "inproc://wiring-race"
 		pub, err := ctx.NewSocket(gozmq.Pub)

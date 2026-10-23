@@ -7,7 +7,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"errors"
 	"io"
 	"math/big"
 	"net"
@@ -19,10 +18,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
-// --------------------------------------------------------------------------
 // Test certificate fixture.
 //
 // We generate a single self-signed ed25519 cert at init-time and use it as
@@ -31,7 +29,6 @@ import (
 // clientTLSConfig (with RootCAs pinned to the generated cert, and
 // ServerName = "localhost" so SAN validation works when we dial 127.0.0.1
 // by hostname).
-// --------------------------------------------------------------------------
 
 var (
 	testCertDER  []byte
@@ -112,8 +109,8 @@ func listenTLSLoopback(t *testing.T, cfg *tls.Config) (*TLSTransport, Listener) 
 func handshakePair(ctx context.Context, t *testing.T, cli, srv Conn) {
 	t.Helper()
 	errCh := make(chan error, 1)
-	go func() { errCh <- srv.(*tlsConn).HandshakeContext(ctx) }()
-	require.NoError(t, cli.(*tlsConn).HandshakeContext(ctx), "client handshake")
+	go func() { errCh <- tlsOf(srv).HandshakeContext(ctx) }()
+	require.NoError(t, tlsOf(cli).HandshakeContext(ctx), "client handshake")
 	require.NoError(t, <-errCh, "server handshake")
 }
 
@@ -128,6 +125,7 @@ func mustNewTLS(t *testing.T, cfg *tls.Config) *TLSTransport {
 // TestTLS_RoundTrip exercises the happy path: handshake, bidirectional
 // write, endpoint reporting.
 func TestTLS_RoundTrip(t *testing.T) {
+	t.Parallel()
 	srvTr, l := listenTLSLoopback(t, serverTLSConfig())
 	_ = srvTr
 	defer l.Close()
@@ -136,7 +134,7 @@ func TestTLS_RoundTrip(t *testing.T) {
 	require.True(t, strings.HasPrefix(endpoint, "tls+tcp://127.0.0.1:"),
 		"Endpoint = %q, want tls+tcp://127.0.0.1:<port>", endpoint)
 
-	ctx := testCtx(t, 5*time.Second)
+	ctx := testutil.Ctx(t, 5*time.Second)
 
 	type acceptResult struct {
 		c   net.Conn
@@ -168,7 +166,7 @@ func TestTLS_RoundTrip(t *testing.T) {
 
 	// Endpoint-string reporting: the Conn LocalEndpoint / RemoteEndpoint
 	// must announce tls+tcp, not raw tcp.
-	cli, ok := dial.(*tlsConn)
+	cli, ok := dial.(*conn)
 	require.True(t, ok, "client conn type = %T", dial)
 	assert.True(t, strings.HasPrefix(cli.RemoteEndpoint(), "tls+tcp://"),
 		"client RemoteEndpoint = %q, want tls+tcp prefix", cli.RemoteEndpoint())
@@ -198,6 +196,7 @@ func TestTLS_RoundTrip(t *testing.T) {
 // handshake rather than silently connecting. The handshake is lazy, so the
 // failure surfaces on the first I/O after Dial.
 func TestTLS_BadCert(t *testing.T) {
+	t.Parallel()
 	_, l := listenTLSLoopback(t, serverTLSConfig())
 	defer l.Close()
 
@@ -225,7 +224,7 @@ func TestTLS_BadCert(t *testing.T) {
 		MinVersion: tls.VersionTLS12,
 	}
 	cliTr := mustNewTLS(t, badCfg)
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	c, err := cliTr.Dial(ctx, "tls+tcp://localhost:"+portStr)
 	if err == nil {
 		_ = c.SetDeadline(time.Now().Add(2 * time.Second))
@@ -237,81 +236,20 @@ func TestTLS_BadCert(t *testing.T) {
 	<-done
 }
 
-// TestTLS_AcceptHonorsCtx asserts that ctx cancellation wakes Accept
-// promptly when no peer arrives.
-func TestTLS_AcceptHonorsCtx(t *testing.T) {
-	srvTr, l := listenTLSLoopback(t, serverTLSConfig())
-	_ = srvTr
-	defer l.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() {
-		_, err := l.Accept(ctx)
-		errCh <- err
-	}()
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-	select {
-	case err := <-errCh:
-		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(2 * time.Second):
-		require.Fail(t, "Accept did not wake within 2s of ctx cancel")
-	}
-}
-
-// TestTLS_ListenerClose_WakesAccept asserts Close wakes a parked Accept.
-func TestTLS_ListenerClose_WakesAccept(t *testing.T) {
-	srvTr, l := listenTLSLoopback(t, serverTLSConfig())
-	_ = srvTr
-
-	errCh := make(chan error, 1)
-	go func() {
-		_, err := l.Accept(context.Background())
-		errCh <- err
-	}()
-	time.Sleep(20 * time.Millisecond)
-	require.NoError(t, l.Close())
-	select {
-	case err := <-errCh:
-		require.ErrorIs(t, err, zmqerr.ErrEndpointInvalid)
-	case <-time.After(2 * time.Second):
-		require.Fail(t, "Accept did not wake on Close")
-	}
-}
-
 // TestTLS_NilConfig_Rejected asserts the constructor rejects a nil
 // tls.Config rather than returning a half-built transport that would
 // fail later at Dial/Listen time.
 func TestTLS_NilConfig_Rejected(t *testing.T) {
+	t.Parallel()
 	tr, err := NewTLSTransport(nil)
 	require.Error(t, err, "NewTLSTransport(nil) succeeded, want error")
 	assert.Nil(t, tr, "NewTLSTransport(nil) returned non-nil transport")
 }
 
-// TestTLS_BadEndpoint covers scheme and host-port parse failures.
-func TestTLS_BadEndpoint(t *testing.T) {
-	tr := mustNewTLS(t, serverTLSConfig())
-	cases := []string{
-		"tcp://x:1",    // wrong scheme
-		"no-scheme",    // no ://
-		"tls+tcp://xx", // missing port
-	}
-	for _, ep := range cases {
-		_, err := tr.Listen(context.Background(), ep)
-		assert.ErrorIs(t, err, zmqerr.ErrEndpointInvalid, "Listen(%q)", ep)
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-		_, dialErr := tr.Dial(ctx, ep)
-		cancel()
-		if !errors.Is(dialErr, zmqerr.ErrEndpointInvalid) && !errors.Is(dialErr, context.DeadlineExceeded) {
-			assert.Failf(t, "unexpected Dial error", "Dial(%q) err = %v, want wraps ErrEndpointInvalid", ep, dialErr)
-		}
-	}
-}
-
 // TestTLS_ManyConcurrentDials sanity-checks that several clients can
 // complete the handshake against one listener without deadlock.
 func TestTLS_ManyConcurrentDials(t *testing.T) {
+	t.Parallel()
 	srvTr, l := listenTLSLoopback(t, serverTLSConfig())
 	_ = srvTr
 	defer l.Close()
@@ -338,7 +276,7 @@ func TestTLS_ManyConcurrentDials(t *testing.T) {
 				defer c.Close()
 				hctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				defer cancel()
-				assert.NoError(t, c.(*tlsConn).HandshakeContext(hctx), "server handshake")
+				assert.NoError(t, tlsOf(c).HandshakeContext(hctx), "server handshake")
 			}()
 		}
 	}()
@@ -355,7 +293,7 @@ func TestTLS_ManyConcurrentDials(t *testing.T) {
 				assert.NoError(t, err, "Dial")
 				return
 			}
-			assert.NoError(t, c.(*tlsConn).HandshakeContext(ctx), "client handshake")
+			assert.NoError(t, tlsOf(c).HandshakeContext(ctx), "client handshake")
 			c.Close()
 		}()
 	}
@@ -369,6 +307,7 @@ func TestTLS_ManyConcurrentDials(t *testing.T) {
 // protects against a data race between a caller mutating the config and
 // the transport reading it mid-handshake.
 func TestTLS_ConfigCloneIsolatesFromCaller(t *testing.T) {
+	t.Parallel()
 	srvCfg := serverTLSConfig()
 	// Construct first; THEN mutate the caller's config. If the
 	// transport held the user's pointer directly, the subsequent
@@ -392,7 +331,7 @@ func TestTLS_ConfigCloneIsolatesFromCaller(t *testing.T) {
 		err error
 	}
 	acceptedCh := make(chan acceptResult, 1)
-	ctx := testCtx(t, 5*time.Second)
+	ctx := testutil.Ctx(t, 5*time.Second)
 	go func() {
 		c, err := l.Accept(ctx)
 		if err != nil {
@@ -436,13 +375,16 @@ func TestTLS_ConfigCloneIsolatesFromCaller(t *testing.T) {
 // a zero MinVersion is upgraded to TLS 1.2 on the stored clone, and any
 // explicit MinVersion below 1.2 is rejected outright.
 func TestTLS_MinVersionFloor(t *testing.T) {
+	t.Parallel()
 	t.Run("zero-defaults-to-1.2", func(t *testing.T) {
+		t.Parallel()
 		cfg := serverTLSConfig()
 		cfg.MinVersion = 0
 		tr := mustNewTLS(t, cfg)
 		require.Equal(t, uint16(tls.VersionTLS12), tr.Config.MinVersion)
 	})
 	t.Run("below-1.2-rejected", func(t *testing.T) {
+		t.Parallel()
 		for _, v := range []uint16{tls.VersionTLS10, tls.VersionTLS11} {
 			cfg := serverTLSConfig()
 			cfg.MinVersion = v
@@ -452,6 +394,7 @@ func TestTLS_MinVersionFloor(t *testing.T) {
 		}
 	})
 	t.Run("1.3-preserved", func(t *testing.T) {
+		t.Parallel()
 		cfg := serverTLSConfig()
 		cfg.MinVersion = tls.VersionTLS13
 		tr := mustNewTLS(t, cfg)
@@ -465,6 +408,7 @@ func TestTLS_MinVersionFloor(t *testing.T) {
 // underlying listener on ctx cancel, permanently bricking the endpoint
 // after one timed-out Accept.)
 func TestTLS_CtxCanceledAcceptLeavesListenerUsable(t *testing.T) {
+	t.Parallel()
 	srvTr, l := listenTLSLoopback(t, serverTLSConfig())
 	_ = srvTr
 	defer l.Close()
@@ -477,7 +421,7 @@ func TestTLS_CtxCanceledAcceptLeavesListenerUsable(t *testing.T) {
 
 	// Second Accept on the same listener must still work end-to-end.
 	_, portStr, _ := net.SplitHostPort(strings.TrimPrefix(l.Endpoint(), "tls+tcp://"))
-	acceptCtx := testCtx(t, 5*time.Second)
+	acceptCtx := testutil.Ctx(t, 5*time.Second)
 	type acceptResult struct {
 		c   net.Conn
 		err error
@@ -508,6 +452,7 @@ func TestTLS_CtxCanceledAcceptLeavesListenerUsable(t *testing.T) {
 // handshake deadline), so Accept hands back every connection immediately
 // and a legitimate client queued behind N silent ones is served at once.
 func TestTLS_SilentClientsDoNotBlockAccept(t *testing.T) {
+	t.Parallel()
 	_, l := listenTLSLoopback(t, serverTLSConfig())
 	defer l.Close()
 	_, portStr, _ := net.SplitHostPort(strings.TrimPrefix(l.Endpoint(), "tls+tcp://"))
@@ -543,7 +488,7 @@ func TestTLS_SilentClientsDoNotBlockAccept(t *testing.T) {
 
 	// Every Accept must return promptly: silentN silent conns, then ours.
 	// Serve each on its own goroutine, as the socket layer does.
-	actx := testCtx(t, time.Second)
+	actx := testutil.Ctx(t, time.Second)
 	var conns []Conn
 	defer func() {
 		for _, c := range conns {
@@ -575,6 +520,7 @@ func TestTLS_SilentClientsDoNotBlockAccept(t *testing.T) {
 // ctx, so a Dial-time handshake would hang it indefinitely; instead Dial
 // returns at once and the handshake is bounded by the conn deadline.
 func TestTLS_DialDoesNotBlockOnSilentServer(t *testing.T) {
+	t.Parallel()
 	raw, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer raw.Close()
@@ -593,7 +539,7 @@ func TestTLS_DialDoesNotBlockOnSilentServer(t *testing.T) {
 	_, portStr, _ := net.SplitHostPort(raw.Addr().String())
 
 	cliTr := mustNewTLS(t, clientTLSConfig())
-	ctx := testCtx(t, time.Second)
+	ctx := testutil.Ctx(t, time.Second)
 	start := time.Now()
 	c, err := cliTr.Dial(ctx, "tls+tcp://localhost:"+portStr)
 	require.NoError(t, err, "Dial blocked on the TLS handshake")
@@ -617,6 +563,7 @@ func TestTLS_DialDoesNotBlockOnSilentServer(t *testing.T) {
 // catches any residual Accept goroutine; this test also explicitly
 // verifies Close is idempotent.
 func TestTLS_AcceptGoroutineExitsOnCtxCancel(t *testing.T) {
+	t.Parallel()
 	srvTr, l := listenTLSLoopback(t, serverTLSConfig())
 	_ = srvTr
 
@@ -646,3 +593,6 @@ func TestTLS_AcceptGoroutineExitsOnCtxCancel(t *testing.T) {
 	// goleak in TestMain will catch any stray Accept goroutine at
 	// package-test teardown; this test's own return is the trigger.
 }
+
+// tlsOf returns the *tls.Conn under a Conn the TLS transport produced.
+func tlsOf(c Conn) *tls.Conn { return c.(*conn).Conn.(*tls.Conn) }

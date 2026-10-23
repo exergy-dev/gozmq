@@ -42,18 +42,14 @@ func generateKeyPair(r io.Reader) (pub Key, priv Key, err error) {
 	if err != nil {
 		return Key{}, Key{}, fmt.Errorf("gozmq/security/curve: GenerateKeyPair: %w", err)
 	}
-	copy(pub[:], pubPtr[:])
-	copy(priv[:], privPtr[:])
-	return pub, priv, nil
+	return Key(*pubPtr), Key(*privPtr), nil
 }
 
-// --------------------------------------------------------------------------
 // Z85 codec — ZMQ RFC 32.
 //
 // Z85 is a 5-char-per-4-byte base-85 encoding using a libzmq-specific
 // alphabet. Input byte length must be a multiple of 4; output char length
 // is a multiple of 5. (The 32-byte Curve keys encode to 40 chars.)
-// --------------------------------------------------------------------------
 
 // z85Alphabet is the 85-character alphabet from RFC 32 §2. Index 0 → '0',
 // ascending through digits, lower-case letters, upper-case letters, and
@@ -129,10 +125,7 @@ func Z85Decode(s string) ([]byte, error) {
 		if v > 0xFFFFFFFF {
 			return nil, fmt.Errorf("%w: chunk at index %d overflows uint32", ErrInvalidZ85, i)
 		}
-		out[oi+0] = byte(v >> 24)
-		out[oi+1] = byte(v >> 16)
-		out[oi+2] = byte(v >> 8)
-		out[oi+3] = byte(v)
+		binary.BigEndian.PutUint32(out[oi:], uint32(v))
 		oi += 4
 	}
 	return out, nil

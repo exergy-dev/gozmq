@@ -3,6 +3,8 @@ package socket
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -118,21 +120,6 @@ type pubEngine struct {
 	counters
 }
 
-// subscriptionFrame builds the single-frame synthetic subscription
-// payload: SubscribeByte/UnsubscribeByte followed by the prefix bytes.
-// Shared by SUB/XSUB's upstream forwarding (sub.go) and XPUB's
-// detach-synthesized CANCELs (xpub.go).
-func subscriptionFrame(subscribe bool, prefix []byte) []byte {
-	buf := make([]byte, 1+len(prefix))
-	if subscribe {
-		buf[0] = SubscribeByte
-	} else {
-		buf[0] = UnsubscribeByte
-	}
-	copy(buf[1:], prefix)
-	return buf
-}
-
 // NewPubEngine returns a new PUB socket engine.
 func NewPubEngine() Engine {
 	return newPubEngineBase(nil)
@@ -155,10 +142,7 @@ func newPubEngineBase(onSub func(*pipe.End, bool, []byte, *msg.Msg) bool) *pubEn
 // e.peers. Caller must hold e.mu; must not be called after Close (which
 // leaves the snapshot nil as the closed sentinel).
 func (e *pubEngine) rebuildSnapLocked() {
-	s := make([]*pubPeer, 0, len(e.peers))
-	for _, peer := range e.peers {
-		s = append(s, peer)
-	}
+	s := slices.Collect(maps.Values(e.peers))
 	e.snap.Store(&s)
 }
 

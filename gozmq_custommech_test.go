@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/security"
 )
 
@@ -98,6 +99,7 @@ func newXORMech(frames *atomic.Int64) func(security.Role, map[string]string) (se
 }
 
 func TestWithSecurityMechOutOfTree(t *testing.T) {
+	t.Parallel()
 	var frames atomic.Int64
 	mech := gozmq.WithSecurityMech(newXORMech(&frames))
 
@@ -150,6 +152,7 @@ func (f forwardingMech) DecodeFrame(flags uint8, b []byte) (uint8, []byte, error
 }
 
 func TestWithSecurityMechWithoutMechBase(t *testing.T) {
+	t.Parallel()
 	mech := gozmq.WithSecurityMech(func(role security.Role, meta map[string]string) (security.Mech, error) {
 		return forwardingMech{security.NewNull(role, meta)}, nil
 	})
@@ -173,66 +176,10 @@ func TestWithSecurityMechWithoutMechBase(t *testing.T) {
 	require.Equal(t, "ping", string(got))
 }
 
-func TestWithSecurityMechRejectsConflicts(t *testing.T) {
-	var frames atomic.Int64
-	mech := gozmq.WithSecurityMech(newXORMech(&frames))
-
-	zctx := gozmq.NewContext()
-	defer func() { _ = zctx.Close() }()
-
-	tests := []struct {
-		name string
-		typ  gozmq.SocketType
-		opts []gozmq.Option
-		want string
-	}{
-		{
-			name: "plain server",
-			typ:  gozmq.Rep,
-			opts: []gozmq.Option{mech, gozmq.WithPlainAuth(func(string, string) bool { return true })},
-			want: "mutually exclusive with the PLAIN options",
-		},
-		{
-			name: "plain client",
-			typ:  gozmq.Req,
-			opts: []gozmq.Option{mech, gozmq.WithPlainClient("u", "p")},
-			want: "mutually exclusive with the PLAIN options",
-		},
-		{
-			name: "curve server",
-			typ:  gozmq.Rep,
-			opts: []gozmq.Option{mech, gozmq.WithCurveServer(make([]byte, 32))},
-			want: "mutually exclusive with the CURVE options",
-		},
-		{
-			name: "stream socket",
-			typ:  gozmq.Stream,
-			opts: []gozmq.Option{mech},
-			want: "not applicable to STREAM sockets",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := zctx.NewSocket(tc.typ, tc.opts...)
-			require.Error(t, err)
-			require.Contains(t, err.Error(), tc.want)
-		})
-	}
-}
-
-func TestWithSecurityMechRejectsNilConstructor(t *testing.T) {
-	zctx := gozmq.NewContext()
-	defer func() { _ = zctx.Close() }()
-
-	_, err := zctx.NewSocket(gozmq.Rep, gozmq.WithSecurityMech(nil))
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "non-nil constructor")
-}
-
 // A constructor that fails must fail the session outright — gozmq must never
 // silently fall back to NULL, which would be a downgrade.
 func TestWithSecurityMechConstructorErrorDoesNotDowngrade(t *testing.T) {
+	t.Parallel()
 	sentinel := errors.New("mechanism unavailable")
 
 	zctx := gozmq.NewContext()
@@ -256,10 +203,9 @@ func TestWithSecurityMechConstructorErrorDoesNotDowngrade(t *testing.T) {
 	defer func() { _ = client.Close() }()
 	require.NoError(t, client.Connect(rep.LastEndpoint()))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
 	// The server never completes a handshake, so no request is ever read.
+	testutil.WaitEvent(t, events, 5*time.Second, func(e gozmq.Event) bool { return e.Type == gozmq.EventHandshakeFailedProtocol })
+	ctx := testutil.Ctx(t, 100*time.Millisecond)
 	_ = client.SendBytes(ctx, []byte("ping"))
 	_, err = rep.RecvBytes(ctx)
 	require.Error(t, err)

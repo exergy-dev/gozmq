@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Fair native-vs-native PUSH->PULL streaming throughput: gozmq vs libzmq,
-# across every transport that bridges TWO separate processes — tcp and ipc.
+# over the transports that bridge two processes. TRANSPORTS defaults to
+# "tcp ipc"; set TRANSPORTS=tcp for the trustworthy cross-implementation table.
 #
 # (inproc:// is single-process by definition, so a two-binary gozmq-vs-libzmq
 # comparison is impossible; tls+tcp:// is a gozmq-only scheme libzmq does not
 # speak. Both are out of scope here — use the in-repo Go benchmarks for inproc.)
 #
 # Both sides run as two processes over the chosen transport with NO CGO —
-# gozmq via perf/local_thr + perf/remote_thr, libzmq via its own C local_thr +
-# remote_thr (compiled from the canonical libzmq perf sources).
+# gozmq via perf/zmqperf, libzmq via its own C local_thr + remote_thr
+# (compiled from the canonical libzmq perf sources).
 #
 # Robustness: each measurement is retried until it yields a valid (>0) result
 # (up to MAX_TRIES), every process is wrapped in `timeout`, TCP ports are never
@@ -16,7 +17,7 @@
 #
 # CAVEAT — cross-impl IPC ratios are NOT apples-to-apples. The libzmq C client
 # (remote_thr.c) uses libzmq's stock SNDHWM (1000) and does a per-message
-# zmq_msg_init_size + memset, whereas gozmq's perf/remote_thr uses a 1M HWM and
+# zmq_msg_init_size + memset, whereas gozmq's zmqperf uses a 1M HWM and
 # reuses a single pre-allocated payload. Over TCP these differences are not the
 # bottleneck (libzmq still wins at 32B), but over IPC they appear to inflate
 # gozmq's relative throughput. Treat the TCP table as the trustworthy
@@ -31,7 +32,7 @@ tmp="$(mktemp -d)"; trap 'rm -rf "$tmp" /tmp/gz-zmq-bench-$$-*.sock' EXIT
 
 gcc -O2 -o "$tmp/c_local_thr"  "$here/local_thr.c"  $(pkg-config --cflags --libs libzmq)
 gcc -O2 -o "$tmp/c_remote_thr" "$here/remote_thr.c" $(pkg-config --cflags --libs libzmq)
-( cd "$root" && go build -o "$tmp/gz_local_thr" ./perf/local_thr && go build -o "$tmp/gz_remote_thr" ./perf/remote_thr )
+( cd "$root" && go build -o "$tmp/zmqperf" ./perf/zmqperf )
 
 MAX_TRIES=5
 PER_RUN_TIMEOUT=40
@@ -53,13 +54,13 @@ one_run() { # kind transport size count -> echoes msg/s (0 on failure)
     timeout "$PER_RUN_TIMEOUT" "$tmp/c_remote_thr" "$ep" "$size" "$count" >/dev/null 2>&1 || true
     wait $p 2>/dev/null || true
   else
-    timeout "$PER_RUN_TIMEOUT" "$tmp/gz_local_thr"  -endpoint "$ep" -size "$size" -count "$count" > "$srv" 2>/dev/null & local p=$!
+    timeout "$PER_RUN_TIMEOUT" "$tmp/zmqperf" local_thr  -endpoint "$ep" -size "$size" -count "$count" > "$srv" 2>/dev/null & local p=$!
     sleep 0.5
-    timeout "$PER_RUN_TIMEOUT" "$tmp/gz_remote_thr" -endpoint "$ep" -size "$size" -count "$count" >/dev/null 2>&1 || true
+    timeout "$PER_RUN_TIMEOUT" "$tmp/zmqperf" remote_thr -endpoint "$ep" -size "$size" -count "$count" >/dev/null 2>&1 || true
     wait $p 2>/dev/null || true
   fi
   [ "$tr" = ipc ] && rm -f "${ep#ipc://}"
-  grep -oP 'mean throughput: \K[0-9]+' "$srv" 2>/dev/null | head -1 || echo 0
+  sed -n 's/^mean throughput: \([0-9]*\) \[msg\/s\].*/\1/p' "$srv" 2>/dev/null | head -1 || echo 0
 }
 
 best() { # kind transport size count -> best valid msg/s over MAX_TRIES (0 if all fail)
@@ -74,7 +75,7 @@ best() { # kind transport size count -> best valid msg/s over MAX_TRIES (0 if al
   echo "$b"
 }
 
-for tr in tcp ipc; do
+for tr in ${TRANSPORTS:-tcp ipc}; do
   echo "## transport: $tr"
   printf "%-6s | %10s %9s | %10s %9s | %s\n" "size" "gozmq" "Gb/s" "libzmq" "Gb/s" "gozmq/zmq"
   for spec in "32:1500000" "256:1500000" "1024:800000" "8192:300000" "65536:80000"; do

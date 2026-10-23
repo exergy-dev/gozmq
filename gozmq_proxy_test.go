@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // startProxy runs Proxy in the background and returns a stop function that
@@ -42,6 +43,7 @@ func startProxy(t *testing.T, frontend, backend, capture *gozmq.Socket) (stop fu
 // no special handling: SUB's SUBSCRIBE reaches XPUB, is surfaced as a
 // message, is forwarded to XSUB, and re-emitted to the real PUB.
 func TestProxyXSubXPub(t *testing.T) {
+	t.Parallel()
 	zctx := gozmq.NewContext()
 	defer func() { _ = zctx.Close() }()
 
@@ -91,6 +93,7 @@ func TestProxyXSubXPub(t *testing.T) {
 // TestProxyRouterDealer covers the request/reply broker. The ROUTER
 // identity envelope must survive both hops for the reply to route home.
 func TestProxyRouterDealer(t *testing.T) {
+	t.Parallel()
 	zctx := gozmq.NewContext()
 	defer func() { _ = zctx.Close() }()
 
@@ -159,6 +162,7 @@ func TestProxyRouterDealer(t *testing.T) {
 // TestProxyPushPullWithCapture covers the pipeline forwarder and the
 // capture socket: every forwarded message must also reach the tap.
 func TestProxyPushPullWithCapture(t *testing.T) {
+	t.Parallel()
 	zctx := gozmq.NewContext()
 	defer func() { _ = zctx.Close() }()
 
@@ -219,6 +223,7 @@ func TestProxyPushPullWithCapture(t *testing.T) {
 // — a proxy that flattened multipart messages would silently corrupt every
 // ROUTER envelope.
 func TestProxyMultipartPreserved(t *testing.T) {
+	t.Parallel()
 	zctx := gozmq.NewContext()
 	defer func() { _ = zctx.Close() }()
 
@@ -260,6 +265,7 @@ func TestProxyMultipartPreserved(t *testing.T) {
 }
 
 func TestProxyRejectsBadArguments(t *testing.T) {
+	t.Parallel()
 	zctx := gozmq.NewContext()
 	defer func() { _ = zctx.Close() }()
 
@@ -280,6 +286,7 @@ func TestProxyRejectsBadArguments(t *testing.T) {
 // Closing a proxied socket is the documented alternative to cancelling the
 // context; it must be reported as a clean stop, not an error.
 func TestProxyStopsCleanlyOnSocketClose(t *testing.T) {
+	t.Parallel()
 	zctx := gozmq.NewContext()
 	defer func() { _ = zctx.Close() }()
 
@@ -311,6 +318,7 @@ func TestProxyStopsCleanlyOnSocketClose(t *testing.T) {
 // shutdown: Proxy's doc promises it returns once ctx is cancelled, and the
 // tap goroutine's pending SendMsg is part of that teardown.
 func TestProxyCaptureBlockedDoesNotHangShutdown(t *testing.T) {
+	t.Parallel()
 	_, front, feeder := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "inproc://proxy-caphang-front", nil, nil)
 	_, back, drain := newSocketPairTypes(t, gozmq.Push, gozmq.Pull, "inproc://proxy-caphang-back", nil, nil)
 	_, capture := newTestSocket(t, gozmq.Push)
@@ -321,7 +329,7 @@ func TestProxyCaptureBlockedDoesNotHangShutdown(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- gozmq.Proxy(pctx, front, back, capture) }()
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, feeder.SendMsg(ctx, gozmq.NewMsgFromBytes([]byte("x"))))
 	m, err := drain.RecvMsg(ctx)
 	require.NoError(t, err)

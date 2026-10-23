@@ -14,8 +14,7 @@ import (
 	"github.com/exergy-dev/gozmq/security"
 )
 
-// Greeting layout constants, mirroring zmtp/greeting.go. The byte layout
-// is fixed by ZMTP 3.1 §2.1 and will not drift.
+// Greeting layout constants (ZMTP 3.1 §2.1).
 const (
 	greetingSize        = 64
 	greetingMechOff     = 12
@@ -115,7 +114,7 @@ func (s *Session) exchangeGreeting() error {
 		return fmt.Errorf("gozmq/session: security mechanism mismatch: peer %q, ours %q", mech, s.cfg.Mech.Name())
 	}
 	// Decode already rejected anything but ZMTP 3.x. Any minor >= 1 is
-	// treated as 3.1 (heartbeats available); design §5.4: skip PING/PONG
+	// treated as 3.1 (heartbeats available); skip PING/PONG
 	// if the peer is 3.0.
 	if peerMinor >= 0x01 {
 		s.peerHeartbeats = true
@@ -225,7 +224,7 @@ func validateSocketTypeCompatibility(localMeta, peerMeta map[string]string) erro
 	if localType == "STREAM" || peerType == "STREAM" {
 		return fmt.Errorf("gozmq/session: STREAM sockets do not negotiate ZMTP sessions (local=%s peer=%s)", localType, peerType)
 	}
-	if !socketTypesCompatible(localType, peerType) {
+	if !SocketTypesCompatible(localType, peerType) {
 		return fmt.Errorf("gozmq/session: incompatible Socket-Type pairing local=%s peer=%s", localType, peerType)
 	}
 	return nil
@@ -240,15 +239,10 @@ func metadataValue(props map[string]string, name string) (string, bool) {
 	return "", false
 }
 
-// SocketTypesCompatible reports whether two ZMTP Socket-Type metadata
-// values form a valid pairing per the ZMTP 3.1 specification. Exported
-// so inproc wiring, which has no handshake, can validate compatibility without
-// running a full ZMTP handshake.
+// SocketTypesCompatible reports whether two ZMTP Socket-Type values form a
+// valid pairing per ZMTP 3.1. Inproc wiring, which has no handshake, uses it
+// directly.
 func SocketTypesCompatible(localType, peerType string) bool {
-	return socketTypesCompatible(localType, peerType)
-}
-
-func socketTypesCompatible(localType, peerType string) bool {
 	switch localType {
 	case "REQ":
 		return peerType == "REP" || peerType == "ROUTER"

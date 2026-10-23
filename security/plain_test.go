@@ -316,11 +316,11 @@ func TestPlainServerInitialSeedIsPassive(t *testing.T) {
 func TestParseCommandAcceptsLibzmqBrokenError(t *testing.T) {
 	body := []byte{0x5E, 'R', 'R', 'O', 'R', 0x03, '4', '0', '0'}
 
-	name, payload, err := parseCommand(body)
+	cmd, err := zmtp.DecodeCommand(body)
 	require.NoError(t, err)
-	require.Equal(t, plainCmdError, name)
+	require.Equal(t, zmtp.CmdError, cmd.Name)
 
-	reason, err := parseErrorReason(payload)
+	reason, err := zmtp.DecodeErrorReason(cmd.Body)
 	require.NoError(t, err)
 	require.Equal(t, "400", reason)
 }
@@ -339,9 +339,9 @@ func TestParseCommandStillRejectsOtherMalformedNames(t *testing.T) {
 		{"shim prefix but declared length honoured", []byte{0x04, 'R', 'R', 'O', 'R'}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			gotName, _, err := parseCommand(tc.body)
+			cmd, err := zmtp.DecodeCommand(tc.body)
 			if err == nil {
-				require.NotEqual(t, plainCmdError, gotName,
+				require.NotEqual(t, zmtp.CmdError, cmd.Name,
 					"malformed body must not be reinterpreted as ERROR")
 			}
 		})
@@ -353,11 +353,11 @@ func TestParseCommandStillRejectsOtherMalformedNames(t *testing.T) {
 func TestParseCommandAcceptsWellFormedError(t *testing.T) {
 	body := append([]byte{0x05, 'E', 'R', 'R', 'O', 'R', 0x03}, "400"...)
 
-	name, payload, err := parseCommand(body)
+	cmd, err := zmtp.DecodeCommand(body)
 	require.NoError(t, err)
-	require.Equal(t, plainCmdError, name)
+	require.Equal(t, zmtp.CmdError, cmd.Name)
 
-	reason, err := parseErrorReason(payload)
+	reason, err := zmtp.DecodeErrorReason(cmd.Body)
 	require.NoError(t, err)
 	require.Equal(t, "400", reason)
 }

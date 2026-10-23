@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
 // Proxy shuttles messages between two sockets in both directions until ctx
@@ -223,9 +225,5 @@ func canSend(t SocketType) bool { return t != Sub && t != Pull }
 // closed out from under the proxy (the documented way to stop it without a
 // context).
 func isProxyShutdown(ctx context.Context, err error) bool {
-	return ctx.Err() != nil ||
-		errors.Is(err, context.Canceled) ||
-		errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, ErrSocketClosed) ||
-		errors.Is(err, ErrContextClosed)
+	return ctx.Err() != nil || zmqerr.IsShutdown(err)
 }

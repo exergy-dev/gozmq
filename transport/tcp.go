@@ -6,10 +6,8 @@ import (
 	"time"
 )
 
-// Defaults that match design §7.1 and the socketConfig defaults in
-// options.go. Higher layers may override on a per-Transport basis by
-// constructing TCPTransport directly and toggling the exported fields
-// before registering it on a Context.
+// Defaults. Higher layers override them by constructing a TCPTransport,
+// setting the exported fields and registering it on a Context.
 const (
 	defaultTCPKeepAlive     = true
 	defaultTCPKeepAliveIdle = 30 * time.Second
@@ -68,19 +66,34 @@ func (t *TCPTransport) Scheme() string { return t.scheme }
 
 // Dial honors ctx via net.Dialer.DialContext.
 func (t *TCPTransport) Dial(ctx context.Context, endpoint string) (Conn, error) {
-	addr, err := t.parseAddress(endpoint)
+	addr, err := parseTCPEndpoint(endpoint, t.scheme, true)
 	if err != nil {
 		return nil, err
 	}
-	d := net.Dialer{
-		KeepAlive: t.keepAliveSetting(),
-	}
-	c, err := d.DialContext(ctx, t.Network, addr)
+	c, err := t.dial(ctx, addr)
 	if err != nil {
 		return nil, err
 	}
+	return t.wrap(c, t.scheme), nil
+}
+
+// dial and listen are the ctx-aware net.Dialer / net.ListenConfig wiring,
+// shared with TLSTransport.
+func (t *TCPTransport) dial(ctx context.Context, addr string) (net.Conn, error) {
+	d := net.Dialer{KeepAlive: t.keepAliveSetting()}
+	return d.DialContext(ctx, t.Network, addr)
+}
+
+func (t *TCPTransport) listen(ctx context.Context, addr string) (net.Listener, error) {
+	lc := net.ListenConfig{KeepAlive: t.keepAliveSetting()}
+	return lc.Listen(ctx, t.Network, addr)
+}
+
+// wrap applies the socket options and adapts c to Conn with scheme://
+// endpoint strings.
+func (t *TCPTransport) wrap(c net.Conn, scheme string) *conn {
 	t.applySocketOptions(c)
-	return newTCPConn(c, t.scheme), nil
+	return &conn{Conn: c, scheme: scheme}
 }
 
 // Listen binds endpoint. For "tcp://*:port" the wildcard expands to
@@ -88,21 +101,15 @@ func (t *TCPTransport) Dial(ctx context.Context, endpoint string) (Conn, error) 
 // resolved address — important for ephemeral-port (port 0 or "*")
 // bindings. ctx bounds host-name resolution.
 func (t *TCPTransport) Listen(ctx context.Context, endpoint string) (Listener, error) {
-	addr, err := t.parseListenAddress(endpoint)
+	addr, err := parseTCPEndpoint(endpoint, t.scheme, false)
 	if err != nil {
 		return nil, err
 	}
-	lc := net.ListenConfig{
-		KeepAlive: t.keepAliveSetting(),
-	}
-	l, err := lc.Listen(ctx, t.Network, addr)
+	l, err := t.listen(ctx, addr)
 	if err != nil {
 		return nil, err
 	}
-	return newNetListener(l, formatTCPEndpoint(t.scheme, l.Addr()), func(c net.Conn) Conn {
-		t.applySocketOptions(c)
-		return newTCPConn(c, t.scheme)
-	}), nil
+	return newNetListener(l, formatTCPEndpoint(t.scheme, l.Addr()), func(c net.Conn) Conn { return t.wrap(c, t.scheme) }), nil
 }
 
 func (t *TCPTransport) keepAliveSetting() time.Duration {
@@ -139,40 +146,32 @@ func (t *TCPTransport) applySocketOptions(c net.Conn) {
 	}
 }
 
-func (t *TCPTransport) parseAddress(endpoint string) (string, error) {
-	return parseTCPEndpoint(endpoint, t.scheme, true)
-}
-
-func (t *TCPTransport) parseListenAddress(endpoint string) (string, error) {
-	return parseTCPEndpoint(endpoint, t.scheme, false)
-}
-
-// --------------------------------------------------------------------------
-// tcpConn — Conn adapter over net.Conn.
-// --------------------------------------------------------------------------
-
-// tcpConn wraps a *net.TCPConn (or any net.Conn) and exposes ZMQ-style
-// endpoint strings via LocalEndpoint / RemoteEndpoint.
-type tcpConn struct {
+// conn adapts a net.Conn (TCP, Unix or TLS) to Conn. IPC fixes the
+// endpoint strings at construction; TCP and TLS format them from the
+// addresses on demand (they are rarely asked for, so this costs nothing
+// per connection). WriteBuffers is writev where the underlying conn
+// supports it.
+type conn struct {
 	net.Conn
-	scheme string
+	scheme        string // TCP/TLS: formats the endpoints from the addresses
+	local, remote string // IPC: fixed endpoint strings
 }
 
-func newTCPConn(c net.Conn, scheme string) *tcpConn {
-	return &tcpConn{Conn: c, scheme: scheme}
+func (c *conn) LocalEndpoint() string {
+	if c.scheme != "" {
+		return formatTCPEndpoint(c.scheme, c.LocalAddr())
+	}
+	return c.local
 }
 
-func (c *tcpConn) LocalEndpoint() string {
-	return formatTCPEndpoint(c.scheme, c.LocalAddr())
+func (c *conn) RemoteEndpoint() string {
+	if c.scheme != "" {
+		return formatTCPEndpoint(c.scheme, c.RemoteAddr())
+	}
+	return c.remote
 }
 
-func (c *tcpConn) RemoteEndpoint() string {
-	return formatTCPEndpoint(c.scheme, c.RemoteAddr())
-}
-
-func (c *tcpConn) WriteBuffers(buffers *net.Buffers) (int64, error) {
-	return buffers.WriteTo(c.Conn)
-}
+func (c *conn) WriteBuffers(buffers *net.Buffers) (int64, error) { return buffers.WriteTo(c.Conn) }
 
 func formatTCPEndpoint(scheme string, a net.Addr) string {
 	if a == nil {

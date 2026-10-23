@@ -13,10 +13,6 @@ import (
 	"github.com/exergy-dev/gozmq/msg"
 )
 
-// --------------------------------------------------------------------------
-// FairQueue
-// --------------------------------------------------------------------------
-
 // FairQueue is a fair-queued inbound multiplexer over a dynamic set of
 // *pipe.End values, after libzmq's fq_t. It runs no goroutines: receivers
 // read the pipes themselves.

@@ -8,23 +8,16 @@ import (
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
-// MetadataCodec is the package-level codec for the ZMTP 3.1 READY property
-// list (§2.3.1). Encoding preserves name case; decoding treats names
-// case-insensitively for duplicate detection.
-//
-// Wire format per property:
+// EncodeMetadata and DecodeMetadata are the ZMTP 3.1 READY property list
+// (§2.3.1). Encoding preserves name case; decoding treats names
+// case-insensitively for duplicate detection. Wire format per property:
 //
 //	[1 byte name-length][name][4 bytes big-endian value-length][value]
 //
-// Properties are concatenated; the list has no outer delimiter. An empty
-// property list is the zero-length byte slice.
-var MetadataCodec = metadataCodec{}
+// Properties are concatenated with no outer delimiter; an empty list is the
+// empty slice.
 
-// metadataCodec is the stateless ZMTP metadata codec; a single value is safe
-// to share across sessions. It is exposed via the MetadataCodec var.
-type metadataCodec struct{}
-
-// Encode serializes props into the ZMTP 3.1 READY property-list wire form.
+// EncodeMetadata serializes props into the ZMTP 3.1 READY property-list wire form.
 // The returned slice is freshly allocated and safe to retain. Property
 // iteration order is unspecified (Go map order); peers must not depend on it.
 //
@@ -32,7 +25,7 @@ type metadataCodec struct{}
 // exceeds 2^32-1 bytes, panic — these are programmer errors in this codebase
 // since we control every caller. (ZMTP lets values reach 2^32-1, so the panic
 // only fires on pathological input.)
-func (metadataCodec) Encode(props map[string]string) []byte {
+func EncodeMetadata(props map[string]string) []byte {
 	// Pre-compute size so we allocate exactly once.
 	total := 0
 	for name, value := range props {
@@ -57,12 +50,12 @@ func (metadataCodec) Encode(props map[string]string) []byte {
 	return out
 }
 
-// Decode parses a ZMTP 3.1 READY property list into a map. Names are kept
+// DecodeMetadata parses a ZMTP 3.1 READY property list into a map. Names are kept
 // in their on-wire case, but duplicate names (compared case-insensitively per
 // ZMTP 3.1 §2.3.1) are rejected with an error wrapping zmqerr.ErrMalformedFrame.
 // Truncated input — any short read of a length prefix or its payload —
 // produces the same wrapped sentinel.
-func (metadataCodec) Decode(raw []byte) (map[string]string, error) {
+func DecodeMetadata(raw []byte) (map[string]string, error) {
 	out := make(map[string]string)
 	seen := make(map[string]struct{}) // lowercase names
 

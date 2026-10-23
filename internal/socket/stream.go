@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -14,7 +15,7 @@ import (
 // streamEngine implements Engine for the STREAM socket type.
 //
 // STREAM carries raw bytes to and from non-ZMQ peers (HTTP/1.1, SMTP, any
-// line-oriented legacy protocol). Per design §9 there is "no ZMTP on the wire":
+// line-oriented legacy protocol). There is no ZMTP on the wire:
 // the engine never sees greeting, handshake, or frame headers, and inbound
 // bytes are whatever read(2) returned.
 //
@@ -84,7 +85,10 @@ func (e *streamEngine) Send(ctx context.Context, m *msg.Msg) error {
 	// of multipart STREAM sends). An empty result is the half-close sentinel,
 	// still handed down as a well-formed Msg for the writer to act on.
 	out := msg.FromBytes(bytes.Join(body, nil))
-	if err := p.Send(ctx, out); err != nil {
+	if err := p.SendOr(ctx, out, e.closeCh); err != nil {
+		if errors.Is(err, pipe.ErrAborted) {
+			return fmt.Errorf("stream send: %w", zmqerr.ErrSocketClosed)
+		}
 		if errors.Is(err, io.ErrClosedPipe) {
 			return fmt.Errorf("stream send: identity %q: peer disconnected: %w", id, zmqerr.ErrRouteUnknown)
 		}

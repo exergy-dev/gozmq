@@ -1,15 +1,16 @@
 package socket
 
 import (
-	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"sync"
 	"time"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
+	"github.com/exergy-dev/gozmq/internal/zmtp"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -40,7 +41,7 @@ import (
 // uses to implement WithSubscribe and dynamic
 // Subscribe/Unsubscribe calls. Internally the two returned values point
 // to the same object — the split keeps subscription controls out of the
-// frozen Engine interface.
+// Engine interface.
 type SubEngine struct {
 	mu     sync.Mutex
 	closed bool
@@ -51,14 +52,11 @@ type SubEngine struct {
 	// subscription.
 	peers map[*pipe.End]struct{}
 
-	// subs tracks the local subscriptions plus refcount (duplicate
-	// Subscribe calls are legal in libzmq and must each have a matching
-	// Unsubscribe before the filter opens up). We keep a separate
-	// SubTree (for Match on Recv) and a plain map (to iterate when
-	// replaying to new peers).
-	tree    *SubTree
-	subs    map[string]int
-	subList [][]byte
+	// subs is the refcount per subscribed prefix (duplicate Subscribe
+	// calls are legal and need matching Unsubscribes); tree is the same
+	// set arranged for Match on Recv.
+	tree *SubTree
+	subs map[string]int
 
 	// fq fair-queues Recv across all attached pipes. Matching is done
 	// AFTER FairQueue returns — messages whose topic frame doesn't match
@@ -128,12 +126,9 @@ func (e *SubEngine) AttachPipe(p *pipe.End) error {
 		return nil
 	}
 	e.peers[p] = struct{}{}
-	// Snapshot current subscriptions while holding the lock so we don't
-	// race with a concurrent Subscribe that also tries to forward.
-	snapshot := make([][]byte, len(e.subList))
-	for i, s := range e.subList {
-		snapshot[i] = bytes.Clone(s)
-	}
+	// Snapshot the subscriptions under the lock so a concurrent Subscribe
+	// cannot race the replay.
+	snapshot := slices.Collect(maps.Keys(e.subs))
 	e.mu.Unlock()
 
 	if err := e.fq.Attach(p); err != nil {
@@ -144,7 +139,7 @@ func (e *SubEngine) AttachPipe(p *pipe.End) error {
 	// (subscription forwarding is best-effort; the application is
 	// expected to resubscribe on reconnect via the socket option).
 	for _, prefix := range snapshot {
-		e.forwardSubscription(context.Background(), p, true, prefix)
+		e.forwardSubscription(context.Background(), p, true, []byte(prefix))
 	}
 	return nil
 }
@@ -156,74 +151,44 @@ func (e *SubEngine) DetachPipe(p *pipe.End) error {
 	return e.fq.Detach(p)
 }
 
-// Subscribe adds prefix to the local filter and forwards a SUBSCRIBE
-// command to every attached peer. Duplicate Subscribe calls are
-// refcounted — an equal number of Unsubscribe calls is required to
-// remove the filter.
-func (e *SubEngine) Subscribe(prefix []byte) error {
+// Subscribe adds prefix to the local filter and forwards a SUBSCRIBE to
+// every attached peer. Duplicate Subscribe calls are refcounted: an equal
+// number of Unsubscribe calls removes the filter.
+func (e *SubEngine) Subscribe(prefix []byte) error { return e.subscribe(prefix, true) }
+
+// Unsubscribe decrements prefix's refcount and, on the final decrement,
+// forwards a CANCEL to every attached peer.
+func (e *SubEngine) Unsubscribe(prefix []byte) error { return e.subscribe(prefix, false) }
+
+func (e *SubEngine) subscribe(prefix []byte, subscribe bool) error {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
 		return fmt.Errorf("sub subscribe: %w", zmqerr.ErrSocketClosed)
 	}
-	shouldForward := e.applySubLocked(prefix, true)
-	peers := make([]*pipe.End, 0, len(e.peers))
-	for p := range e.peers {
-		peers = append(peers, p)
-	}
+	// Only the first add or last remove is forwarded, so peers see one
+	// command per unique prefix; refcount duplicates stay local.
+	forward := e.applySubLocked(prefix, subscribe)
+	peers := slices.Collect(maps.Keys(e.peers))
 	e.mu.Unlock()
-	// Only forward the first ref so peers see a single SUBSCRIBE per
-	// unique prefix. Refcount duplicates stay local.
-	if shouldForward {
+	if forward {
 		for _, p := range peers {
-			e.forwardSubscription(context.Background(), p, true, prefix)
+			e.forwardSubscription(context.Background(), p, subscribe, prefix)
 		}
 	}
 	return nil
 }
 
-// Unsubscribe decrements the refcount for prefix and, on the final
-// decrement, forwards a CANCEL command to every attached peer.
-func (e *SubEngine) Unsubscribe(prefix []byte) error {
-	e.mu.Lock()
-	if e.closed {
-		e.mu.Unlock()
-		return fmt.Errorf("sub unsubscribe: %w", zmqerr.ErrSocketClosed)
-	}
-	shouldForward := e.applySubLocked(prefix, false)
-	peers := make([]*pipe.End, 0, len(e.peers))
-	for p := range e.peers {
-		peers = append(peers, p)
-	}
-	e.mu.Unlock()
-	if shouldForward {
-		for _, p := range peers {
-			e.forwardSubscription(context.Background(), p, false, prefix)
-		}
-	}
-	return nil
-}
-
-// applySubLocked updates the local subscription state — the refcount map,
-// the match tree, and the replay list — for a single subscribe/unsubscribe
-// of prefix. It returns shouldForward: true exactly when this was the first
-// add or the last remove of prefix, i.e. when a SUBSCRIBE/CANCEL must be
-// forwarded upstream so peers see one command per unique prefix. An
-// unsubscribe of an absent prefix is a no-op and returns false. The caller
-// must hold e.mu.
-//
-// This is the single source of truth for the refcount/tree/subList
-// invariant shared by Subscribe, Unsubscribe, and xsubSend (XSUB).
-func (e *SubEngine) applySubLocked(prefix []byte, subscribe bool) (shouldForward bool) {
+// applySubLocked applies one subscribe or unsubscribe of prefix to the
+// refcount map and the match tree, and reports whether it was the first add
+// or the last remove, i.e. whether a SUBSCRIBE/CANCEL must go upstream. An
+// unsubscribe of an absent prefix is a no-op. The caller holds e.mu.
+func (e *SubEngine) applySubLocked(prefix []byte, subscribe bool) bool {
 	key := string(prefix)
 	if subscribe {
 		e.subs[key]++
 		e.tree.Add(prefix)
-		if e.subs[key] == 1 {
-			e.subList = append(e.subList, bytes.Clone(prefix))
-			return true
-		}
-		return false
+		return e.subs[key] == 1
 	}
 	if e.subs[key] == 0 {
 		return false
@@ -232,18 +197,9 @@ func (e *SubEngine) applySubLocked(prefix []byte, subscribe bool) (shouldForward
 	e.tree.Remove(prefix)
 	if e.subs[key] == 0 {
 		delete(e.subs, key)
-		e.removeSubFromList(key)
 		return true
 	}
 	return false
-}
-
-// removeSubFromList drops the first subList entry equal to key. The caller
-// must hold e.mu.
-func (e *SubEngine) removeSubFromList(key string) {
-	if i := slices.IndexFunc(e.subList, func(s []byte) bool { return string(s) == key }); i >= 0 {
-		e.subList = slices.Delete(e.subList, i, i+1)
-	}
 }
 
 // forwardSubscription sends a synthetic single-frame subscription
@@ -260,7 +216,7 @@ func (e *SubEngine) removeSubFromList(key string) {
 func (e *SubEngine) forwardSubscription(ctx context.Context, p *pipe.End, subscribe bool, prefix []byte) {
 	sendCtx, cancel := context.WithTimeout(ctx, subForwardTimeout)
 	defer cancel()
-	_ = p.Send(sendCtx, msg.FromBytes(subscriptionFrame(subscribe, prefix)))
+	_ = p.Send(sendCtx, msg.FromBytes(zmtp.SubscriptionFrame(subscribe, prefix)))
 }
 
 // subForwardTimeout bounds how long Subscribe/Unsubscribe will wait on
@@ -298,10 +254,7 @@ func (e *SubEngine) xsubSend(ctx context.Context, m *msg.Msg) error {
 	// subscription), so the shouldForward result is intentionally ignored
 	// here — unlike Subscribe/Unsubscribe which dedup forwarding.
 	e.applySubLocked(prefix, subscribe)
-	peers := make([]*pipe.End, 0, len(e.peers))
-	for p := range e.peers {
-		peers = append(peers, p)
-	}
+	peers := slices.Collect(maps.Keys(e.peers))
 	e.mu.Unlock()
 
 	for _, p := range peers {
@@ -324,17 +277,13 @@ func (e *SubEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		if err != nil {
 			return nil, err
 		}
-		if m.NumFrames() == 0 || !e.matches(m.Frames()[0]) {
+		if m.NumFrames() == 0 || !e.tree.Match(m.Frames()[0]) {
 			m.Release()
 			continue
 		}
 		e.recv.Add(1)
 		return m, nil
 	}
-}
-
-func (e *SubEngine) matches(topic []byte) bool {
-	return e.tree.Match(topic)
 }
 
 // Metrics reports the SUB/XSUB engine's counters. recv counts user-

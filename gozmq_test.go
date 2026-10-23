@@ -1,24 +1,24 @@
 package gozmq_test
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"testing"
 	"time"
 
-	"go.uber.org/goleak"
+	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/security/curve"
 )
 
-func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }
+func TestMain(m *testing.M) { testutil.VerifyMain(m) }
 
 // TestPairRoundTrip proves that two PAIR sockets can round-trip a multipart
 // and a single-frame Msg, -race clean and with no goroutine leaks, over both
 // the TCP session path and the inproc direct-pipe path.
 func TestPairRoundTrip(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name     string
 		endpoint string
@@ -28,33 +28,21 @@ func TestPairRoundTrip(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, server, client := newSocketPair(t, gozmq.Pair, tc.endpoint)
-			callCtx := testCtx(t)
+			callCtx := testutil.Ctx(t)
 
 			// Client → server, multipart.
 			req := gozmq.NewMsgFromFrames([]byte("hello"), []byte("world"))
-			if err := client.SendMsg(callCtx, req); err != nil {
-				t.Fatalf("client send: %v", err)
-			}
+			require.NoError(t, client.SendMsg(callCtx, req), "client send")
 			got, err := server.RecvMsg(callCtx)
-			if err != nil {
-				t.Fatalf("server recv: %v", err)
-			}
-			if got.NumFrames() != 2 || string(got.Frames()[0]) != "hello" || string(got.Frames()[1]) != "world" {
-				t.Fatalf("server got %v frames=%v", got.NumFrames(), got.Frames())
-			}
+			require.NoError(t, err, "server recv")
+			require.Equal(t, [][]byte{[]byte("hello"), []byte("world")}, got.Frames())
 			got.Release()
 
 			// Server → client, single frame.
-			if err := server.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("ack"))); err != nil {
-				t.Fatalf("server send: %v", err)
-			}
+			require.NoError(t, server.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("ack"))), "server send")
 			ack, err := client.RecvMsg(callCtx)
-			if err != nil {
-				t.Fatalf("client recv: %v", err)
-			}
-			if string(ack.Bytes()) != "ack" {
-				t.Fatalf("client got %q want ack", ack.Bytes())
-			}
+			require.NoError(t, err, "client recv")
+			require.Equal(t, "ack", string(ack.Bytes()))
 			ack.Release()
 		})
 	}
@@ -63,23 +51,18 @@ func TestPairRoundTrip(t *testing.T) {
 // TestPushPull_TCP exercises the A5 load-balance/fair-queue primitives end
 // to end through real sessions and transport.
 func TestPushPull_TCP(t *testing.T) {
+	t.Parallel()
 	_, puller, pusher := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "tcp://127.0.0.1:0", nil, nil)
 
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 
 	for i := 0; i < 5; i++ {
-		if err := pusher.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte{byte(i)})); err != nil {
-			t.Fatalf("push[%d]: %v", i, err)
-		}
+		require.NoError(t, pusher.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte{byte(i)})), "push[%d]", i)
 	}
 	for i := 0; i < 5; i++ {
 		m, err := puller.RecvMsg(callCtx)
-		if err != nil {
-			t.Fatalf("pull[%d]: %v", i, err)
-		}
-		if m.Bytes()[0] != byte(i) {
-			t.Fatalf("pull[%d] = %d (order violated)", i, m.Bytes()[0])
-		}
+		require.NoError(t, err, "pull[%d]", i)
+		require.Equal(t, byte(i), m.Bytes()[0], "pull[%d]: order violated", i)
 		m.Release()
 	}
 }
@@ -88,74 +71,53 @@ func TestPushPull_TCP(t *testing.T) {
 // smoke-test that the typed sentinels propagate correctly through the
 // public API.
 func TestPushSendRejected(t *testing.T) {
+	t.Parallel()
 	_, s := newTestSocket(t, gozmq.Push)
 
 	_, err := s.RecvMsg(context.Background())
-	if !errors.Is(err, gozmq.ErrFSMViolation) {
-		t.Fatalf("expected ErrFSMViolation, got %v", err)
-	}
+	require.ErrorIs(t, err, gozmq.ErrFSMViolation)
 }
 
 // TestReqRep_TCP exercises the REQ/REP lock-step FSM over a real session
 // and transport.
 func TestReqRep_TCP(t *testing.T) {
+	t.Parallel()
 	_, rep, req := newSocketPairTypes(t, gozmq.Rep, gozmq.Req, "tcp://127.0.0.1:0", nil, nil)
 
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 
 	for i := 0; i < 3; i++ {
-		if err := req.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte{byte(i)})); err != nil {
-			t.Fatalf("req send[%d]: %v", i, err)
-		}
+		require.NoError(t, req.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte{byte(i)})), "req send[%d]", i)
 		got, err := rep.RecvMsg(callCtx)
-		if err != nil {
-			t.Fatalf("rep recv[%d]: %v", i, err)
-		}
-		if got.Bytes()[0] != byte(i) {
-			t.Fatalf("rep got %d want %d", got.Bytes()[0], i)
-		}
+		require.NoError(t, err, "rep recv[%d]", i)
+		require.Equal(t, byte(i), got.Bytes()[0], "rep got")
 		got.Release()
 		reply := []byte{byte(i) * 10}
-		if err := rep.SendMsg(callCtx, gozmq.NewMsgFromBytes(reply)); err != nil {
-			t.Fatalf("rep send[%d]: %v", i, err)
-		}
+		require.NoError(t, rep.SendMsg(callCtx, gozmq.NewMsgFromBytes(reply)), "rep send[%d]", i)
 		back, err := req.RecvMsg(callCtx)
-		if err != nil {
-			t.Fatalf("req recv[%d]: %v", i, err)
-		}
-		if back.Bytes()[0] != reply[0] {
-			t.Fatalf("req got %d want %d", back.Bytes()[0], reply[0])
-		}
+		require.NoError(t, err, "req recv[%d]", i)
+		require.Equal(t, reply[0], back.Bytes()[0], "req got")
 		back.Release()
 	}
 }
 
 // TestPubSub_Inproc exercises PUB/SUB with topic filtering over inproc.
 func TestPubSub_Inproc(t *testing.T) {
+	t.Parallel()
 	_, pub, sub := newPubSubPair(t, "inproc://pubsub-test", [][]byte{[]byte("alpha")}, nil, nil)
 
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 
 	// Send one matching and one non-matching message. The filter must
 	// drop "beta" before it reaches RecvMsg.
-	if err := pub.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("alphaOne"))); err != nil {
-		t.Fatalf("pub send alpha: %v", err)
-	}
-	if err := pub.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("betaTwo"))); err != nil {
-		t.Fatalf("pub send beta: %v", err)
-	}
-	if err := pub.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("alphaThree"))); err != nil {
-		t.Fatalf("pub send alpha: %v", err)
+	for _, body := range []string{"alphaOne", "betaTwo", "alphaThree"} {
+		require.NoError(t, pub.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte(body))), "pub send %s", body)
 	}
 
 	for _, want := range []string{"alphaOne", "alphaThree"} {
 		got, err := sub.RecvMsg(callCtx)
-		if err != nil {
-			t.Fatalf("sub recv %s: %v", want, err)
-		}
-		if string(got.Bytes()) != want {
-			t.Fatalf("sub got %q want %q", got.Bytes(), want)
-		}
+		require.NoError(t, err, "sub recv %s", want)
+		require.Equal(t, want, string(got.Bytes()), "sub got")
 		got.Release()
 	}
 }
@@ -166,10 +128,11 @@ func TestPubSub_Inproc(t *testing.T) {
 // classified subscriptions by sniffing the payload. A SUB's peer is a PUB
 // that only ever sends data, so such payloads must be delivered intact.
 func TestPubSub_BinaryPayloadLeadingSubByte(t *testing.T) {
+	t.Parallel()
 	// Match-all subscription: every published message should be delivered.
 	_, pub, sub := newPubSubPair(t, "inproc://pubsub-binary", [][]byte{{}}, nil, nil)
 
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 
 	// Payloads beginning with the subscription marker bytes (0x00/0x01)
 	// plus a control case. Before the fix the first two were dropped.
@@ -179,69 +142,47 @@ func TestPubSub_BinaryPayloadLeadingSubByte(t *testing.T) {
 		{'A', 0x00, 0x01},
 	}
 	for _, p := range want {
-		if err := pub.SendMsg(callCtx, gozmq.NewMsgFromBytes(p)); err != nil {
-			t.Fatalf("pub send %x: %v", p, err)
-		}
+		require.NoError(t, pub.SendMsg(callCtx, gozmq.NewMsgFromBytes(p)), "pub send %x", p)
 	}
 	for i, w := range want {
 		got, err := sub.RecvMsg(callCtx)
-		if err != nil {
-			t.Fatalf("sub recv %d: %v", i, err)
-		}
-		if !bytes.Equal(got.Bytes(), w) {
-			t.Fatalf("payload %d: got %x want %x", i, got.Bytes(), w)
-		}
+		require.NoError(t, err, "sub recv %d", i)
+		require.Equal(t, w, got.Bytes(), "payload %d", i)
 		got.Release()
 	}
 }
 
 // TestRouterDealer_TCP exercises ROUTER identity-based routing.
 func TestRouterDealer_TCP(t *testing.T) {
+	t.Parallel()
 	_, router, dealer := newSocketPairTypes(
 		t, gozmq.Router, gozmq.Dealer, "tcp://127.0.0.1:0",
 		nil, []gozmq.Option{gozmq.WithIdentity([]byte("worker-1"))},
 	)
 
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 
 	// Dealer → Router (Router sees identity frame prepended).
-	if err := dealer.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("req-payload"))); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, dealer.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("req-payload"))))
 	got, err := router.RecvMsg(callCtx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.NumFrames() != 2 {
-		t.Fatalf("router frames = %d want 2 (identity + body), got %v", got.NumFrames(), got.Frames())
-	}
-	if string(got.Frames()[0]) != "worker-1" {
-		t.Fatalf("router identity %q want worker-1", got.Frames()[0])
-	}
-	if string(got.Frames()[1]) != "req-payload" {
-		t.Fatalf("router body %q", got.Frames()[1])
-	}
+	require.NoError(t, err)
+	require.Equal(t, [][]byte{[]byte("worker-1"), []byte("req-payload")}, got.Frames(), "router frames: want identity + body")
 	got.Release()
 
 	// Router → Dealer (use same identity in leading frame).
-	if err := router.SendMsg(callCtx, gozmq.NewMsgFromFrames(
+	require.NoError(t, router.SendMsg(callCtx, gozmq.NewMsgFromFrames(
 		[]byte("worker-1"), []byte("reply-payload"),
-	)); err != nil {
-		t.Fatal(err)
-	}
+	)))
 	reply, err := dealer.RecvMsg(callCtx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(reply.Bytes()) != "reply-payload" {
-		t.Fatalf("dealer got %q", reply.Bytes())
-	}
+	require.NoError(t, err)
+	require.Equal(t, "reply-payload", string(reply.Bytes()), "dealer got")
 	reply.Release()
 }
 
 // TestPlainAuth_Success: a PLAIN client with correct credentials handshakes
 // with a PLAIN server and then round-trips.
 func TestPlainAuth_Success(t *testing.T) {
+	t.Parallel()
 	_, server, client := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair, "tcp://127.0.0.1:0",
 		[]gozmq.Option{gozmq.WithPlainAuth(func(u, p string) bool {
 			return u == "alice" && p == "hunter2"
@@ -249,60 +190,43 @@ func TestPlainAuth_Success(t *testing.T) {
 		[]gozmq.Option{gozmq.WithPlainClient("alice", "hunter2")},
 	)
 
-	callCtx := testCtx(t)
-	if err := client.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("secret"))); err != nil {
-		t.Fatal(err)
-	}
+	callCtx := testutil.Ctx(t)
+	require.NoError(t, client.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("secret"))))
 	got, err := server.RecvMsg(callCtx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got.Bytes()) != "secret" {
-		t.Fatalf("got %q", got.Bytes())
-	}
+	require.NoError(t, err)
+	require.Equal(t, "secret", string(got.Bytes()))
 	got.Release()
 }
 
 // TestCurveAuth_Success verifies that a CURVE client with the correct
 // server key completes the handshake and round-trips.
 func TestCurveAuth_Success(t *testing.T) {
+	t.Parallel()
 	serverPub, serverSec, err := curve.GenerateKeyPair()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	clientPub, clientSec, err := curve.GenerateKeyPair()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	_, server, client := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair, "tcp://127.0.0.1:0",
 		[]gozmq.Option{gozmq.WithCurveServer(serverSec[:])},
 		[]gozmq.Option{gozmq.WithCurveClient(serverPub[:], clientPub[:], clientSec[:])},
 	)
 
-	callCtx := testCtx(t)
-	if err := client.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("curve-secret"))); err != nil {
-		t.Fatalf("send: %v", err)
-	}
+	callCtx := testutil.Ctx(t)
+	require.NoError(t, client.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("curve-secret"))), "send")
 	got, err := server.RecvMsg(callCtx)
-	if err != nil {
-		t.Fatalf("recv: %v", err)
-	}
-	if string(got.Bytes()) != "curve-secret" {
-		t.Fatalf("got %q", got.Bytes())
-	}
+	require.NoError(t, err, "recv")
+	require.Equal(t, "curve-secret", string(got.Bytes()))
 	got.Release()
 }
 
 // TestContextClosed_BlocksNewSocket is a smoke test on teardown ordering.
 func TestContextClosed_BlocksNewSocket(t *testing.T) {
+	t.Parallel()
 	ctxZmq := gozmq.NewContext()
-	if err := ctxZmq.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-	if _, err := ctxZmq.NewSocket(gozmq.Pair); !errors.Is(err, gozmq.ErrContextClosed) {
-		t.Fatalf("expected ErrContextClosed, got %v", err)
-	}
+	require.NoError(t, ctxZmq.Close(), "close")
+	_, err := ctxZmq.NewSocket(gozmq.Pair)
+	require.ErrorIs(t, err, gozmq.ErrContextClosed)
 }
 
 // TestMaxMessageSize_SendBoundary covers the synchronous send-side
@@ -314,6 +238,7 @@ func TestContextClosed_BlocksNewSocket(t *testing.T) {
 //     monitor channel or session round-trip is involved), the session is
 //     NOT torn down, and a subsequent at-limit send still round-trips.
 func TestMaxMessageSize_SendBoundary(t *testing.T) {
+	t.Parallel()
 	const limit = 1024
 	opts := []gozmq.Option{gozmq.WithMaxMessageSize(limit)}
 
@@ -333,18 +258,16 @@ func TestMaxMessageSize_SendBoundary(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, server, client := newSocketPairTypes(t, tc.server, tc.client, tc.endpoint, opts, opts)
-			callCtx := testCtx(t)
+			callCtx := testutil.Ctx(t)
 
 			if tc.overLimit {
 				big := make([]byte, limit+1)
 				start := time.Now()
 				err := client.SendMsg(callCtx, gozmq.NewMsgFromBytes(big))
 				elapsed := time.Since(start)
-				if !errors.Is(err, gozmq.ErrMalformedFrame) {
-					t.Fatalf("oversize SendMsg err = %v, want ErrMalformedFrame", err)
-				}
-				if tc.assertPrompt && elapsed > 500*time.Millisecond {
-					t.Fatalf("oversize SendMsg took %v — expected synchronous return", elapsed)
+				require.ErrorIs(t, err, gozmq.ErrMalformedFrame, "oversize SendMsg")
+				if tc.assertPrompt {
+					require.LessOrEqual(t, elapsed, 500*time.Millisecond, "oversize SendMsg took %v — expected synchronous return", elapsed)
 				}
 			}
 
@@ -354,16 +277,10 @@ func TestMaxMessageSize_SendBoundary(t *testing.T) {
 			for i := range payload {
 				payload[i] = byte(i & 0xff)
 			}
-			if err := client.SendMsg(callCtx, gozmq.NewMsgFromBytes(payload)); err != nil {
-				t.Fatalf("at-limit SendMsg: %v", err)
-			}
+			require.NoError(t, client.SendMsg(callCtx, gozmq.NewMsgFromBytes(payload)), "at-limit SendMsg")
 			got, err := server.RecvMsg(callCtx)
-			if err != nil {
-				t.Fatalf("recv at limit: %v", err)
-			}
-			if !bytes.Equal(got.Bytes(), payload) {
-				t.Fatalf("recv size = %d want %d (payload mismatch)", len(got.Bytes()), limit)
-			}
+			require.NoError(t, err, "recv at limit")
+			require.Equal(t, payload, got.Bytes(), "recv size = %d want %d (payload mismatch)", len(got.Bytes()), limit)
 			got.Release()
 		})
 	}
@@ -375,40 +292,32 @@ func TestMaxMessageSize_SendBoundary(t *testing.T) {
 // total exceeds the cap is rejected synchronously even when every frame is
 // under it, and one whose total fits is delivered.
 func TestSendMsg_CollectsMultipartSizeCorrectly(t *testing.T) {
+	t.Parallel()
 	const limit = 1024
 	_, srv, cli := newSocketPair(t, gozmq.Pair, "inproc://sendmsg-multipart", gozmq.WithMaxMessageSize(limit))
 
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 
 	// Case A1: two frames whose sum is exactly the limit — accepted.
 	a := make([]byte, limit/2)
 	b := make([]byte, limit/2)
-	if err := cli.SendMsg(callCtx, gozmq.NewMsgFromFrames(a, b)); err != nil {
-		t.Fatalf("multipart (sum == limit) SendMsg: %v", err)
-	}
+	require.NoError(t, cli.SendMsg(callCtx, gozmq.NewMsgFromFrames(a, b)), "multipart (sum == limit) SendMsg")
 	got, err := srv.RecvMsg(callCtx)
-	if err != nil {
-		t.Fatalf("recv multipart: %v", err)
-	}
-	if got.NumFrames() != 2 || len(got.Frames()[0]) != limit/2 || len(got.Frames()[1]) != limit/2 {
-		t.Fatalf("recv frames = %v, want 2x%d", got.Frames(), limit/2)
-	}
+	require.NoError(t, err, "recv multipart")
+	require.Equal(t, [][]byte{a, b}, got.Frames(), "want 2x%d", limit/2)
 	got.Release()
 
 	// Case A2: two frames each under the limit but summing over it —
 	// rejected up front, so a gozmq receiver never tears the session down
 	// for a message a gozmq sender accepted.
-	if err := cli.SendMsg(callCtx, gozmq.NewMsgFromFrames(make([]byte, limit), make([]byte, 1))); !errors.Is(err, gozmq.ErrMalformedFrame) {
-		t.Fatalf("multipart (sum > limit) SendMsg err = %v, want ErrMalformedFrame", err)
-	}
+	err = cli.SendMsg(callCtx, gozmq.NewMsgFromFrames(make([]byte, limit), make([]byte, 1)))
+	require.ErrorIs(t, err, gozmq.ErrMalformedFrame, "multipart (sum > limit) SendMsg")
 
 	// Case B: one frame > limit — rejected with ErrMalformedFrame.
 	small := []byte("ok")
 	bigFrame := make([]byte, limit+1)
 	err = cli.SendMsg(callCtx, gozmq.NewMsgFromFrames(small, bigFrame))
-	if !errors.Is(err, gozmq.ErrMalformedFrame) {
-		t.Fatalf("multipart w/ oversize frame err = %v, want ErrMalformedFrame", err)
-	}
+	require.ErrorIs(t, err, gozmq.ErrMalformedFrame, "multipart w/ oversize frame")
 }
 
 // TestCloseCtx_CancellationBreaksLingerDrain verifies that under
@@ -422,6 +331,7 @@ func TestSendMsg_CollectsMultipartSizeCorrectly(t *testing.T) {
 // and pre-fill past the transport-level pipe buffer, so the drain path
 // blocks until the deadline interrupts it.
 func TestCloseCtx_CancellationBreaksLingerDrain(t *testing.T) {
+	t.Parallel()
 	// receiver accepts the wiring but never RecvMsgs payload. With a tiny
 	// recvHWM its inbound pipe fills quickly and blocks further writes.
 	_, receiver, sender := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair,
@@ -432,15 +342,11 @@ func TestCloseCtx_CancellationBreaksLingerDrain(t *testing.T) {
 
 	// Settle: a reverse round-trip (receiver → sender) proves both ends
 	// are attached without a fixed sleep.
-	callCtx := testCtx(t)
-	if err := receiver.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("sync"))); err != nil {
-		t.Fatalf("settle send: %v", err)
-	}
-	if m, err := sender.RecvMsg(callCtx); err != nil {
-		t.Fatalf("settle recv: %v", err)
-	} else {
-		m.Release()
-	}
+	callCtx := testutil.Ctx(t)
+	require.NoError(t, receiver.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("sync"))), "settle send")
+	m, err := sender.RecvMsg(callCtx)
+	require.NoError(t, err, "settle recv")
+	m.Release()
 
 	// Pre-fill: enqueue enough messages that the transport pipe +
 	// receiver pipe (HWM 1) + buffers all saturate. Once saturated, a
@@ -464,22 +370,16 @@ func TestCloseCtx_CancellationBreaksLingerDrain(t *testing.T) {
 	defer closeCancel()
 
 	start := time.Now()
-	err := sender.CloseCtx(closeCtx)
+	err = sender.CloseCtx(closeCtx)
 	elapsed := time.Since(start)
 
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("CloseCtx err = %v, want context.DeadlineExceeded (elapsed=%v)", err, elapsed)
-	}
+	require.ErrorIs(t, err, context.DeadlineExceeded, "CloseCtx (elapsed=%v)", elapsed)
 	// Generous bound: the linger wait should be interrupted within a
 	// few hundred ms of the deadline, not hours.
-	if elapsed > 5*time.Second {
-		t.Fatalf("CloseCtx took %v after ctx cancel — did not honor ctx.Done", elapsed)
-	}
+	require.LessOrEqual(t, elapsed, 5*time.Second, "CloseCtx took %v after ctx cancel — did not honor ctx.Done", elapsed)
 
 	// Idempotent: second CloseCtx returns nil.
-	if err2 := sender.CloseCtx(context.Background()); err2 != nil {
-		t.Fatalf("second CloseCtx err = %v, want nil", err2)
-	}
+	require.NoError(t, sender.CloseCtx(context.Background()), "second CloseCtx")
 }
 
 // TestCloseCtx_NormalDrainStillWorks confirms that CloseCtx with a
@@ -487,52 +387,42 @@ func TestCloseCtx_CancellationBreaksLingerDrain(t *testing.T) {
 // the peer has drained every queued message, the close path has nothing
 // left to linger on.
 func TestCloseCtx_NormalDrainStillWorks(t *testing.T) {
+	t.Parallel()
 	_, receiver, sender := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair,
 		"inproc://closectx-normal-drain",
 		nil,
 		[]gozmq.Option{gozmq.WithLinger(2 * time.Second)},
 	)
 
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 	const N = 4
 	for i := 0; i < N; i++ {
-		if err := sender.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte{byte(i)})); err != nil {
-			t.Fatalf("send %d: %v", i, err)
-		}
+		require.NoError(t, sender.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte{byte(i)})), "send %d", i)
 	}
 	// Drain everything BEFORE closing — this is the "responsive peer"
 	// scenario, not the "drain at Close" scenario, and waiting for the
 	// last receive replaces any settle sleep.
 	for i := 0; i < N; i++ {
 		m, err := receiver.RecvMsg(callCtx)
-		if err != nil {
-			t.Fatalf("recv %d: %v", i, err)
-		}
-		if len(m.Bytes()) != 1 || m.Bytes()[0] != byte(i) {
-			t.Fatalf("recv %d: unexpected payload %x", i, m.Bytes())
-		}
+		require.NoError(t, err, "recv %d", i)
+		require.Equal(t, []byte{byte(i)}, m.Bytes(), "recv %d: unexpected payload", i)
 		m.Release()
 	}
 
-	if err := sender.CloseCtx(context.Background()); err != nil {
-		t.Fatalf("CloseCtx err = %v, want nil", err)
-	}
+	require.NoError(t, sender.CloseCtx(context.Background()), "CloseCtx")
 }
 
 // TestClose_DelegatesToCloseCtx confirms that Close uses the same teardown
 // path as CloseCtx with a background context.
 func TestClose_DelegatesToCloseCtx(t *testing.T) {
+	t.Parallel()
 	_, _, sender := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair,
 		"inproc://close-delegates",
 		nil,
 		[]gozmq.Option{gozmq.WithLinger(200 * time.Millisecond)},
 	)
 
-	if err := sender.Close(); err != nil {
-		t.Fatalf("Close() err = %v, want nil", err)
-	}
+	require.NoError(t, sender.Close(), "Close()")
 	// Idempotent contract: repeated Close returns nil, like Context.Close.
-	if err := sender.Close(); err != nil {
-		t.Fatalf("second Close() err = %v, want nil", err)
-	}
+	require.NoError(t, sender.Close(), "second Close()")
 }

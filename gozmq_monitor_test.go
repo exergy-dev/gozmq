@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // drainEvents spools events off ch into a slice until the ctx fires or
@@ -63,6 +64,7 @@ func hasType(events []gozmq.Event, t gozmq.EventType) bool {
 // sequence on a single PAIR/TCP round trip: Listening → Accepted →
 // HandshakeSucceeded → (client connect-side events) → Closed.
 func TestMonitor_ServerLifecycle(t *testing.T) {
+	t.Parallel()
 	srvEvents := make(chan gozmq.Event, 64)
 	cliEvents := make(chan gozmq.Event, 64)
 	_, srv, cli := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair, "tcp://127.0.0.1:0",
@@ -72,7 +74,7 @@ func TestMonitor_ServerLifecycle(t *testing.T) {
 
 	// Round-trip a message to guarantee the handshake completed on
 	// both ends before we assert on events.
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 	if err := cli.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("hello"))); err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -135,12 +137,9 @@ func TestMonitor_ServerLifecycle(t *testing.T) {
 	// Drain any pending events for up to 1s looking for EventClosed.
 	// Use separate contexts per channel so the drain of one doesn't
 	// starve the drain of the other.
-	srvDrainCtx, srvDrainCancel := context.WithTimeout(context.Background(), 1*time.Second)
-	srvTail := drainEvents(srvDrainCtx, srvEvents)
-	srvDrainCancel()
-	cliDrainCtx, cliDrainCancel := context.WithTimeout(context.Background(), 1*time.Second)
-	cliTail := drainEvents(cliDrainCtx, cliEvents)
-	cliDrainCancel()
+	closed := func(evts []gozmq.Event) bool { return hasType(evts, gozmq.EventClosed) }
+	srvTail := testutil.CollectUntil(srvEvents, 3*time.Second, closed)
+	cliTail := testutil.CollectUntil(cliEvents, 3*time.Second, closed)
 	if !hasType(srvTail, gozmq.EventClosed) {
 		t.Errorf("server: no EventClosed after Close; tail=%v", eventTypes(srvTail))
 	}
@@ -153,6 +152,7 @@ func TestMonitor_ServerLifecycle(t *testing.T) {
 // malformed endpoint produces an error and a monitor event with a
 // non-empty Reason.
 func TestMonitor_BindFailed(t *testing.T) {
+	t.Parallel()
 	evts := make(chan gozmq.Event, 16)
 	_, s := newTestSocket(t, gozmq.Pair, gozmq.WithMonitor(evts, gozmq.EventAll))
 
@@ -160,10 +160,7 @@ func TestMonitor_BindFailed(t *testing.T) {
 	if err := s.Bind("bogus://nothing"); err == nil {
 		t.Fatal("expected bind error for bogus scheme")
 	}
-	// Pull any events with a short wait.
-	drainCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	collected := drainEvents(drainCtx, evts)
-	cancel()
+	collected := testutil.CollectUntil(evts, 3*time.Second, func(evts []gozmq.Event) bool { return hasType(evts, gozmq.EventBindFailed) })
 	if !hasType(collected, gozmq.EventBindFailed) {
 		t.Errorf("no EventBindFailed; collected=%v", eventTypes(collected))
 	}
@@ -177,6 +174,7 @@ func TestMonitor_BindFailed(t *testing.T) {
 // on. We cap the test to a short window and assert the Reconnects
 // metric was bumped.
 func TestMonitor_ConnectRetryOnRefused(t *testing.T) {
+	t.Parallel()
 	evts := make(chan gozmq.Event, 64)
 	_, s := newTestSocket(t, gozmq.Pair,
 		gozmq.WithMonitor(evts, gozmq.EventAll),
@@ -223,6 +221,7 @@ func eventTypes(events []gozmq.Event) []uint32 {
 // TestMonitor_MaskFiltersEvents verifies WithMonitor's mask argument
 // keeps events off the channel when their Type bit is unset.
 func TestMonitor_MaskFiltersEvents(t *testing.T) {
+	t.Parallel()
 	evts := make(chan gozmq.Event, 16)
 	// Subscribe only to EventListening — no other event should
 	// reach the channel.
@@ -235,10 +234,10 @@ func TestMonitor_MaskFiltersEvents(t *testing.T) {
 		t.Errorf("close: %v", err)
 	}
 
-	// Drain the channel for a short window.
-	drainCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	collected := drainEvents(drainCtx, evts)
-	cancel()
+	// Listening is the only event the mask lets through; Closed must not
+	// follow it, so give the masked-out event a short window to show up.
+	collected := testutil.CollectUntil(evts, 3*time.Second, func(evts []gozmq.Event) bool { return len(evts) > 0 })
+	collected = append(collected, testutil.CollectUntil(evts, 100*time.Millisecond, func([]gozmq.Event) bool { return false })...)
 
 	for _, ev := range collected {
 		if ev.Type != gozmq.EventListening {
@@ -255,6 +254,7 @@ func TestMonitor_MaskFiltersEvents(t *testing.T) {
 // skew could break it on exotic platforms) but catches accidental
 // zero-Time events.
 func TestMonitor_EventTimestampsPopulated(t *testing.T) {
+	t.Parallel()
 	evts := make(chan gozmq.Event, 16)
 	_, s := newTestSocket(t, gozmq.Pair, gozmq.WithMonitor(evts, gozmq.EventAll))
 	if err := s.Bind("tcp://127.0.0.1:0"); err != nil {
@@ -263,10 +263,7 @@ func TestMonitor_EventTimestampsPopulated(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Errorf("close: %v", err)
 	}
-	drainCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	collected := drainEvents(drainCtx, evts)
-	cancel()
-
+	collected := testutil.CollectUntil(evts, 3*time.Second, func(evts []gozmq.Event) bool { return hasType(evts, gozmq.EventClosed) })
 	if len(collected) == 0 {
 		t.Fatal("no events collected")
 	}
@@ -300,6 +297,7 @@ func countType(events []gozmq.Event, t gozmq.EventType) int {
 // success and, when the link drops, one disconnect; a failed handshake is
 // reported on both sides with no success and no attach.
 func TestMonitor_SessionEventsBothSides(t *testing.T) {
+	t.Parallel()
 	const peerEvents = gozmq.EventHandshakeSucceeded | gozmq.EventHandshakeFailedProtocol |
 		gozmq.EventConnected | gozmq.EventDisconnected
 	t.Run("established", func(t *testing.T) {
@@ -309,7 +307,7 @@ func TestMonitor_SessionEventsBothSides(t *testing.T) {
 			[]gozmq.Option{gozmq.WithMonitor(srvEvents, peerEvents)},
 			[]gozmq.Option{gozmq.WithMonitor(cliEvents, peerEvents)},
 		)
-		callCtx := testCtx(t)
+		callCtx := testutil.Ctx(t)
 		require.NoError(t, cli.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("hello"))))
 		m, err := srv.RecvMsg(callCtx)
 		require.NoError(t, err)

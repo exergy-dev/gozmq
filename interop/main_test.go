@@ -17,9 +17,9 @@ import (
 // reactor(s) (`zmq::io_thread_t`, `zmq::reaper_t`), but those are C
 // threads outside the Go runtime and therefore invisible to goleak — no
 // whitelist needed. The only Go goroutines in this package are the ones
-// the tests spawn themselves (Recv fan-outs in push_pull_test.go) and
-// they all join before the test returns. If a future test introduces a
+// the tests spawn themselves (the load-balance fan-out and the linger
+// close/drain) and they all join before the test returns. If a future test introduces a
 // goroutine blocked in a cgocall across the TestMain boundary, add an
 // explicit goleak.IgnoreTopFunction here and document WHICH function and
 // WHY — per the contract in §10.5.
-func TestMain(m *testing.M) { testutil.VerifyTestMain(m) }
+func TestMain(m *testing.M) { testutil.VerifyMain(m) }
