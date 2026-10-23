@@ -64,8 +64,10 @@ type Mech interface {
 	EncodeFrame(flags uint8, plain []byte) (wireFlags uint8, wire []byte, err error)
 
 	// DecodeFrame reverses EncodeFrame. The returned flags are the logical
-	// post-decode frame flags seen by the session layer. Returns
-	// ErrMalformedFrame on MAC failure.
+	// post-decode frame flags seen by the session layer. A mechanism that
+	// authenticates frames must derive them from authenticated data only
+	// (CURVE ignores the outer wire flags, which are not under the MAC, as
+	// libzmq does). Returns ErrMalformedFrame on MAC failure.
 	DecodeFrame(flags uint8, wire []byte) (plainFlags uint8, plain []byte, err error)
 
 	// Metadata returns local properties sent in READY. Must return after

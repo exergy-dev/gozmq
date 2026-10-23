@@ -96,9 +96,16 @@ func (s *Session) exchangeGreeting() error {
 		return fmt.Errorf("gozmq/session: read greeting: %w", err)
 	}
 
-	mech, peerMinor, err := decodeGreeting(buf[:])
+	mech, peerMinor, peerAsServer, err := decodeGreeting(buf[:])
 	if err != nil {
 		return err
+	}
+	// Two servers (both ends WithCurveServer, or both WithPlainAuth) would
+	// each wait for the other's first handshake command until
+	// HandshakeTimeout. Fail at the greeting instead, so the
+	// misconfiguration is reported at once.
+	if peerAsServer && s.cfg.Mech.AsServer() {
+		return fmt.Errorf("gozmq/session: both peers declare the %s server role (as-server=1): %w", mech, zmqerr.ErrMalformedFrame)
 	}
 	// ZMTP requires both peers to use the same mechanism and to close the
 	// connection otherwise, as libzmq does. Leaving it to the mechanism's
@@ -123,8 +130,8 @@ func (s *Session) exchangeGreeting() error {
 //
 // "Message" here is whatever NextHandshake returns — it's not framed
 // in any particular way at the session level; for NULL/PLAIN it's a
-// single READY command body. Writes go through the session's FrameCodec;
-// reads use a ZMTP codec capped at handshakeMaxFrame (see there).
+// single READY command body. Reads and writes use a ZMTP codec capped at
+// handshakeMaxFrame (see there), independent of the data-phase codec.
 func (s *Session) runSecurityHandshake() error {
 	readCodec := zmtp.NewFrameCodec(handshakeMaxFrame)
 	var in []byte
@@ -135,8 +142,11 @@ func (s *Session) runSecurityHandshake() error {
 		// instead of seeing an abrupt close; the writer sends it before
 		// the conn closes.
 		if len(out) > 0 {
+			// Handshake frames are bounded by handshakeMaxFrame on both
+			// sides, independent of the data cap: a small
+			// WithMaxMessageSize must not break a CURVE INITIATE.
 			var frame bytes.Buffer
-			if werr := s.cfg.Codec.WriteFrame(&frame, zmtp.FlagCommand, out); werr != nil {
+			if werr := readCodec.WriteFrame(&frame, zmtp.FlagCommand, out); werr != nil {
 				return fmt.Errorf("gozmq/session: encode handshake frame: %w", werr)
 			}
 			s.hsOut <- frame.Bytes()
@@ -170,7 +180,29 @@ func (s *Session) finalizePeerMetadata() error {
 	if err != nil {
 		return err
 	}
+	if err := validatePeerIdentity(props); err != nil {
+		return err
+	}
 	return validateSocketTypeCompatibility(s.cfg.Mech.Metadata(), props)
+}
+
+// validatePeerIdentity enforces ZMTP 3.1's rules on a peer-advertised
+// Identity: at most 255 bytes and no leading zero byte (that range is
+// reserved for identities the receiver synthesizes, so a peer that used it
+// could collide with, and take over, another peer's ROUTER routing slot).
+// libzmq refuses to set such a ZMQ_ROUTING_ID locally, so a conforming peer
+// never sends one.
+func validatePeerIdentity(props map[string]string) error {
+	id, ok := props["Identity"]
+	switch {
+	case !ok || id == "":
+		return nil
+	case len(id) > 255:
+		return fmt.Errorf("%w: peer Identity is %d bytes, max 255", zmqerr.ErrMalformedFrame, len(id))
+	case id[0] == 0:
+		return fmt.Errorf("%w: peer Identity starts with a zero byte", zmqerr.ErrMalformedFrame)
+	}
+	return nil
 }
 
 func peerMetadataFromMechanism(m security.Mech) (map[string]string, error) {
@@ -270,28 +302,28 @@ func encodeGreeting(mech string, asServer bool) ([]byte, error) {
 }
 
 // decodeGreeting validates a 64-byte greeting block and returns the
-// peer's mechanism and minor version.
-func decodeGreeting(buf []byte) (mech string, minor byte, err error) {
+// peer's mechanism, minor version and as-server flag.
+func decodeGreeting(buf []byte) (mech string, minor byte, asServer bool, err error) {
 	if len(buf) != greetingSize {
-		return "", 0, fmt.Errorf("%w: greeting wrong size %d", zmqerr.ErrMalformedFrame, len(buf))
+		return "", 0, false, fmt.Errorf("%w: greeting wrong size %d", zmqerr.ErrMalformedFrame, len(buf))
 	}
 	if buf[0] != greetingSigPrefix {
-		return "", 0, fmt.Errorf("%w: bad signature prefix 0x%02x", zmqerr.ErrMalformedFrame, buf[0])
+		return "", 0, false, fmt.Errorf("%w: bad signature prefix 0x%02x", zmqerr.ErrMalformedFrame, buf[0])
 	}
 	if buf[9] != greetingSigTerm {
-		return "", 0, fmt.Errorf("%w: bad signature terminator 0x%02x", zmqerr.ErrMalformedFrame, buf[9])
+		return "", 0, false, fmt.Errorf("%w: bad signature terminator 0x%02x", zmqerr.ErrMalformedFrame, buf[9])
 	}
 	major := buf[10]
 	minor = buf[11]
 	if major != greetingVersionMaj {
-		return "", 0, fmt.Errorf("%w: unsupported major 0x%02x", zmqerr.ErrProtocolVersion, major)
+		return "", 0, false, fmt.Errorf("%w: unsupported major 0x%02x", zmqerr.ErrProtocolVersion, major)
 	}
 	// Any 3.x minor is acceptable: ZMTP guarantees backwards-compatible
 	// minors, so we treat minor >= 1 as 3.1 (heartbeats) and never
 	// reject a future 3.x peer.
-	asServer := buf[greetingAsServerOff]
-	if asServer != 0 && asServer != 1 {
-		return "", 0, fmt.Errorf("%w: bad as-server byte 0x%02x", zmqerr.ErrMalformedFrame, asServer)
+	asServerByte := buf[greetingAsServerOff]
+	if asServerByte != 0 && asServerByte != 1 {
+		return "", 0, false, fmt.Errorf("%w: bad as-server byte 0x%02x", zmqerr.ErrMalformedFrame, asServerByte)
 	}
 	// Mechanism: NUL-terminated, NUL-padded, printable ASCII.
 	raw := buf[greetingMechOff : greetingMechOff+greetingMechLen]
@@ -301,11 +333,11 @@ func decodeGreeting(buf []byte) (mech string, minor byte, err error) {
 	}
 	for i := end; i < len(raw); i++ {
 		if raw[i] != 0 {
-			return "", 0, fmt.Errorf("%w: mechanism padding non-zero at %d", zmqerr.ErrMalformedFrame, i)
+			return "", 0, false, fmt.Errorf("%w: mechanism padding non-zero at %d", zmqerr.ErrMalformedFrame, i)
 		}
 	}
 	if i := bytes.IndexFunc(raw[:end], nonPrintableASCII); i >= 0 {
-		return "", 0, fmt.Errorf("%w: mechanism non-printable 0x%02x at %d", zmqerr.ErrMalformedFrame, raw[i], i)
+		return "", 0, false, fmt.Errorf("%w: mechanism non-printable 0x%02x at %d", zmqerr.ErrMalformedFrame, raw[i], i)
 	}
-	return string(raw[:end]), minor, nil
+	return string(raw[:end]), minor, asServerByte == 1, nil
 }

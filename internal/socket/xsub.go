@@ -9,9 +9,9 @@ package socket
 // Subscribe/Unsubscribe API calls — matching libzmq's XSUB contract.
 // The expected outbound wire shape is one frame whose first byte is
 // 0x01 (SUBSCRIBE) or 0x00 (CANCEL) followed by the prefix bytes; any
-// other message shape yields zmqerr.ErrFSMViolation. Incoming
-// SUBSCRIBE/CANCEL messages from peers (typically XPUB sources on the
-// reverse path) are surfaced to the application via Recv.
+// other message shape yields zmqerr.ErrFSMViolation. Inbound
+// SUBSCRIBE/CANCEL commands from peers are dropped by the session (only
+// PUB/XPUB consume them), as in libzmq; data frames reach Recv unchanged.
 //
 // Implementation: the same *SubEngine as NewSubEngine, with the
 // surfacing flag set; Send is re-targeted to interpret the outbound

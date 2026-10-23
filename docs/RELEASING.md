@@ -19,7 +19,7 @@ golangci-lint run                                 # also builds the interop and 
 deadcode -test ./...                              # golang.org/x/tools/cmd/deadcode; must print nothing
 go test -race -count=1 ./...
 go test -tags interop -race ./interop/...         # needs libzmq3-dev
-GOZMQ_SOAK_DURATION=10m go test -tags soak -run TestSoak ./soak/...
+GOZMQ_SOAK_DURATION=10m go test -tags soak -run TestSoak -timeout 60m ./soak/...   # three tests, 10m each
 ```
 
 If the release contains performance work, record the benchmark gate
@@ -43,11 +43,13 @@ done
 ## Public API review
 
 No exported signature anywhere outside `internal/` may name an internal
-type. This must print nothing:
+type. This must print nothing (the error sentinels are `var X = zmqerr.X`
+aliases by design and are excluded):
 
 ```sh
 for p in . ./msg ./transport ./typed ./typed/codecjson ./security ./security/curve; do
-  go doc -all "$p" | grep -E "^(func|type|const|var| ) .*\b(pipe|session|socket|zmqerr|zmtp|bufpool|testutil)\."
+  go doc -all "$p" | grep -E "^\s*(func|type|const|var)?\s*[A-Z][A-Za-z0-9_]*(\(|\[| ).*\b(pipe|session|socket|zmqerr|zmtp|bufpool|testutil)\.[A-Z]" \
+    | grep -v "= zmqerr\."
 done
 ```
 

@@ -72,7 +72,7 @@ func (s *Session) readLoop() {
 
 	// frames accumulates the message in progress; it is built once the
 	// last frame arrives, so a lent message costs no extra allocation.
-	// lent holds its pooled frame buffers (recvAlloc only), which become
+	// lent holds its pooled frame buffers (recvPool only), which become
 	// the message's lease; on an exit mid-message they are left to the
 	// GC, which is always safe. Both slices are reused across messages.
 	var frames, lent [][]byte
@@ -86,7 +86,7 @@ func (s *Session) readLoop() {
 		default:
 		}
 
-		flags, body, err := s.cfg.Codec.ReadFrame(s.reader, scratch, s.recvAlloc)
+		flags, body, err := s.cfg.Codec.ReadFrame(s.reader, scratch, s.recvPool)
 		if err != nil {
 			if !isShutdownErr(err) {
 				s.cfg.Logger.Debug("gozmq/session: reader exit", "err", err)
@@ -133,9 +133,10 @@ func (s *Session) readLoop() {
 			// always does for NULL/PLAIN), so copy the frame out before
 			// the next ReadFrame overwrites it.
 			frame = bytes.Clone(decoded)
-		case s.recvAlloc != nil:
-			// recvAlloc is only set for identity framing, so frame is
-			// body, the pool buffer.
+		case s.recvPool != nil:
+			// recvPool is only set for identity framing, so frame is body,
+			// the pool buffer: the codec guarantees that the body it returns
+			// came from pool.Get even when it was read incrementally.
 			lent = append(lent, body)
 		}
 		frames = append(frames, frame)
@@ -212,6 +213,9 @@ func (s *Session) publishInbound(m *msg.Msg) error {
 // length-prefixed: 1 byte name length, name bytes, then body. We
 // decode just enough to pick PING/PONG/etc. Unknown commands are
 // dropped silently per ZMTP 3.1 §3.
+// maxPingContextLen is the ZMTP 3.1 limit on the opaque PING context.
+const maxPingContextLen = 16
+
 func (s *Session) handleCommand(body []byte) error {
 	if len(body) < 1 {
 		return fmt.Errorf("%w: empty command body", zmqerr.ErrMalformedFrame)
@@ -230,9 +234,15 @@ func (s *Session) handleCommand(body []byte) error {
 		// TTL). The reply is handed to the writer goroutine via cmdCh
 		// (see the cmdCh field doc for why the reader never writes).
 		// enqueueCommand copies ctxBytes, which may alias scratch.
+		// ZMTP 3.1 bounds the context at 16 bytes; a longer one is a
+		// malformed PING and must not be echoed, or an authenticated peer
+		// could queue MaxMessageSize-sized PONGs.
 		var ctxBytes []byte
 		if len(rest) >= 2 {
 			ctxBytes = rest[2:]
+		}
+		if len(ctxBytes) > maxPingContextLen {
+			return fmt.Errorf("%w: PING context %d bytes exceeds %d", zmqerr.ErrMalformedFrame, len(ctxBytes), maxPingContextLen)
 		}
 		s.enqueueCommand("PONG", ctxBytes)
 		return nil

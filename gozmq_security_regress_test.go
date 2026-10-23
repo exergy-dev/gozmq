@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"runtime"
@@ -243,4 +244,171 @@ func TestSecurity_ZAPPlainErrorReportsAuthFailure(t *testing.T) {
 	})
 	require.True(t, hasType(collected, gozmq.EventHandshakeFailedAuth),
 		"ZAP rejection not reported as an auth failure; events=%v", eventTypes(collected))
+}
+
+// rawNullHandshake dials addr and completes a ZMTP 3.<minor> NULL handshake
+// by hand, advertising socketType and meta, returning the connection with the
+// server's READY consumed. It lets a test speak to a gozmq socket as an
+// arbitrary (possibly misbehaving) peer.
+func rawNullHandshake(t *testing.T, addr string, minor byte, socketType string, meta map[string]string) net.Conn {
+	t.Helper()
+	c, err := net.Dial("tcp", addr)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	require.NoError(t, c.SetDeadline(time.Now().Add(10*time.Second)))
+	greet := make([]byte, 64)
+	greet[0], greet[9], greet[10], greet[11] = 0xFF, 0x7F, 3, minor
+	copy(greet[12:], "NULL")
+	_, err = c.Write(greet)
+	require.NoError(t, err)
+	var peerGreet [64]byte
+	_, err = io.ReadFull(c, peerGreet[:])
+	require.NoError(t, err, "server greeting")
+	props := map[string]string{"Socket-Type": socketType}
+	for k, v := range meta {
+		props[k] = v
+	}
+	ready := security.EncodeReady(props)
+	// NULL server is passive: the client sends READY first.
+	_, err = c.Write(append([]byte{0x04, byte(len(ready))}, ready...))
+	require.NoError(t, err)
+	// The server's READY proves the handshake completed on its side.
+	var hdr [2]byte
+	_, err = io.ReadFull(c, hdr[:])
+	require.NoError(t, err, "server READY header")
+	require.Equal(t, byte(0x04), hdr[0], "expected COMMAND frame")
+	_, err = io.ReadFull(c, make([]byte, int(hdr[1])))
+	require.NoError(t, err, "server READY body")
+	return c
+}
+
+// requireConnOpen asserts a short read on c times out (the session is up)
+// rather than returning EOF.
+func requireConnOpen(t *testing.T, c net.Conn, what string) {
+	t.Helper()
+	require.NoError(t, c.SetReadDeadline(time.Now().Add(300*time.Millisecond)))
+	_, err := c.Read(make([]byte, 1))
+	var ne net.Error
+	require.Truef(t, errors.As(err, &ne) && ne.Timeout(), "%s: expected the session to stay open, got %v", what, err)
+}
+
+// requireConnClosed asserts the server closes c: draining it reaches EOF (or
+// a reset) rather than a read timeout. Anything the server flushed before
+// closing, such as a READY queued before the handshake failed, is discarded.
+func requireConnClosed(t *testing.T, c net.Conn, what string) {
+	t.Helper()
+	require.NoError(t, c.SetReadDeadline(time.Now().Add(3*time.Second)))
+	_, err := io.Copy(io.Discard, c)
+	var ne net.Error
+	require.Falsef(t, errors.As(err, &ne) && ne.Timeout(), "%s: server kept the session open", what)
+}
+
+// TestSecurity_PostAuthStalledFrameAllocationBounded: after the handshake a
+// peer that greets as ZMTP 3.0 gets no heartbeat, so a frame header that
+// announces 64 MiB followed by silence used to pin 64 MiB per connection for
+// as long as the connection lived. Allocation must track the bytes actually
+// received. The connections stay open: this bounds memory without inventing
+// an idle disconnect for legitimately quiet 3.0 peers.
+func TestSecurity_PostAuthStalledFrameAllocationBounded(t *testing.T) {
+	_, srv := newTestSocket(t, gozmq.Pull)
+	require.NoError(t, srv.Bind("tcp://127.0.0.1:0"))
+	addr := strings.TrimPrefix(srv.LastEndpoint(), "tcp://")
+
+	const conns = 8
+	cs := make([]net.Conn, 0, conns)
+	for range conns {
+		cs = append(cs, rawNullHandshake(t, addr, 0, "PUSH", nil))
+	}
+
+	var before runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+
+	for _, c := range cs {
+		hdr := make([]byte, 9)
+		hdr[0] = 0x02 // LONG
+		binary.BigEndian.PutUint64(hdr[1:], 64<<20-1)
+		_, err := c.Write(append(hdr, 'x', 'y')) // two body bytes, then silence
+		require.NoError(t, err)
+	}
+	// Let every reader consume its header and park in the body read.
+	time.Sleep(300 * time.Millisecond)
+
+	var after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	growth := int64(after.HeapAlloc) - int64(before.HeapAlloc)
+	t.Logf("HeapAlloc growth for %d stalled 64 MiB frames: %d KiB", conns, growth>>10)
+	require.Less(t, growth, int64(8<<20), "stalled frames allocated attacker-announced sizes")
+
+	for i, c := range cs {
+		requireConnOpen(t, c, fmt.Sprintf("conn %d", i))
+	}
+}
+
+// pingFrame builds a ZMTP PING command frame with the given context.
+func pingFrame(context []byte) []byte {
+	body := append([]byte{4, 'P', 'I', 'N', 'G', 0, 10}, context...)
+	return append([]byte{0x04, byte(len(body))}, body...)
+}
+
+// TestSecurity_PingContextCapped: ZMTP 3.1 limits the PING context to 16
+// bytes. A longer one used to be echoed back verbatim, letting an
+// authenticated peer queue PONGs up to MaxMessageSize each; now it is a
+// protocol error that ends the session.
+func TestSecurity_PingContextCapped(t *testing.T) {
+	_, srv := newTestSocket(t, gozmq.Pull)
+	require.NoError(t, srv.Bind("tcp://127.0.0.1:0"))
+	addr := strings.TrimPrefix(srv.LastEndpoint(), "tcp://")
+
+	ok := rawNullHandshake(t, addr, 1, "PUSH", nil)
+	_, err := ok.Write(pingFrame(make([]byte, 16)))
+	require.NoError(t, err)
+	// The PONG comes back: COMMAND frame, "\x04PONG" + 16 context bytes.
+	require.NoError(t, ok.SetReadDeadline(time.Now().Add(3*time.Second)))
+	pong := make([]byte, 2+5+16)
+	_, err = io.ReadFull(ok, pong)
+	require.NoError(t, err, "PONG for a 16-byte context")
+	require.Equal(t, []byte{0x04, 21, 4, 'P', 'O', 'N', 'G'}, pong[:7])
+
+	bad := rawNullHandshake(t, addr, 1, "PUSH", nil)
+	_, err = bad.Write(pingFrame(make([]byte, 17)))
+	require.NoError(t, err)
+	requireConnClosed(t, bad, "17-byte PING context")
+}
+
+// TestSecurity_PeerIdentityValidated: a peer-advertised Identity must obey
+// ZMTP 3.1 (at most 255 bytes, no leading zero byte). A leading zero would
+// let a peer collide with the identities a ROUTER synthesizes and take over
+// another peer's routing slot.
+func TestSecurity_PeerIdentityValidated(t *testing.T) {
+	_, srv := newTestSocket(t, gozmq.Router)
+	require.NoError(t, srv.Bind("tcp://127.0.0.1:0"))
+	addr := strings.TrimPrefix(srv.LastEndpoint(), "tcp://")
+
+	good := rawNullHandshake(t, addr, 1, "DEALER", map[string]string{"Identity": "peer-a"})
+	requireConnOpen(t, good, "valid identity")
+
+	for name, id := range map[string]string{
+		"leading-zero": "\x00peer",
+		"too-long":     strings.Repeat("x", 256),
+	} {
+		c, err := net.Dial("tcp", addr)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = c.Close() })
+		require.NoError(t, c.SetDeadline(time.Now().Add(10*time.Second)))
+		greet := make([]byte, 64)
+		greet[0], greet[9], greet[10], greet[11] = 0xFF, 0x7F, 3, 1
+		copy(greet[12:], "NULL")
+		_, err = c.Write(greet)
+		require.NoError(t, err)
+		_, err = io.ReadFull(c, make([]byte, 64))
+		require.NoError(t, err, "%s: server greeting", name)
+		ready := security.EncodeReady(map[string]string{"Socket-Type": "DEALER", "Identity": id})
+		hdr := []byte{0x04 | 0x02, 0, 0, 0, 0, 0, 0, 0, 0}
+		binary.BigEndian.PutUint64(hdr[1:], uint64(len(ready)))
+		_, err = c.Write(append(hdr, ready...))
+		require.NoError(t, err)
+		requireConnClosed(t, c, name)
+	}
 }

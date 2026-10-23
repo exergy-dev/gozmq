@@ -64,7 +64,8 @@ jobs:
   soak:
     name: soak (connection churn)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Three soak tests run one after another, each for GOZMQ_SOAK_DURATION.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -73,7 +74,7 @@ jobs:
       - name: Soak
         env:
           GOZMQ_SOAK_DURATION: 10m
-        run: go test -tags soak -run TestSoak -timeout 30m -v ./soak/...
+        run: go test -tags soak -run TestSoak -timeout 60m -v ./soak/...
 
   interop-matrix:
     name: interop (libzmq ${{ matrix.libzmq }})

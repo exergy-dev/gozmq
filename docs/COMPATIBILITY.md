@@ -1,9 +1,10 @@
 # libzmq compatibility
 
-`gozmq` speaks ZMTP 3.1 (negotiating down to 3.0) and is wire-compatible with
-libzmq ≥ 4.2. The [`interop/`](../interop) suite runs gozmq against a real
-libzmq in CI, in both directions, for every socket pattern and security
-mechanism listed below.
+`gozmq` speaks ZMTP 3.1 (negotiating down to 3.0) and targets wire
+compatibility with libzmq ≥ 4.2; it is tested against libzmq 4.3.4. The
+[`interop/`](../interop) suite runs gozmq against a real libzmq in CI, in
+both directions, for every socket pattern over NULL and for the PLAIN,
+CURVE and ZAP combinations listed in [`interop/README.md`](../interop/README.md).
 
 This page is the honest inventory: what is implemented, what is deliberately
 absent, and where behaviour differs from libzmq even when both work.
@@ -80,7 +81,7 @@ but are almost never the right answer — see the
 | `ZMQ_UNSUBSCRIBE` | `Socket.Unsubscribe` |
 | `ZMQ_RECONNECT_IVL` | `WithReconnectInterval` |
 | `ZMQ_RECONNECT_IVL_MAX` | `WithReconnectIntervalMax` (different 0-semantics, see below) |
-| `ZMQ_MAXMSGSIZE` | `WithMaxMessageSize` |
+| `ZMQ_MAXMSGSIZE` | `WithMaxMessageSize` (bounds the whole message, not each frame; see below) |
 | `ZMQ_ROUTER_MANDATORY` | `WithRouterMandatory` |
 | `ZMQ_XPUB_VERBOSE` | `WithXPubVerbose` |
 | `ZMQ_HEARTBEAT_IVL` / `ZMQ_HEARTBEAT_TIMEOUT` | `WithHeartbeat` |
@@ -171,8 +172,17 @@ value silently take each other's replies instead of one failing loudly.
 
 Peers that advertise no identity get one synthesized as libzmq does: five
 bytes, a leading `0` then a per-socket 32-bit counter that starts at a random
-value and skips identities in use. (Earlier gozmq versions used four random
-bytes, which could collide and misroute replies.)
+value and skips identities in use. A peer-advertised identity must follow
+ZMTP 3.1 (1–255 bytes, no leading zero byte) or the handshake fails.
+
+### `MaxMessageSize` bounds the whole message
+
+`ZMQ_MAXMSGSIZE` is a per-frame limit. gozmq's `WithMaxMessageSize` bounds
+the total of all frames of one logical message, on send (a synchronous
+error) and on receive (the session is torn down), so the two sides always
+agree. For CURVE it is a plaintext bound; the 33-byte per-frame overhead is
+allowed for on the wire. A libzmq peer that sends a multipart message whose
+frames are each under the cap but whose total exceeds it is disconnected.
 
 ### `HWM 0` means unbounded
 
@@ -214,11 +224,12 @@ context deadline.
   that authenticates nobody would be a security hazard.
 - STREAM cannot use `inproc://`.
 
-Parity notes: `WithSendHWM`/`WithRecvHWM` apply as given, with 0 meaning
-unlimited (earlier gozmq versions turned 0 into 1024); `Close` honours
-`WithLinger`, flushing queued outbound data before it closes each connection
-(it used to drop it); and `Disconnect` closes the connection a `Connect`
-made (it used to fail).
+- `WithMaxMessageSize` and the reconnect options are accepted but have no
+  effect: raw sessions have no frame codec and never reconnect.
+
+`WithSendHWM`/`WithRecvHWM` apply as given, with 0 meaning unlimited;
+`Close` honours `WithLinger`, flushing queued outbound data before it closes
+each connection; and `Disconnect` closes the connection a `Connect` made.
 
 ### inproc
 
@@ -231,11 +242,10 @@ A socket configured with PLAIN, CURVE, or a `WithSecurityMech` mechanism
 cannot use inproc: its `Bind` or `Connect` on `inproc://` fails with
 `ErrEndpointInvalid`, rather than silently running unauthenticated.
 
-The rest matches libzmq, and is listed because earlier gozmq versions
-differed:
+The rest matches libzmq:
 
 - A `Connect` before the `Bind` waits with no time limit, until the `Bind`,
-  a `Disconnect` or `Close`. (It used to give up after 500 ms and retry.)
+  a `Disconnect` or `Close`.
 - Each direction queues up to the sender's send HWM plus the receiver's
   recv HWM, unlimited if either is 0.
 - Both sides see each other's `WithIdentity`, so ROUTER↔ROUTER can address
@@ -259,22 +269,22 @@ to the receive HWM.
 XSUB delivers what its publishers send as data and never turns their
 SUBSCRIBE/CANCEL commands into messages; libzmq does the same, and
 conforming publishers never send them. Data that starts with `0x00` or
-`0x01` reaches SUB/XSUB applications unchanged. Earlier gozmq versions
-surfaced such commands on XSUB.
+`0x01` reaches SUB/XSUB applications unchanged.
 
 ### CURVE commands in the `MESSAGE` flags
 
-This matches libzmq and is noted because earlier gozmq releases did not. Once
-the CURVE handshake is done, libzmq boxes every frame, commands included, in a
-`MESSAGE` sent with outer flags `0x00`; `MORE` (`0x01`) and `COMMAND` (`0x02`)
-travel only in the encrypted inner flags byte. gozmq now does the same, which
-is what makes heartbeats (on by default) work over CURVE against libzmq.
+This matches libzmq. Once the CURVE handshake is done, libzmq boxes every
+frame, commands included, in a `MESSAGE` sent with outer flags `0x00`;
+`MORE` (`0x01`) and `COMMAND` (`0x02`) travel only in the encrypted inner
+flags byte. gozmq does the same, which is what makes heartbeats (on by
+default) work over CURVE against libzmq. The outer wire flags of a
+`MESSAGE` are not authenticated and are ignored on receipt, as libzmq does.
 
-gozmq still accepts commands sent the old way (outer `COMMAND` flag), so a
-new gozmq understands an old one, but **an older gozmq rejects the new
-encoding** and tears the session down at the first PING. Upgrade both ends of
-a gozmq↔gozmq CURVE link together, or disable heartbeats
-(`WithHeartbeat(0, 0)`) on both until you can.
+CurveZMQ, as libzmq implements it, tolerates gaps in the per-direction nonce
+counter (only replays and reordering are rejected), so an on-path attacker
+can delete whole frames from a CURVE stream undetected. gozmq matches that
+behaviour; applications that need to detect loss must sequence their own
+messages.
 
 ### CURVE nonce exhaustion
 

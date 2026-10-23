@@ -5,8 +5,8 @@ is mostly about not breaking interoperability — the rest is ordinary Go.
 
 ## Getting set up
 
-Go 1.22 or newer. Everything except the interop harness is pure Go with no
-external dependencies:
+Go 1.25 or newer. Everything except the interop harness is pure Go; the only
+non-test dependency is golang.org/x/crypto (CURVE):
 
 ```sh
 git clone https://github.com/exergy-dev/gozmq
@@ -45,7 +45,7 @@ go test -tags interop -race ./interop/...        # if you touched the wire
 ```
 
 `deadcode` is `go install golang.org/x/tools/cmd/deadcode@latest`. CI also
-runs the tests on Go 1.22 (the `go.mod` minimum), enforces an 80% coverage
+runs the tests on Go 1.25 (the `go.mod` minimum), enforces an 80% coverage
 floor on the library packages, cross-builds with `CGO_ENABLED=0`, and runs
 every fuzz target briefly; see `.github/workflows/ci.yml`.
 
@@ -90,9 +90,11 @@ and B/op must stay within 5%; re-run a flagged benchmark with
 `perf/README.md`. Do **not** benchmark with `-race`; it multiplies
 synchronisation cost by roughly 5× and makes the numbers meaningless.
 
-**Goroutine leaks fail the build.** Every package's `TestMain` calls
-`testutil.VerifyTestMain`, which runs goleak. If a new goroutine can outlive
-`Socket.Close`, tests will say so.
+**Goroutine leaks fail the build.** The packages that start goroutines
+(root, `internal/pipe`, `internal/session`, `internal/socket`,
+`internal/zmtp`, `security`, `security/curve`, `transport`, `interop`,
+`perf`) run goleak from `TestMain`, through `testutil.VerifyTestMain` or
+directly. If a new goroutine can outlive `Socket.Close`, tests will say so.
 
 **Long-horizon changes want a soak run.** If you touch teardown, reconnect,
 or anything that allocates per connection:

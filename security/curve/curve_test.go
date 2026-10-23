@@ -191,16 +191,22 @@ func TestCurveMessageCommandFlag(t *testing.T) {
 	}
 }
 
-// TestCurveMessageLegacyOuterCommand keeps older gozmq peers working: they
-// sent commands with the outer COMMAND flag and inner flags 0.
-func TestCurveMessageLegacyOuterCommand(t *testing.T) {
+// TestCurveMessageOuterFlagsIgnored: the outer wire flags of a MESSAGE are
+// not authenticated, so they must not change how the plaintext is handled.
+// Only the encrypted inner flags byte decides MORE and COMMAND, as in
+// libzmq. An on-path attacker flipping the outer COMMAND bit would
+// otherwise have a data frame consumed as a command.
+func TestCurveMessageOuterFlagsIgnored(t *testing.T) {
 	c, s := runHandshake(t)
 	client, server := c.(*curveMech), s.(*curveMech)
-	wire := sealMessage(client, append([]byte{0x00}, "\x04PING\x00\x0a"...))
-	gotFlags, got, err := server.DecodeFrame(zmtp.FlagCommand, wire)
-	require.NoError(t, err, "DecodeFrame")
-	require.Equal(t, zmtp.FlagCommand, gotFlags, "decoded flags")
-	require.Equal(t, []byte("\x04PING\x00\x0a"), got, "decoded body")
+	payload := []byte("\x04PING\x00\x0a")
+	for _, outer := range []uint8{zmtp.FlagCommand, zmtp.FlagMore, zmtp.FlagCommand | zmtp.FlagMore} {
+		wire := sealMessage(client, append([]byte{0x00}, payload...))
+		gotFlags, got, err := server.DecodeFrame(outer, wire)
+		require.NoError(t, err, "DecodeFrame outer=%#x", outer)
+		require.Zero(t, gotFlags, "outer flags %#x must not leak into decoded flags", outer)
+		require.Equal(t, payload, got, "decoded body")
+	}
 }
 
 // TestCurveMessageUnknownInnerFlagRejected: inner bits other than MORE and

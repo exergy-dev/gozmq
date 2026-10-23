@@ -3,7 +3,8 @@ package gozmq
 import "time"
 
 // EventType classifies lifecycle events emitted on a socket's monitor channel.
-// The value set matches the ZMTP monitor spec; new kinds may be appended, so
+// The kinds mirror libzmq's ZMQ_EVENT_* set, but the numeric values are
+// gozmq's own and are not the libzmq constants; new kinds may be appended, so
 // consumers should handle unknown values gracefully. EventType is a bitmask
 // so consumers can subscribe to a subset of event kinds via [WithMonitor]
 // or [Socket.Monitor].
@@ -97,8 +98,9 @@ const (
 )
 
 // Event is a single lifecycle notification delivered on a monitor channel
-// registered via [WithMonitor] or [Socket.Monitor]. All fields are
-// populated for every event.
+// registered via [WithMonitor] or [Socket.Monitor]. Type, Endpoint and Time
+// are set for every event; Reason only where noted below. Never close a
+// monitor channel (see [Socket.Monitor]).
 type Event struct {
 	// Type is the event kind. Consumers should treat unknown values
 	// defensively because new kinds may be added in minor versions.
@@ -114,11 +116,11 @@ type Event struct {
 	// Time is the wall-clock timestamp at which the event was emitted.
 	Time time.Time
 
-	// Reason is a machine-readable code or error string explaining
-	// failure events (EventBindFailed, EventAcceptFailed,
-	// EventHandshakeFailed*, EventDisconnected when caused by an error,
-	// EventConnectDelayed/Retried where it carries the pending backoff).
-	// Empty for unambiguous success events such as EventConnected,
-	// EventListening, and EventHandshakeSucceeded.
+	// Reason is an error string explaining failure events (EventBindFailed,
+	// EventAcceptFailed, EventHandshakeFailed*) or the pending backoff for
+	// EventConnectDelayed/Retried. It is empty for EventDisconnected, even
+	// when the session was torn down for a protocol error: that cause is
+	// logged through [WithLogger]. Empty for success events such as
+	// EventConnected, EventListening, and EventHandshakeSucceeded.
 	Reason string
 }

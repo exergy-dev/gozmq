@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sync"
 
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
@@ -48,7 +49,7 @@ func NewFrameCodec(maxBody int64) FrameCodec {
 }
 
 // ReadFrame implements FrameCodec.
-func (c *frameCodec) ReadFrame(r io.Reader, dst []byte, alloc func(n int) []byte) (uint8, []byte, error) {
+func (c *frameCodec) ReadFrame(r io.Reader, dst []byte, pool BodyPool) (uint8, []byte, error) {
 	var hdr [1]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		// Surface EOF/UnexpectedEOF unwrapped so callers can use errors.Is on
@@ -92,7 +93,16 @@ func (c *frameCodec) ReadFrame(r io.Reader, dst []byte, alloc func(n int) []byte
 	}
 
 	n := int(length)
-	body := reuseOrAllocate(dst, n, alloc)
+	if cap(dst) < n && n > incrementalBodyThreshold {
+		// Do not trust a large length header: a peer that announces a
+		// huge frame and then stalls must not pin maxBody per connection.
+		body, err := readBodyIncremental(r, n, pool)
+		if err != nil {
+			return flags, nil, fmt.Errorf("gozmq/zmtp: read body (%d bytes): %w", n, wrapEOF(err))
+		}
+		return flags, body, nil
+	}
+	body := reuseOrAllocate(dst, n, pool)
 	if n > 0 {
 		if _, err := io.ReadFull(r, body); err != nil {
 			return flags, nil, fmt.Errorf("gozmq/zmtp: read body (%d bytes): %w", n, wrapEOF(err))
@@ -100,6 +110,82 @@ func (c *frameCodec) ReadFrame(r io.Reader, dst []byte, alloc func(n int) []byte
 	}
 	return flags, body, nil
 }
+
+// incrementalBodyThreshold bounds what ReadFrame allocates from a frame's
+// length header alone. Longer bodies go through readBodyIncremental, so a
+// peer that announces a huge frame and stalls pins at most
+// (incrementalGrowth+1)*received + incrementalBodyThreshold bytes (the
+// buffer just filled plus the larger one it is copied into), not maxBody.
+// 128 KiB keeps a 64 KiB CURVE frame (65,569 wire bytes) on the single-read
+// path, and is below what the kernel already spends on one TCP socket.
+const incrementalBodyThreshold = 128 << 10
+
+// incrementalGrowth is the buffer growth factor in readBodyIncremental and
+// therefore the memory amplification bound for a partially received body: a
+// peer must deliver at least 1/incrementalGrowth of a body before the full
+// body is allocated. 8 keeps every frame up to 1 MiB to one intermediate
+// buffer and one copy of incrementalBodyThreshold bytes; 2 would halve the
+// bound but copy almost a full body's worth on the way.
+const incrementalGrowth = 8
+
+// readBodyIncremental reads an n-byte body (n > incrementalBodyThreshold)
+// without trusting n up front. It reads into a threshold-sized buffer, grows
+// it by incrementalGrowth each time it fills, and switches to the final
+// n-byte buffer only once at least n/incrementalGrowth bytes have arrived.
+// Every buffer comes from pool when one is given, and intermediates go back
+// through Put, so the pooled zero-copy delivery costs no allocation here; the
+// returned body is always a pool.Get buffer, as the contract requires. A
+// frame that completes pays one copy per intermediate (under n/incrementalGrowth
+// bytes in total).
+func readBodyIncremental(r io.Reader, n int, pool BodyPool) ([]byte, error) {
+	// Intermediates never reach the caller, so without a caller pool they
+	// are recycled through the codec's own; the final buffer is the
+	// caller's (pool.Get, or a fresh make it owns outright).
+	scratch := pool
+	if scratch == nil {
+		scratch = intermediates
+	}
+	buf := scratch.Get(incrementalBodyThreshold)
+	filled := 0
+	for {
+		if _, err := io.ReadFull(r, buf[filled:]); err != nil {
+			scratch.Put(buf)
+			return nil, err
+		}
+		filled = len(buf)
+		if filled == n {
+			return buf, nil
+		}
+		var next []byte
+		switch {
+		case filled >= n/incrementalGrowth:
+			next = reuseOrAllocate(nil, n, pool)
+		default:
+			// filled < n/incrementalGrowth, so this cannot overflow and
+			// stays below n.
+			next = scratch.Get(filled * incrementalGrowth)
+		}
+		copy(next, buf)
+		scratch.Put(buf)
+		buf = next
+	}
+}
+
+// intermediates recycles readBodyIncremental's intermediate buffers for
+// callers without a BodyPool. A failed read leaves nothing behind: every
+// buffer taken is Put back before returning an error.
+var intermediates BodyPool = &intermediatePool{}
+
+type intermediatePool struct{ p sync.Pool }
+
+func (ip *intermediatePool) Get(n int) []byte {
+	if b, ok := ip.p.Get().(*[]byte); ok && cap(*b) >= n {
+		return (*b)[:n]
+	}
+	return make([]byte, n)
+}
+
+func (ip *intermediatePool) Put(b []byte) { ip.p.Put(&b) }
 
 // WriteFrame implements FrameCodec. It always emits the smallest legal
 // length encoding: bodies <256 bytes use the short form unless the LONG flag
@@ -169,14 +255,14 @@ func (c *frameCodec) validateWriteFrame(flags uint8, body []byte) (useLong bool,
 }
 
 // reuseOrAllocate returns dst[:n] when dst has the capacity, otherwise a
-// buffer from alloc (make when alloc is nil) that the caller owns outright
+// buffer from pool (make when pool is nil) that the caller owns outright
 // (the session reader hands it to the *Msg without copying).
-func reuseOrAllocate(dst []byte, n int, alloc func(int) []byte) []byte {
+func reuseOrAllocate(dst []byte, n int, pool BodyPool) []byte {
 	if cap(dst) >= n {
 		return dst[:n]
 	}
-	if alloc != nil {
-		return alloc(n)
+	if pool != nil {
+		return pool.Get(n)
 	}
 	return make([]byte, n)
 }

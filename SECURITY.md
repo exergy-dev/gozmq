@@ -82,8 +82,26 @@ For deployments on untrusted networks:
   `tls+tcp://`.
 - Compare PLAIN credentials in constant time — `crypto/subtle.ConstantTimeCompare`,
   not `==`. The callback you pass to `WithPlainAuth` is your code.
-- Keep `WithMaxMessageSize` at a finite value. Setting it to 0 removes the
-  ceiling and lets a hostile sender force unbounded allocation.
+- Keep `WithMaxMessageSize` at a finite value. It bounds what a completed
+  message may occupy; inbound frames are allocated as their bytes arrive, so
+  a peer that announces a huge frame and stalls pins at most nine times the
+  bytes it actually sent plus 128 KiB, not the cap. Setting it to 0 removes
+  the ceiling for completed messages.
+- Limit concurrent connections to listeners on untrusted networks at the OS
+  or firewall level. gozmq accepts without bound; each connection costs two
+  goroutines and roughly 100 KiB of buffers whether or not it authenticates.
+- **CURVE authenticates key possession, not identity.** Without a
+  `WithZAPHandler`, a CURVE server accepts every client that completes the
+  handshake. Install a ZAP handler and check the client public key it is
+  given to decide which clients are allowed.
+- ZAP handlers and `WithPlainAuth` callbacks run on the connection's
+  handshake goroutine with no timeout and no panic recovery. Keep them quick,
+  never call `Close` from them, and treat a panic there as a process crash.
+- ROUTER hands an identity over to the newest peer that claims it (see
+  `docs/COMPATIBILITY.md`). Any peer that can complete the handshake can
+  therefore take over another peer's routing slot by presenting its
+  identity; with NULL that is anyone who can connect. Use CURVE or PLAIN
+  with ZAP where identities must be trusted, and keep identities unique.
 - Keep heartbeats enabled on long-lived connections; they are the only
   reliable way to detect a half-open TCP connection.
 - Keep `WithSendHWM` / `WithRecvHWM` non-zero. 0 means unbounded, so a peer

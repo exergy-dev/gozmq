@@ -850,6 +850,12 @@ func (m *curveMech) parseReady(body []byte) error {
 // writer goroutine is the sole EncodeFrame caller and the reader goroutine
 // the sole DecodeFrame caller. EncodeFrame relies on this to reuse the
 // per-mechanism encScratch buffer; the nonce counters assume it too.
+// FrameOverhead reports the bytes a MESSAGE adds to a plaintext frame on
+// the wire: the command name, the nonce counter, the inner flags byte and
+// the box tag. The session sizes its frame codec by it so WithMaxMessageSize
+// bounds the plaintext a caller sees, not the ciphertext.
+func (m *curveMech) FrameOverhead() int { return 1 + len(cmdMessage) + 8 + 1 + boxOverhead }
+
 func (m *curveMech) EncodeFrame(flags uint8, plain []byte) (uint8, []byte, error) {
 	if m.state != stateDone {
 		return 0, nil, fmt.Errorf("gozmq/security/curve: EncodeFrame before handshake: %w", zmqerr.ErrFSMViolation)
@@ -938,13 +944,15 @@ func (m *curveMech) DecodeFrame(flags uint8, wire []byte) (uint8, []byte, error)
 	if inner&^(innerFlagMore|innerFlagCommand) != 0 {
 		return 0, nil, fmt.Errorf("gozmq/security/curve: MESSAGE inner flags %#x invalid: %w", inner, zmqerr.ErrMalformedFrame)
 	}
-	// Strip the 1-byte inner flags prefix and restore MORE and COMMAND to
-	// the logical flags seen by the session layer. An outer COMMAND flag is
-	// passed through rather than cleared: earlier gozmq releases sent
-	// commands that way, and the session still recognises them as such.
+	// Strip the 1-byte inner flags prefix and derive MORE and COMMAND for
+	// the session layer from it alone. The outer wire flags are not covered
+	// by the MAC, so they must not influence how authenticated data is
+	// handled: an on-path attacker flipping the outer COMMAND bit would
+	// otherwise turn a data frame into a command. libzmq likewise ignores
+	// the outer flags of a MESSAGE.
 	// plain is a fresh slice produced by box.Open; slicing it (rather than
 	// make+copy) is safe — the backing array has no other referents.
-	out := flags &^ zmtp.FlagMore
+	var out uint8
 	if inner&innerFlagMore != 0 {
 		out |= zmtp.FlagMore
 	}

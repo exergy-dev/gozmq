@@ -16,7 +16,7 @@ import (
 // interrupt the linger drain. Callers using WithLinger(-1) (infinite) should
 // use CloseCtx with a cancellable context instead.
 //
-// Teardown order (LINGER drain, design §6.4):
+// Teardown order (LINGER drain, design §4.7):
 //  1. Quiesce reconnectors — stop re-dialing, but KEEP current sessions
 //     alive so their outbound queues can drain to the wire.
 //  2. Close listeners — no new accepts.
@@ -47,6 +47,12 @@ func (s *Socket) Close() error {
 // runs — callers observe a fully-closed Socket on return. Idempotent:
 // a second call returns nil.
 func (s *Socket) CloseCtx(ctx context.Context) error {
+	if ctx == nil {
+		// A nil ctx must not panic half-way through teardown (after closed
+		// is set but before the sessions are stopped), which would leak
+		// every connection with no way to close the socket again.
+		ctx = context.Background()
+	}
 	if !s.closed.CompareAndSwap(false, true) {
 		return nil
 	}

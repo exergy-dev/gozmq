@@ -224,8 +224,10 @@
 // use, gozmq hands the identity over: replies addressed to it go to the new
 // peer from then on. The old connection is not closed; it stays attached
 // until it disconnects, and messages it still sends arrive under the same
-// identity. This is libzmq's ZMQ_ROUTER_HANDOVER=1 behaviour rather than its
-// default, which rejects the new peer and keeps the old pipe bound. Handover is the better default in practice — a client reconnecting
+// identity. libzmq's default (ZMQ_ROUTER_HANDOVER=0) rejects the new peer
+// and keeps the old pipe bound; its HANDOVER=1 terminates the old pipe. gozmq
+// does neither exactly (see docs/COMPATIBILITY.md). Handover is the better
+// default in practice — a client reconnecting
 // before the server's TCP stack has noticed the old connection died would
 // otherwise be stranded until the stale pipe times out — but it does mean
 // two clients that pick the same [WithIdentity] value will silently evict

@@ -19,7 +19,7 @@ jobs:
         # The go.mod minimum plus the two Go releases upstream supports.
         # Dropping the minimum from this matrix is how a library silently
         # stops building for the version its go.mod advertises.
-        go: ['1.22.x', 'oldstable', 'stable']
+        go: ['1.25.x', 'oldstable', 'stable']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -46,9 +46,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
-      - uses: golangci/golangci-lint-action@v6
+      # Action v7+ is required for a v2 .golangci.yml; pin the linter to the
+      # version the release was gated with.
+      - uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
+          version: v2.15.0
 
   race:
     name: race (whole module)

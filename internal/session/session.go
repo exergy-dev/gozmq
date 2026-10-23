@@ -116,9 +116,9 @@ type Session struct {
 	decode frameDecoder
 	// directHeader enables the writer's header-only fast path (see New).
 	directHeader zmtp.FrameHeaderAppender
-	// recvAlloc, when non-nil, supplies the reader's large frame buffers
+	// recvPool, when non-nil, supplies the reader's large frame buffers
 	// from the pool (see Config.RecvBufferPool).
-	recvAlloc func(int) []byte
+	recvPool zmtp.BodyPool
 
 	// hsOut carries the greeting and encoded handshake frames from the
 	// reader to the writer, which writes them while the reader reads, so a
@@ -218,6 +218,12 @@ func monoNow() int64 {
 	return int64(time.Since(monoEpoch))
 }
 
+// recvBufPool adapts the package-level bufpool to zmtp.BodyPool.
+type recvBufPool struct{}
+
+func (recvBufPool) Get(n int) []byte { return bufpool.Get(n) }
+func (recvBufPool) Put(b []byte)     { bufpool.Put(b) }
+
 type frameEncoder func(flags uint8, body []byte) (uint8, []byte, error)
 type frameDecoder func(flags uint8, body []byte) (uint8, []byte, error)
 
@@ -295,9 +301,9 @@ func New(cfg Config) *Session {
 			directHeader = h
 		}
 	}
-	// recvAlloc hands the reader pooled frame buffers (see Config.RecvBufferPool).
+	// recvPool hands the reader pooled frame buffers (see Config.RecvBufferPool).
 	if cfg.RecvBufferPool && identityMech {
-		s.recvAlloc = bufpool.Get
+		s.recvPool = recvBufPool{}
 	}
 	s.reader = bufio.NewReaderSize(cfg.Conn, sessionReadBufferSize)
 	s.encode, s.decode, s.directHeader = encode, decode, directHeader
