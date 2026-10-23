@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -50,7 +51,7 @@ func TestRaw_InboundChunking(t *testing.T) {
 		_ = connB.Close()
 	}()
 
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	var got bytes.Buffer
 	for got.Len() < len(payload) {
 		m, err := rs.pipe.Recv(ctx)
@@ -69,7 +70,7 @@ func TestRaw_InboundChunkSized(t *testing.T) {
 	defer connB.Close()
 	rs := startRaw(t, connA, 0)
 
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	var chunks []*msg.Msg
 	for _, b := range []string{"a", "b"} {
 		_, err := connB.Write([]byte(b))
@@ -92,7 +93,7 @@ func TestRaw_OutboundVerbatim(t *testing.T) {
 	rs := startRaw(t, connA, 0)
 
 	const body = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
-	require.NoError(t, rs.pipe.Send(testCtx(t, 2*time.Second), msg.FromBytes([]byte(body))))
+	require.NoError(t, rs.pipe.Send(testutil.Ctx(t, 2*time.Second), msg.FromBytes([]byte(body))))
 	buf := make([]byte, len(body))
 	_, err := io.ReadFull(connB, buf)
 	require.NoError(t, err)
@@ -106,7 +107,7 @@ func TestRaw_EmptyBodyCloses(t *testing.T) {
 	connA, connB := newFakeConnPair()
 	rs := startRaw(t, connA, 0)
 
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	require.NoError(t, rs.pipe.Send(ctx, msg.FromBytes([]byte("last-packet"))))
 	require.NoError(t, rs.pipe.Send(ctx, msg.FromBytes(nil)))
 
@@ -124,7 +125,7 @@ func TestRaw_PeerEOFClosesPipe(t *testing.T) {
 	rs := startRaw(t, connA, 0)
 	_ = connB.Close()
 
-	_, err := rs.pipe.Recv(testCtx(t, 2*time.Second))
+	_, err := rs.pipe.Recv(testutil.Ctx(t, 2*time.Second))
 	require.ErrorIs(t, err, io.EOF)
 	waitClosed(t, rs.Done(), 2*time.Second, "session did not end after peer EOF")
 }
@@ -137,7 +138,7 @@ func TestRaw_DrainFlushesThenKeepsConn(t *testing.T) {
 	rs := startRaw(t, connA, 0)
 
 	const n = 50
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	var want bytes.Buffer
 	for i := range n {
 		b := []byte{byte('a' + i%26)}

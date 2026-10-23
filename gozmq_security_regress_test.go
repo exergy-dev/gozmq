@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/security"
 )
 
@@ -75,7 +76,7 @@ func TestSecurity_CustomMechNotBypassed(t *testing.T) {
 		opt := gozmq.WithSecurityMech(newXORMech(&frames))
 		_, srv, cli := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "tcp://127.0.0.1:0",
 			[]gozmq.Option{opt}, []gozmq.Option{opt})
-		ctx := testCtx(t)
+		ctx := testutil.Ctx(t)
 		require.NoError(t, cli.SendBytes(ctx, []byte("hello")))
 		got, err := srv.RecvBytes(ctx)
 		require.NoError(t, err)
@@ -110,7 +111,7 @@ func TestSecurity_PlainRoleFollowsOption(t *testing.T) {
 				gotUser.Store(u)
 				return u == "alice" && p == "pw"
 			})})
-		ctx := testCtx(t)
+		ctx := testutil.Ctx(t)
 		require.NoError(t, cliSide.SendBytes(ctx, []byte("hi")))
 		got, err := authSide.RecvBytes(ctx)
 		require.NoError(t, err)
@@ -246,42 +247,6 @@ func TestSecurity_ZAPPlainErrorReportsAuthFailure(t *testing.T) {
 		"ZAP rejection not reported as an auth failure; events=%v", eventTypes(collected))
 }
 
-// rawNullHandshake dials addr and completes a ZMTP 3.<minor> NULL handshake
-// by hand, advertising socketType and meta, returning the connection with the
-// server's READY consumed. It lets a test speak to a gozmq socket as an
-// arbitrary (possibly misbehaving) peer.
-func rawNullHandshake(t *testing.T, addr string, minor byte, socketType string, meta map[string]string) net.Conn {
-	t.Helper()
-	c, err := net.Dial("tcp", addr)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = c.Close() })
-	require.NoError(t, c.SetDeadline(time.Now().Add(10*time.Second)))
-	greet := make([]byte, 64)
-	greet[0], greet[9], greet[10], greet[11] = 0xFF, 0x7F, 3, minor
-	copy(greet[12:], "NULL")
-	_, err = c.Write(greet)
-	require.NoError(t, err)
-	var peerGreet [64]byte
-	_, err = io.ReadFull(c, peerGreet[:])
-	require.NoError(t, err, "server greeting")
-	props := map[string]string{"Socket-Type": socketType}
-	for k, v := range meta {
-		props[k] = v
-	}
-	ready := security.EncodeReady(props)
-	// NULL server is passive: the client sends READY first.
-	_, err = c.Write(append([]byte{0x04, byte(len(ready))}, ready...))
-	require.NoError(t, err)
-	// The server's READY proves the handshake completed on its side.
-	var hdr [2]byte
-	_, err = io.ReadFull(c, hdr[:])
-	require.NoError(t, err, "server READY header")
-	require.Equal(t, byte(0x04), hdr[0], "expected COMMAND frame")
-	_, err = io.ReadFull(c, make([]byte, int(hdr[1])))
-	require.NoError(t, err, "server READY body")
-	return c
-}
-
 // requireConnOpen asserts a short read on c times out (the session is up)
 // rather than returning EOF.
 func requireConnOpen(t *testing.T, c net.Conn, what string) {
@@ -317,7 +282,7 @@ func TestSecurity_PostAuthStalledFrameAllocationBounded(t *testing.T) {
 	const conns = 8
 	cs := make([]net.Conn, 0, conns)
 	for range conns {
-		cs = append(cs, rawNullHandshake(t, addr, 0, "PUSH", nil))
+		cs = append(cs, testutil.RawNullHandshake(t, addr, 0, "PUSH", nil))
 	}
 
 	var before runtime.MemStats
@@ -361,7 +326,7 @@ func TestSecurity_PingContextCapped(t *testing.T) {
 	require.NoError(t, srv.Bind("tcp://127.0.0.1:0"))
 	addr := strings.TrimPrefix(srv.LastEndpoint(), "tcp://")
 
-	ok := rawNullHandshake(t, addr, 1, "PUSH", nil)
+	ok := testutil.RawNullHandshake(t, addr, 1, "PUSH", nil)
 	_, err := ok.Write(pingFrame(make([]byte, 16)))
 	require.NoError(t, err)
 	// The PONG comes back: COMMAND frame, "\x04PONG" + 16 context bytes.
@@ -371,7 +336,7 @@ func TestSecurity_PingContextCapped(t *testing.T) {
 	require.NoError(t, err, "PONG for a 16-byte context")
 	require.Equal(t, []byte{0x04, 21, 4, 'P', 'O', 'N', 'G'}, pong[:7])
 
-	bad := rawNullHandshake(t, addr, 1, "PUSH", nil)
+	bad := testutil.RawNullHandshake(t, addr, 1, "PUSH", nil)
 	_, err = bad.Write(pingFrame(make([]byte, 17)))
 	require.NoError(t, err)
 	requireConnClosed(t, bad, "17-byte PING context")
@@ -386,7 +351,7 @@ func TestSecurity_PeerIdentityValidated(t *testing.T) {
 	require.NoError(t, srv.Bind("tcp://127.0.0.1:0"))
 	addr := strings.TrimPrefix(srv.LastEndpoint(), "tcp://")
 
-	good := rawNullHandshake(t, addr, 1, "DEALER", map[string]string{"Identity": "peer-a"})
+	good := testutil.RawNullHandshake(t, addr, 1, "DEALER", map[string]string{"Identity": "peer-a"})
 	requireConnOpen(t, good, "valid identity")
 
 	for name, id := range map[string]string{
@@ -397,9 +362,7 @@ func TestSecurity_PeerIdentityValidated(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = c.Close() })
 		require.NoError(t, c.SetDeadline(time.Now().Add(10*time.Second)))
-		greet := make([]byte, 64)
-		greet[0], greet[9], greet[10], greet[11] = 0xFF, 0x7F, 3, 1
-		copy(greet[12:], "NULL")
+		greet := testutil.Greeting("NULL", 1)
 		_, err = c.Write(greet)
 		require.NoError(t, err)
 		_, err = io.ReadFull(c, make([]byte, 64))

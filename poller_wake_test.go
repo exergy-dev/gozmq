@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // TestPoller_WakesOnInprocDelivery drives inproc senders into HWM (both
@@ -74,7 +75,7 @@ func TestPoller_WakesOnInprocDelivery(t *testing.T) {
 func TestPoller_RepSubXSub(t *testing.T) {
 	t.Run("rep", func(t *testing.T) {
 		_, rep, req := newSocketPairTypes(t, gozmq.Rep, gozmq.Req, "inproc://poller-rep", nil, nil)
-		ctx := testCtx(t)
+		ctx := testutil.Ctx(t)
 		pIn := gozmq.NewPoller()
 		pIn.Add(rep, gozmq.PollIn|gozmq.PollOut)
 		go func() { _ = req.SendMsg(ctx, gozmq.NewMsgFromBytes([]byte("q"))) }()
@@ -98,7 +99,7 @@ func TestPoller_RepSubXSub(t *testing.T) {
 	})
 	t.Run("xsub", func(t *testing.T) {
 		_, xpub, xsub := newSocketPairTypes(t, gozmq.XPub, gozmq.XSub, "inproc://poller-xsub", nil, nil)
-		ctx := testCtx(t)
+		ctx := testutil.Ctx(t)
 		pOut := gozmq.NewPoller()
 		pOut.Add(xsub, gozmq.PollOut)
 		require.Equal(t, gozmq.PollOut, waitPoll(t, pOut, 2*time.Second)[0].Events)
@@ -121,7 +122,7 @@ func TestPoller_RepSubXSub(t *testing.T) {
 // Nothing arrives at that point, so only REP's own state change can wake it.
 func TestPoller_RepPollInAfterSend(t *testing.T) {
 	_, rep, dealer := newSocketPairTypes(t, gozmq.Rep, gozmq.Dealer, "inproc://poller-rep-send", nil, nil)
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	for _, q := range []string{"q1", "q2"} {
 		require.NoError(t, dealer.SendMsg(ctx, gozmq.NewMsgFromFrames([]byte{}, []byte(q))))
 	}
@@ -176,7 +177,7 @@ func TestPoller_MixedSocketsWakeEach(t *testing.T) {
 	p.Add(pull, gozmq.PollIn)
 	p.Add(xpub, gozmq.PollIn)
 	p.Add(push, gozmq.PollOut)
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	for _, step := range []struct {
 		name    string
 		trigger func()

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // TestClosedSocket_AllOpsReturnErrSocketClosed asserts the uniform
@@ -60,7 +61,7 @@ func TestZeroLengthMessages(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, server, client := newSocketPair(t, gozmq.Pair, tc.endpoint)
-			callCtx := testCtx(t)
+			callCtx := testutil.Ctx(t)
 
 			// Empty single frame.
 			if err := client.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte{})); err != nil {
@@ -103,7 +104,7 @@ func TestConcurrentClose_UnblocksParkedSendAndRecv(t *testing.T) {
 	)
 
 	// Settle: reverse round-trip proves both ends are attached.
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 	if err := receiver.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("sync"))); err != nil {
 		t.Fatalf("settle send: %v", err)
 	}
@@ -195,7 +196,7 @@ func TestMaxMessageSize_RecvSideTeardown(t *testing.T) {
 		nil, // sender keeps the default (large) cap so its synchronous check passes
 	)
 
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 	// Two frames of limit-10 bytes: each frame is under the receiver's
 	// per-frame cap, but the multipart accumulation (2*(limit-10) > limit)
 	// trips the message-level check.
@@ -244,7 +245,7 @@ func TestPoller_Modify(t *testing.T) {
 
 	// Inbound data still wakes the narrowed registration — with only the
 	// PollIn bit reported even though the socket remains writable.
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 	if err := server.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("wake"))); err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -267,7 +268,7 @@ func TestSocketUnbind(t *testing.T) {
 	ep := puller.LastEndpoint()
 
 	// Establish the pre-existing connection with a round-trip.
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 	if err := pusher.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("before"))); err != nil {
 		t.Fatalf("send before unbind: %v", err)
 	}
@@ -330,7 +331,7 @@ func TestSocketUnbind(t *testing.T) {
 // round-trip copy on the happy path, and an error on multipart.
 func TestRecvBytes(t *testing.T) {
 	_, server, client := newSocketPair(t, gozmq.Pair, "inproc://recv-bytes")
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 
 	if err := client.SendBytes(callCtx, []byte("payload")); err != nil {
 		t.Fatalf("SendBytes: %v", err)
@@ -433,7 +434,7 @@ func TestNewMsg(t *testing.T) {
 	}
 
 	_, server, client := newSocketPair(t, gozmq.Pair, "inproc://newmsg-roundtrip")
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 	if err := client.SendMsg(callCtx, m); err != nil {
 		t.Fatalf("send: %v", err)
 	}

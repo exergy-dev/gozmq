@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 func TestRouterMandatory_GozmqRouter_LibzmqDealer(t *testing.T) {
@@ -109,7 +110,7 @@ func TestXPubVerbose_GozmqXPub_LibzmqXSub(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	sub := subscribeFrame(true, []byte("alpha"))
+	sub := testutil.SubscribeFrame(true, []byte("alpha"))
 	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	for i := 0; i < 2; i++ {
@@ -156,7 +157,7 @@ func TestXPubVerbose_LibzmqXPub_GozmqXSub(t *testing.T) {
 
 	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	sub := subscribeFrame(true, []byte("alpha"))
+	sub := testutil.SubscribeFrame(true, []byte("alpha"))
 	for i := 0; i < 2; i++ {
 		if err := xsub.SendMsg(callCtx, gozmq.NewMsgFromBytes(sub)); err != nil {
 			t.Fatalf("gozmq xsub send subscribe #%d: %v", i+1, err)

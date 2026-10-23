@@ -9,6 +9,7 @@ import (
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -24,7 +25,7 @@ func TestSub_FilterDropsNonMatching(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	require.NoError(t, sub.Subscribe([]byte("go")), "subscribe")
 	// Drain the forwarded subscription that Subscribe pushed onto the
@@ -61,7 +62,7 @@ func TestSub_EmptySubscriptionAcceptsEverything(t *testing.T) {
 	mustAttach(t, eng, a)
 
 	require.NoError(t, sub.Subscribe([]byte{}), "subscribe")
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// Drain forwarded subscribe.
 	drainCtx, dc := context.WithTimeout(ctx, 100*time.Millisecond)
@@ -113,7 +114,7 @@ func TestSub_ReplaysSubscriptionsOnAttach(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	got := map[string]bool{}
 	for i := 0; i < 2; i++ {
@@ -136,7 +137,7 @@ func TestSub_RefcountedSubscribe(t *testing.T) {
 	a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	require.NoError(t, sub.Subscribe([]byte("x")), "sub1")
 	require.NoError(t, sub.Subscribe([]byte("x")), "sub2")

@@ -10,6 +10,7 @@ import (
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -23,7 +24,7 @@ func TestRouter_DetachReleasesPipes(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewRouterEngine(false)
 	defer eng.Close()
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	const n = 64
 	var ends []weak.Pointer[pipe.End]

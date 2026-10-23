@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -222,7 +223,7 @@ func TestWriter_BatchCoalescesMultipleMessages(t *testing.T) {
 	wcA.resetWriteCounters()
 
 	const N = 5
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	// First send: the writer pulls it and parks in the gated writev.
 	require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("msg-0"))), "Send[0]")
 	require.Eventually(t, func() bool { return wcA.gateWaiting.Load() == 1 },
@@ -267,7 +268,7 @@ func TestWriter_InteractiveSingleMessage(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	ccA.resetWriteCounters()
 
-	ctx := testCtx(t, time.Second)
+	ctx := testutil.Ctx(t, time.Second)
 
 	start := time.Now()
 	require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("solo"))), "Send")
@@ -292,7 +293,7 @@ func TestWriter_OrderPreservation(t *testing.T) {
 	defer func() { _ = sA.Stop(); _ = sB.Stop() }()
 
 	const N = 20
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 
 	// Producer
 	go func() {
@@ -343,7 +344,7 @@ func TestWriter_Backpressure(t *testing.T) {
 	// writev (otherwise the writer's coalescing TryRecv loop can keep
 	// pace with the pusher and swallow everything into one large batch
 	// before flushing, hiding the HWM).
-	primeCtx := testCtx(t, 2*time.Second)
+	primeCtx := testutil.Ctx(t, 2*time.Second)
 	require.NoError(t, sA.Pipe().Send(primeCtx, msg.FromBytes([]byte("bp-prime"))), "Send(prime)")
 	require.Eventually(t, func() bool { return wcA.gateWaiting.Load() == 1 },
 		2*time.Second, time.Millisecond, "writer did not park in the gated writev")
@@ -351,7 +352,7 @@ func TestWriter_Backpressure(t *testing.T) {
 	// With the writer parked, further Sends accumulate in the pipe until
 	// its capacity (HWM) is reached, after which Send MUST block —
 	// batching must not drain the pipe to empty ahead of the wire.
-	pushCtx := testCtx(t, 200*time.Millisecond)
+	pushCtx := testutil.Ctx(t, 200*time.Millisecond)
 
 	var pushed int
 	for i := 0; i < 4*HWM; i++ {
@@ -388,7 +389,7 @@ func TestWriter_BatchCap(t *testing.T) {
 	// Enqueue exactly 2.5× maxBatchMessages so we're guaranteed to
 	// exceed the cap in at least one batch boundary.
 	N := maxBatchMessages*5/2 + 1
-	ctx := testCtx(t, 5*time.Second)
+	ctx := testutil.Ctx(t, 5*time.Second)
 	for i := 0; i < N; i++ {
 		require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte(fmt.Sprintf("c-%d", i)))), "Send[%d]", i)
 	}
@@ -430,7 +431,7 @@ func TestWriter_BatchLingerDrain(t *testing.T) {
 	// Enqueue messages WITHOUT having B drain: the writer runs normally
 	// and sends them. We want them on the wire before the Drain.
 	const N = 10
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	for i := 0; i < N; i++ {
 		require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte(fmt.Sprintf("d-%d", i)))), "Send[%d]", i)
 	}
@@ -471,7 +472,7 @@ func TestWriter_EmptyMessageStillEmitted(t *testing.T) {
 	sA, sB, _ := newWriterTestPair(t, 4, 4)
 	defer func() { _ = sA.Stop(); _ = sB.Stop() }()
 
-	ctx := testCtx(t, time.Second)
+	ctx := testutil.Ctx(t, time.Second)
 
 	require.NoError(t, sA.Pipe().Send(ctx, msg.New()), "Send(empty)")
 	got, err := sB.Pipe().Recv(ctx)
@@ -489,7 +490,7 @@ func TestWriter_MultipartBatched(t *testing.T) {
 	sA, sB, _ := newWriterTestPair(t, 16, 16)
 	defer func() { _ = sA.Stop(); _ = sB.Stop() }()
 
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 
 	// Send 4 multipart messages; each has 3 frames.
 	for i := 0; i < 4; i++ {
@@ -540,7 +541,7 @@ func TestReader_HandlesPingWhileWriterBlocked(t *testing.T) {
 	// message so the writer parks inside WriteBuffers.
 	gate := make(chan struct{})
 	wcA.setGate(gate)
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("stall"))), "Send(stall)")
 	require.Eventually(t, func() bool { return wcA.gateWaiting.Load() == 1 },
 		2*time.Second, time.Millisecond, "writer did not park in the gated writev")
@@ -550,7 +551,7 @@ func TestReader_HandlesPingWhileWriterBlocked(t *testing.T) {
 	peer.sendPing(0, []byte("ctx1"))
 	// ... proven by data sent AFTER the PING still flowing to the engine.
 	peer.sendData([]byte("after-ping"))
-	got, err := sA.Pipe().Recv(testCtx(t, 2*time.Second))
+	got, err := sA.Pipe().Recv(testutil.Ctx(t, 2*time.Second))
 	require.NoError(t, err, "reader blocked behind the wedged writer")
 	require.Equal(t, "after-ping", string(got.Bytes()))
 
@@ -572,7 +573,7 @@ func TestWriter_LingerDrainUnboundedQueue(t *testing.T) {
 		t.Run(fmt.Sprintf("sendHWM=%d", hwm), func(t *testing.T) {
 			sA, sB, _ := newWriterTestPair(t, hwm, 0)
 			const N = 5000
-			ctx := testCtx(t, 5*time.Second)
+			ctx := testutil.Ctx(t, 5*time.Second)
 			got := make(chan int, 1)
 			go func() {
 				k := 0

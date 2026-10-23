@@ -13,6 +13,7 @@ import (
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -28,7 +29,7 @@ func TestFairQueue_NoGoroutines(t *testing.T) {
 	for _, p := range engineEnds {
 		require.NoError(t, fq.Attach(p))
 	}
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	for _, p := range peerEnds {
 		require.NoError(t, p.Send(ctx, msg.FromBytes([]byte("x"))))
 	}
@@ -58,7 +59,7 @@ func TestFairQueue_PerPeerFIFOConcurrentReceivers(t *testing.T) {
 			for _, p := range engineEnds {
 				require.NoError(t, fq.Attach(p))
 			}
-			ctx := testCtx(t)
+			ctx := testutil.Ctx(t)
 			const per, receivers = 2000, 3
 			for src, p := range peerEnds {
 				go func() {
@@ -112,7 +113,7 @@ func TestFairQueue_ClosedPipeDrainsWithoutDetach(t *testing.T) {
 		for _, p := range engineEnds {
 			require.NoError(t, fq.Attach(p))
 		}
-		ctx := testCtx(t)
+		ctx := testutil.Ctx(t)
 		const n = 5
 		for i := range n {
 			require.NoError(t, peerEnds[0].Send(ctx, seqMsg(0, i)))
@@ -152,7 +153,7 @@ func TestFairQueue_PollerAndRecvShareGate(t *testing.T) {
 			for _, p := range engineEnds {
 				require.NoError(t, fq.Attach(p))
 			}
-			ctx := testCtx(t)
+			ctx := testutil.Ctx(t)
 
 			got := make(chan string, 2)
 			go func() { // blocked receiver
@@ -267,7 +268,7 @@ func TestFairQueue_TryRecvWithSourceAndPending(t *testing.T) {
 	require.False(t, ok)
 	require.False(t, fq.Pending())
 
-	require.NoError(t, b.Send(testCtx(t), msg.FromBytes([]byte("x"))))
+	require.NoError(t, b.Send(testutil.Ctx(t), msg.FromBytes([]byte("x"))))
 	require.True(t, fq.Pending(), "the message activates the idle pipe")
 	m, src, ok := fq.TryRecvWithSource()
 	require.True(t, ok)

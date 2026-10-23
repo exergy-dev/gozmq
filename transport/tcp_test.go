@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
@@ -31,7 +32,7 @@ func TestTCP_RoundTrip_Bytes(t *testing.T) {
 	endpoint := l.Endpoint()
 	require.True(t, strings.HasPrefix(endpoint, "tcp://127.0.0.1:"), "Endpoint = %q, want tcp://127.0.0.1:<port>", endpoint)
 
-	ctx := testCtx(t, 5*time.Second)
+	ctx := testutil.Ctx(t, 5*time.Second)
 
 	type acceptResult struct {
 		c   net.Conn
@@ -93,7 +94,7 @@ func TestTCP_Wildcard_And_Ephemeral_Port(t *testing.T) {
 	require.NoError(t, err, "SplitHostPort %q", ep)
 	dialEP := "tcp://127.0.0.1:" + portStr
 
-	ctx := testCtx(t, 5*time.Second)
+	ctx := testutil.Ctx(t, 5*time.Second)
 
 	acceptCh := make(chan struct{}, 1)
 	go func() {
@@ -167,7 +168,7 @@ func TestTCP_Dial_Honors_Ctx_Cancellation(t *testing.T) {
 	tr := NewTCPTransport()
 	// 240.0.0.1 is reserved; connect attempts hang or RST quickly. Use ctx
 	// to bound.
-	ctx := testCtx(t, 100*time.Millisecond)
+	ctx := testutil.Ctx(t, 100*time.Millisecond)
 	_, err := tr.Dial(ctx, "tcp://240.0.0.1:9")
 	require.Error(t, err, "Dial unexpectedly succeeded")
 }
@@ -197,7 +198,7 @@ func TestTCP_Conn_Endpoints(t *testing.T) {
 	defer l.Close()
 	endpoint := l.Endpoint()
 
-	ctx := testCtx(t, 5*time.Second)
+	ctx := testutil.Ctx(t, 5*time.Second)
 
 	type acceptResult struct {
 		c   net.Conn
@@ -259,7 +260,7 @@ func TestTCP_TCP6_Scheme(t *testing.T) {
 	ep := l.Endpoint()
 	require.True(t, strings.HasPrefix(ep, "tcp6://"), "Endpoint = %q", ep)
 
-	ctx := testCtx(t, 5*time.Second)
+	ctx := testutil.Ctx(t, 5*time.Second)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {

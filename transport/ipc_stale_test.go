@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -29,7 +30,7 @@ func TestIPC_StaleSocketFileIsReclaimed(t *testing.T) {
 	require.NoError(t, err, "Listen over a stale socket file")
 	defer l.Close()
 
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	go func() {
 		if c, err := l.Accept(ctx); err == nil {
 			_ = c.Close()
@@ -52,7 +53,7 @@ func TestIPC_LiveSocketFileIsNotReclaimed(t *testing.T) {
 	_, err = tr.Listen(context.Background(), "ipc://"+path)
 	require.Error(t, err, "second Listen on a live endpoint must fail")
 
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	go func() {
 		if c, err := live.Accept(ctx); err == nil {
 			_ = c.Close()

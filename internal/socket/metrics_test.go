@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -23,7 +24,7 @@ func TestLoadBalancer_SentCounter(t *testing.T) {
 	defer closePipes(append(engineEnds, peerEnds...)...)
 	require.NoError(t, lb.Attach(engineEnds[0]), "attach")
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	for i := 0; i < n; i++ {
 		require.NoError(t, lb.Send(ctx, msg.FromBytes([]byte{byte(i)})), "send %d", i)
 	}
@@ -51,7 +52,7 @@ func TestFairQueue_RecvCounter(t *testing.T) {
 	defer closePipes(append(engineEnds, peerEnds...)...)
 	require.NoError(t, fq.Attach(engineEnds[0]), "attach")
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	for i := 0; i < n; i++ {
 		require.NoError(t, peerEnds[0].Send(ctx, msg.FromBytes([]byte{byte(i)})), "peer send %d", i)
 	}
@@ -73,7 +74,7 @@ func TestFairQueue_QueueDepthGauge(t *testing.T) {
 		for _, p := range engineEnds {
 			require.NoError(t, fq.Attach(p), "attach")
 		}
-		ctx := testCtx(t)
+		ctx := testutil.Ctx(t)
 		const depth = 1500 // past the HWM-0 channel, into overflow
 		for i := 0; i < depth; i++ {
 			require.NoError(t, peerEnds[i%n].Send(ctx, msg.FromBytes([]byte("hi"))), "peer send")

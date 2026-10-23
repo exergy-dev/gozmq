@@ -16,6 +16,7 @@ import (
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/session"
 	"github.com/exergy-dev/gozmq/internal/socket"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 	"github.com/exergy-dev/gozmq/transport"
@@ -47,7 +48,7 @@ func TestStream_InboundTaggedByIdentity(t *testing.T) {
 
 	mustAttach(t, eng, engA, engB)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// Peer A pushes raw bytes; Peer B pushes raw bytes. Each should
 	// surface on the engine tagged with the sender's identity.
@@ -91,7 +92,7 @@ func TestStream_OutboundRoutesByIdentity(t *testing.T) {
 
 	mustAttach(t, eng, engA, engB)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// Send a multi-frame body to peer-a; concatenation should land on peerA.
 	require.NoError(t, eng.Send(ctx, msg.FromFrames(idA, []byte("HTTP/1.1 "), []byte("200 OK\r\n"))), "send to A")
@@ -169,7 +170,7 @@ func TestStream_AnonymousPeerGetsSynthesizedIdentity(t *testing.T) {
 	}()
 	mustAttach(t, eng, engP)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	require.NoError(t, peer.Send(ctx, msg.FromBytes([]byte("raw"))), "peer send")
 	m, err := eng.Recv(ctx)
@@ -199,7 +200,7 @@ func TestStream_SendToVanishedPeer(t *testing.T) {
 	mustAttach(t, eng, engP)
 	require.NoError(t, peer.Close())
 
-	err := eng.Send(testCtx(t), msg.FromFrames([]byte("gone"), []byte("x")))
+	err := eng.Send(testutil.Ctx(t), msg.FromFrames([]byte("gone"), []byte("x")))
 	require.ErrorIs(t, err, zmqerr.ErrRouteUnknown)
 }
 
@@ -296,7 +297,7 @@ func TestStream_HTTPEchoRoundTrip(t *testing.T) {
 	client := newStreamPeer(t, eng, []byte("http-client"))
 	defer client.close()
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// --- client → server ----------------------------------------------------
 	const request = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
@@ -405,7 +406,7 @@ func TestStream_PeerDisconnect(t *testing.T) {
 	// Manual close sequence: do not defer p.close() because we want to
 	// observe partial-teardown behavior.
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// 1. Peer sends; engine receives tagged with identity.
 	require.NoError(t, p.send(ctx, []byte("hello")), "peer send")
@@ -448,7 +449,7 @@ func TestStream_HalfCloseZeroLengthBody(t *testing.T) {
 	p := newStreamPeer(t, eng, id)
 	defer p.close()
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// 1. Send real data first. Then send the zero-length-body sentinel.
 	require.NoError(t, eng.Send(ctx, msg.FromFrames(id, []byte("final payload\n"))), "data send")
@@ -492,7 +493,7 @@ func TestStream_PeerCloseDrainsInFlight(t *testing.T) {
 	p := newStreamPeer(t, eng, id)
 	defer p.close()
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// Push data, then close the peer side immediately (no wait).
 	require.NoError(t, p.send(ctx, []byte("inflight-a")), "send a")
@@ -761,7 +762,7 @@ func TestStream_TCP_PeerDisconnect(t *testing.T) {
 
 	engPipe := startRawSession(t, eng, srvConn)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// Send one chunk, then close the client.
 	_, err := cliConn.Write([]byte("hello\n"))
@@ -801,7 +802,7 @@ func TestStream_TCP_HalfClose(t *testing.T) {
 
 	startRawSession(t, eng, srvConn)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// Prime: have the client write something so the server learns the
 	// peer's identity.

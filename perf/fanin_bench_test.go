@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 const scaleMsgSize = 64
@@ -316,7 +317,7 @@ func BenchmarkXPubSubscribeChurn_Inproc(b *testing.B) {
 	for i := range frames {
 		topic := fmt.Appendf(nil, "topic-%02d", i)
 		frames[i][0] = append([]byte{0x00}, topic...)
-		frames[i][1] = xsubSubscribeFrame(topic)
+		frames[i][1] = testutil.SubscribeFrame(true, topic)
 	}
 
 	callCtx, callCancel := context.WithTimeout(context.Background(), 5*time.Minute)

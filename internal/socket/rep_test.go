@@ -9,6 +9,7 @@ import (
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -24,7 +25,7 @@ func TestRep_StripsEnvelopeOnRecv(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// REQ-style wire: [identityA, empty, body]
 	wire := msg.FromFrames([]byte("identityA"), []byte{}, []byte("hello"))
@@ -46,7 +47,7 @@ func TestRep_ReplayEnvelopeOnSend(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// Deliver a REQ-shape inbound frame.
 	wire := msg.FromFrames([]byte("idA"), []byte("idB"), []byte{}, []byte("hi"))
@@ -78,7 +79,7 @@ func TestRep_DoubleRecvFSMViolation(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	wire := msg.FromFrames([]byte{}, []byte("q"))
 	require.NoError(t, b.Send(ctx, wire), "peer send")
 	_, err := eng.Recv(ctx)
@@ -98,7 +99,7 @@ func TestRep_ConcurrentRecvFSMViolation(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	mc1, ec1 := recvAsync(ctx, eng)
 	time.Sleep(20 * time.Millisecond)
 	rctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
@@ -137,7 +138,7 @@ func TestRep_RecvCtxCancelRestoresCanRecv(t *testing.T) {
 	_, err := eng.Recv(rctx)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("q"))))
 	got, err := eng.Recv(ctx)
 	require.NoError(t, err)
@@ -156,7 +157,7 @@ func TestRep_SendToVanishedRequester(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("q"))))
 	_, err := eng.Recv(ctx)
 	require.NoError(t, err)
@@ -179,7 +180,7 @@ func TestRep_SkipsMalformedRequest(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, b.Send(ctx, msg.FromBytes([]byte("no-delimiter"))))
 	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("good"))))
 	got, err := eng.Recv(ctx)
@@ -207,7 +208,7 @@ func TestRep_DoubleSendFSMViolation(t *testing.T) {
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	wire := msg.FromFrames([]byte{}, []byte("q"))
 	require.NoError(t, b.Send(ctx, wire), "peer send")
 	_, err := eng.Recv(ctx)
@@ -230,7 +231,7 @@ func TestRep_StickyPeer_AfterMultiplePeers(t *testing.T) {
 	defer closePipes(append(engineEnds, peerEnds...)...)
 	mustAttach(t, eng, engineEnds...)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// Peer 1 sends a request.
 	wire := msg.FromFrames([]byte{}, []byte("q"))
@@ -288,7 +289,7 @@ func TestRep_CloseUnblocksSendAtHWM(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("q"))), "request")
 	_, err := eng.Recv(ctx)
 	require.NoError(t, err, "recv")

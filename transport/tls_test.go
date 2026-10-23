@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
@@ -136,7 +137,7 @@ func TestTLS_RoundTrip(t *testing.T) {
 	require.True(t, strings.HasPrefix(endpoint, "tls+tcp://127.0.0.1:"),
 		"Endpoint = %q, want tls+tcp://127.0.0.1:<port>", endpoint)
 
-	ctx := testCtx(t, 5*time.Second)
+	ctx := testutil.Ctx(t, 5*time.Second)
 
 	type acceptResult struct {
 		c   net.Conn
@@ -225,7 +226,7 @@ func TestTLS_BadCert(t *testing.T) {
 		MinVersion: tls.VersionTLS12,
 	}
 	cliTr := mustNewTLS(t, badCfg)
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	c, err := cliTr.Dial(ctx, "tls+tcp://localhost:"+portStr)
 	if err == nil {
 		_ = c.SetDeadline(time.Now().Add(2 * time.Second))
@@ -392,7 +393,7 @@ func TestTLS_ConfigCloneIsolatesFromCaller(t *testing.T) {
 		err error
 	}
 	acceptedCh := make(chan acceptResult, 1)
-	ctx := testCtx(t, 5*time.Second)
+	ctx := testutil.Ctx(t, 5*time.Second)
 	go func() {
 		c, err := l.Accept(ctx)
 		if err != nil {
@@ -477,7 +478,7 @@ func TestTLS_CtxCanceledAcceptLeavesListenerUsable(t *testing.T) {
 
 	// Second Accept on the same listener must still work end-to-end.
 	_, portStr, _ := net.SplitHostPort(strings.TrimPrefix(l.Endpoint(), "tls+tcp://"))
-	acceptCtx := testCtx(t, 5*time.Second)
+	acceptCtx := testutil.Ctx(t, 5*time.Second)
 	type acceptResult struct {
 		c   net.Conn
 		err error
@@ -543,7 +544,7 @@ func TestTLS_SilentClientsDoNotBlockAccept(t *testing.T) {
 
 	// Every Accept must return promptly: silentN silent conns, then ours.
 	// Serve each on its own goroutine, as the socket layer does.
-	actx := testCtx(t, time.Second)
+	actx := testutil.Ctx(t, time.Second)
 	var conns []Conn
 	defer func() {
 		for _, c := range conns {
@@ -593,7 +594,7 @@ func TestTLS_DialDoesNotBlockOnSilentServer(t *testing.T) {
 	_, portStr, _ := net.SplitHostPort(raw.Addr().String())
 
 	cliTr := mustNewTLS(t, clientTLSConfig())
-	ctx := testCtx(t, time.Second)
+	ctx := testutil.Ctx(t, time.Second)
 	start := time.Now()
 	c, err := cliTr.Dial(ctx, "tls+tcp://localhost:"+portStr)
 	require.NoError(t, err, "Dial blocked on the TLS handshake")

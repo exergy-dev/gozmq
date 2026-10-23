@@ -7,13 +7,12 @@ import (
 	"testing"
 	"time"
 
-	"go.uber.org/goleak"
-
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/security/curve"
 )
 
-func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }
+func TestMain(m *testing.M) { testutil.VerifyMain(m) }
 
 // TestPairRoundTrip proves that two PAIR sockets can round-trip a multipart
 // and a single-frame Msg, -race clean and with no goroutine leaks, over both
@@ -28,7 +27,7 @@ func TestPairRoundTrip(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, server, client := newSocketPair(t, gozmq.Pair, tc.endpoint)
-			callCtx := testCtx(t)
+			callCtx := testutil.Ctx(t)
 
 			// Client → server, multipart.
 			req := gozmq.NewMsgFromFrames([]byte("hello"), []byte("world"))
@@ -65,7 +64,7 @@ func TestPairRoundTrip(t *testing.T) {
 func TestPushPull_TCP(t *testing.T) {
 	_, puller, pusher := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "tcp://127.0.0.1:0", nil, nil)
 
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 
 	for i := 0; i < 5; i++ {
 		if err := pusher.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte{byte(i)})); err != nil {
@@ -101,7 +100,7 @@ func TestPushSendRejected(t *testing.T) {
 func TestReqRep_TCP(t *testing.T) {
 	_, rep, req := newSocketPairTypes(t, gozmq.Rep, gozmq.Req, "tcp://127.0.0.1:0", nil, nil)
 
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 
 	for i := 0; i < 3; i++ {
 		if err := req.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte{byte(i)})); err != nil {
@@ -134,7 +133,7 @@ func TestReqRep_TCP(t *testing.T) {
 func TestPubSub_Inproc(t *testing.T) {
 	_, pub, sub := newPubSubPair(t, "inproc://pubsub-test", [][]byte{[]byte("alpha")}, nil, nil)
 
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 
 	// Send one matching and one non-matching message. The filter must
 	// drop "beta" before it reaches RecvMsg.
@@ -169,7 +168,7 @@ func TestPubSub_BinaryPayloadLeadingSubByte(t *testing.T) {
 	// Match-all subscription: every published message should be delivered.
 	_, pub, sub := newPubSubPair(t, "inproc://pubsub-binary", [][]byte{{}}, nil, nil)
 
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 
 	// Payloads beginning with the subscription marker bytes (0x00/0x01)
 	// plus a control case. Before the fix the first two were dropped.
@@ -202,7 +201,7 @@ func TestRouterDealer_TCP(t *testing.T) {
 		nil, []gozmq.Option{gozmq.WithIdentity([]byte("worker-1"))},
 	)
 
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 
 	// Dealer → Router (Router sees identity frame prepended).
 	if err := dealer.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("req-payload"))); err != nil {
@@ -249,7 +248,7 @@ func TestPlainAuth_Success(t *testing.T) {
 		[]gozmq.Option{gozmq.WithPlainClient("alice", "hunter2")},
 	)
 
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 	if err := client.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("secret"))); err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +279,7 @@ func TestCurveAuth_Success(t *testing.T) {
 		[]gozmq.Option{gozmq.WithCurveClient(serverPub[:], clientPub[:], clientSec[:])},
 	)
 
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 	if err := client.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("curve-secret"))); err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -333,7 +332,7 @@ func TestMaxMessageSize_SendBoundary(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, server, client := newSocketPairTypes(t, tc.server, tc.client, tc.endpoint, opts, opts)
-			callCtx := testCtx(t)
+			callCtx := testutil.Ctx(t)
 
 			if tc.overLimit {
 				big := make([]byte, limit+1)
@@ -378,7 +377,7 @@ func TestSendMsg_CollectsMultipartSizeCorrectly(t *testing.T) {
 	const limit = 1024
 	_, srv, cli := newSocketPair(t, gozmq.Pair, "inproc://sendmsg-multipart", gozmq.WithMaxMessageSize(limit))
 
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 
 	// Case A1: two frames whose sum is exactly the limit — accepted.
 	a := make([]byte, limit/2)
@@ -432,7 +431,7 @@ func TestCloseCtx_CancellationBreaksLingerDrain(t *testing.T) {
 
 	// Settle: a reverse round-trip (receiver → sender) proves both ends
 	// are attached without a fixed sleep.
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 	if err := receiver.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("sync"))); err != nil {
 		t.Fatalf("settle send: %v", err)
 	}
@@ -493,7 +492,7 @@ func TestCloseCtx_NormalDrainStillWorks(t *testing.T) {
 		[]gozmq.Option{gozmq.WithLinger(2 * time.Second)},
 	)
 
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 	const N = 4
 	for i := 0; i < N; i++ {
 		if err := sender.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte{byte(i)})); err != nil {

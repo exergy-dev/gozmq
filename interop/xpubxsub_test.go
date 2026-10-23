@@ -8,21 +8,8 @@ import (
 	"time"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
-
-// subscribeFrame builds the ZMTP synthetic subscribe frame that XSUB sends
-// to its XPUB peer: a single frame whose first byte is 0x01 (subscribe) or
-// 0x00 (unsubscribe), followed by the topic prefix.
-func subscribeFrame(subscribe bool, topic []byte) []byte {
-	flag := byte(0x00)
-	if subscribe {
-		flag = 0x01
-	}
-	buf := make([]byte, 0, 1+len(topic))
-	buf = append(buf, flag)
-	buf = append(buf, topic...)
-	return buf
-}
 
 // TestXPubXSub_GozmqXPub_LibzmqXSub: gozmq XPUB binds, libzmq XSUB connects
 // and sends a synthetic subscribe frame for "alpha". The gozmq XPUB surfaces
@@ -56,7 +43,7 @@ func TestXPubXSub_GozmqXPub_LibzmqXSub(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// XSUB sends its subscribe as a user-frame: [0x01, "alpha"].
-	if err := xsub.Send([][]byte{subscribeFrame(true, []byte("alpha"))}); err != nil {
+	if err := xsub.Send([][]byte{testutil.SubscribeFrame(true, []byte("alpha"))}); err != nil {
 		t.Fatalf("libzmq xsub send subscribe: %v", err)
 	}
 
@@ -129,7 +116,7 @@ func TestXPubXSub_LibzmqXPub_GozmqXSub(t *testing.T) {
 
 	// gozmq XSUB sends a synthetic SUBSCRIBE message to drive the libzmq
 	// XPUB's subscription tree.
-	if err := xsub.SendMsg(callCtx, gozmq.NewMsgFromBytes(subscribeFrame(true, []byte("alpha")))); err != nil {
+	if err := xsub.SendMsg(callCtx, gozmq.NewMsgFromBytes(testutil.SubscribeFrame(true, []byte("alpha")))); err != nil {
 		t.Fatalf("gozmq xsub send subscribe: %v", err)
 	}
 

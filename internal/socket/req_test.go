@@ -10,6 +10,7 @@ import (
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -25,7 +26,7 @@ func TestReq_PrependsEmptyDelimiter(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("hello"))), "send")
 	got, err := b.Recv(ctx)
@@ -46,7 +47,7 @@ func TestReq_StripsEmptyDelimiterOnRecv(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// First send so the FSM moves to canRecv with a sticky pipe.
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))), "send")
@@ -74,7 +75,7 @@ func TestReq_DoubleSendFSMViolation(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("1"))), "first send")
 	err := eng.Send(ctx, msg.FromBytes([]byte("2")))
@@ -96,7 +97,7 @@ func TestReq_ConcurrentSendsOneWins(t *testing.T) {
 	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("fill"))))
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	const n = 8
 	errs := make(chan error, n)
 	start := make(chan struct{})
@@ -158,7 +159,7 @@ func TestReq_ConcurrentRecvFSMViolation(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))))
 	_, err := b.Recv(ctx)
 	require.NoError(t, err)
@@ -196,7 +197,7 @@ func TestReq_SendCtxCancelRestoresCanSend(t *testing.T) {
 	defer cancel()
 	require.ErrorIs(t, eng.Send(sctx, msg.FromBytes([]byte("q"))), context.DeadlineExceeded)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	_, err := b.Recv(ctx) // drain the filler
 	require.NoError(t, err)
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))))
@@ -225,7 +226,7 @@ func TestReq_DoubleRecvFSMViolation(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))), "send")
 	// Drain request; peer replies.
 	_, err := b.Recv(ctx)
@@ -254,7 +255,7 @@ func TestReq_Rep_RoundTrip_Direct(t *testing.T) {
 	mustAttach(t, reqEng, reqSide)
 	mustAttach(t, repEng, repSide)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	const rounds = 4
 	for i := 0; i < rounds; i++ {
@@ -318,7 +319,7 @@ func TestReq_Send_WaitsForPeer(t *testing.T) {
 	eng := socket.NewReqEngine()
 	defer eng.Close()
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	sendDone := make(chan error, 1)
 	go func() {
@@ -356,7 +357,7 @@ func TestReq_RecvCtxErrorKeepsAwaitingReply(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))), "send")
 	_, err := b.Recv(ctx)
 	require.NoError(t, err, "drain request")
@@ -388,7 +389,7 @@ func TestReq_StaleReplyDiscardedOnNextSend(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q1"))), "send q1")
 	_, err := b.Recv(ctx)
 	require.NoError(t, err, "drain q1")

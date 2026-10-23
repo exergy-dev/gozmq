@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // newTestSocket creates a Context plus a single socket of the given type.
@@ -98,7 +99,7 @@ func newPubSubPair(
 // and draining up to the final sequence number leaves the stream empty.
 func syncSub(t *testing.T, pub, sub *gozmq.Socket, topic []byte) {
 	t.Helper()
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 	probe := func(i int) []byte {
 		return fmt.Appendf(nil, "%s\x00gozmq-sync-probe\x00%d", topic, i)
 	}
@@ -131,13 +132,4 @@ func syncSub(t *testing.T, pub, sub *gozmq.Socket, topic []byte) {
 		got = append(got[:0], m.Bytes()...)
 		m.Release()
 	}
-}
-
-// testCtx returns a context.Context with a 5-second timeout suitable for
-// most test operations. Cancellation is registered via t.Cleanup.
-func testCtx(t *testing.T) context.Context {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	t.Cleanup(cancel)
-	return ctx
 }

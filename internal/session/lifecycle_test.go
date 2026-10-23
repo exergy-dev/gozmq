@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -54,7 +55,7 @@ func TestSession_TwoGoroutines(t *testing.T) {
 		Config{Conn: connA, Mech: newFakeMech("NULL", false, nil), SendHWM: 4, RecvHWM: 4, HeartbeatInterval: time.Hour},
 		Config{Conn: connB, Mech: newFakeMech("NULL", true, nil), SendHWM: 4, RecvHWM: 4, HeartbeatInterval: time.Hour},
 	)
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("x"))))
 	_, err := sB.Pipe().Recv(ctx)
 	require.NoError(t, err)
@@ -92,7 +93,7 @@ func TestSession_HandshakeOverSynchronousPipe(t *testing.T) {
 		Config{Conn: connA, Mech: &roundsMech{fakeMech: newFakeMech("NULL", false, nil), rounds: 5}, SendHWM: 4, RecvHWM: 4},
 		Config{Conn: connB, Mech: &roundsMech{fakeMech: newFakeMech("NULL", true, nil), rounds: 5}, SendHWM: 4, RecvHWM: 4},
 	)
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("after-handshake"))))
 	got, err := sB.Pipe().Recv(ctx)
 	require.NoError(t, err)

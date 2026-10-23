@@ -9,6 +9,7 @@ import (
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -27,7 +28,7 @@ func TestXPub_SurfacesSubscribeToApplication(t *testing.T) {
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	require.NoError(t, b.Send(ctx, subscribeMsg(true, []byte("news"))), "peer subscribe")
 	m, err := eng.Recv(ctx)
@@ -60,7 +61,7 @@ func TestXPub_SurfacesUnsubscribe(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	require.NoError(t, b.Send(ctx, subscribeMsg(true, []byte("t"))), "sub")
 	_, err := eng.Recv(ctx)
@@ -107,7 +108,7 @@ func TestXPub_DedupDefault(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// Two identical SUBSCRIBEs from the same peer.
 	require.NoError(t, b.Send(ctx, subscribeMsg(true, []byte("news"))), "sub1")
@@ -139,7 +140,7 @@ func TestXPub_VerboseDisablesDedup(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	require.NoError(t, b.Send(ctx, subscribeMsg(true, []byte("news"))), "sub1")
 	require.NoError(t, b.Send(ctx, subscribeMsg(true, []byte("news"))), "sub2")
@@ -168,7 +169,7 @@ func TestXPub_DedupLastCancel(t *testing.T) {
 	defer closePipes(a1, b1, a2, b2)
 	mustAttach(t, eng, a1, a2)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// Two distinct peers subscribe to "news". Only the first should
 	// surface.
@@ -216,7 +217,7 @@ func TestXPub_DetachEmitsCancel(t *testing.T) {
 			a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
 			defer closePipes(a, b)
 			mustAttach(t, eng, a)
-			ctx := testCtx(t)
+			ctx := testutil.Ctx(t)
 
 			// Peer subscribes; the app observes it (which also seeds the
 			// aggregate refcount bookkeeping).
@@ -248,7 +249,7 @@ func TestXPub_DetachEmitsNoCancelWhileOtherSubscribersRemain(t *testing.T) {
 	a2, b2 := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a1, b1, a2, b2)
 	mustAttach(t, eng, a1, a2)
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	require.NoError(t, b1.Send(ctx, subscribeMsg(true, []byte("topic"))), "peer1 subscribe")
 	m, err := eng.Recv(ctx)
@@ -303,7 +304,7 @@ func TestXPub_DetachBeforeRecvSettlesRefcounts(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewXPubEngineV(false)
 	defer eng.Close()
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	a1, b1 := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a1, b1)
@@ -328,7 +329,7 @@ func TestXPub_ForeignCancelIgnored(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewXPubEngineV(false)
 	defer eng.Close()
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	good, goodPeer := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
 	evil, evilPeer := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
@@ -359,7 +360,7 @@ func TestXPub_DetachAppliesQueuedCommandsFirst(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewXPubEngineV(false)
 	defer eng.Close()
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
 	other, otherPeer := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})

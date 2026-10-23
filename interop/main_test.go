@@ -22,4 +22,4 @@ import (
 // goroutine blocked in a cgocall across the TestMain boundary, add an
 // explicit goleak.IgnoreTopFunction here and document WHICH function and
 // WHY — per the contract in §10.5.
-func TestMain(m *testing.M) { testutil.VerifyTestMain(m) }
+func TestMain(m *testing.M) { testutil.VerifyMain(m) }

@@ -8,6 +8,7 @@ import (
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -69,7 +70,7 @@ func TestFairQueue_GateWakesOnSinglePipeDelivery(t *testing.T) {
 	woke := parkOnGate(gate)
 	requireNoWake(t, woke)
 
-	require.NoError(t, b.Send(testCtx(t), msg.FromBytes([]byte("x"))), "peer send")
+	require.NoError(t, b.Send(testutil.Ctx(t), msg.FromBytes([]byte("x"))), "peer send")
 	requireWake(t, woke, "fairqueue single pipe")
 	require.True(t, fq.CanRecv(), "message must still be pending (non-consuming signal)")
 }
@@ -86,7 +87,7 @@ func TestPair_InGateWakesOnDelivery(t *testing.T) {
 	woke := parkOnIn(t, eng)
 	requireNoWake(t, woke)
 
-	require.NoError(t, b.Send(testCtx(t), msg.FromBytes([]byte("x"))), "peer send")
+	require.NoError(t, b.Send(testutil.Ctx(t), msg.FromBytes([]byte("x"))), "peer send")
 	requireWake(t, woke, "pair engine")
 	require.True(t, eng.CanRecvNow())
 }
@@ -100,7 +101,7 @@ func TestReq_InGateWakesOnReply(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))), "send")
 	_, err := b.Recv(ctx)
 	require.NoError(t, err, "drain request")
@@ -128,7 +129,7 @@ func TestXPub_InGateWakesOnSubscription(t *testing.T) {
 	woke := parkOnIn(t, eng)
 	requireNoWake(t, woke)
 
-	require.NoError(t, b2.Send(testCtx(t), msg.FromBytes([]byte("\x01A"))), "peer subscribe")
+	require.NoError(t, b2.Send(testutil.Ctx(t), msg.FromBytes([]byte("\x01A"))), "peer subscribe")
 	requireWake(t, woke, "xpub subscription")
 	require.True(t, eng.CanRecvNow())
 	require.True(t, eng.CanRecvNow(), "CanRecvNow must not consume the event")
@@ -147,7 +148,7 @@ func TestRep_InGateWakesAfterSend(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	for _, q := range []string{"q1", "q2"} {
 		require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte(q))), "peer request")
 	}

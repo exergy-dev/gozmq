@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // TestSocketMetrics_PushPullCounters drives a PUSH→PULL pair and checks
@@ -14,7 +15,7 @@ import (
 func TestSocketMetrics_PushPullCounters(t *testing.T) {
 	_, puller, pusher := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "inproc://metrics-pushpull", nil, nil)
 
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 
 	const n = 8
 	for i := 0; i < n; i++ {
@@ -59,7 +60,7 @@ func TestSocketMetrics_PubDropsOnSlowSubscriber(t *testing.T) {
 	// The subscription sync probes count toward Sent — measure the delta.
 	base := pub.Metrics().Sent
 
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 	const n = 200
 	for i := 0; i < n; i++ {
 		// Never drain on the SUB side. Once HWM is full the per-peer
@@ -95,7 +96,7 @@ func TestSocketMetrics_QueueDepthGauge(t *testing.T) {
 		t.Fatalf("connect2: %v", err)
 	}
 
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 	if err := pusher.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("x"))); err != nil {
 		t.Fatalf("send: %v", err)
 	}

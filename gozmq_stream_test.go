@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // TestSocketStream_TCP_HTTPEcho validates the end-to-end STREAM wiring:
@@ -43,7 +44,7 @@ func TestSocketStream_TCP_HTTPEcho(t *testing.T) {
 	}
 	defer cli.Close()
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	const request = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
 	if _, err := cli.Write([]byte(request)); err != nil {
@@ -135,7 +136,7 @@ func TestSocketStream_TCP_Connect(t *testing.T) {
 	}
 	defer a.c.Close()
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// Send via gozmq; read raw on the other side.
 	//
@@ -190,7 +191,7 @@ func streamServerPeer(t *testing.T, opts ...gozmq.Option) (*gozmq.Socket, net.Co
 	t.Cleanup(func() { _ = cli.Close() })
 	_, err = cli.Write([]byte("x"))
 	require.NoError(t, err)
-	m, err := srv.RecvMsg(testCtx(t))
+	m, err := srv.RecvMsg(testutil.Ctx(t))
 	require.NoError(t, err)
 	return srv, cli, m.Frames()[0]
 }
@@ -223,7 +224,7 @@ func TestSocketStream_LingerFlushes(t *testing.T) {
 		read <- got
 	}()
 	chunk := bytes.Repeat([]byte("q"), size)
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	for i := 0; i < n; i++ {
 		require.NoError(t, srv.SendMsg(ctx, gozmq.NewMsgFromFrames(id, chunk)))
 	}

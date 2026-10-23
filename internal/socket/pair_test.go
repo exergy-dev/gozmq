@@ -10,6 +10,7 @@ import (
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -55,7 +56,7 @@ func TestPair_SendBeforeAttachWaits(t *testing.T) {
 	eng := socket.NewPairEngine()
 	defer eng.Close()
 
-	ctx, cancel := context.WithCancel(testCtx(t))
+	ctx, cancel := context.WithCancel(testutil.Ctx(t))
 	done := make(chan error, 1)
 	go func() { done <- eng.Send(ctx, msg.FromBytes([]byte("x"))) }()
 	select {
@@ -152,7 +153,7 @@ func TestPair_PeerCloseDrainsThenWaitsForNextPeer(t *testing.T) {
 			t.Parallel()
 			eng := socket.NewPairEngine()
 			defer eng.Close()
-			ctx := testCtx(t)
+			ctx := testutil.Ctx(t)
 
 			a, b := pipe.NewPair(tc.hwm, tc.hwm, pipe.PeerInfo{}, pipe.PeerInfo{})
 			defer closePipes(a, b)
@@ -206,7 +207,7 @@ func TestPair_DetachedPipeDrainedBeforeNextPeer(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewPairEngine()
 	defer eng.Close()
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
@@ -234,7 +235,7 @@ func TestPair_AttachReplacesClosedPipe(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewPairEngine()
 	defer eng.Close()
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
@@ -265,7 +266,7 @@ func TestPair_SendWaitsAcrossPeerClose(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewPairEngine()
 	defer eng.Close()
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)

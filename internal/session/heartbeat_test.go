@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
 )
 
@@ -236,7 +237,7 @@ func TestHeartbeat_InboundTrafficSuppressesTimeout(t *testing.T) {
 	frames := peer.startReadLoop()
 	_ = frames
 
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	// Walk fake time forward in sub-timeout steps, sending traffic at
 	// each step. idle never reaches the 1s timeout.
 	for i := 0; i < 3; i++ {
@@ -278,7 +279,7 @@ func TestHeartbeat_ReaderParkedOnBackpressureIsNotTimeout(t *testing.T) {
 
 	// Drain the engine side: the reader unparks and re-stamps the idle
 	// clock, so the stale 5s gap must not be charged against the peer.
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	for _, want := range []string{"m1", "m2"} {
 		m, err := s.Pipe().Recv(ctx)
 		require.NoError(t, err, "Recv %s", want)

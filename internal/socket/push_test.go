@@ -9,6 +9,7 @@ import (
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -25,7 +26,7 @@ func TestPush_LoadBalances(t *testing.T) {
 
 	mustAttach(t, eng, engineEnds...)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	for i := 0; i < send; i++ {
 		require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte{byte(i)})), "send %d", i)
 	}
@@ -64,7 +65,7 @@ func TestPush_BlocksOnHWMUnblocksOnDrain(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("one"))), "first send")
 	done := make(chan error, 1)
 	go func() { done <- eng.Send(ctx, msg.FromBytes([]byte("two"))) }()

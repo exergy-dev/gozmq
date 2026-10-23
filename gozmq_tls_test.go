@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/transport"
 )
 
@@ -98,7 +99,7 @@ func TestTLSTransport_SocketRoundTrip(t *testing.T) {
 		t.Fatalf("connect tls+tcp: %v", err)
 	}
 
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 	const n = 5
 	for i := 0; i < n; i++ {
 		if err := pusher.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte{byte(i)})); err != nil {

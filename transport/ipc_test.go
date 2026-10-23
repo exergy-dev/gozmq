@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
@@ -38,7 +39,7 @@ func TestIPC_Filesystem_RoundTrip(t *testing.T) {
 
 	require.Equal(t, endpoint, l.Endpoint())
 
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 
 	acceptCh := make(chan *ipcConn, 1)
 	go func() {
@@ -136,7 +137,7 @@ func TestIPC_AbstractNamespace(t *testing.T) {
 
 	require.Equal(t, endpoint, l.Endpoint())
 
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 
 	acceptCh := make(chan *ipcConn, 1)
 	go func() {

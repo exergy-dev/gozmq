@@ -9,6 +9,7 @@ import (
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -41,7 +42,7 @@ func TestPub_LentFanoutRefPerPeer(t *testing.T) {
 	engineEnds, peerEnds := makePairs(3, 1, 1)
 	defer closePipes(append(engineEnds, peerEnds...)...)
 	mustAttach(t, eng, engineEnds...)
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	for _, p := range peerEnds {
 		require.NoError(t, p.Send(ctx, subscribeMsg(true, nil)))
@@ -92,7 +93,7 @@ func TestRouter_LentSendDerives(t *testing.T) {
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{Identity: []byte("peer")}, pipe.PeerInfo{})
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	m, released := newLent([]byte("peer"), []byte("body"))
 	m.Retain() // keep a reference to inspect m afterwards
@@ -121,7 +122,7 @@ func TestSub_LentFilterMissReleased(t *testing.T) {
 	engineEnds, peerEnds := makePairs(1, 4, 4)
 	defer closePipes(append(engineEnds, peerEnds...)...)
 	mustAttach(t, eng, engineEnds...)
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	drainPipe(peerEnds[0]) // the forwarded SUBSCRIBE
 
 	miss, released := newLent([]byte("B"))

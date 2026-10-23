@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // drainEvents spools events off ch into a slice until the ctx fires or
@@ -72,7 +73,7 @@ func TestMonitor_ServerLifecycle(t *testing.T) {
 
 	// Round-trip a message to guarantee the handshake completed on
 	// both ends before we assert on events.
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 	if err := cli.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("hello"))); err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -309,7 +310,7 @@ func TestMonitor_SessionEventsBothSides(t *testing.T) {
 			[]gozmq.Option{gozmq.WithMonitor(srvEvents, peerEvents)},
 			[]gozmq.Option{gozmq.WithMonitor(cliEvents, peerEvents)},
 		)
-		callCtx := testCtx(t)
+		callCtx := testutil.Ctx(t)
 		require.NoError(t, cli.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("hello"))))
 		m, err := srv.RecvMsg(callCtx)
 		require.NoError(t, err)

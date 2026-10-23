@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // Goroutine budgets for an idle, established link, measured per connecting
@@ -48,7 +49,7 @@ func goroutinesPerLink(t *testing.T, endpoint string) float64 {
 	require.NoError(t, pull.Bind(endpoint))
 	before := settledGoroutines(t)
 
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 	for i := 0; i < goroutineTestLinks; i++ {
 		push, err := ctx.NewSocket(gozmq.Push)
 		require.NoError(t, err)
@@ -99,7 +100,7 @@ func TestGoroutinesPerStreamConnection(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s, link := tc.setup(t)
 			before := settledGoroutines(t)
-			callCtx := testCtx(t)
+			callCtx := testutil.Ctx(t)
 			for i := 0; i < goroutineTestLinks; i++ {
 				c := link()
 				t.Cleanup(func() { _ = c.Close() })
@@ -165,7 +166,7 @@ func pubSubGoroutinesPerLink(t *testing.T, endpoint string) float64 {
 	require.NoError(t, pub.Bind(endpoint))
 	before := settledGoroutines(t)
 
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 	for i := 0; i < goroutineTestLinks; i++ {
 		sub, err := ctx.NewSocket(gozmq.Sub)
 		require.NoError(t, err)

@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // TestInprocCloseLingerEndsWhenConsumed: on the inproc direct-pipe path,
@@ -45,7 +46,7 @@ func TestInprocCloseLingerEndsWhenConsumed(t *testing.T) {
 
 			t.Run(name+"/consumed", func(t *testing.T) {
 				push, pull := setup(t)
-				ctx := testCtx(t)
+				ctx := testutil.Ctx(t)
 				for i := 0; i < n; i++ {
 					require.NoError(t, push.SendBytes(ctx, []byte("x")))
 				}
@@ -67,7 +68,7 @@ func TestInprocCloseLingerEndsWhenConsumed(t *testing.T) {
 
 			t.Run(name+"/queued", func(t *testing.T) {
 				push, pull := setup(t)
-				ctx := testCtx(t)
+				ctx := testutil.Ctx(t)
 				for i := 0; i < n; i++ {
 					require.NoError(t, push.SendBytes(ctx, []byte("x")))
 				}
@@ -147,7 +148,7 @@ func TestConnectAttachFailureTearsDownSession(t *testing.T) {
 // sentinel (errors.go), including RecvBytes' multipart refusal.
 func TestRecvBytesMultipartWrapsSentinel(t *testing.T) {
 	_, a, b := newSocketPair(t, gozmq.Pair, "inproc://recvbytes-multipart")
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, a.SendMsg(ctx, gozmq.NewMsgFromFrames([]byte("a"), []byte("b"))))
 	_, err := b.RecvBytes(ctx)
 	require.ErrorIs(t, err, gozmq.ErrFSMViolation)

@@ -17,6 +17,7 @@ import (
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -47,7 +48,7 @@ func TestRouter_RoutesByIdentity(t *testing.T) {
 	defer closePipes(append(engineEnds, peerEnds...)...)
 	mustAttach(t, eng, engineEnds...)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// Send a message targeted at peerB.
 	out := msg.FromFrames([]byte("peerB"), []byte("hello"))
@@ -79,7 +80,7 @@ func TestRouter_PrependsIdentityOnRecv(t *testing.T) {
 	defer closePipes(append(engineEnds, peerEnds...)...)
 	mustAttach(t, eng, engineEnds...)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// Peer "bravo" sends a message into the router.
 	require.NoError(t, peerEnds[1].Send(ctx, msg.FromBytes([]byte("ping"))), "peer send")
@@ -173,7 +174,7 @@ func TestRouter_AnonymousPeerGetsSynthesizedIdentity(t *testing.T) {
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// Anonymous peer sends; Router receives with a leading synthesized
 	// identity.
@@ -210,7 +211,7 @@ func TestRouter_SendToVanishedPeer(t *testing.T) {
 			mustAttach(t, eng, engineEnds...)
 			require.NoError(t, peerEnds[0].Close())
 
-			err := eng.Send(testCtx(t), msg.FromFrames([]byte("gone"), []byte("x")))
+			err := eng.Send(testutil.Ctx(t), msg.FromFrames([]byte("gone"), []byte("x")))
 			if mandatory {
 				require.ErrorIs(t, err, zmqerr.ErrRouteUnknown)
 				return
@@ -229,7 +230,7 @@ func TestRouter_SynthesizedIdentitiesAreDistinct(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewRouterEngine(true)
 	defer eng.Close()
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	attach := func(info pipe.PeerInfo) *pipe.End {
 		a, b := pipe.NewPair(4, 4, info, pipe.PeerInfo{})
@@ -540,7 +541,7 @@ func TestRouter_RecvAfterDetachKeepsIdentity(t *testing.T) {
 			t.Parallel()
 			eng := socket.NewRouterEngine(false)
 			defer eng.Close()
-			ctx := testCtx(t)
+			ctx := testutil.Ctx(t)
 
 			if extraPeer {
 				x, y := pipe.NewPair(8, 8, pipe.PeerInfo{Identity: []byte("idle")}, pipe.PeerInfo{})

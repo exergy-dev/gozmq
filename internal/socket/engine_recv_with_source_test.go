@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -32,7 +33,7 @@ func TestFairQueue_RecvWithSource(t *testing.T) {
 	require.NoError(t, fq.Attach(aEng), "attach A")
 	require.NoError(t, fq.Attach(bEng), "attach B")
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	// Send from B first; assert source is bEng.
 	require.NoError(t, bPeer.Send(ctx, msg.FromBytes([]byte("from-B"))), "bPeer send")

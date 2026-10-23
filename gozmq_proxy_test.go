@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // startProxy runs Proxy in the background and returns a stop function that
@@ -321,7 +322,7 @@ func TestProxyCaptureBlockedDoesNotHangShutdown(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- gozmq.Proxy(pctx, front, back, capture) }()
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, feeder.SendMsg(ctx, gozmq.NewMsgFromBytes([]byte("x"))))
 	m, err := drain.RecvMsg(ctx)
 	require.NoError(t, err)

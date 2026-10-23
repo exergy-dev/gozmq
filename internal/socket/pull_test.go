@@ -9,6 +9,7 @@ import (
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/socket"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -24,7 +25,7 @@ func TestPull_FairQueues(t *testing.T) {
 
 	mustAttach(t, eng, engineEnds...)
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	want := make(map[byte]bool)
 	for i := 0; i < n; i++ {
 		body := byte('a' + i)
@@ -47,7 +48,7 @@ func TestPull_RecvWakesOnAttach(t *testing.T) {
 	eng := socket.NewPullEngine()
 	defer eng.Close()
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	type result struct {
 		m   *msg.Msg
 		err error

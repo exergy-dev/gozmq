@@ -6,4 +6,4 @@ import (
 	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
-func TestMain(m *testing.M) { testutil.VerifyTestMain(m) }
+func TestMain(m *testing.M) { testutil.VerifyMain(m) }

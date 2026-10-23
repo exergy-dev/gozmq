@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
@@ -88,7 +89,7 @@ func TestAccept_ConcurrentAcceptsIndependentCtx(t *testing.T) {
 	require.NoError(t, err)
 	defer l.Close()
 
-	longCtx := testCtx(t, 5*time.Second)
+	longCtx := testutil.Ctx(t, 5*time.Second)
 	longCh := make(chan error, 1)
 	go func() {
 		c, err := l.Accept(longCtx)

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 func TestSocketDisconnect_StopsReconnectAndDetachesPeer(t *testing.T) {
@@ -39,7 +40,7 @@ func TestSocketDisconnect_StopsReconnectAndDetachesPeer(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 	if err := cli.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("hello"))); err != nil {
 		t.Fatalf("send: %v", err)
 	}

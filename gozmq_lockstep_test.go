@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // recvAsync runs s.RecvMsg in a goroutine and reports its outcome.
@@ -43,7 +44,7 @@ func requireRecv(t *testing.T, ch <-chan recvResult, want string) {
 func TestPairReconnectingPeerKeepsWaiting(t *testing.T) {
 	ctx := gozmq.NewContext()
 	t.Cleanup(func() { _ = ctx.Close() })
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 
 	server, err := ctx.NewSocket(gozmq.Pair)
 	require.NoError(t, err)
@@ -80,7 +81,7 @@ func TestPairReconnectingPeerKeepsWaiting(t *testing.T) {
 // connected peer disconnects receives from the next peer to connect.
 func TestPairBoundPeerAcceptsNextPeer(t *testing.T) {
 	ctx, server, client := newSocketPair(t, gozmq.Pair, "tcp://127.0.0.1:0")
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 
 	require.NoError(t, client.SendBytes(callCtx, []byte("first")))
 	got, err := server.RecvBytes(callCtx)
@@ -108,7 +109,7 @@ func TestPairBoundPeerAcceptsNextPeer(t *testing.T) {
 // ErrFSMViolation.
 func TestReqConcurrentSendsOneWins(t *testing.T) {
 	_, rep, req := newSocketPairTypes(t, gozmq.Rep, gozmq.Req, "tcp://127.0.0.1:0", nil, nil)
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 
 	const n = 8
 	errs := make(chan error, n)
@@ -145,7 +146,7 @@ func TestReqConcurrentSendsOneWins(t *testing.T) {
 // serve the next request.
 func TestRepReplyToVanishedRequester(t *testing.T) {
 	ctx, rep, req := newSocketPairTypes(t, gozmq.Rep, gozmq.Req, "tcp://127.0.0.1:0", nil, nil)
-	callCtx := testCtx(t)
+	callCtx := testutil.Ctx(t)
 
 	require.NoError(t, req.SendBytes(callCtx, []byte("q1")))
 	got, err := rep.RecvBytes(callCtx)

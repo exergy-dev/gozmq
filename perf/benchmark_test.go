@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // sizes is the canonical message-size ladder for every benchmark. Matches
@@ -615,15 +616,6 @@ func benchRouterDealerLatency(b *testing.B, msgSize int, endpoint string) {
 // XPUB / XSUB latency + throughput.
 // -----------------------------------------------------------------------------
 
-// xsubSubscribeFrame builds the synthetic ZMTP subscribe frame the XSUB
-// socket sends to its XPUB peer: 0x01 followed by the topic prefix.
-func xsubSubscribeFrame(topic []byte) []byte {
-	buf := make([]byte, 0, 1+len(topic))
-	buf = append(buf, 0x01)
-	buf = append(buf, topic...)
-	return buf
-}
-
 // BenchmarkXPubXSubLatency_Inproc measures one-shot XPUB→XSUB delivery on
 // an empty-topic subscription. Each iteration sends one message and
 // receives one — the ns/op number is XPUB send + slow-joiner-free XSUB
@@ -667,7 +659,7 @@ func benchXPubXSubLatency(b *testing.B, msgSize int, endpoint string) {
 	// XSUB subscribes to all topics via a synthetic 0x01 frame; XPUB
 	// surfaces the subscription on its Recv path. We drain that here so it
 	// doesn't sit in the XPUB queue during the timed phase.
-	if err := xsub.SendMsg(subCtx, gozmq.NewMsgFromBytes(xsubSubscribeFrame(nil))); err != nil {
+	if err := xsub.SendMsg(subCtx, gozmq.NewMsgFromBytes(testutil.SubscribeFrame(true, nil))); err != nil {
 		b.Fatalf("xsub subscribe: %v", err)
 	}
 	if _, err := xpub.RecvMsg(subCtx); err != nil {
@@ -743,7 +735,7 @@ func benchXPubXSubThroughput(b *testing.B, msgSize int, endpoint string) {
 
 	subCtx, subCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer subCancel()
-	if err := xsub.SendMsg(subCtx, gozmq.NewMsgFromBytes(xsubSubscribeFrame(nil))); err != nil {
+	if err := xsub.SendMsg(subCtx, gozmq.NewMsgFromBytes(testutil.SubscribeFrame(true, nil))); err != nil {
 		b.Fatalf("xsub subscribe: %v", err)
 	}
 	if _, err := xpub.RecvMsg(subCtx); err != nil {

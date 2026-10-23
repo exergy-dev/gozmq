@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -283,7 +284,7 @@ func TestSession_Handshake_AndRoundTrip(t *testing.T) {
 
 	// Push a multipart message A→B and verify it surfaces verbatim.
 	out := msg.FromFrames([]byte("hello"), []byte("world"), []byte("!"))
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	require.NoError(t, sA.Pipe().Send(ctx, out), "A.Pipe.Send")
 	got, err := sB.Pipe().Recv(ctx)
 	require.NoError(t, err, "B.Pipe.Recv")
@@ -415,7 +416,7 @@ func TestSession_Drain_DoesNotCloseConnUntilStop(t *testing.T) {
 		8,
 	)
 
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	for i := 0; i < 4; i++ {
 		require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte(fmt.Sprintf("linger-%d", i)))), "Send[%d]", i)
 	}
@@ -482,7 +483,7 @@ func TestSession_FramePathsIgnoreMechName(t *testing.T) {
 			)
 			_, _, identity := sessionFramePaths(xorMech{newFakeMech(name, false, nil)})
 			require.False(t, identity, "name alone must not select identity framing")
-			ctx := testCtx(t, 2*time.Second)
+			ctx := testutil.Ctx(t, 2*time.Second)
 			require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("hello"))))
 			got, err := sB.Pipe().Recv(ctx)
 			require.NoError(t, err)
@@ -723,7 +724,7 @@ func TestReader_MaxMessageSize_UnderLimit(t *testing.T) {
 			MaxMessageSize: 1024},
 	)
 
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	frame := make([]byte, 256)
 	// 4 × 256 B = exactly the cap — allowed (the limit is "exceeds").
 	require.NoError(t, sA.Pipe().Send(ctx, msg.FromFrames(frame, frame, frame, frame)), "Send")
@@ -744,7 +745,7 @@ func TestReader_MaxMessageSize_OverLimit(t *testing.T) {
 			MaxMessageSize: 512},
 	)
 
-	ctx := testCtx(t, 2*time.Second)
+	ctx := testutil.Ctx(t, 2*time.Second)
 	frame := make([]byte, 256)
 	// 3 × 256 B = 768 B > 512 B: B's reader must reject mid-message. The
 	// teardown happens as soon as the third frame arrives — B never
@@ -753,7 +754,7 @@ func TestReader_MaxMessageSize_OverLimit(t *testing.T) {
 
 	waitClosed(t, sB.Done(), 2*time.Second, "receiver did not tear down on oversized multipart")
 	// The rejected message must not surface on B's pipe.
-	_, err := sB.Pipe().Recv(testCtx(t, time.Second))
+	_, err := sB.Pipe().Recv(testutil.Ctx(t, time.Second))
 	require.Error(t, err, "oversized message surfaced on the pipe")
 	// A sees the disconnect (B closed the conn during shutdown).
 	waitClosed(t, sA.Done(), 2*time.Second, "sender did not observe receiver teardown")
@@ -786,7 +787,7 @@ func startZmtpPair(t *testing.T, hwm int) (sA, sB *tSession) {
 // delivered frame may alias scratch.
 func TestReader_ScratchSizeBoundary(t *testing.T) {
 	sA, sB := startZmtpPair(t, 8)
-	ctx := testCtx(t, 5*time.Second)
+	ctx := testutil.Ctx(t, 5*time.Second)
 
 	payloads := [][]byte{
 		bytes.Repeat([]byte{0xA5}, readScratchSize),
@@ -811,7 +812,7 @@ func TestReader_ScratchSizeBoundary(t *testing.T) {
 func TestReader_SmallFrameBurstIndependentPayloads(t *testing.T) {
 	const N = 64
 	sA, sB := startZmtpPair(t, N+4)
-	ctx := testCtx(t, 5*time.Second)
+	ctx := testutil.Ctx(t, 5*time.Second)
 
 	for i := 0; i < N; i++ {
 		m := msg.FromBytes([]byte(fmt.Sprintf("payload-%03d", i)))
@@ -850,7 +851,7 @@ func TestReader_SubscriptionCommands(t *testing.T) {
 			Config{Conn: connB, Mech: newFakeMech("NULL", true, nil), SendHWM: 8, RecvHWM: 8,
 				SubscriptionCommands: enabled},
 		)
-		ctx := testCtx(t, 2*time.Second)
+		ctx := testutil.Ctx(t, 2*time.Second)
 		sA.enqueueCommand("SUBSCRIBE", []byte("topic"))
 		sA.enqueueCommand("CANCEL", []byte("topic"))
 		require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("data1"))))

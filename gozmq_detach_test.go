@@ -9,22 +9,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // waitEvent blocks until an event of type typ arrives on events.
 func waitEvent(t *testing.T, events <-chan gozmq.Event, typ gozmq.EventType) {
 	t.Helper()
-	ctx := testCtx(t)
-	for {
-		select {
-		case ev := <-events:
-			if ev.Type == typ {
-				return
-			}
-		case <-ctx.Done():
-			t.Fatalf("timed out waiting for event %v", typ)
-		}
-	}
+	testutil.WaitEvent(t, events, 5*time.Second, func(e gozmq.Event) bool { return e.Type == typ })
 }
 
 // TestPeerDetach_QueuedMessagesSurvive: messages a sender already delivered
@@ -88,7 +79,7 @@ func testPeerDetachQueued(t *testing.T, transport string, extraPeer, router bool
 		return nil, string(f[0]), nil
 	}
 
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, push.SendBytes(ctx, []byte("warmup")))
 	peerID, _, err := recv(ctx)
 	require.NoError(t, err)
@@ -101,7 +92,7 @@ func testPeerDetachQueued(t *testing.T, transport string, extraPeer, router bool
 	// The receiver has detached the sender's pipe before we read anything.
 	waitEvent(t, events, gozmq.EventDisconnected)
 
-	ctx = testCtx(t)
+	ctx = testutil.Ctx(t)
 	for i := range n {
 		id, body, err := recv(ctx)
 		require.NoError(t, err, "recv %d of %d after sender detached", i, n)
@@ -113,7 +104,7 @@ func testPeerDetachQueued(t *testing.T, transport string, extraPeer, router bool
 // requireSubEvent receives the next XPUB subscription event and checks it.
 func requireSubEvent(t *testing.T, xpub *gozmq.Socket, subscribe bool, prefix string) {
 	t.Helper()
-	m, err := xpub.RecvMsg(testCtx(t))
+	m, err := xpub.RecvMsg(testutil.Ctx(t))
 	require.NoError(t, err)
 	want := string(append([]byte{0}, prefix...))
 	if subscribe {
@@ -154,7 +145,7 @@ func TestXPub_ForeignCancelIgnored(t *testing.T) {
 	zctx, xpub := newTestSocket(t, gozmq.XPub)
 	require.NoError(t, xpub.Bind("tcp://127.0.0.1:0"))
 	ep := xpub.LastEndpoint()
-	ctx := testCtx(t)
+	ctx := testutil.Ctx(t)
 
 	good, err := zctx.NewSocket(gozmq.Sub, gozmq.WithSubscribe([]byte("A")))
 	require.NoError(t, err)

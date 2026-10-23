@@ -9,17 +9,10 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/security"
 	"github.com/exergy-dev/gozmq/transport"
 )
-
-// inprocCtx returns a 5 s call context cancelled at test end.
-func inprocCtx(t *testing.T) context.Context {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	t.Cleanup(cancel)
-	return ctx
-}
 
 // inprocSocket creates a socket on zctx, closed at test end.
 func inprocSocket(t *testing.T, zctx *Context, typ SocketType, opts ...Option) *Socket {
@@ -46,7 +39,7 @@ func linkCount(s *Socket) int {
 // requireRoundTrip sends body from src and requires dst to receive it.
 func requireRoundTrip(t *testing.T, src, dst *Socket, body string) {
 	t.Helper()
-	ctx := inprocCtx(t)
+	ctx := testutil.Ctx(t)
 	require.NoError(t, src.SendBytes(ctx, []byte(body)))
 	got, err := dst.RecvBytes(ctx)
 	require.NoError(t, err)
@@ -57,16 +50,7 @@ func requireRoundTrip(t *testing.T, src, dst *Socket, body string) {
 // inproc emits synchronously, so nothing is waited for.
 func requireEvent(t *testing.T, ch <-chan Event, typ EventType) {
 	t.Helper()
-	for {
-		select {
-		case ev := <-ch:
-			if ev.Type == typ {
-				return
-			}
-		default:
-			t.Fatalf("no %v event queued", typ)
-		}
-	}
+	testutil.WaitEvent(t, ch, time.Second, func(e Event) bool { return e.Type == typ })
 }
 
 // TestInproc_ConnectBeforeBindWaits: a Connect may precede its Bind by
@@ -168,7 +152,7 @@ func TestInproc_IdentityBothWays(t *testing.T) {
 	b := inprocSocket(t, zctx, Router, WithIdentity([]byte("B")), WithRouterMandatory(true))
 	require.NoError(t, b.Connect(ep))
 
-	ctx := inprocCtx(t)
+	ctx := testutil.Ctx(t)
 	for _, tc := range []struct {
 		src, dst *Socket
 		to, from string
