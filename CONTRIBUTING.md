@@ -28,7 +28,7 @@ go test -tags interop -race ./interop/...
 Install the linter (CI runs the same config):
 
 ```sh
-go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 golangci-lint run
 ```
 
@@ -69,9 +69,9 @@ behaviour is the better one.
 **Public API changes.** From v1.0.0 the compatibility promise covers
 everything exported outside `internal/`: additions are fine in a minor
 release, and anything breaking has to wait for v2. Until then (0.x),
-breaking changes may land in a minor release but must be listed under
-**Breaking changes** in `CHANGELOG.md` with a migration hint. No exported signature may name a type
-from `internal/` — the contracts live in `transport`, `security`, and `msg`
+breaking changes may land in a minor release but must be listed in
+`CHANGELOG.md` with a migration hint. No exported signature may name a type
+from `internal/`; the contracts live in `transport`, `security`, and `msg`
 precisely so this stays true.
 
 **Performance claims need numbers, and hot-path changes need the gate.**
@@ -84,17 +84,14 @@ against the commit you started from:
 perf/benchgate.sh <base-commit>                  # needs benchstat
 ```
 
-No benchmark may regress by more than 5% (p < 0.05), allocs/op may not rise,
-and B/op must stay within 5%; re-run a flagged benchmark with
-`perf/benchgate.sh <base> '<regex>' 16` before calling it a regression. See
-`perf/README.md`. Do **not** benchmark with `-race`; it multiplies
-synchronisation cost by roughly 5× and makes the numbers meaningless.
+The pass rule is in the script's header. Do **not** benchmark with `-race`;
+it multiplies synchronisation cost by roughly 5× and makes the numbers
+meaningless.
 
-**Goroutine leaks fail the build.** The packages that start goroutines
-(root, `internal/pipe`, `internal/session`, `internal/socket`,
-`internal/zmtp`, `security`, `security/curve`, `transport`, `interop`,
-`perf`) run goleak from `TestMain`, through `testutil.VerifyTestMain` or
-directly. If a new goroutine can outlive `Socket.Close`, tests will say so.
+**Goroutine leaks fail the build.** Every package's `TestMain` runs goleak
+through `testutil.VerifyMain`. If a new goroutine can outlive
+`Socket.Close`, tests will say so. Shared test helpers live in
+`internal/testutil`; add to it rather than copying a helper into a package.
 
 **Long-horizon changes want a soak run.** If you touch teardown, reconnect,
 or anything that allocates per connection:

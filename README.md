@@ -18,34 +18,15 @@ only cgo in this repository is the build-tagged interop test harness that
 checks us against a real libzmq.
 
 **It talks to libzmq.** Wire compatibility is a first-class goal, not an
-aspiration. CI runs the [`interop/`](interop) suite against libzmq 4.3.4 in
-both directions: every socket pattern over NULL, most over PLAIN, CURVE
-and ZAP on PAIR. The exact matrix is in [`interop/README.md`](interop/README.md).
+aspiration. CI runs the [`interop/`](interop) suite against libzmq 4.3.x in
+both directions; the matrix is in [`interop/README.md`](interop/README.md).
 
 **It is fast enough that the tradeoff is gone.** Measured two-process over
-loopback against libzmq 4.3.4, `gozmq` is within about 10% of libzmq from
-256 B through 64 KB:
-
-| Message size | gozmq | libzmq 4.3.4 | ratio |
-| :--- | ---: | ---: | ---: |
-| 32 B | 5.70M msg/s | 9.96M msg/s | 0.57× |
-| 256 B | 4.43M msg/s | 4.03M msg/s | 1.10× |
-| 1 KB | 2.26M msg/s | 2.06M msg/s | 1.10× |
-| 8 KB | 0.51M msg/s | 0.48M msg/s | 1.06× |
-| 64 KB | 43.2 Gb/s | 48.4 Gb/s | 0.89× |
-
-The 32 B gap is real and is scheduler-bound — goroutine wakeups, roughly 36%
-of CPU in a profile there — not something more allocation tuning fixes. If
-your workload is tiny messages at millions per second, measure before you
-switch. Full methodology and the complete matrix are in
-[`perf/REPORT.md`](perf/REPORT.md).
-
-Caveats: the figures are from the report's 2026-06-10 run on one WSL2
-machine; received frames over 4 KiB were pooled by default then and pooling
-is now opt-in (`WithRecvBufferPool`), so the 8 KB and 64 KB rows may not
-match the default configuration; and the gozmq tools ran with a 1,000,000
-message HWM while the libzmq tools used their default of 1000. Treat the
-table as "the same order of magnitude", and measure your own workload.
+loopback against libzmq, gozmq is within about 10% of libzmq from 256 B
+through 64 KB and behind on 32 B messages, where goroutine wakeups dominate.
+The numbers, the method and the tools to reproduce them are in
+[`perf/REPORT.md`](perf/REPORT.md); measure your own workload before you
+switch if it is tiny messages at millions per second.
 
 ## Install
 
@@ -124,57 +105,20 @@ place behaviour differs from libzmq — see
 
 ## Stability
 
-`gozmq` follows semantic versioning and is pre-1.0: a 0.x minor release may
-include breaking changes, each listed in `CHANGELOG.md` with a migration hint.
-From v1.0.0, everything exported outside `internal/` will be covered by the
-compatibility promise: breaking changes will wait for a major version, and
-additions may land in any minor.
-`CHANGELOG.md` records everything user-visible.
+Semantic versioning, pre-1.0: a 0.x minor may break the API, and every such
+change is listed in `CHANGELOG.md` with a migration hint. From v1.0.0 the
+compatibility promise covers everything exported outside `internal/`.
 
-## Notes
+## Security defaults
 
-**Message ownership.** By default, frames returned by `RecvMsg` are ordinary
-Go memory that belongs to you: keep them, slice them, or re-send the message.
-There is nothing to release; `Msg.Release` and `Msg.Retain` do nothing.
-
-For large-frame throughput, `WithRecvBufferPool(true)` receives frames over
-4 KiB into pooled buffers instead. Such a message is lent (`Msg.Lent`): its
-frames stay valid until you call `Release`, after which the buffers are
-reused, so copy anything you keep. `Retain` adds a reference that needs its
-own `Release`, and releasing too often panics. Forwarding is safe:
-`SendMsg` holds its own reference until the write completes, so
-`RecvMsg`, `SendMsg`, `Release` is correct. Build derived messages with
-`Msg.Derive`, not by rewrapping the frames. A forgotten `Release` is safe;
-the buffer is left to the garbage collector.
-
-`RecvBytes` returns a copy of a single-frame payload and needs no
-bookkeeping in either mode.
-
-**Security defaults.** The default mechanism is NULL: no authentication, no
-encryption, matching libzmq. That is fine for `inproc`, `ipc`, and trusted
-network segments. For anything else use CURVE, or PLAIN under `tls+tcp://`.
-As in libzmq, the PLAIN and CURVE server/client role comes from the option
+The default mechanism is NULL: no authentication, no encryption, matching
+libzmq. Use CURVE, or PLAIN under `tls+tcp://`, on anything but trusted
+segments. The PLAIN and CURVE server/client role comes from the option
 (`WithPlainAuth` / `WithPlainClient`, `WithCurveServer` / `WithCurveClient`),
-not from which side binds. To decide which peers are allowed, install a
-`security.ZAPHandler` on the Context with `gozmq.WithZAPHandler` and name
-the socket's domain with `WithZAPDomain`; it vets PLAIN and CURVE servers,
-and NULL sockets that set a domain.
-
-**inproc.** `inproc://` joins two sockets of one Context with a single
-in-memory pipe pair: no framing, no copy, no goroutine. As in libzmq it runs
-no security mechanism, so a socket configured with PLAIN, CURVE or
-`WithSecurityMech` gets an `ErrEndpointInvalid` error from `Bind` or
-`Connect` on `inproc://`. A `Connect` may come before its `Bind` and waits
-for it without a time limit. Each direction queues up to the sender's send
-HWM plus the receiver's recv HWM (unlimited if either is 0).
-
-**STREAM.** A STREAM socket carries raw TCP bytes, framed as
-`[connection identity, payload]`; an empty payload closes that connection.
-It dials once and never reconnects, honours the HWMs as given (0 is
-unlimited) and `WithLinger`, rejects the ZMTP-layer options (security,
-identity, heartbeat, handshake timeout, ZAP domain, receive pool) and
-ignores `WithMaxMessageSize` and the reconnect options. See the package
-documentation for the details.
+not from which side binds, and a CURVE server authorizes nobody until a
+`security.ZAPHandler` is installed with `gozmq.WithZAPHandler`. Message
+ownership, `inproc://` and STREAM semantics are in the package
+documentation and [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
 
 ## Documentation
 
@@ -182,12 +126,11 @@ documentation for the details.
   The package doc covers security, defaults, STREAM, polling, close
   semantics, and the concurrency model.
 - **libzmq compatibility** — [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
-- **Runnable demos** — [`examples/`](examples), one self-contained program
-  per pattern.
-- **Architecture** — [`design.md`](design.md): layering, protocol, security,
-  and test strategy.
+- **Runnable demos** — [`examples/`](examples), plus the `Example*`
+  functions in the package tests.
+- **Architecture** — [`design.md`](design.md).
 - **Performance** — [`perf/REPORT.md`](perf/REPORT.md) and the libzmq-comparable
-  CLI tools in [`perf/`](perf).
+  tool in [`perf/`](perf).
 - **Contributing** — [`CONTRIBUTING.md`](CONTRIBUTING.md).
 - **Security policy** — [`SECURITY.md`](SECURITY.md).
 
