@@ -94,7 +94,7 @@ func TestCurve_ForgedVouchLowOrderClientKey(t *testing.T) {
 	initPlain := append(append(append([]byte{}, C[:]...), vouch...),
 		security.EncodeMetadata(map[string]string{"Socket-Type": "DEALER"})...)
 	counter := cli.ourShortNonce
-	ib := sealShort(prefixInitiate, counter, initPlain, &cli.peerEphPublic, &cli.ourEphSecret)
+	ib := sealShort(prefixInitiate, counter, initPlain, &cli.shared) // (S', c'), precomputed by parseWelcome
 	body := []byte{byte(len(cmdInitiate))}
 	body = append(body, cmdInitiate...)
 	body = append(body, cookie...)
