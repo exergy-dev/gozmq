@@ -220,7 +220,7 @@ func TestPoller_AddNarrowsMask(t *testing.T) {
 	shortCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	ev, err := p.Poll(shortCtx)
-	require.ErrorIs(t, err, context.DeadlineExceeded, "post-Modify Poll = (%+v, %v)", ev, err)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "post-narrowing Poll = (%+v, %v)", ev, err)
 
 	// Inbound data still wakes the narrowed registration — with only the
 	// PollIn bit reported even though the socket remains writable.
