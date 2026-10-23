@@ -8,10 +8,13 @@ migration hint.
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-10-23
+## [0.1.1] - 2026-10-23
 
 First public release. A pure-Go implementation of the ZeroMQ socket patterns
 and the ZMTP 3.1 wire protocol: no cgo, no libzmq, no build tags.
+
+(0.1.1 rather than 0.1.0 because a `v0.1.0` tag was cut in the private
+repository before the pre-release review; see [0.1.0] below.)
 
 Requires Go 1.25 or newer.
 
@@ -76,5 +79,12 @@ gozmq was developed privately from early 2026. Earlier snapshots were never
 published to a module proxy, so this release has no upgrade path to
 document; the development history is in the git log.
 
-[Unreleased]: https://github.com/exergy-dev/gozmq/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/exergy-dev/gozmq/releases/tag/v0.1.0
+## [0.1.0] - 2026-10-01
+
+Tagged in the private repository before the pre-release review and never
+pushed to GitHub or a module proxy. It has the memory-exhaustion, CURVE
+and crash issues listed under 0.1.1, so it is not available and should not
+be used; the first published version is 0.1.1.
+
+[Unreleased]: https://github.com/exergy-dev/gozmq/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/exergy-dev/gozmq/releases/tag/v0.1.1
