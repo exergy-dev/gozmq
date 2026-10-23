@@ -35,24 +35,29 @@ directory's CGO sources.
 
 ## Scope
 
-The interop suite covers the wrapper plus the gozmq engines that exist
-today:
+Every test drives one `gozmq` socket against one `libzmq` socket. A test is
+written once against two interchangeable ends (`link_test.go`); a `direction`
+value says which implementation binds, so each case runs both ways —
+`gozmq`-binds and `libzmq`-binds — from one table row.
 
 - `zmq_wrap.go` — thin CGO wrapper over libzmq (context, socket,
   bind/connect, multipart send/recv, subscribe, last-endpoint).
-- `zmq_wrap_test.go` — smoke test that the wrapper itself works
-  (libzmq PAIR ↔ libzmq PAIR round-trip).
-- `pair_test.go` — `gozmq` PAIR ↔ `libzmq` PAIR, both directions.
-- `push_pull_test.go` — `gozmq` PUSH/PULL ↔ `libzmq` PULL/PUSH, both
-  directions, plus a load-balance assertion (one gozmq PUSH fanning 9
-  messages across three libzmq PULL peers, expecting 3 per peer).
-
-The suite also covers DEALER/ROUTER, REQ/REP, PUB/SUB, XPUB/XSUB, CURVE,
-PLAIN, ZAP, lifecycle behavior, and transport-specific edge cases.
+- `zmq_wrap_test.go` — one smoke test that the wrapper itself works
+  (libzmq PAIR ↔ libzmq PAIR round-trip, plus a bogus-option rejection).
+- `link_test.go`, `mech_test.go` — the socket adapter, the `direction`
+  value and the NULL/PLAIN/CURVE mechanism table.
+- `patterns_test.go` — socket patterns over NULL, plus load-balance,
+  router-mandatory, XPUB-verbose, STREAM, non-`tcp://` transports and
+  payload edges.
+- `security_test.go` — PLAIN and CURVE handshakes and ZAP.
+- `lifecycle_test.go` — heartbeat, disconnect, linger, reconnect,
+  max-message-size.
+- `proxy_test.go`, `zap_helper_test.go` — a TCP frame-mutating splicer and
+  the libzmq-side ZAP responder.
 
 ## Coverage Snapshot
 
-Current tagged coverage over `tcp://` looks like this:
+Mechanism × pattern over `tcp://`, each cell run in both directions:
 
 | Pattern | NULL | PLAIN | CURVE |
 | --- | --- | --- | --- |
@@ -63,48 +68,32 @@ Current tagged coverage over `tcp://` looks like this:
 | XPUB/XSUB | yes | no | no |
 | PUSH/PULL | yes | no | no |
 
-Current PLAIN coverage includes:
-
-- PAIR round-trips both directions.
-- Bad-password rejection both directions.
-- Empty-username acceptance both directions.
-- Oversized-credential rejection.
-- REQ/REP, DEALER/ROUTER, and PUB/SUB transparency over authenticated links.
-
-Current ZAP coverage includes:
-
-- NULL accept/reject with libzmq as the authoritative server.
-- NULL accept/reject with gozmq as the authoritative server.
-- PLAIN accept/reject with libzmq as the authoritative server.
-- PLAIN accept/reject with gozmq as the authoritative server.
-- CURVE accept/reject with libzmq as the authoritative server.
-- CURVE accept/reject with gozmq as the authoritative server.
-
-Current payload-edge coverage includes:
-
-- Zero-length frames, including an empty middle frame in multipart.
-- Frame-size boundaries at 255, 256, and 257 bytes.
-- Large frames at 1 MiB and 16 MiB.
-- 32-frame multipart messages.
-
-Current transport coverage beyond `tcp://` includes:
-
-- `tcp6://` PAIR interop both directions. On the libzmq side this uses `tcp://` plus `ZMQ_IPV6=1`, which is libzmq's native IPv6 model.
-- `ipc://` filesystem-namespace PAIR interop both directions.
-- `ipc://@name` abstract-namespace PAIR interop both directions on Linux.
-- `STREAM` raw-TCP framing interop both directions over `tcp://`.
-
-Current heartbeat coverage includes:
-
-- Idle-session survival for at least five heartbeat intervals in both directions.
-- `EventDisconnected` on the monitored gozmq peer after the libzmq side closes mid-idle.
-
-Current lifecycle coverage includes:
-
-- Client-side `Disconnect` teardown in both directions.
-- Receiver-enforced max-message-size teardown in both directions.
-- Reconnect after close/rebind in both directions.
-- `LINGER` drain-vs-drop semantics in both directions.
+- **PLAIN** (`TestSecurity`): good-credential accept, bad-password reject
+  (and no delivery after), empty-username accept, and REQ/REP, DEALER/ROUTER
+  and PUB/SUB transparency over an authenticated link. An oversized (256-byte)
+  username is skipped: libzmq 4.3.x refuses it in `zmq_setsockopt`, so it
+  never reaches the wire.
+- **CURVE** (`TestSecurity`): PAIR round-trip, a wrong pinned server key that
+  never completes a handshake, and (`TestCurve_CorruptedWelcome`) a one-byte
+  flip inside the WELCOME cookie box that the client must reject.
+- **ZAP** (`TestZAP`): NULL, PLAIN and CURVE, accept and reject, with each
+  implementation as the authenticating server; PLAIN also proves the ZAP
+  verdict overrides the local callback, and every case asserts the handler
+  was consulted.
+- **Payload edges** (`TestPayloadEdges`): empty frames (including an empty
+  middle frame), the 255/256/257-byte framing boundary, 1 MiB and 16 MiB
+  frames, and a 32-frame multipart.
+- **Transports beyond `tcp://`** (`TestTransports`): `ipc://` filesystem and
+  `ipc://@` abstract (Linux) namespaces, and `tcp6://` — on the libzmq side
+  `tcp://` plus `ZMQ_IPV6=1`, its native IPv6 model. `STREAM` raw-TCP framing
+  is `TestStream`.
+- **Heartbeat** (`TestHeartbeat`): over NULL, PLAIN and CURVE, an idle
+  session survives past the timeout and carries data afterward with no
+  heartbeat command leaking into user data, then the gozmq peer observes the
+  libzmq close.
+- **Lifecycle** (`lifecycle_test.go`): client-side `Disconnect`,
+  receiver-enforced max-message-size, reconnect after close/rebind, and
+  `LINGER` drain-vs-drop — each in both directions.
 
 ## Conventions
 
