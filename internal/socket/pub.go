@@ -274,9 +274,11 @@ func (e *pubEngine) Send(ctx context.Context, m *msg.Msg) error {
 	// changes no peer's membership, so snap stays current.
 	e.applyPending()
 
-	// Single pass, no allocation and no lock: each peer's SubTree matches
-	// from a published snapshot, and the peer entries are immutable. A peer detached concurrently may still appear in a loaded
-	// snapshot; its pipe rejects the TrySend, which counts as a drop.
+	// Single pass, no allocation and no engine lock: each peer's SubTree
+	// is goroutine-safe (an atomic flag answers subscribe-to-all), and the
+	// snapshot entries are immutable. A peer detached concurrently may
+	// still appear in a loaded snapshot; its pipe rejects the TrySend,
+	// which counts as a drop.
 	//
 	// Drop-on-HWM: a peer whose pipe has no room loses the message
 	// immediately (libzmq parity — no grace deadline, so one slow

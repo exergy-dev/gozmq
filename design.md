@@ -370,9 +370,9 @@ closed; every other error is treated as per-connection and retried.
 - A multi-peer receive walks only the pipes that have data; a single-peer
   receive blocks in the one pipe without a lock. Bounded channels express the
   HWM directly.
-- PUB/XPUB `Send` reads a copy-on-write snapshot of the peers, and each
-  peer's subscription tree is copy-on-write too: no lock, no per-message
-  slice.
+- PUB/XPUB `Send` reads a copy-on-write snapshot of the peers (no lock, no
+  per-message slice) and answers a peer's subscribe-to-all from an atomic
+  flag; only a selective tree takes that peer's read lock.
 - CURVE precomputes each handshake key once and seals every frame straight
   into the writer's batch; the reader adopts its plaintext without a copy.
 - A bound ROUTER costs two goroutines per TCP peer and none per inproc peer;

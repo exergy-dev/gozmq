@@ -28,9 +28,9 @@ migration hint.
   reader no longer allocates its header fields, the writer has one encode
   path for every mechanism, and a REP keeps a plain request's envelope by
   reference.
-- A PUB matches each peer's subscription tree without a lock: the tree is
-  copy-on-write, published with one atomic store per Subscribe or
-  Unsubscribe.
+- A PUB answers the subscribe-to-all case from an atomic flag per peer
+  instead of taking that peer's subscription lock on every message; a
+  selective tree is still walked under the read lock.
 - CURVE derives each handshake key once (four fewer X25519 operations per
   side per connection) and the reader reuses one ciphertext buffer for its
   large frames.
