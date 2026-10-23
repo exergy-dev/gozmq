@@ -16,6 +16,7 @@ import (
 // ZMTP guarantees backwards-compatible minors — while a non-3 major is
 // still rejected. The session treats minor >= 1 as 3.1 (heartbeats).
 func TestDecodeGreeting_MinorVersions(t *testing.T) {
+	t.Parallel()
 	for _, minor := range []byte{0x00, 0x01, 0x02, 0x7F, 0xFF} {
 		g, err := encodeGreeting("NULL", false)
 		require.NoError(t, err, "encodeGreeting")
@@ -29,6 +30,7 @@ func TestDecodeGreeting_MinorVersions(t *testing.T) {
 }
 
 func TestDecodeGreeting_RejectsWrongMajor(t *testing.T) {
+	t.Parallel()
 	g, err := encodeGreeting("NULL", false)
 	require.NoError(t, err, "encodeGreeting")
 	g[10] = 0x02 // ZMTP 2.x peer
@@ -42,6 +44,7 @@ func TestDecodeGreeting_RejectsWrongMajor(t *testing.T) {
 // handshake on both sides instead of being logged and left to the
 // mechanism's parser.
 func TestHandshake_RejectsMechanismMismatch(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	sA := startTestSession(Config{Conn: connA, Mech: newFakeMech("NULL", false, nil), Codec: fakeCodec{}, SendHWM: 1, RecvHWM: 1})
 	sB := startTestSession(Config{Conn: connB, Mech: newFakeMech("PLAIN", true, nil), Codec: fakeCodec{}, SendHWM: 1, RecvHWM: 1})
@@ -64,6 +67,7 @@ func TestHandshake_RejectsMechanismMismatch(t *testing.T) {
 // than handshakeMaxFrame bytes is rejected from its header alone, before
 // any body is buffered, whatever MaxMessageSize the session carries.
 func TestHandshake_BoundsPreAuthFrameSize(t *testing.T) {
+	t.Parallel()
 	connA, connB := newFakeConnPair()
 	defer func() { _ = connB.Close() }()
 	s := startTestSession(Config{

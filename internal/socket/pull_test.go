@@ -3,7 +3,6 @@ package socket_test
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -53,27 +52,18 @@ func TestPull_RecvWakesOnAttach(t *testing.T) {
 		m   *msg.Msg
 		err error
 	}
-	done := make(chan result, 1)
-	go func() {
-		m, err := eng.Recv(ctx)
-		done <- result{m: m, err: err}
-	}()
-	select {
-	case <-done:
-		require.Fail(t, "recv returned before any pipe attached")
-	case <-time.After(50 * time.Millisecond):
-	}
 	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
 	defer closePipes(a, b)
-	require.NoError(t, b.Send(ctx, msg.FromBytes([]byte("hi"))), "peer send")
-	mustAttach(t, eng, a)
-	select {
-	case r := <-done:
-		require.NoError(t, r.err, "recv")
-		require.Equal(t, "hi", string(r.m.Bytes()))
-	case <-time.After(time.Second):
-		require.Fail(t, "recv did not wake on attach")
-	}
+	// Recv must block until a pipe with a message available is attached.
+	r := testutil.RequireUnblocks(t, func() result {
+		m, err := eng.Recv(ctx)
+		return result{m: m, err: err}
+	}, func() {
+		require.NoError(t, b.Send(ctx, msg.FromBytes([]byte("hi"))), "peer send")
+		mustAttach(t, eng, a)
+	})
+	require.NoError(t, r.err, "recv")
+	require.Equal(t, "hi", string(r.m.Bytes()))
 }
 
 func TestPull_SendIsFSMViolation(t *testing.T) {
@@ -87,17 +77,9 @@ func TestPull_SendIsFSMViolation(t *testing.T) {
 func TestPull_CloseUnblocksRecv(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewPullEngine()
-	done := make(chan error, 1)
-	go func() {
+	err := testutil.RequireUnblocks(t, func() error {
 		_, err := eng.Recv(context.Background())
-		done <- err
-	}()
-	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, eng.Close(), "close")
-	select {
-	case err := <-done:
-		require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
-	case <-time.After(time.Second):
-		require.Fail(t, "recv did not unblock on close")
-	}
+		return err
+	}, func() { require.NoError(t, eng.Close(), "close") })
+	require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
 }

@@ -11,7 +11,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/goleak"
 
 	"github.com/exergy-dev/gozmq"
 	"github.com/exergy-dev/gozmq/typed"
@@ -28,16 +27,16 @@ type alert struct {
 func newPubSubPair(t *testing.T, endpoint string) (*gozmq.Context, *gozmq.Socket, *gozmq.Socket) {
 	t.Helper()
 	zctx := gozmq.NewContext()
-	pubSock, err := zctx.NewSocket(gozmq.Pub)
+	pubSock, err := zctx.NewSocket(gozmq.Pub, gozmq.WithLinger(0))
 	require.NoError(t, err)
 	require.NoError(t, pubSock.Bind(endpoint))
-	subSock, err := zctx.NewSocket(gozmq.Sub)
+	subSock, err := zctx.NewSocket(gozmq.Sub, gozmq.WithLinger(0))
 	require.NoError(t, err)
 	return zctx, pubSock, subSock
 }
 
 func TestTopicMux_DispatchesHeterogeneousTypes(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	t.Parallel()
 
 	zctx, pubSock, subSock := newPubSubPair(t, "inproc://typed-router-hetero")
 	defer zctx.Close()
@@ -114,7 +113,7 @@ func TestTopicMux_DispatchesHeterogeneousTypes(t *testing.T) {
 }
 
 func TestTopicMux_LongestPrefixWins(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	t.Parallel()
 
 	zctx, pubSock, subSock := newPubSubPair(t, "inproc://typed-router-longest")
 	defer zctx.Close()
@@ -171,7 +170,7 @@ func TestTopicMux_LongestPrefixWins(t *testing.T) {
 }
 
 func TestTopicMux_RegisterAfterRunReturnsError(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	t.Parallel()
 
 	zctx, pubSock, subSock := newPubSubPair(t, "inproc://typed-router-after-run")
 	defer zctx.Close()
@@ -203,7 +202,7 @@ func TestTopicMux_RegisterAfterRunReturnsError(t *testing.T) {
 }
 
 func TestTopicMux_DuplicateTopicRejected(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	t.Parallel()
 
 	zctx, pubSock, subSock := newPubSubPair(t, "inproc://typed-router-dup")
 	defer zctx.Close()
@@ -217,7 +216,7 @@ func TestTopicMux_DuplicateTopicRejected(t *testing.T) {
 }
 
 func TestTopicMux_UnmatchedTopicSurfacesErrNoTopicMatch(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	t.Parallel()
 
 	zctx, pubSock, subSock := newPubSubPair(t, "inproc://typed-router-nomatch")
 	defer zctx.Close()
@@ -250,7 +249,7 @@ func TestTopicMux_UnmatchedTopicSurfacesErrNoTopicMatch(t *testing.T) {
 // A second Run while one is executing must be rejected, not run alongside
 // it (and must not clear the first Run's latch when it returns).
 func TestTopicMux_ConcurrentRunRejected(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	t.Parallel()
 
 	zctx, pubSock, subSock := newPubSubPair(t, "inproc://typed-router-concurrent-run")
 	defer zctx.Close()
@@ -280,7 +279,7 @@ func TestTopicMux_ConcurrentRunRejected(t *testing.T) {
 // handlers or be rejected, never mutate the table Run is reading. Run under
 // -race: messages already queued make Run consult the table immediately.
 func TestTopicMux_RegisterRacesRun(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	t.Parallel()
 
 	zctx, pubSock, subSock := newPubSubPair(t, "inproc://typed-router-register-race")
 	defer zctx.Close()

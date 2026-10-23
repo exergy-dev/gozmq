@@ -209,19 +209,11 @@ func TestStream_CloseUnblocksRecv(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewStreamEngine()
 
-	done := make(chan error, 1)
-	go func() {
+	err := testutil.RequireUnblocks(t, func() error {
 		_, err := eng.Recv(context.Background())
-		done <- err
-	}()
-	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, eng.Close(), "close")
-	select {
-	case err := <-done:
-		require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
-	case <-time.After(time.Second):
-		require.Fail(t, "recv did not unblock on close")
-	}
+		return err
+	}, func() { require.NoError(t, eng.Close(), "close") })
+	require.ErrorIs(t, err, zmqerr.ErrSocketClosed)
 }
 
 // --------------------------------------------------------------------------

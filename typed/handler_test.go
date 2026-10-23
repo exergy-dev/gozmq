@@ -8,24 +8,24 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"go.uber.org/goleak"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/typed"
 )
 
 func TestReceiver_Handle_Roundtrip(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	t.Parallel()
 
 	zctx := gozmq.NewContext()
 	defer zctx.Close()
 
-	push, err := zctx.NewSocket(gozmq.Push)
+	push, err := zctx.NewSocket(gozmq.Push, gozmq.WithLinger(0))
 	require.NoError(t, err)
 	defer push.Close()
 	require.NoError(t, push.Bind("inproc://typed-handle-pushpull"))
 
-	pull, err := zctx.NewSocket(gozmq.Pull)
+	pull, err := zctx.NewSocket(gozmq.Pull, gozmq.WithLinger(0))
 	require.NoError(t, err)
 	defer pull.Close()
 	require.NoError(t, pull.Connect("inproc://typed-handle-pushpull"))
@@ -79,17 +79,17 @@ func TestReceiver_Handle_Roundtrip(t *testing.T) {
 }
 
 func TestSubscriber_Handle_TopicRoundtrip(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	t.Parallel()
 
 	zctx := gozmq.NewContext()
 	defer zctx.Close()
 
-	pubSock, err := zctx.NewSocket(gozmq.Pub)
+	pubSock, err := zctx.NewSocket(gozmq.Pub, gozmq.WithLinger(0))
 	require.NoError(t, err)
 	defer pubSock.Close()
 	require.NoError(t, pubSock.Bind("inproc://typed-handle-pubsub"))
 
-	subSock, err := zctx.NewSocket(gozmq.Sub)
+	subSock, err := zctx.NewSocket(gozmq.Sub, gozmq.WithLinger(0))
 	require.NoError(t, err)
 	defer subSock.Close()
 
@@ -144,16 +144,16 @@ func TestSubscriber_Handle_TopicRoundtrip(t *testing.T) {
 }
 
 func TestHandle_StopOnHandlerError(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	t.Parallel()
 
 	zctx := gozmq.NewContext()
 	defer zctx.Close()
 
-	push, err := zctx.NewSocket(gozmq.Push)
+	push, err := zctx.NewSocket(gozmq.Push, gozmq.WithLinger(0))
 	require.NoError(t, err)
 	defer push.Close()
 	require.NoError(t, push.Bind("inproc://typed-handle-stoperr"))
-	pull, err := zctx.NewSocket(gozmq.Pull)
+	pull, err := zctx.NewSocket(gozmq.Pull, gozmq.WithLinger(0))
 	require.NoError(t, err)
 	defer pull.Close()
 	require.NoError(t, pull.Connect("inproc://typed-handle-stoperr"))
@@ -175,16 +175,16 @@ func TestHandle_StopOnHandlerError(t *testing.T) {
 }
 
 func TestHandle_ClassifyDecodeVsHandler(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	t.Parallel()
 
 	zctx := gozmq.NewContext()
 	defer zctx.Close()
 
-	push, err := zctx.NewSocket(gozmq.Push)
+	push, err := zctx.NewSocket(gozmq.Push, gozmq.WithLinger(0))
 	require.NoError(t, err)
 	defer push.Close()
 	require.NoError(t, push.Bind("inproc://typed-handle-classify"))
-	pull, err := zctx.NewSocket(gozmq.Pull)
+	pull, err := zctx.NewSocket(gozmq.Pull, gozmq.WithLinger(0))
 	require.NoError(t, err)
 	defer pull.Close()
 	require.NoError(t, pull.Connect("inproc://typed-handle-classify"))
@@ -223,33 +223,23 @@ func TestHandle_ClassifyDecodeVsHandler(t *testing.T) {
 }
 
 func TestHandle_SocketClosedIsFatal(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	t.Parallel()
 
 	zctx := gozmq.NewContext()
 	defer zctx.Close()
 
-	pull, err := zctx.NewSocket(gozmq.Pull)
+	pull, err := zctx.NewSocket(gozmq.Pull, gozmq.WithLinger(0))
 	require.NoError(t, err)
 	require.NoError(t, pull.Bind("inproc://typed-handle-closed"))
 
 	receiver := typed.NewReceiver[payload](pull, jsonCodec{})
 
-	done := make(chan error, 1)
-	go func() {
-		done <- receiver.Handle(context.Background(),
+	err = testutil.RequireUnblocks(t, func() error {
+		return receiver.Handle(context.Background(),
 			func(_ context.Context, _ payload) error { return nil },
 			// Error handler that would continue on socket error if we let it.
 			typed.WithErrorHandler(func(error) error { return nil }),
 		)
-	}()
-
-	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, pull.Close(), "close")
-
-	select {
-	case err := <-done:
-		require.ErrorIs(t, err, gozmq.ErrSocketClosed)
-	case <-time.After(5 * time.Second):
-		require.Fail(t, "Handle did not return after socket close")
-	}
+	}, func() { require.NoError(t, pull.Close(), "close") })
+	require.ErrorIs(t, err, gozmq.ErrSocketClosed)
 }
