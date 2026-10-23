@@ -27,13 +27,13 @@ import (
 // longer entries panic, since they cannot be produced by any valid
 // configuration.
 func EncodeMetadata(meta map[string]string) []byte {
-	return zmtp.MetadataCodec.Encode(meta)
+	return zmtp.EncodeMetadata(meta)
 }
 
 // DecodeMetadata parses a ZMTP 3.1 §5.2 property list. It returns an error
 // wrapping gozmq.ErrMalformedFrame on a truncated or malformed list.
 func DecodeMetadata(b []byte) (map[string]string, error) {
-	return zmtp.MetadataCodec.Decode(b)
+	return zmtp.DecodeMetadata(b)
 }
 
 // EncodeReady returns the wire bytes of a ZMTP READY command whose body is

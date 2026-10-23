@@ -13,12 +13,10 @@ import (
 	"github.com/exergy-dev/gozmq/internal/zmtp"
 )
 
-// --------------------------------------------------------------------------
 // fakeClock: deterministic Config.Now source. The heartbeat timer
 // still runs on real time (we keep intervals to a few ms), but all
 // idle-time arithmetic flows through the injected clock, so tests control
 // "how long the peer has been silent" exactly.
-// --------------------------------------------------------------------------
 
 type fakeClock struct{ ns atomic.Int64 }
 
@@ -33,13 +31,11 @@ func newFakeClock() *fakeClock {
 func (c *fakeClock) Now() int64              { return c.ns.Load() }
 func (c *fakeClock) Advance(d time.Duration) { c.ns.Add(int64(d)) }
 
-// --------------------------------------------------------------------------
 // manualPeer drives the remote side of a session by hand: real greeting
 // bytes, the one-round fakeMech-style handshake, then raw fakeCodec frames
 // under test control. Unlike a full peer session it never replies to
 // PINGs unless the test says so — which is exactly what heartbeat-timeout
 // tests need.
-// --------------------------------------------------------------------------
 
 type manualPeer struct {
 	t    *testing.T
@@ -194,10 +190,6 @@ func requireAlive(t *testing.T, s *tSession, wait time.Duration, msg string) {
 	case <-time.After(wait):
 	}
 }
-
-// --------------------------------------------------------------------------
-// Tests
-// --------------------------------------------------------------------------
 
 // TestHeartbeat_PingCadenceAndTTL: with the fake clock frozen (idle
 // always 0) the scheduler must emit a PING every interval, carrying our

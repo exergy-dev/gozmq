@@ -9,10 +9,6 @@ import (
 	"github.com/exergy-dev/gozmq/msg"
 )
 
-// --------------------------------------------------------------------------
-// Simple engine combinators
-// --------------------------------------------------------------------------
-
 type sendOnlyEngine struct {
 	gates
 	name string

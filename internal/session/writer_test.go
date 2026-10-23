@@ -17,11 +17,9 @@ import (
 	"github.com/exergy-dev/gozmq/msg"
 )
 
-// --------------------------------------------------------------------------
 // countingConn wraps a fakeConn and records every Write call: count,
 // per-call byte lengths, and an accumulated byte buffer of the full
 // stream. It is the instrumented receiver used by writer-batching tests.
-// --------------------------------------------------------------------------
 
 type countingConn struct {
 	*fakeConn
@@ -57,7 +55,6 @@ func (c *countingConn) Sizes() []int {
 	return out
 }
 
-// --------------------------------------------------------------------------
 // writevConn extends countingConn with WriteBuffers — the bufferWriter
 // fast path flushBatch prefers — emulating writev(2): every buffer in a
 // batch lands in ONE Write call on the underlying countingConn, making
@@ -68,7 +65,6 @@ func (c *countingConn) Sizes() []int {
 // flushes go through WriteBuffers (greeting/handshake writes use plain
 // Write), the gate exerts wire backpressure without wedging the
 // handshake — the phase distinction the old Write-level gate lacked.
-// --------------------------------------------------------------------------
 
 type writevConn struct {
 	*countingConn
@@ -108,12 +104,10 @@ func (c *writevConn) WriteBuffers(bufs *net.Buffers) (int64, error) {
 	return int64(n), err
 }
 
-// --------------------------------------------------------------------------
 // newWriterTestPair builds two sessions A→B over a countingConn on the
 // A side and plain fakeConn on the B side, runs both handshakes, and
 // returns (sA, sB, countingConn). B drains via a goroutine that just
 // calls Recv so the pipe doesn't stall.
-// --------------------------------------------------------------------------
 
 func newWriterTestPair(t *testing.T, sendHWM, recvHWM int) (sA, sB *tSession, ccA *countingConn) {
 	t.Helper()
@@ -149,14 +143,12 @@ func (c *countingConn) resetWriteCounters() {
 	c.mu.Unlock()
 }
 
-// --------------------------------------------------------------------------
 // TestWriter_BatchRetainsBufferCapacityAcrossFlushes: net.Buffers.WriteTo
 // and the tcpConn WriteBuffers fast path CONSUME the slice header they
 // are handed (*v = (*v)[i:]), so flushBatch must be given a COPY of the
 // batch's buffers header. Regression check: the batch's backing array
 // must survive flushes — before the fix, release() truncated the
 // consumed (empty) tail and every batch re-grew from zero capacity.
-// --------------------------------------------------------------------------
 
 // consumeWritevConn emulates the consume semantics of net.Buffers.WriteTo
 // faithfully: the passed slice header is advanced past everything written.
@@ -204,7 +196,6 @@ func TestWriter_BatchRetainsBufferCapacityAcrossFlushes(t *testing.T) {
 	require.Zero(t, cap(batch.scratch), "oversized scratch retained after flush")
 }
 
-// --------------------------------------------------------------------------
 // TestWriter_BatchCoalescesMultipleMessages: enqueue many messages
 // rapidly; verify the writer coalesces them into fewer writev calls than
 // messages via net.Buffers.
@@ -213,7 +204,6 @@ func TestWriter_BatchRetainsBufferCapacityAcrossFlushes(t *testing.T) {
 // first traffic-phase flush, queue all N messages into the sessionPipe
 // while it is parked, then unblock the gate — at most one more
 // writer-loop iteration coalesces everything still queued.
-// --------------------------------------------------------------------------
 
 func TestWriter_BatchCoalescesMultipleMessages(t *testing.T) {
 	t.Parallel()
@@ -257,11 +247,9 @@ func TestWriter_BatchCoalescesMultipleMessages(t *testing.T) {
 	t.Logf("batched %d messages into %d writev calls (sizes=%v)", N, writes, wcA.Sizes())
 }
 
-// --------------------------------------------------------------------------
 // TestWriter_InteractiveSingleMessage: a solo message should be written
 // immediately, NOT wait for a batch to fill. We assert latency is low
 // AND the message is received promptly.
-// --------------------------------------------------------------------------
 
 func TestWriter_InteractiveSingleMessage(t *testing.T) {
 	t.Parallel()
@@ -285,11 +273,9 @@ func TestWriter_InteractiveSingleMessage(t *testing.T) {
 	assert.LessOrEqual(t, elapsed, 200*time.Millisecond, "solo round-trip expected <200ms (no coalescing delay)")
 }
 
-// --------------------------------------------------------------------------
 // TestWriter_OrderPreservation: enqueue 20 messages with sequential
 // payloads; capture bytes at the wire; decode frames; assert original
 // order.
-// --------------------------------------------------------------------------
 
 func TestWriter_OrderPreservation(t *testing.T) {
 	t.Parallel()
@@ -318,12 +304,10 @@ func TestWriter_OrderPreservation(t *testing.T) {
 	}
 }
 
-// --------------------------------------------------------------------------
 // TestWriter_Backpressure: with a gated Conn.Write, the writer stalls
 // after draining its in-flight batch. Subsequent Send calls must block
 // once the pipe HWM fills — this is the fundamental backpressure
 // guarantee: batching must not drain the pipe to empty ahead of writes.
-// --------------------------------------------------------------------------
 
 func TestWriter_Backpressure(t *testing.T) {
 	t.Parallel()
@@ -375,12 +359,10 @@ func TestWriter_Backpressure(t *testing.T) {
 	t.Logf("backpressure kicked in after %d pushes (HWM=%d, batch cap=%d)", pushed, HWM, maxBatchMessages)
 }
 
-// --------------------------------------------------------------------------
 // TestWriter_BatchCap: enqueue more than maxBatchMessages rapidly and
 // verify multiple batches are emitted, and each batch's bytes are under
 // the size cap. This also exercises the loop's re-arm path (after one
 // batch it goes back to blocking Recv).
-// --------------------------------------------------------------------------
 
 func TestWriter_BatchCap(t *testing.T) {
 	t.Parallel()
@@ -420,11 +402,9 @@ func TestWriter_BatchCap(t *testing.T) {
 	t.Logf("N=%d messages emitted in %d batches, sizes=%v", N, len(sizes), sizes)
 }
 
-// --------------------------------------------------------------------------
 // TestWriter_BatchLingerDrain: cancel writerCtx while messages are
 // queued; assert drainSessionPipe flushes everything using the
 // batched path.
-// --------------------------------------------------------------------------
 
 func TestWriter_BatchLingerDrain(t *testing.T) {
 	t.Parallel()
@@ -469,11 +449,9 @@ func TestWriter_BatchLingerDrain(t *testing.T) {
 	}
 }
 
-// --------------------------------------------------------------------------
 // TestWriter_EmptyMessageStillEmitted: an empty Msg (no frames) must
 // still emit one zero-length non-MORE frame so the peer sees a
 // message boundary.
-// --------------------------------------------------------------------------
 
 func TestWriter_EmptyMessageStillEmitted(t *testing.T) {
 	t.Parallel()
@@ -489,10 +467,8 @@ func TestWriter_EmptyMessageStillEmitted(t *testing.T) {
 	require.Empty(t, got.Frames()[0], "frame not zero-length")
 }
 
-// --------------------------------------------------------------------------
 // TestWriter_MultipartBatched: multipart messages must be batched as a
 // single contiguous sequence of frames with MORE flags preserved.
-// --------------------------------------------------------------------------
 
 func TestWriter_MultipartBatched(t *testing.T) {
 	t.Parallel()
@@ -526,13 +502,11 @@ func TestWriter_MultipartBatched(t *testing.T) {
 	}
 }
 
-// --------------------------------------------------------------------------
 // TestReader_HandlesPingWhileWriterBlocked: regression for the
 // reader-writes-PONG-inline deadlock. With the writer goroutine wedged
 // in a conn write (peer not draining), an incoming
 // PING must NOT stall the reader — the PONG is routed to the writer via
 // the command channel and the reader keeps reading.
-// --------------------------------------------------------------------------
 
 func TestReader_HandlesPingWhileWriterBlocked(t *testing.T) {
 	t.Parallel()
@@ -572,11 +546,9 @@ func TestReader_HandlesPingWhileWriterBlocked(t *testing.T) {
 		"PONG must echo the PING context")
 }
 
-// --------------------------------------------------------------------------
 // TestWriter_LingerDrainUnboundedQueue: with SendHWM 0 most of a large
 // outbound backlog sits in the pipe's overflow, past its channel. The
 // linger drain must flush every queued message.
-// --------------------------------------------------------------------------
 
 func TestWriter_LingerDrainUnboundedQueue(t *testing.T) {
 	t.Parallel()

@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq/internal/testutil"
-	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
 // listenLoopback binds tcp://127.0.0.1:0 and returns the resolved Listener.
@@ -123,33 +122,6 @@ func TestTCP_Wildcard_And_Ephemeral_Port(t *testing.T) {
 	}
 }
 
-// TestTCP_Listener_Close_Wakes_Accept is the core "no indefinite hang"
-// guarantee.
-func TestTCP_Listener_Close_Wakes_Accept(t *testing.T) {
-	t.Parallel()
-	_, l := listenLoopback(t)
-
-	err := testutil.RequireUnblocks(t, func() error {
-		_, err := l.Accept(context.Background())
-		return err
-	}, func() { require.NoError(t, l.Close(), "Close") })
-	require.ErrorIs(t, err, zmqerr.ErrEndpointInvalid)
-}
-
-// TestTCP_Accept_Honors_Ctx asserts ctx cancellation wakes Accept.
-func TestTCP_Accept_Honors_Ctx(t *testing.T) {
-	t.Parallel()
-	_, l := listenLoopback(t)
-	defer l.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	err := testutil.RequireUnblocks(t, func() error {
-		_, err := l.Accept(ctx)
-		return err
-	}, cancel)
-	require.ErrorIs(t, err, context.Canceled)
-}
-
 // TestTCP_Dial_Honors_Ctx_Cancellation. Dial to an unroutable address with
 // a short deadline; ctx must error within the deadline window.
 func TestTCP_Dial_Honors_Ctx_Cancellation(t *testing.T) {
@@ -160,25 +132,6 @@ func TestTCP_Dial_Honors_Ctx_Cancellation(t *testing.T) {
 	ctx := testutil.Ctx(t, 100*time.Millisecond)
 	_, err := tr.Dial(ctx, "tcp://240.0.0.1:9")
 	require.Error(t, err, "Dial unexpectedly succeeded")
-}
-
-// TestTCP_BadEndpoint covers the parse path.
-func TestTCP_BadEndpoint(t *testing.T) {
-	t.Parallel()
-	tr := NewTCPTransport()
-	cases := []string{
-		"tcp://*:5555",   // wildcard not allowed for Dial
-		"tcp://host",     // missing port
-		"tcp://host:0",   // port 0 not allowed for Dial
-		"udp://host:1",   // wrong scheme
-		"no-scheme-here", // no scheme
-	}
-	for _, ep := range cases {
-		_, err := tr.Dial(context.Background(), ep)
-		if assert.Error(t, err, "Dial(%q) succeeded, want error", ep) {
-			assert.ErrorIs(t, err, zmqerr.ErrEndpointInvalid, "Dial(%q)", ep)
-		}
-	}
 }
 
 // TestTCP_Conn_Endpoints checks LocalEndpoint / RemoteEndpoint round-trip

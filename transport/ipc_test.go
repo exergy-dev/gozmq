@@ -2,7 +2,6 @@ package transport
 
 import (
 	"context"
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -199,63 +198,6 @@ func TestIPC_AbstractNamespace_NonLinux(t *testing.T) {
 	tr := NewIPCTransport()
 	_, err := tr.Listen(context.Background(), "ipc://@foo")
 	require.ErrorIs(t, err, zmqerr.ErrEndpointInvalid, "Listen(abstract) on %s", runtime.GOOS)
-}
-
-// TestIPC_ListenerClose_WakesAccept asserts Close wakes a parked Accept.
-func TestIPC_ListenerClose_WakesAccept(t *testing.T) {
-	t.Parallel()
-	tr := NewIPCTransport()
-	path := tmpSock(t, "close-wake.sock")
-	endpoint := "ipc://" + path
-	l, err := tr.Listen(context.Background(), endpoint)
-	require.NoError(t, err, "Listen")
-
-	err = testutil.RequireUnblocks(t, func() error {
-		_, err := l.Accept(context.Background())
-		return err
-	}, func() { require.NoError(t, l.Close()) })
-	require.ErrorIs(t, err, zmqerr.ErrEndpointInvalid)
-}
-
-// TestIPC_AcceptHonorsCtx asserts ctx cancellation wakes Accept.
-func TestIPC_AcceptHonorsCtx(t *testing.T) {
-	t.Parallel()
-	tr := NewIPCTransport()
-	path := tmpSock(t, "ctx.sock")
-	endpoint := "ipc://" + path
-	l, err := tr.Listen(context.Background(), endpoint)
-	require.NoError(t, err, "Listen")
-	defer l.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	err = testutil.RequireUnblocks(t, func() error {
-		_, err := l.Accept(ctx)
-		return err
-	}, cancel)
-	require.ErrorIs(t, err, context.Canceled)
-}
-
-// TestIPC_BadEndpoint covers parse failures: wrong scheme, empty path,
-// empty abstract name.
-func TestIPC_BadEndpoint(t *testing.T) {
-	t.Parallel()
-	tr := NewIPCTransport()
-	cases := []string{
-		"tcp://x:1", // wrong scheme
-		"ipc://",    // empty path
-		"ipc://@",   // empty abstract name
-		"no-scheme", // missing ://
-	}
-	for _, ep := range cases {
-		_, err := tr.Listen(context.Background(), ep)
-		assert.ErrorIs(t, err, zmqerr.ErrEndpointInvalid, "Listen(%q)", ep)
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-		_, err = tr.Dial(ctx, ep)
-		cancel()
-		if !errors.Is(err, zmqerr.ErrEndpointInvalid) && !errors.Is(err, context.DeadlineExceeded) {
-			assert.Failf(t, "unexpected Dial error", "Dial(%q) err = %v, want wraps ErrEndpointInvalid", ep, err)
-		}
-	}
 }
 
 // TestIPC_ManyConcurrentDials sanity-checks the listener under a modest

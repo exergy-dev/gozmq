@@ -17,10 +17,6 @@ import (
 
 const scaleMsgSize = 64
 
-// -----------------------------------------------------------------------------
-// PUSH fan-in: one PULL fed by many concurrent PUSH sockets.
-// -----------------------------------------------------------------------------
-
 func BenchmarkPushPullFanIn_Inproc(b *testing.B) {
 	for _, n := range []int{2, 16, 256} {
 		b.Run(fmt.Sprintf("pushers=%d", n), func(b *testing.B) {
@@ -117,10 +113,6 @@ func benchPushPullFanIn(b *testing.B, nPush int, endpoint string) {
 	sendWG.Wait()
 }
 
-// -----------------------------------------------------------------------------
-// ROUTER receive cost with many idle peers attached.
-// -----------------------------------------------------------------------------
-
 // BenchmarkRouterIdlePeers_Inproc round-trips 64B between one DEALER and a
 // ROUTER echo while idle DEALERs are also attached to the ROUTER. The
 // per-round-trip cost should not grow with the number of idle peers.
@@ -160,10 +152,6 @@ func benchRouterIdlePeers(b *testing.B, nIdle int, endpoint string) {
 	echoRoundTrips(b, router.sock, dealer, scaleMsgSize)
 }
 
-// -----------------------------------------------------------------------------
-// Wide PUB fanout.
-// -----------------------------------------------------------------------------
-
 // BenchmarkPubSubFanoutWide_Inproc is BenchmarkPubSubFanout_Inproc at 64
 // subscribers, where per-subscriber costs in the PUB dominate.
 func BenchmarkPubSubFanoutWide_Inproc(b *testing.B) {
@@ -172,10 +160,6 @@ func BenchmarkPubSubFanoutWide_Inproc(b *testing.B) {
 		benchPubSubFanout(b, inprocEndpoint(), scaleMsgSize, nSub)
 	})
 }
-
-// -----------------------------------------------------------------------------
-// XPUB subscription churn.
-// -----------------------------------------------------------------------------
 
 // BenchmarkXPubSubscribeChurn_Inproc times one subscription event per
 // iteration: an XSUB alternately subscribes to and cancels a rotating set
@@ -229,10 +213,6 @@ func BenchmarkXPubSubscribeChurn_Inproc(b *testing.B) {
 	}
 	b.StopTimer()
 }
-
-// -----------------------------------------------------------------------------
-// TCP connection setup.
-// -----------------------------------------------------------------------------
 
 // BenchmarkConnectHandshake_TCP times one connection lifetime per
 // iteration: create a PUSH, connect it to a bound PULL (dial plus NULL

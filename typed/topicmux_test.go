@@ -43,7 +43,7 @@ func TestTopicMux_DispatchesHeterogeneousTypes(t *testing.T) {
 	defer pubSock.Close()
 	defer subSock.Close()
 
-	router := typed.NewTopicMux(subSock, jsonCodec{})
+	router := typed.NewTopicMux(subSock, typed.JSONCodec{})
 	var (
 		mu       sync.Mutex
 		orders   []order
@@ -78,8 +78,8 @@ func TestTopicMux_DispatchesHeterogeneousTypes(t *testing.T) {
 	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	orderPub := typed.NewPublisher[order](pubSock, jsonCodec{})
-	alertPub := typed.NewPublisher[alert](pubSock, jsonCodec{})
+	orderPub := typed.NewPublisher[order](pubSock, typed.JSONCodec{})
+	alertPub := typed.NewPublisher[alert](pubSock, typed.JSONCodec{})
 	require.NoError(t, orderPub.Send(callCtx, "orders.created", order{ID: 1}))
 	require.NoError(t, alertPub.Send(callCtx, "alerts.disk", alert{Severity: "warn"}))
 	require.NoError(t, orderPub.Send(callCtx, "orders.cancelled", order{ID: 2}))
@@ -120,7 +120,7 @@ func TestTopicMux_LongestPrefixWins(t *testing.T) {
 	defer pubSock.Close()
 	defer subSock.Close()
 
-	router := typed.NewTopicMux(subSock, jsonCodec{})
+	router := typed.NewTopicMux(subSock, typed.JSONCodec{})
 
 	var (
 		mu     sync.Mutex
@@ -148,7 +148,7 @@ func TestTopicMux_LongestPrefixWins(t *testing.T) {
 
 	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	pub := typed.NewPublisher[order](pubSock, jsonCodec{})
+	pub := typed.NewPublisher[order](pubSock, typed.JSONCodec{})
 	require.NoError(t, pub.Send(callCtx, "orders.priority.urgent", order{ID: 7}))
 
 	loopCtx, loopCancel := context.WithCancel(callCtx)
@@ -177,7 +177,7 @@ func TestTopicMux_RegisterAfterRunReturnsError(t *testing.T) {
 	defer pubSock.Close()
 	defer subSock.Close()
 
-	router := typed.NewTopicMux(subSock, jsonCodec{})
+	router := typed.NewTopicMux(subSock, typed.JSONCodec{})
 	require.NoError(t, subSock.Connect("inproc://typed-router-after-run"))
 
 	runCtx, runCancel := context.WithCancel(context.Background())
@@ -209,7 +209,7 @@ func TestTopicMux_DuplicateTopicRejected(t *testing.T) {
 	defer pubSock.Close()
 	defer subSock.Close()
 
-	router := typed.NewTopicMux(subSock, jsonCodec{})
+	router := typed.NewTopicMux(subSock, typed.JSONCodec{})
 	require.NoError(t, typed.Register[order](router, "orders.", func(context.Context, typed.Message[order]) error { return nil }))
 	err := typed.Register[order](router, "orders.", func(context.Context, typed.Message[order]) error { return nil })
 	require.ErrorIs(t, err, typed.ErrTopicAlreadyRegistered)
@@ -223,7 +223,7 @@ func TestTopicMux_UnmatchedTopicSurfacesErrNoTopicMatch(t *testing.T) {
 	defer pubSock.Close()
 	defer subSock.Close()
 
-	router := typed.NewTopicMux(subSock, jsonCodec{})
+	router := typed.NewTopicMux(subSock, typed.JSONCodec{})
 	// Subscribe via the router to "orders.", but then also subscribe the raw
 	// socket to "metrics." so the SUB filter will pass a topic the router
 	// has no handler for.
@@ -234,7 +234,7 @@ func TestTopicMux_UnmatchedTopicSurfacesErrNoTopicMatch(t *testing.T) {
 
 	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	metricsPub := typed.NewPublisher[order](pubSock, jsonCodec{})
+	metricsPub := typed.NewPublisher[order](pubSock, typed.JSONCodec{})
 	require.NoError(t, metricsPub.Send(callCtx, "metrics.cpu", order{ID: 99}))
 
 	err := router.Run(callCtx, typed.WithErrorHandler(func(e error) error {
@@ -256,7 +256,7 @@ func TestTopicMux_ConcurrentRunRejected(t *testing.T) {
 	defer pubSock.Close()
 	defer subSock.Close()
 
-	router := typed.NewTopicMux(subSock, jsonCodec{})
+	router := typed.NewTopicMux(subSock, typed.JSONCodec{})
 	runCtx, runCancel := context.WithCancel(context.Background())
 	defer runCancel()
 	runErr := make(chan error, 1)
@@ -286,7 +286,7 @@ func TestTopicMux_RegisterRacesRun(t *testing.T) {
 	defer pubSock.Close()
 	defer subSock.Close()
 
-	router := typed.NewTopicMux(subSock, jsonCodec{})
+	router := typed.NewTopicMux(subSock, typed.JSONCodec{})
 	var got atomic.Int32
 	require.NoError(t, typed.Register[order](router, "a.", func(context.Context, typed.Message[order]) error {
 		got.Add(1)
@@ -297,7 +297,7 @@ func TestTopicMux_RegisterRacesRun(t *testing.T) {
 
 	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	pub := typed.NewPublisher[order](pubSock, jsonCodec{})
+	pub := typed.NewPublisher[order](pubSock, typed.JSONCodec{})
 	const n = 50
 	for i := range n {
 		require.NoError(t, pub.Send(callCtx, "a.x", order{ID: i}))

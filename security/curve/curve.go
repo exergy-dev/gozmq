@@ -41,10 +41,6 @@ import (
 	"golang.org/x/crypto/nacl/secretbox"
 )
 
-// --------------------------------------------------------------------------
-// Constants: command names + fixed sizes from RFC 26.
-// --------------------------------------------------------------------------
-
 const (
 	cmdHello    = "HELLO"
 	cmdWelcome  = "WELCOME"
@@ -81,10 +77,6 @@ const (
 	innerFlagMore    uint8 = 0x01
 	innerFlagCommand uint8 = 0x02
 )
-
-// --------------------------------------------------------------------------
-// Mechanism state machine.
-// --------------------------------------------------------------------------
 
 // curveState tracks which handshake command we've sent/consumed.
 type curveState uint8
@@ -266,10 +258,6 @@ func newMech(role security.Role, ownSecret, ownPublicHint, peerLongTerm Key, loc
 	return m, nil
 }
 
-// --------------------------------------------------------------------------
-// security.Mech implementation.
-// --------------------------------------------------------------------------
-
 // Name is the greeting mechanism token.
 func (*curveMech) Name() string { return mechName }
 
@@ -400,10 +388,6 @@ func (m *curveMech) finishHandshake() {
 	m.state = stateDone
 }
 
-// --------------------------------------------------------------------------
-// HELLO (client → server).
-// --------------------------------------------------------------------------
-
 // buildHello constructs the HELLO command body: [5]"HELLO" + version +
 // padding + C' + short-nonce-counter + signature-box.
 func (m *curveMech) buildHello() ([]byte, error) {
@@ -474,10 +458,6 @@ func (m *curveMech) parseHello(body []byte) error {
 	m.peerShortNonce = counter + 1
 	return nil
 }
-
-// --------------------------------------------------------------------------
-// WELCOME (server → client).
-// --------------------------------------------------------------------------
 
 // buildWelcome constructs the WELCOME command body on the server side.
 // WELCOME's freshness comes from a random long-nonce (16 bytes), not a
@@ -562,10 +542,6 @@ func (m *curveMech) parseWelcome(body []byte) ([]byte, error) {
 	return cookie, nil
 }
 
-// --------------------------------------------------------------------------
-// INITIATE (client → server).
-// --------------------------------------------------------------------------
-
 // buildInitiate constructs the INITIATE command body on the client side.
 // Layout: [8]"INITIATE" + cookie(96) + short-nonce(8) + initiate-box(variable).
 func (m *curveMech) buildInitiate(cookie []byte) ([]byte, error) {
@@ -593,7 +569,7 @@ func (m *curveMech) buildInitiate(cookie []byte) ([]byte, error) {
 	vouch = append(vouch, vouchBox...)
 
 	// Initiate box plaintext: C || vouch || metadata.
-	meta := zmtp.MetadataCodec.Encode(m.Metadata())
+	meta := zmtp.EncodeMetadata(m.Metadata())
 	initPlain := make([]byte, 0, 32+vouchSize+len(meta))
 	initPlain = append(initPlain, m.ourPublic[:]...)
 	initPlain = append(initPlain, vouch...)
@@ -722,7 +698,7 @@ func (m *curveMech) parseInitiate(body []byte) ([]byte, error) {
 	// Client long-term public is now authenticated. Record it and parse
 	// metadata.
 	m.peerPublic = clientLongPub
-	props, err := zmtp.MetadataCodec.Decode(metaBytes)
+	props, err := zmtp.DecodeMetadata(metaBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -741,14 +717,10 @@ func (m *curveMech) parseInitiate(body []byte) ([]byte, error) {
 	return nil, nil
 }
 
-// --------------------------------------------------------------------------
-// READY (server → client).
-// --------------------------------------------------------------------------
-
 // buildReady constructs the READY command body. Layout:
 // [5]"READY" + short-nonce(8) + ready-box(metadata ciphertext).
 func (m *curveMech) buildReady() []byte {
-	meta := zmtp.MetadataCodec.Encode(m.Metadata())
+	meta := zmtp.EncodeMetadata(m.Metadata())
 	counter := m.ourShortNonce
 	m.ourShortNonce++
 	readyBox := sealShort(prefixReady, counter, meta, &m.peerEphPublic, &m.ourEphSecret)
@@ -780,7 +752,7 @@ func (m *curveMech) parseReady(body []byte) error {
 	if !ok {
 		return fmt.Errorf("gozmq/security/curve: READY box open failed: %w", zmqerr.ErrAuthFailed)
 	}
-	props, err := zmtp.MetadataCodec.Decode(plain)
+	props, err := zmtp.DecodeMetadata(plain)
 	if err != nil {
 		return err
 	}
@@ -788,10 +760,6 @@ func (m *curveMech) parseReady(body []byte) error {
 	m.peerShortNonce = counter + 1
 	return nil
 }
-
-// --------------------------------------------------------------------------
-// MESSAGE (traffic phase).
-// --------------------------------------------------------------------------
 
 // EncodeFrame wraps one plaintext ZMTP frame body (data or command) in a
 // MESSAGE command body, emitted as the body of a single ZMTP frame. The
@@ -924,10 +892,6 @@ func (m *curveMech) DecodeFrame(flags uint8, wire []byte) (uint8, []byte, error)
 	m.peerShortNonce = counter + 1
 	return out, plain[1:], nil
 }
-
-// --------------------------------------------------------------------------
-// Helpers.
-// --------------------------------------------------------------------------
 
 // sealShort boxes plain under the short nonce (prefix, counter) with the
 // given peer-public / our-secret key pair. The nonce shapes are defined in

@@ -89,10 +89,6 @@ import (
 // LoadBalancer in loadbalancer.go, FairQueue in fairqueue.go. The simple
 // combinator engines (PUSH/PULL/DEALER) are in combinators.go.
 
-// --------------------------------------------------------------------------
-// Shared engine plumbing
-// --------------------------------------------------------------------------
-
 // counters holds the standard per-engine metric counters. Engines embed it so
 // the promoted sent/recv/dropped fields work in place (e.counters.sent ==
 // e.sent), and snapshot builds the Metrics. dropped and queueDepth

@@ -1,11 +1,11 @@
-package codecjson_test
+package typed_test
 
 import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/exergy-dev/gozmq/typed/codecjson"
+	"github.com/exergy-dev/gozmq/typed"
 )
 
 type thing struct {
@@ -15,7 +15,7 @@ type thing struct {
 
 func TestCodec_Roundtrip(t *testing.T) {
 	t.Parallel()
-	c := codecjson.Codec{}
+	c := typed.JSONCodec{}
 	want := thing{N: 7, Name: "lucky"}
 	b, err := c.Marshal(want)
 	require.NoError(t, err, "marshal")
@@ -26,7 +26,7 @@ func TestCodec_Roundtrip(t *testing.T) {
 
 func TestCodec_UnmarshalError(t *testing.T) {
 	t.Parallel()
-	c := codecjson.Codec{}
+	c := typed.JSONCodec{}
 	var got thing
 	require.Error(t, c.Unmarshal([]byte("not json"), &got), "want error on malformed json")
 }

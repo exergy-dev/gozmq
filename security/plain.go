@@ -152,7 +152,7 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		}
 
 	case plainClientSendInitiate:
-		out := zmtp.EncodeCommand(zmtp.Command{Name: plainCmdInitiate, Body: zmtp.MetadataCodec.Encode(m.localMeta)})
+		out := zmtp.EncodeCommand(zmtp.Command{Name: plainCmdInitiate, Body: zmtp.EncodeMetadata(m.localMeta)})
 		m.state = plainClientRecvReady
 		return out, false, nil
 
@@ -172,7 +172,7 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 			}
 			return nil, false, fmt.Errorf("gozmq/security/plain: server rejected INITIATE: %q: %w", reason, zmqerr.ErrAuthFailed)
 		case zmtp.CmdReady:
-			props, err := zmtp.MetadataCodec.Decode(cmd.Body)
+			props, err := zmtp.DecodeMetadata(cmd.Body)
 			if err != nil {
 				return nil, false, err
 			}
@@ -240,7 +240,7 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		if cmd.Name != plainCmdInitiate {
 			return nil, false, fmt.Errorf("gozmq/security/plain: expected INITIATE, got %q: %w", cmd.Name, zmqerr.ErrMalformedFrame)
 		}
-		props, err := zmtp.MetadataCodec.Decode(cmd.Body)
+		props, err := zmtp.DecodeMetadata(cmd.Body)
 		if err != nil {
 			return nil, false, err
 		}
@@ -249,7 +249,7 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		return m.NextHandshake(nil)
 
 	case plainServerSendReady:
-		out := zmtp.EncodeCommand(zmtp.Command{Name: zmtp.CmdReady, Body: zmtp.MetadataCodec.Encode(m.localMeta)})
+		out := zmtp.EncodeCommand(zmtp.Command{Name: zmtp.CmdReady, Body: zmtp.EncodeMetadata(m.localMeta)})
 		m.state = plainDone
 		return out, true, nil
 
@@ -258,10 +258,6 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 	}
 	return nil, false, fmt.Errorf("gozmq/security/plain: unexpected state %d", m.state)
 }
-
-// ---------------------------------------------------------------------------
-// Wire helpers (RFC 24 §4 command bodies).
-// ---------------------------------------------------------------------------
 
 // putShortString appends the RFC 24 short-string form — [1 byte length][bytes]
 // — of s to dst. Strings are capped at 255 bytes by the single-byte prefix.

@@ -125,10 +125,6 @@ func newPayload(n int) []byte {
 	return b
 }
 
-// -----------------------------------------------------------------------------
-// Socket setup shared by every benchmark.
-// -----------------------------------------------------------------------------
-
 // bound is the server side of a benchmark: a Context and one socket bound
 // in it. Both are closed when the benchmark function returns, after any
 // client created through connect.
@@ -180,10 +176,6 @@ func newPair(b *testing.B, serverType, clientType gozmq.SocketType, serverOpts, 
 	srv := bind(b, serverType, endpoint, serverOpts...)
 	return srv.sock, srv.connect(clientType, clientOpts...)
 }
-
-// -----------------------------------------------------------------------------
-// Round-trip (echo) benchmarks: REQ/REP and DEALER/ROUTER.
-// -----------------------------------------------------------------------------
 
 // benchEcho binds a serverType socket, connects a clientType socket and
 // times b.N client→server→client round trips of a size-byte payload.
@@ -288,10 +280,6 @@ func BenchmarkRouterDealerLatency_Inproc(b *testing.B) {
 func BenchmarkRouterDealerLatency_TCP(b *testing.B) {
 	forEachSize(b, latencySizes, tcpEndpoint, benchRouterDealer)
 }
-
-// -----------------------------------------------------------------------------
-// Streaming (one-way) benchmarks: PUSH/PULL, XPUB/XSUB, PUB/SUB fanout.
-// -----------------------------------------------------------------------------
 
 // warmStream sends one size-byte message from sender and receives it on
 // every receiver, proving the handshake and the first flight.

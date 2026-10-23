@@ -28,7 +28,7 @@ type. This must print nothing (the error sentinels are `var X = zmqerr.X`
 aliases by design and are excluded):
 
 ```sh
-for p in . ./msg ./transport ./typed ./typed/codecjson ./security ./security/curve; do
+for p in . ./msg ./transport ./typed ./security ./security/curve; do
   go doc -all "$p" | grep -E "^\s*(func|type|const|var)?\s*[A-Z][A-Za-z0-9_]*(\(|\[| ).*\b(pipe|session|socket|zmqerr|zmtp|bufpool|testutil)\.[A-Z]" \
     | grep -v "= zmqerr\."
 done
@@ -39,7 +39,7 @@ confirm it matches the intended version bump:
 
 ```sh
 git worktree add /tmp/gozmq-prev vPREVIOUS
-for p in . ./msg ./transport ./typed ./typed/codecjson ./security ./security/curve; do
+for p in . ./msg ./transport ./typed ./security ./security/curve; do
   diff <(cd /tmp/gozmq-prev && go doc -all "$p") <(go doc -all "$p")
 done
 git worktree remove /tmp/gozmq-prev

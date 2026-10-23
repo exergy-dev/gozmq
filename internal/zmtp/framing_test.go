@@ -203,7 +203,7 @@ func TestFrameNewFrameCodecPanicsOnNegative(t *testing.T) {
 // FuzzFrameDecode feeds arbitrary byte streams through the decoder. The
 // decoder must never panic and must, after a successful decode, accept its
 // own re-encoded output. This is the load-bearing safety net for the framing
-// layer per design §10.4.
+// layer.
 func FuzzFrameDecode(f *testing.F) {
 	// Seed with a couple of valid frames so the fuzzer has a starting point.
 	f.Add([]byte{0x00, 0x00})

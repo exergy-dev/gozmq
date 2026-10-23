@@ -30,8 +30,8 @@ func TestReceiver_Handle_Roundtrip(t *testing.T) {
 	defer pull.Close()
 	require.NoError(t, pull.Connect("inproc://typed-handle-pushpull"))
 
-	sender := typed.NewSender[payload](push, jsonCodec{})
-	receiver := typed.NewReceiver[payload](pull, jsonCodec{})
+	sender := typed.NewSender[payload](push, typed.JSONCodec{})
+	receiver := typed.NewReceiver[payload](pull, typed.JSONCodec{})
 
 	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -93,8 +93,8 @@ func TestSubscriber_Handle_TopicRoundtrip(t *testing.T) {
 	require.NoError(t, err)
 	defer subSock.Close()
 
-	pub := typed.NewPublisher[payload](pubSock, jsonCodec{})
-	sub := typed.NewSubscriber[payload](subSock, jsonCodec{})
+	pub := typed.NewPublisher[payload](pubSock, typed.JSONCodec{})
+	sub := typed.NewSubscriber[payload](subSock, typed.JSONCodec{})
 	require.NoError(t, sub.Subscribe("orders."))
 	require.NoError(t, subSock.Connect("inproc://typed-handle-pubsub"))
 	syncSub(t, pubSock, subSock, "orders.")
@@ -158,8 +158,8 @@ func TestHandle_StopOnHandlerError(t *testing.T) {
 	defer pull.Close()
 	require.NoError(t, pull.Connect("inproc://typed-handle-stoperr"))
 
-	sender := typed.NewSender[payload](push, jsonCodec{})
-	receiver := typed.NewReceiver[payload](pull, jsonCodec{})
+	sender := typed.NewSender[payload](push, typed.JSONCodec{})
+	receiver := typed.NewReceiver[payload](pull, typed.JSONCodec{})
 
 	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -195,10 +195,10 @@ func TestHandle_ClassifyDecodeVsHandler(t *testing.T) {
 	// Frame 1: malformed JSON → decode error.
 	require.NoError(t, push.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("not json"))))
 	// Frame 2: valid JSON → handler gets it and returns an error.
-	sender := typed.NewSender[payload](push, jsonCodec{})
+	sender := typed.NewSender[payload](push, typed.JSONCodec{})
 	require.NoError(t, sender.Send(callCtx, payload{N: 7}))
 
-	receiver := typed.NewReceiver[payload](pull, jsonCodec{})
+	receiver := typed.NewReceiver[payload](pull, typed.JSONCodec{})
 
 	var kinds []string
 	boom := errors.New("boom")
@@ -232,7 +232,7 @@ func TestHandle_SocketClosedIsFatal(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, pull.Bind("inproc://typed-handle-closed"))
 
-	receiver := typed.NewReceiver[payload](pull, jsonCodec{})
+	receiver := typed.NewReceiver[payload](pull, typed.JSONCodec{})
 
 	err = testutil.RequireUnblocks(t, func() error {
 		return receiver.Handle(context.Background(),

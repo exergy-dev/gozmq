@@ -45,13 +45,11 @@ func generateKeyPair(r io.Reader) (pub Key, priv Key, err error) {
 	return Key(*pubPtr), Key(*privPtr), nil
 }
 
-// --------------------------------------------------------------------------
 // Z85 codec — ZMQ RFC 32.
 //
 // Z85 is a 5-char-per-4-byte base-85 encoding using a libzmq-specific
 // alphabet. Input byte length must be a multiple of 4; output char length
 // is a multiple of 5. (The 32-byte Curve keys encode to 40 chars.)
-// --------------------------------------------------------------------------
 
 // z85Alphabet is the 85-character alphabet from RFC 32 §2. Index 0 → '0',
 // ascending through digits, lower-case letters, upper-case letters, and

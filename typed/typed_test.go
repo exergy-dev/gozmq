@@ -2,7 +2,6 @@ package typed_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -12,14 +11,6 @@ import (
 	"github.com/exergy-dev/gozmq"
 	"github.com/exergy-dev/gozmq/typed"
 )
-
-// jsonCodec is a trivial Codec used only for tests. Keeping the package
-// free of built-in codecs is intentional; we define one here to exercise
-// roundtrips.
-type jsonCodec struct{}
-
-func (jsonCodec) Marshal(v any) ([]byte, error)   { return json.Marshal(v) }
-func (jsonCodec) Unmarshal(b []byte, v any) error { return json.Unmarshal(b, v) }
 
 // failingCodec returns a fixed error from Marshal and panics if Unmarshal
 // is called — used to verify marshal-error propagation.
@@ -49,8 +40,8 @@ func TestSenderReceiver_PushPull(t *testing.T) {
 	defer pull.Close()
 	require.NoError(t, pull.Connect("inproc://typed-pushpull"))
 
-	sender := typed.NewSender[payload](push, jsonCodec{})
-	receiver := typed.NewReceiver[payload](pull, jsonCodec{})
+	sender := typed.NewSender[payload](push, typed.JSONCodec{})
+	receiver := typed.NewReceiver[payload](pull, typed.JSONCodec{})
 
 	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -77,8 +68,8 @@ func TestPublisherSubscriber_TopicRoundtrip(t *testing.T) {
 	require.NoError(t, err)
 	defer subSock.Close()
 
-	pub := typed.NewPublisher[payload](pubSock, jsonCodec{})
-	sub := typed.NewSubscriber[payload](subSock, jsonCodec{})
+	pub := typed.NewPublisher[payload](pubSock, typed.JSONCodec{})
+	sub := typed.NewSubscriber[payload](subSock, typed.JSONCodec{})
 
 	require.NoError(t, sub.Subscribe("orders."))
 	require.NoError(t, subSock.Connect("inproc://typed-pubsub"))
@@ -146,7 +137,7 @@ func TestReceiver_WrongFrameCount(t *testing.T) {
 	// Receiver must surface ErrFrameCount.
 	require.NoError(t, push.SendMsg(callCtx, gozmq.NewMsgFromFrames([]byte("a"), []byte("b"))), "raw send")
 
-	receiver := typed.NewReceiver[payload](pull, jsonCodec{})
+	receiver := typed.NewReceiver[payload](pull, typed.JSONCodec{})
 	_, err = receiver.Recv(callCtx)
 	require.ErrorIs(t, err, typed.ErrFrameCount)
 	require.ErrorIs(t, err, typed.ErrDecode)
@@ -163,7 +154,7 @@ func TestReceiver_ContextCancelled(t *testing.T) {
 	defer pull.Close()
 	require.NoError(t, pull.Bind("inproc://typed-cancel"))
 
-	receiver := typed.NewReceiver[payload](pull, jsonCodec{})
+	receiver := typed.NewReceiver[payload](pull, typed.JSONCodec{})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -193,8 +184,8 @@ func TestSubscriber_Unsubscribe(t *testing.T) {
 	require.NoError(t, err)
 	defer subSock.Close()
 
-	pub := typed.NewPublisher[payload](pubSock, jsonCodec{})
-	sub := typed.NewSubscriber[payload](subSock, jsonCodec{})
+	pub := typed.NewPublisher[payload](pubSock, typed.JSONCodec{})
+	sub := typed.NewSubscriber[payload](subSock, typed.JSONCodec{})
 
 	require.NoError(t, sub.Subscribe("orders."))
 	require.NoError(t, subSock.Connect("inproc://typed-unsub"))

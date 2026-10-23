@@ -7,7 +7,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"errors"
 	"io"
 	"math/big"
 	"net"
@@ -20,10 +19,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq/internal/testutil"
-	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
-// --------------------------------------------------------------------------
 // Test certificate fixture.
 //
 // We generate a single self-signed ed25519 cert at init-time and use it as
@@ -32,7 +29,6 @@ import (
 // clientTLSConfig (with RootCAs pinned to the generated cert, and
 // ServerName = "localhost" so SAN validation works when we dial 127.0.0.1
 // by hostname).
-// --------------------------------------------------------------------------
 
 var (
 	testCertDER  []byte
@@ -240,35 +236,6 @@ func TestTLS_BadCert(t *testing.T) {
 	<-done
 }
 
-// TestTLS_AcceptHonorsCtx asserts that ctx cancellation wakes Accept
-// promptly when no peer arrives.
-func TestTLS_AcceptHonorsCtx(t *testing.T) {
-	t.Parallel()
-	srvTr, l := listenTLSLoopback(t, serverTLSConfig())
-	_ = srvTr
-	defer l.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	err := testutil.RequireUnblocks(t, func() error {
-		_, err := l.Accept(ctx)
-		return err
-	}, cancel)
-	require.ErrorIs(t, err, context.Canceled)
-}
-
-// TestTLS_ListenerClose_WakesAccept asserts Close wakes a parked Accept.
-func TestTLS_ListenerClose_WakesAccept(t *testing.T) {
-	t.Parallel()
-	srvTr, l := listenTLSLoopback(t, serverTLSConfig())
-	_ = srvTr
-
-	err := testutil.RequireUnblocks(t, func() error {
-		_, err := l.Accept(context.Background())
-		return err
-	}, func() { require.NoError(t, l.Close()) })
-	require.ErrorIs(t, err, zmqerr.ErrEndpointInvalid)
-}
-
 // TestTLS_NilConfig_Rejected asserts the constructor rejects a nil
 // tls.Config rather than returning a half-built transport that would
 // fail later at Dial/Listen time.
@@ -277,27 +244,6 @@ func TestTLS_NilConfig_Rejected(t *testing.T) {
 	tr, err := NewTLSTransport(nil)
 	require.Error(t, err, "NewTLSTransport(nil) succeeded, want error")
 	assert.Nil(t, tr, "NewTLSTransport(nil) returned non-nil transport")
-}
-
-// TestTLS_BadEndpoint covers scheme and host-port parse failures.
-func TestTLS_BadEndpoint(t *testing.T) {
-	t.Parallel()
-	tr := mustNewTLS(t, serverTLSConfig())
-	cases := []string{
-		"tcp://x:1",    // wrong scheme
-		"no-scheme",    // no ://
-		"tls+tcp://xx", // missing port
-	}
-	for _, ep := range cases {
-		_, err := tr.Listen(context.Background(), ep)
-		assert.ErrorIs(t, err, zmqerr.ErrEndpointInvalid, "Listen(%q)", ep)
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-		_, dialErr := tr.Dial(ctx, ep)
-		cancel()
-		if !errors.Is(dialErr, zmqerr.ErrEndpointInvalid) && !errors.Is(dialErr, context.DeadlineExceeded) {
-			assert.Failf(t, "unexpected Dial error", "Dial(%q) err = %v, want wraps ErrEndpointInvalid", ep, dialErr)
-		}
-	}
 }
 
 // TestTLS_ManyConcurrentDials sanity-checks that several clients can

@@ -24,7 +24,6 @@
 // socket, e.g. for libzmq peers in the same process.
 //
 // Wire format per RFC 27 §3
-// -------------------------
 //
 // Request (multi-frame):
 //
@@ -172,10 +171,6 @@ func (h ZAPHandler) ServeRequest(reqFrames [][]byte) [][]byte {
 	return EncodeZAPResponse(resp)
 }
 
-// ---------------------------------------------------------------------------
-// Codec — request
-// ---------------------------------------------------------------------------
-
 // EncodeZAPRequest serializes req into the RFC 27 §3.1 multi-frame form. The
 // returned slice holds the request frames in order and aliases req.RequestID,
 // req.Identity, and each req.Credentials[i] — callers must not mutate those
@@ -250,10 +245,6 @@ func DecodeZAPRequest(frames [][]byte) (*ZAPRequest, error) {
 	return req, nil
 }
 
-// ---------------------------------------------------------------------------
-// Codec — response
-// ---------------------------------------------------------------------------
-
 // EncodeZAPResponse serializes resp into RFC 27 §3.2 multi-frame form. A nil
 // Metadata map is treated as empty (zero-length frame 5). The returned slice
 // does NOT alias resp's fields — we allocate fresh frames because responses
@@ -278,7 +269,7 @@ func EncodeZAPResponse(resp *ZAPResponse) [][]byte {
 		[]byte(statusCode),
 		[]byte(statusText),
 		[]byte(userID),
-		zmtp.MetadataCodec.Encode(meta),
+		zmtp.EncodeMetadata(meta),
 	}
 }
 
@@ -306,7 +297,7 @@ func DecodeZAPResponse(frames [][]byte) (*ZAPResponse, error) {
 	if version != zapVersion {
 		return nil, fmt.Errorf("gozmq/security/zap: unsupported response version %q: %w", version, zmqerr.ErrMalformedFrame)
 	}
-	meta, err := zmtp.MetadataCodec.Decode(frames[5])
+	meta, err := zmtp.DecodeMetadata(frames[5])
 	if err != nil {
 		return nil, err // already wraps ErrMalformedFrame
 	}

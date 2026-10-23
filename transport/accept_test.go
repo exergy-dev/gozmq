@@ -40,6 +40,7 @@ func TestAccept_ClosedErrorWrapsNetErrClosed(t *testing.T) {
 				_, err := l.Accept(context.Background())
 				return err
 			}, func() { require.NoError(t, l.Close()) })
+			require.ErrorIs(t, err, zmqerr.ErrEndpointInvalid)
 			require.ErrorIs(t, err, net.ErrClosed, "parked Accept")
 			require.ErrorIs(t, err, zmqerr.ErrEndpointInvalid, "parked Accept")
 			_, err = l.Accept(context.Background())
@@ -118,5 +119,49 @@ func TestAccept_ConcurrentAcceptsIndependentCtx(t *testing.T) {
 		require.NoError(t, err, "uncancelled Accept")
 	case <-time.After(2 * time.Second):
 		t.Fatal("uncancelled Accept did not pick up the connection")
+	}
+}
+
+// TestAccept_HonorsCtx: a parked Accept returns ctx.Err() when its context
+// is cancelled, on every transport, and the listener stays usable.
+func TestAccept_HonorsCtx(t *testing.T) {
+	t.Parallel()
+	for scheme, l := range listenAll(t) {
+		t.Run(scheme, func(t *testing.T) {
+			t.Parallel()
+			defer l.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			err := testutil.RequireUnblocks(t, func() error {
+				_, err := l.Accept(ctx)
+				return err
+			}, cancel)
+			require.ErrorIs(t, err, context.Canceled)
+		})
+	}
+}
+
+// TestBadEndpoints: malformed or wrong-scheme endpoints fail Dial and Listen
+// with ErrEndpointInvalid on every transport.
+func TestBadEndpoints(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		tr        Transport
+		endpoints []string
+		dialOnly  bool // endpoints that only Dial rejects (wildcard, port 0)
+	}{
+		{NewTCPTransport(), []string{"tcp://host", "udp://host:1", "no-scheme-here"}, false},
+		{NewTCPTransport(), []string{"tcp://*:5555", "tcp://host:0"}, true},
+		{NewIPCTransport(), []string{"tcp://x:1", "ipc://", "ipc://@", "no-scheme"}, false},
+		{mustNewTLS(t, serverTLSConfig()), []string{"tcp://x:1", "no-scheme", "tls+tcp://xx"}, false},
+	} {
+		for _, ep := range tc.endpoints {
+			ctx := testutil.Ctx(t, 50*time.Millisecond)
+			_, err := tc.tr.Dial(ctx, ep)
+			require.ErrorIs(t, err, zmqerr.ErrEndpointInvalid, "%s Dial(%q)", tc.tr.Scheme(), ep)
+			if !tc.dialOnly {
+				_, err = tc.tr.Listen(context.Background(), ep)
+				require.ErrorIs(t, err, zmqerr.ErrEndpointInvalid, "%s Listen(%q)", tc.tr.Scheme(), ep)
+			}
+		}
 	}
 }

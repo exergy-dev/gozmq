@@ -15,7 +15,6 @@ import (
 
 	"github.com/exergy-dev/gozmq"
 	"github.com/exergy-dev/gozmq/typed"
-	"github.com/exergy-dev/gozmq/typed/codecjson"
 )
 
 type Order struct {
@@ -41,7 +40,7 @@ func main() {
 	check(err, "new SUB")
 	defer subSock.Close()
 
-	codec := codecjson.Codec{}
+	codec := typed.JSONCodec{}
 	mux := typed.NewTopicMux(subSock, codec)
 
 	var wg sync.WaitGroup
