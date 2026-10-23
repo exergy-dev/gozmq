@@ -2,6 +2,7 @@ package socket_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
@@ -84,10 +85,10 @@ func TestEngineConformance(t *testing.T) {
 			} else {
 				require.ErrorIs(t, eng.AttachPipe(a), zmqerr.ErrFSMViolation, "pair re-attach")
 			}
-			if tc.closedSendErr == zmqerr.ErrFSMViolation {
+			if errors.Is(tc.closedSendErr, zmqerr.ErrFSMViolation) {
 				require.ErrorIs(t, eng.Send(ctx, tc.sendMsg()), zmqerr.ErrFSMViolation, "send on a recv-only engine")
 			}
-			if tc.closedRecvErr == zmqerr.ErrFSMViolation {
+			if errors.Is(tc.closedRecvErr, zmqerr.ErrFSMViolation) {
 				_, err := eng.Recv(ctx)
 				require.ErrorIs(t, err, zmqerr.ErrFSMViolation, "recv on a send-only engine")
 			}

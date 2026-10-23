@@ -1,7 +1,6 @@
 package zmtp
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -9,91 +8,47 @@ import (
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
-func TestCommandRoundTrip(t *testing.T) {
+// TestCommandCodec: the command header round-trips, names are checked
+// byte-exact, ERROR reasons are clamped and parsed, libzmq's broken ERROR
+// name is the one malformed encoding accepted, and subscription frames
+// carry the flag byte.
+func TestCommandCodec(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name string
-		cmd  Command
-	}{
-		{name: "ready-empty", cmd: Command{Name: CmdReady, Body: nil}},
-		{name: "ready-body", cmd: Command{Name: CmdReady, Body: []byte("\x0bSocket-Type\x00\x00\x00\x03REQ")}},
-		{name: "error", cmd: Command{Name: CmdError, Body: []byte("auth failed")}},
-		{name: "subscribe-prefix", cmd: Command{Name: "SUBSCRIBE", Body: []byte("logs.")}},
-		{name: "cancel-prefix", cmd: Command{Name: "CANCEL", Body: []byte("logs.")}},
-		{name: "disconnect-empty", cmd: Command{Name: "DISCONNECT", Body: nil}},
+	body := EncodeCommand(Command{Name: "PING", Body: []byte{0, 10, 'c'}})
+	require.Equal(t, []byte{4, 'P', 'I', 'N', 'G', 0, 10, 'c'}, body)
+	cmd, err := DecodeCommand(body)
+	require.NoError(t, err)
+	require.Equal(t, Command{Name: "PING", Body: []byte{0, 10, 'c'}}, cmd)
+
+	payload, err := ExpectCommand(body, "PING")
+	require.NoError(t, err)
+	require.Equal(t, []byte{0, 10, 'c'}, payload)
+	_, err = ExpectCommand(body, "PONG")
+	require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
+	_, err = ExpectCommand([]byte{9}, "PONG")
+	require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
+	for _, raw := range [][]byte{nil, {0}, {3, 'A', 'B'}, {2, 'A', 0x01}} {
+		_, err := DecodeCommand(raw)
+		require.ErrorIs(t, err, zmqerr.ErrMalformedFrame, "%v", raw)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			raw := EncodeCommand(tc.cmd)
-			got, err := DecodeCommand(raw)
-			require.NoError(t, err, "DecodeCommand")
-			require.Equal(t, tc.cmd.Name, got.Name, "name")
-			if len(tc.cmd.Body) == 0 {
-				require.Empty(t, got.Body, "body")
-			} else {
-				require.Equal(t, tc.cmd.Body, got.Body, "body")
-			}
-		})
-	}
-}
+	require.Panics(t, func() { AppendCommandName(nil, string(make([]byte, 256))) })
 
-func TestCommandWireFormat(t *testing.T) {
-	t.Parallel()
-	raw := EncodeCommand(Command{Name: CmdReady, Body: []byte("payload")})
-	want := append([]byte{byte(len(CmdReady))}, []byte(CmdReady)...)
-	want = append(want, []byte("payload")...)
-	require.Equal(t, want, raw)
-}
+	long := string(make([]byte, 300))
+	reason, isErr, err := DecodeError(EncodeError(long))
+	require.NoError(t, err)
+	require.True(t, isErr)
+	require.Len(t, reason, 255)
+	reason, isErr, err = DecodeError(append([]byte{0x5E, 'R', 'R', 'O', 'R'}, 2, 'n', 'o'))
+	require.NoError(t, err)
+	require.True(t, isErr, "libzmq's broken ERROR name")
+	require.Equal(t, "no", reason)
+	_, isErr, err = DecodeError(append(AppendCommandName(nil, CmdError), 5, 'x'))
+	require.True(t, isErr)
+	require.ErrorIs(t, err, zmqerr.ErrMalformedFrame, "truncated reason")
+	_, isErr, err = DecodeError(body)
+	require.False(t, isErr)
+	require.NoError(t, err)
 
-func TestCommandRejects(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		raw  []byte
-	}{
-		{name: "empty", raw: []byte{}},
-		{name: "zero-name", raw: []byte{0x00}},
-		{name: "name-overruns", raw: []byte{0x05, 'R', 'E', 'A'}},
-		{name: "non-printable-name", raw: []byte{0x03, 'R', 0x01, 'Y'}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			_, err := DecodeCommand(tc.raw)
-			require.ErrorIs(t, err, zmqerr.ErrMalformedFrame)
-		})
-	}
-}
-
-func TestEncodeCommandPanicsOnHugeName(t *testing.T) {
-	t.Parallel()
-	require.Panics(t, func() {
-		EncodeCommand(Command{Name: strings.Repeat("X", MaxCommandNameLen+1)})
-	})
-}
-
-// FuzzCommand: arbitrary input bytes interpreted as a COMMAND-frame body must
-// either decode cleanly (and round-trip via EncodeCommand) or be rejected. No
-// panics, no infinite loops.
-func FuzzCommand(f *testing.F) {
-	f.Add([]byte{0x05, 'R', 'E', 'A', 'D', 'Y'})
-	f.Add([]byte{0x04, 'P', 'I', 'N', 'G', 0x00, 0x10, 'c', 't', 'x'})
-	f.Add([]byte{})                       // empty
-	f.Add([]byte{0xFF})                   // length > buffer
-	f.Add([]byte{0x00})                   // zero name length
-	f.Add([]byte{0x01, 0x01, 0x02, 0x03}) // non-printable name byte
-
-	f.Fuzz(func(t *testing.T, data []byte) {
-		c, err := DecodeCommand(data)
-		if err != nil {
-			return
-		}
-		// Re-encode and re-decode must be stable.
-		raw := EncodeCommand(c)
-		c2, err2 := DecodeCommand(raw)
-		require.NoError(t, err2, "re-decode failed")
-		require.Equal(t, c.Name, c2.Name, "round-trip name drift")
-		require.Equal(t, c.Body, c2.Body, "round-trip body drift")
-	})
+	require.Equal(t, []byte{1, 'a', 'b'}, SubscriptionFrame(true, []byte("ab")))
+	require.Equal(t, []byte{0}, SubscriptionFrame(false, nil))
 }

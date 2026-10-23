@@ -112,7 +112,8 @@ func DecodeErrorReason(payload []byte) (string, error) {
 	if len(payload) < 1 || 1+int(payload[0]) > len(payload) {
 		return "", fmt.Errorf("gozmq/zmtp: ERROR reason truncated: %w", zmqerr.ErrMalformedFrame)
 	}
-	return string(payload[1 : 1+payload[0]]), nil
+	n := int(payload[0]) // int arithmetic: a 255-byte reason must not wrap the slice bound
+	return string(payload[1 : 1+n]), nil
 }
 
 // DecodeError reports whether raw is an ERROR command. isError is false for
