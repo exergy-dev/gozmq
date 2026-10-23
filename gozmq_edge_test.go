@@ -19,6 +19,7 @@ import (
 // post-Close contract: every public operation on a closed socket fails
 // with ErrSocketClosed.
 func TestClosedSocket_AllOpsReturnErrSocketClosed(t *testing.T) {
+	t.Parallel()
 	_, s := newTestSocket(t, gozmq.Sub)
 	require.NoError(t, s.Close(), "close")
 
@@ -49,6 +50,7 @@ func TestClosedSocket_AllOpsReturnErrSocketClosed(t *testing.T) {
 // [empty][empty] multipart over PAIR on both transports — zero-length
 // bodies are legal ZMTP frames and must survive framing intact.
 func TestZeroLengthMessages(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name     string
 		endpoint string
@@ -85,6 +87,7 @@ func TestZeroLengthMessages(t *testing.T) {
 // in RecvMsg (idle peer), then Closes the socket: both must unblock with
 // ErrSocketClosed and nothing may deadlock or leak (goleak in TestMain).
 func TestConcurrentClose_UnblocksParkedSendAndRecv(t *testing.T) {
+	t.Parallel()
 	_, receiver, sender := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair,
 		"inproc://concurrent-close",
 		[]gozmq.Option{gozmq.WithRecvHWM(1)},
@@ -142,6 +145,7 @@ func TestConcurrentClose_UnblocksParkedSendAndRecv(t *testing.T) {
 // TestRecvMsg_ContextCancellation cancels a parked RecvMsg directly and
 // asserts the ctx error propagates out of the engine.
 func TestRecvMsg_ContextCancellation(t *testing.T) {
+	t.Parallel()
 	_, _, client := newSocketPair(t, gozmq.Pair, "inproc://recv-cancel")
 
 	recvCtx, cancel := context.WithCancel(context.Background())
@@ -166,6 +170,7 @@ func TestRecvMsg_ContextCancellation(t *testing.T) {
 // (ErrMalformedFrame inside the reader), surfacing on the receiver's
 // monitor as EventDisconnected — and the message never reaches RecvMsg.
 func TestMaxMessageSize_RecvSideTeardown(t *testing.T) {
+	t.Parallel()
 	const limit = 64
 	srvEvents := make(chan gozmq.Event, 64)
 	_, receiver, sender := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair,
@@ -194,10 +199,11 @@ func TestMaxMessageSize_RecvSideTeardown(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded, "RecvMsg = (%v, %v): message must be dropped", m, err)
 }
 
-// TestPoller_Modify registers PollIn|PollOut, narrows the mask to PollIn
-// via Modify, and asserts the poller stops reporting writability while
+// TestPoller_AddNarrowsMask registers PollIn|PollOut, narrows the mask to
+// PollIn with a second Add, and asserts the poller stops reporting writability while
 // still waking for inbound data.
-func TestPoller_Modify(t *testing.T) {
+func TestPoller_AddNarrowsMask(t *testing.T) {
+	t.Parallel()
 	_, server, client := newSocketPair(t, gozmq.Pair, "inproc://poller-modify")
 
 	p := gozmq.NewPoller()
@@ -210,7 +216,7 @@ func TestPoller_Modify(t *testing.T) {
 	require.Equal(t, gozmq.PollOut, events[0].Events, "initial poll: want PollOut only")
 
 	// Narrow to PollIn: writability must no longer wake Poll.
-	p.Modify(client, gozmq.PollIn)
+	p.Add(client, gozmq.PollIn)
 	shortCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	ev, err := p.Poll(shortCtx)
@@ -233,6 +239,7 @@ func TestPoller_Modify(t *testing.T) {
 // established connections keep working, new clients can no longer be
 // accepted, and an unknown endpoint wraps ErrEndpointUnknown.
 func TestSocketUnbind(t *testing.T) {
+	t.Parallel()
 	ctxZmq, puller, pusher := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "tcp://127.0.0.1:0", nil, nil)
 	ep := puller.LastEndpoint()
 
@@ -279,6 +286,7 @@ func TestSocketUnbind(t *testing.T) {
 // TestRecvBytes covers the misuse-proof single-frame receive: a
 // round-trip copy on the happy path, and an error on multipart.
 func TestRecvBytes(t *testing.T) {
+	t.Parallel()
 	_, server, client := newSocketPair(t, gozmq.Pair, "inproc://recv-bytes")
 	callCtx := testutil.Ctx(t)
 
@@ -297,6 +305,7 @@ func TestRecvBytes(t *testing.T) {
 // must surface EventHandshakeFailedAuth on its monitor channel
 // (exercising classifyHandshakeEvent's ErrAuthFailed branch).
 func TestPlainAuth_WrongPassword(t *testing.T) {
+	t.Parallel()
 	cliEvents := make(chan gozmq.Event, 64)
 	newSocketPairTypes(t, gozmq.Pair, gozmq.Pair, "tcp://127.0.0.1:0",
 		[]gozmq.Option{gozmq.WithPlainAuth(func(u, p string) bool {
@@ -323,6 +332,7 @@ func TestPlainAuth_WrongPassword(t *testing.T) {
 // unregistered scheme returns ErrTransportUnknown synchronously AND
 // emits EventConnectFailed (terminal — no reconnect loop to retry it).
 func TestConnect_UnknownTransportEmitsConnectFailed(t *testing.T) {
+	t.Parallel()
 	evts := make(chan gozmq.Event, 8)
 	_, s := newTestSocket(t, gozmq.Pair, gozmq.WithMonitor(evts, gozmq.EventAll))
 
@@ -341,6 +351,7 @@ func TestConnect_UnknownTransportEmitsConnectFailed(t *testing.T) {
 // TestSocketType_String covers the Stringer including the unknown-value
 // fallback.
 func TestSocketType_String(t *testing.T) {
+	t.Parallel()
 	require.Equal(t, "PAIR", gozmq.Pair.String())
 	require.Equal(t, "SocketType(99)", gozmq.SocketType(99).String())
 }
@@ -349,6 +360,7 @@ func TestSocketType_String(t *testing.T) {
 // incremental frame appends, a round trip, and the always-safe Release
 // contract for caller-constructed messages.
 func TestNewMsg(t *testing.T) {
+	t.Parallel()
 	m := gozmq.NewMsg()
 	require.Equal(t, 0, m.NumFrames(), "NewMsg NumFrames")
 	m.AppendFrame([]byte("alpha"))
@@ -372,6 +384,7 @@ func TestNewMsg(t *testing.T) {
 // socket's internal diagnostics: a refused dial must produce the
 // reconnector's debug log line on the custom logger.
 func TestWithLogger(t *testing.T) {
+	t.Parallel()
 	var (
 		mu  sync.Mutex
 		buf bytes.Buffer

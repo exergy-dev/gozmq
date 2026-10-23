@@ -27,6 +27,7 @@ import (
 // handshake error killed the accept loop and the silent one stalled it for
 // the full TLS handshake timeout.
 func TestBind_TLSBadClientsDoNotStopAccepting(t *testing.T) {
+	t.Parallel()
 	tr, err := transport.NewTLSTransport(newSelfSignedTLSConfig(t))
 	require.NoError(t, err, "NewTLSTransport")
 	zctx := gozmq.NewContext()
@@ -113,6 +114,7 @@ func (l *flakyListener) Endpoint() string {
 // net.ErrClosed through a registered out-of-tree transport. The accept loop
 // must surface them as EventAcceptFailed and keep accepting.
 func TestBind_AcceptErrorDoesNotStopAccepting(t *testing.T) {
+	t.Parallel()
 	zctx := gozmq.NewContext()
 	defer zctx.Close()
 	zctx.RegisterTransport(&flakyTransport{tcp: transport.NewTCPTransport(), failures: 3})
@@ -146,6 +148,7 @@ func TestBind_AcceptErrorDoesNotStopAccepting(t *testing.T) {
 // listener snapshot used to leak its listener (and accept goroutine), leaving
 // the inproc name bound forever.
 func TestBind_RacingCloseReleasesListener(t *testing.T) {
+	t.Parallel()
 	zctx := gozmq.NewContext()
 	defer zctx.Close()
 	for i := 0; i < 1000; i++ {

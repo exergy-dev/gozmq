@@ -19,6 +19,7 @@ import (
 // carry raw bytes between the app and a non-ZMQ TCP peer. A matching
 // STREAM client dials out via a second Socket.
 func TestSocketStream_TCP_HTTPEcho(t *testing.T) {
+	t.Parallel()
 	zctx := gozmq.NewContext()
 	defer zctx.Close()
 
@@ -78,6 +79,7 @@ func TestSocketStream_TCP_HTTPEcho(t *testing.T) {
 // Socket(Stream).Connect dials out to a plain TCP listener, and bytes
 // written via SendMsg reach the peer verbatim.
 func TestSocketStream_TCP_Connect(t *testing.T) {
+	t.Parallel()
 	// Listener that speaks plain TCP.
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err, "listen")
@@ -160,6 +162,7 @@ func streamServerPeer(t *testing.T, opts ...gozmq.Option) (*gozmq.Socket, net.Co
 // unlimited (the old adapter substituted 1024): with the peer not reading,
 // far more than the kernel buffers can take still queues without blocking.
 func TestSocketStream_SendHWMZeroUnlimited(t *testing.T) {
+	t.Parallel()
 	srv, cli, id := streamServerPeer(t, gozmq.WithSendHWM(0))
 	const n, size = 2048, 16 << 10 // 32 MiB
 	chunk := bytes.Repeat([]byte("z"), size)
@@ -175,6 +178,7 @@ func TestSocketStream_SendHWMZeroUnlimited(t *testing.T) {
 // TestSocketStream_LingerFlushes: Close drains what STREAM still has queued
 // before closing the connection (the old adapter dropped it).
 func TestSocketStream_LingerFlushes(t *testing.T) {
+	t.Parallel()
 	srv, cli, id := streamServerPeer(t, gozmq.WithLinger(10*time.Second))
 	const n, size = 1024, 32 << 10 // 32 MiB, well past the kernel buffers
 	read := make(chan int64, 1)
@@ -199,6 +203,7 @@ func TestSocketStream_LingerFlushes(t *testing.T) {
 // TestSocketStream_Disconnect: Disconnect closes a STREAM Connect's
 // connection, and a second Disconnect finds nothing.
 func TestSocketStream_Disconnect(t *testing.T) {
+	t.Parallel()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer l.Close()

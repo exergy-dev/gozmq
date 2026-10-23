@@ -16,6 +16,7 @@ import (
 // active receiver, on both the inproc direct-pipe path and the TCP
 // session path.
 func TestHWMZeroDoesNotBlockWithoutReceiver(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name     string
 		endpoint string

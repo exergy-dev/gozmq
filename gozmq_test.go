@@ -18,6 +18,7 @@ func TestMain(m *testing.M) { testutil.VerifyMain(m) }
 // and a single-frame Msg, -race clean and with no goroutine leaks, over both
 // the TCP session path and the inproc direct-pipe path.
 func TestPairRoundTrip(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name     string
 		endpoint string
@@ -50,6 +51,7 @@ func TestPairRoundTrip(t *testing.T) {
 // TestPushPull_TCP exercises the A5 load-balance/fair-queue primitives end
 // to end through real sessions and transport.
 func TestPushPull_TCP(t *testing.T) {
+	t.Parallel()
 	_, puller, pusher := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "tcp://127.0.0.1:0", nil, nil)
 
 	callCtx := testutil.Ctx(t)
@@ -69,6 +71,7 @@ func TestPushPull_TCP(t *testing.T) {
 // smoke-test that the typed sentinels propagate correctly through the
 // public API.
 func TestPushSendRejected(t *testing.T) {
+	t.Parallel()
 	_, s := newTestSocket(t, gozmq.Push)
 
 	_, err := s.RecvMsg(context.Background())
@@ -78,6 +81,7 @@ func TestPushSendRejected(t *testing.T) {
 // TestReqRep_TCP exercises the REQ/REP lock-step FSM over a real session
 // and transport.
 func TestReqRep_TCP(t *testing.T) {
+	t.Parallel()
 	_, rep, req := newSocketPairTypes(t, gozmq.Rep, gozmq.Req, "tcp://127.0.0.1:0", nil, nil)
 
 	callCtx := testutil.Ctx(t)
@@ -99,6 +103,7 @@ func TestReqRep_TCP(t *testing.T) {
 
 // TestPubSub_Inproc exercises PUB/SUB with topic filtering over inproc.
 func TestPubSub_Inproc(t *testing.T) {
+	t.Parallel()
 	_, pub, sub := newPubSubPair(t, "inproc://pubsub-test", [][]byte{[]byte("alpha")}, nil, nil)
 
 	callCtx := testutil.Ctx(t)
@@ -123,6 +128,7 @@ func TestPubSub_Inproc(t *testing.T) {
 // classified subscriptions by sniffing the payload. A SUB's peer is a PUB
 // that only ever sends data, so such payloads must be delivered intact.
 func TestPubSub_BinaryPayloadLeadingSubByte(t *testing.T) {
+	t.Parallel()
 	// Match-all subscription: every published message should be delivered.
 	_, pub, sub := newPubSubPair(t, "inproc://pubsub-binary", [][]byte{{}}, nil, nil)
 
@@ -148,6 +154,7 @@ func TestPubSub_BinaryPayloadLeadingSubByte(t *testing.T) {
 
 // TestRouterDealer_TCP exercises ROUTER identity-based routing.
 func TestRouterDealer_TCP(t *testing.T) {
+	t.Parallel()
 	_, router, dealer := newSocketPairTypes(
 		t, gozmq.Router, gozmq.Dealer, "tcp://127.0.0.1:0",
 		nil, []gozmq.Option{gozmq.WithIdentity([]byte("worker-1"))},
@@ -175,6 +182,7 @@ func TestRouterDealer_TCP(t *testing.T) {
 // TestPlainAuth_Success: a PLAIN client with correct credentials handshakes
 // with a PLAIN server and then round-trips.
 func TestPlainAuth_Success(t *testing.T) {
+	t.Parallel()
 	_, server, client := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair, "tcp://127.0.0.1:0",
 		[]gozmq.Option{gozmq.WithPlainAuth(func(u, p string) bool {
 			return u == "alice" && p == "hunter2"
@@ -193,6 +201,7 @@ func TestPlainAuth_Success(t *testing.T) {
 // TestCurveAuth_Success verifies that a CURVE client with the correct
 // server key completes the handshake and round-trips.
 func TestCurveAuth_Success(t *testing.T) {
+	t.Parallel()
 	serverPub, serverSec, err := curve.GenerateKeyPair()
 	require.NoError(t, err)
 	clientPub, clientSec, err := curve.GenerateKeyPair()
@@ -213,6 +222,7 @@ func TestCurveAuth_Success(t *testing.T) {
 
 // TestContextClosed_BlocksNewSocket is a smoke test on teardown ordering.
 func TestContextClosed_BlocksNewSocket(t *testing.T) {
+	t.Parallel()
 	ctxZmq := gozmq.NewContext()
 	require.NoError(t, ctxZmq.Close(), "close")
 	_, err := ctxZmq.NewSocket(gozmq.Pair)
@@ -228,6 +238,7 @@ func TestContextClosed_BlocksNewSocket(t *testing.T) {
 //     monitor channel or session round-trip is involved), the session is
 //     NOT torn down, and a subsequent at-limit send still round-trips.
 func TestMaxMessageSize_SendBoundary(t *testing.T) {
+	t.Parallel()
 	const limit = 1024
 	opts := []gozmq.Option{gozmq.WithMaxMessageSize(limit)}
 
@@ -281,6 +292,7 @@ func TestMaxMessageSize_SendBoundary(t *testing.T) {
 // total exceeds the cap is rejected synchronously even when every frame is
 // under it, and one whose total fits is delivered.
 func TestSendMsg_CollectsMultipartSizeCorrectly(t *testing.T) {
+	t.Parallel()
 	const limit = 1024
 	_, srv, cli := newSocketPair(t, gozmq.Pair, "inproc://sendmsg-multipart", gozmq.WithMaxMessageSize(limit))
 
@@ -319,6 +331,7 @@ func TestSendMsg_CollectsMultipartSizeCorrectly(t *testing.T) {
 // and pre-fill past the transport-level pipe buffer, so the drain path
 // blocks until the deadline interrupts it.
 func TestCloseCtx_CancellationBreaksLingerDrain(t *testing.T) {
+	t.Parallel()
 	// receiver accepts the wiring but never RecvMsgs payload. With a tiny
 	// recvHWM its inbound pipe fills quickly and blocks further writes.
 	_, receiver, sender := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair,
@@ -374,6 +387,7 @@ func TestCloseCtx_CancellationBreaksLingerDrain(t *testing.T) {
 // the peer has drained every queued message, the close path has nothing
 // left to linger on.
 func TestCloseCtx_NormalDrainStillWorks(t *testing.T) {
+	t.Parallel()
 	_, receiver, sender := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair,
 		"inproc://closectx-normal-drain",
 		nil,
@@ -401,6 +415,7 @@ func TestCloseCtx_NormalDrainStillWorks(t *testing.T) {
 // TestClose_DelegatesToCloseCtx confirms that Close uses the same teardown
 // path as CloseCtx with a background context.
 func TestClose_DelegatesToCloseCtx(t *testing.T) {
+	t.Parallel()
 	_, _, sender := newSocketPairTypes(t, gozmq.Pair, gozmq.Pair,
 		"inproc://close-delegates",
 		nil,

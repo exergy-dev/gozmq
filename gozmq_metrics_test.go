@@ -15,6 +15,7 @@ import (
 // count. Exercises the LoadBalancer.Sent / FairQueue.Recvd plumbing
 // through the public Socket.Metrics surface.
 func TestSocketMetrics_PushPullCounters(t *testing.T) {
+	t.Parallel()
 	_, puller, pusher := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "inproc://metrics-pushpull", nil, nil)
 
 	callCtx := testutil.Ctx(t)
@@ -39,6 +40,7 @@ func TestSocketMetrics_PushPullCounters(t *testing.T) {
 // is full. Verifies the per-(message, peer) drop accounting at the PUB
 // fanout site.
 func TestSocketMetrics_PubDropsOnSlowSubscriber(t *testing.T) {
+	t.Parallel()
 	// Small HWMs so a handful of sends are enough to overflow the
 	// peer's inbound buffer. newPubSubPair waits for the SUBSCRIBE to
 	// reach the PUB engine before returning; otherwise the early sends
@@ -70,6 +72,7 @@ func TestSocketMetrics_PubDropsOnSlowSubscriber(t *testing.T) {
 // once a message is queued in one of the puller's inbound pipes and
 // returns to 0 once Recv drains it, with two PUSH peers connected.
 func TestSocketMetrics_QueueDepthGauge(t *testing.T) {
+	t.Parallel()
 	ctxZmq, puller, pusher := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "inproc://metrics-depth", nil, nil)
 
 	// Attach a second pusher: the FairQueue walks several pipes.
@@ -94,6 +97,7 @@ func TestSocketMetrics_QueueDepthGauge(t *testing.T) {
 // TestSocketMetrics_ClosedReturnsZero asserts that Metrics on a closed
 // Socket returns the zero value rather than panicking.
 func TestSocketMetrics_ClosedReturnsZero(t *testing.T) {
+	t.Parallel()
 	_, s := newTestSocket(t, gozmq.Push)
 	require.NoError(t, s.Close(), "close")
 	require.Zero(t, s.Metrics(), "Metrics on closed socket")

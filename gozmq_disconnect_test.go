@@ -12,6 +12,7 @@ import (
 )
 
 func TestSocketDisconnect_StopsReconnectAndDetachesPeer(t *testing.T) {
+	t.Parallel()
 	ctxZmq := gozmq.NewContext()
 	defer ctxZmq.Close()
 

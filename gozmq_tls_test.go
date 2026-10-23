@@ -64,6 +64,7 @@ func newSelfSignedTLSConfig(t *testing.T) *tls.Config {
 // dials it (server cert verified against the pinned root), and messages
 // round-trip in order.
 func TestTLSTransport_SocketRoundTrip(t *testing.T) {
+	t.Parallel()
 	tr, err := transport.NewTLSTransport(newSelfSignedTLSConfig(t))
 	require.NoError(t, err, "NewTLSTransport")
 

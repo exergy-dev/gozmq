@@ -38,6 +38,7 @@ func requireOnlyReady(t *testing.T, events []gozmq.PollEvent, s *gozmq.Socket, r
 // PULL socket. After the user RecvMsgs the message, a subsequent
 // Poll with a short context should not return PollIn (no new data).
 func TestPoller_PullReadsAfterPush(t *testing.T) {
+	t.Parallel()
 	_, pull, push := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "tcp://127.0.0.1:0", nil, nil)
 
 	ctx := testutil.Ctx(t)
@@ -61,6 +62,7 @@ func TestPoller_PullReadsAfterPush(t *testing.T) {
 }
 
 func TestPoller_ZeroValue(t *testing.T) {
+	t.Parallel()
 	_, server, client := newSocketPair(t, gozmq.Pair, "inproc://poller-zero-value")
 
 	require.NoError(t, client.SendMsg(testutil.Ctx(t), gozmq.NewMsgFromBytes([]byte("hi"))), "client send")
@@ -72,6 +74,7 @@ func TestPoller_ZeroValue(t *testing.T) {
 }
 
 func TestPoller_PairPollOut(t *testing.T) {
+	t.Parallel()
 	_, _, client := newSocketPair(t, gozmq.Pair, "inproc://poller-pair-out")
 
 	p := gozmq.NewPoller()
@@ -81,6 +84,7 @@ func TestPoller_PairPollOut(t *testing.T) {
 }
 
 func TestPoller_ReqPollInOut(t *testing.T) {
+	t.Parallel()
 	_, rep, req := newSocketPairTypes(t, gozmq.Rep, gozmq.Req, "inproc://poller-req", nil, nil)
 
 	pOut := gozmq.NewPoller()
@@ -100,6 +104,7 @@ func TestPoller_ReqPollInOut(t *testing.T) {
 }
 
 func TestPoller_PubPollOut(t *testing.T) {
+	t.Parallel()
 	_, _, pub := newSocketPairTypes(t, gozmq.Sub, gozmq.Pub, "inproc://poller-pub",
 		[]gozmq.Option{gozmq.WithSubscribe(nil)}, nil)
 
@@ -109,6 +114,7 @@ func TestPoller_PubPollOut(t *testing.T) {
 }
 
 func TestPoller_XPubPollIn(t *testing.T) {
+	t.Parallel()
 	_, xpub, xsub := newSocketPairTypes(t, gozmq.XPub, gozmq.XSub, "inproc://poller-xpub", nil, nil)
 
 	require.NoError(t, xsub.SendMsg(testutil.Ctx(t), gozmq.NewMsgFromBytes([]byte{1, 't'})), "xsub subscribe")
@@ -119,6 +125,7 @@ func TestPoller_XPubPollIn(t *testing.T) {
 }
 
 func TestPoller_StreamPollInOut(t *testing.T) {
+	t.Parallel()
 	ctx := gozmq.NewContext()
 	defer ctx.Close()
 
@@ -153,6 +160,7 @@ func TestPoller_StreamPollInOut(t *testing.T) {
 // then sends a message via PUSH. Poll must not report the removed
 // socket.
 func TestPoller_RemoveStopsReporting(t *testing.T) {
+	t.Parallel()
 	_, pull, push := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "tcp://127.0.0.1:0", nil, nil)
 
 	p := gozmq.NewPoller()
@@ -175,6 +183,7 @@ func TestPoller_RemoveStopsReporting(t *testing.T) {
 // TestPoller_OnlySecondPullReady registers two PULL sockets and
 // pushes to only the second; Poll must report exactly the second.
 func TestPoller_OnlySecondPullReady(t *testing.T) {
+	t.Parallel()
 	zctx := gozmq.NewContext()
 	defer zctx.Close()
 
@@ -214,6 +223,7 @@ func TestPoller_OnlySecondPullReady(t *testing.T) {
 // queued, and the second waiter must still wake rather than sleep until its
 // ctx expires.
 func TestPoller_TwoWaitersSameSocket(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		pollers func() (*gozmq.Poller, *gozmq.Poller)
@@ -224,11 +234,11 @@ func TestPoller_TwoWaitersSameSocket(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			zctx := gozmq.NewContext()
 			defer zctx.Close()
-			pull, err := zctx.NewSocket(gozmq.Pull)
+			pull, err := zctx.NewSocket(gozmq.Pull, gozmq.WithLinger(0))
 			require.NoError(t, err, "new pull")
 			defer pull.Close()
 			require.NoError(t, pull.Bind("inproc://poller-two-waiters"), "bind")
-			push, err := zctx.NewSocket(gozmq.Push)
+			push, err := zctx.NewSocket(gozmq.Push, gozmq.WithLinger(0))
 			require.NoError(t, err, "new push")
 			defer push.Close()
 			require.NoError(t, push.Connect("inproc://poller-two-waiters"), "connect")
@@ -261,6 +271,7 @@ func TestPoller_TwoWaitersSameSocket(t *testing.T) {
 // TestPoller_ContextCancel asserts Poll returns ctx.Err() when ctx
 // cancels before any socket becomes ready.
 func TestPoller_ContextCancel(t *testing.T) {
+	t.Parallel()
 	zctx := gozmq.NewContext()
 	defer zctx.Close()
 
@@ -285,6 +296,7 @@ func TestPoller_ContextCancel(t *testing.T) {
 // TestPoller_DealerRouterPollOut verifies PollOut on a DEALER once
 // it has connected to a ROUTER peer.
 func TestPoller_DealerRouterPollOut(t *testing.T) {
+	t.Parallel()
 	_, _, dealer := newSocketPairTypes(t, gozmq.Router, gozmq.Dealer, "tcp://127.0.0.1:0", nil, nil)
 
 	p := gozmq.NewPoller()
