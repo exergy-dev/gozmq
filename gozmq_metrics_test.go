@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/exergy-dev/gozmq"
 	"github.com/exergy-dev/gozmq/internal/testutil"
 )
@@ -19,27 +21,17 @@ func TestSocketMetrics_PushPullCounters(t *testing.T) {
 
 	const n = 8
 	for i := 0; i < n; i++ {
-		if err := pusher.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte{byte(i)})); err != nil {
-			t.Fatalf("send %d: %v", i, err)
-		}
+		require.NoError(t, pusher.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte{byte(i)})), "send %d", i)
 	}
 	for i := 0; i < n; i++ {
 		m, err := puller.RecvMsg(callCtx)
-		if err != nil {
-			t.Fatalf("recv %d: %v", i, err)
-		}
+		require.NoError(t, err, "recv %d", i)
 		m.Release()
 	}
 
-	if got := pusher.Metrics().Sent; got != n {
-		t.Fatalf("pusher Sent = %d, want %d", got, n)
-	}
-	if got := puller.Metrics().Recv; got != n {
-		t.Fatalf("puller Recv = %d, want %d", got, n)
-	}
-	if got := pusher.Metrics().Recv; got != 0 {
-		t.Fatalf("pusher Recv = %d, want 0 (send-only)", got)
-	}
+	require.EqualValues(t, n, pusher.Metrics().Sent, "pusher Sent")
+	require.EqualValues(t, n, puller.Metrics().Recv, "puller Recv")
+	require.Zero(t, pusher.Metrics().Recv, "pusher Recv (send-only)")
 }
 
 // TestSocketMetrics_PubDropsOnSlowSubscriber confirms that a PUB whose
@@ -66,18 +58,12 @@ func TestSocketMetrics_PubDropsOnSlowSubscriber(t *testing.T) {
 		// Never drain on the SUB side. Once HWM is full the per-peer
 		// try-send hits the pubTryTimeout deadline and the engine
 		// increments Dropped.
-		if err := pub.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte{byte(i)})); err != nil {
-			t.Fatalf("send %d: %v", i, err)
-		}
+		require.NoError(t, pub.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte{byte(i)})), "send %d", i)
 	}
 
 	m := pub.Metrics()
-	if m.Sent != base+n {
-		t.Fatalf("pub Sent = %d, want %d", m.Sent, base+n)
-	}
-	if m.Dropped == 0 {
-		t.Fatalf("pub Dropped = 0, want > 0 (slow subscriber should overflow HWM=%d)", 2)
-	}
+	require.Equal(t, base+n, m.Sent, "pub Sent")
+	require.Positive(t, m.Dropped, "pub Dropped: slow subscriber should overflow HWM=%d", 2)
 }
 
 // TestSocketMetrics_QueueDepthGauge confirms that QueueDepth flips to 1
@@ -88,50 +74,27 @@ func TestSocketMetrics_QueueDepthGauge(t *testing.T) {
 
 	// Attach a second pusher: the FairQueue walks several pipes.
 	pusher2, err := ctxZmq.NewSocket(gozmq.Push)
-	if err != nil {
-		t.Fatalf("new push2: %v", err)
-	}
+	require.NoError(t, err, "new push2")
 	defer pusher2.Close()
-	if err := pusher2.Connect(puller.LastEndpoint()); err != nil {
-		t.Fatalf("connect2: %v", err)
-	}
+	require.NoError(t, pusher2.Connect(puller.LastEndpoint()), "connect2")
 
 	callCtx := testutil.Ctx(t)
-	if err := pusher.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("x"))); err != nil {
-		t.Fatalf("send: %v", err)
-	}
+	require.NoError(t, pusher.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("x"))), "send")
 
 	// Wait for the message to reach the puller's pipe.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if puller.Metrics().QueueDepth == 1 {
-			break
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	if got := puller.Metrics().QueueDepth; got != 1 {
-		t.Fatalf("QueueDepth before drain = %d, want 1", got)
-	}
+	require.Eventually(t, func() bool { return puller.Metrics().QueueDepth == 1 },
+		2*time.Second, 2*time.Millisecond, "QueueDepth before drain never reached 1")
 
-	if m, err := puller.RecvMsg(callCtx); err != nil {
-		t.Fatalf("recv: %v", err)
-	} else {
-		m.Release()
-	}
-	if got := puller.Metrics().QueueDepth; got != 0 {
-		t.Fatalf("QueueDepth after drain = %d, want 0", got)
-	}
+	m, err := puller.RecvMsg(callCtx)
+	require.NoError(t, err, "recv")
+	m.Release()
+	require.Zero(t, puller.Metrics().QueueDepth, "QueueDepth after drain")
 }
 
 // TestSocketMetrics_ClosedReturnsZero asserts that Metrics on a closed
 // Socket returns the zero value rather than panicking.
 func TestSocketMetrics_ClosedReturnsZero(t *testing.T) {
 	_, s := newTestSocket(t, gozmq.Push)
-	if err := s.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-	m := s.Metrics()
-	if m != (gozmq.SocketMetrics{}) {
-		t.Fatalf("Metrics on closed socket = %+v, want zero", m)
-	}
+	require.NoError(t, s.Close(), "close")
+	require.Zero(t, s.Metrics(), "Metrics on closed socket")
 }

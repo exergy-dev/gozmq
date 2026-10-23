@@ -2,12 +2,14 @@ package gozmq_test
 
 import (
 	"context"
-	"errors"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // waitPoll issues a single blocking Poll bounded by budget and returns
@@ -16,16 +18,19 @@ import (
 // the fixed wakeup bug that previously required spinning short Polls).
 func waitPoll(t *testing.T, p *gozmq.Poller, budget time.Duration) []gozmq.PollEvent {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
-	defer cancel()
-	ev, err := p.Poll(ctx)
-	if err != nil {
-		t.Fatalf("poll: %v", err)
-	}
-	if len(ev) == 0 {
-		t.Fatalf("poll returned no events and no error")
-	}
+	ev, err := p.Poll(testutil.Ctx(t, budget))
+	require.NoError(t, err, "poll")
+	require.NotEmpty(t, ev, "poll returned no events and no error")
 	return ev
+}
+
+// requireOnlyReady asserts events names exactly one socket, s, with the
+// ready bit set.
+func requireOnlyReady(t *testing.T, events []gozmq.PollEvent, s *gozmq.Socket, ready gozmq.PollEvents) {
+	t.Helper()
+	require.Len(t, events, 1, "unexpected poll events: %+v", events)
+	require.Same(t, s, events[0].Socket, "event socket mismatch")
+	require.NotZero(t, events[0].Events&ready, "expected %#x, got %#x", ready, events[0].Events)
 }
 
 // TestPoller_PullReadsAfterPush registers a PULL socket, pushes a
@@ -35,65 +40,35 @@ func waitPoll(t *testing.T, p *gozmq.Poller, budget time.Duration) []gozmq.PollE
 func TestPoller_PullReadsAfterPush(t *testing.T) {
 	_, pull, push := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "tcp://127.0.0.1:0", nil, nil)
 
-	sendCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := push.SendMsg(sendCtx, gozmq.NewMsgFromBytes([]byte("hi"))); err != nil {
-		t.Fatalf("push send: %v", err)
-	}
+	ctx := testutil.Ctx(t)
+	require.NoError(t, push.SendMsg(ctx, gozmq.NewMsgFromBytes([]byte("hi"))), "push send")
 
 	p := gozmq.NewPoller()
 	p.Add(pull, gozmq.PollIn)
 
-	events := waitPoll(t, p, 2*time.Second)
-	if len(events) != 1 {
-		t.Fatalf("want 1 event, got %d: %+v", len(events), events)
-	}
-	if events[0].Socket != pull {
-		t.Fatalf("event socket mismatch")
-	}
-	if events[0].Events&gozmq.PollIn == 0 {
-		t.Fatalf("expected PollIn, got %#x", events[0].Events)
-	}
+	requireOnlyReady(t, waitPoll(t, p, 2*time.Second), pull, gozmq.PollIn)
 
 	// Drain the message.
-	recvCtx, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel2()
-	m, err := pull.RecvMsg(recvCtx)
-	if err != nil {
-		t.Fatalf("recv: %v", err)
-	}
-	if string(m.Bytes()) != "hi" {
-		t.Fatalf("want hi, got %q", m.Bytes())
-	}
+	m, err := pull.RecvMsg(ctx)
+	require.NoError(t, err, "recv")
+	require.Equal(t, "hi", string(m.Bytes()))
 
 	// No more data → Poll with a short ctx should time out.
 	noCtx, noCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer noCancel()
 	ev, err := p.Poll(noCtx)
-	if err == nil {
-		t.Fatalf("expected timeout, got events %+v", ev)
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected DeadlineExceeded, got %v", err)
-	}
+	require.ErrorIs(t, err, context.DeadlineExceeded, "expected timeout, got events %+v", ev)
 }
 
 func TestPoller_ZeroValue(t *testing.T) {
 	_, server, client := newSocketPair(t, gozmq.Pair, "inproc://poller-zero-value")
 
-	sendCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := client.SendMsg(sendCtx, gozmq.NewMsgFromBytes([]byte("hi"))); err != nil {
-		t.Fatalf("client send: %v", err)
-	}
+	require.NoError(t, client.SendMsg(testutil.Ctx(t), gozmq.NewMsgFromBytes([]byte("hi"))), "client send")
 
 	var p gozmq.Poller
 	p.Add(server, gozmq.PollIn)
 
-	events := waitPoll(t, &p, 2*time.Second)
-	if len(events) != 1 || events[0].Socket != server || events[0].Events&gozmq.PollIn == 0 {
-		t.Fatalf("unexpected poll events: %+v", events)
-	}
+	requireOnlyReady(t, waitPoll(t, &p, 2*time.Second), server, gozmq.PollIn)
 }
 
 func TestPoller_PairPollOut(t *testing.T) {
@@ -102,10 +77,7 @@ func TestPoller_PairPollOut(t *testing.T) {
 	p := gozmq.NewPoller()
 	p.Add(client, gozmq.PollOut)
 
-	events := waitPoll(t, p, 2*time.Second)
-	if len(events) != 1 || events[0].Socket != client || events[0].Events&gozmq.PollOut == 0 {
-		t.Fatalf("unexpected poll events: %+v", events)
-	}
+	requireOnlyReady(t, waitPoll(t, p, 2*time.Second), client, gozmq.PollOut)
 }
 
 func TestPoller_ReqPollInOut(t *testing.T) {
@@ -113,31 +85,18 @@ func TestPoller_ReqPollInOut(t *testing.T) {
 
 	pOut := gozmq.NewPoller()
 	pOut.Add(req, gozmq.PollOut)
-	events := waitPoll(t, pOut, 2*time.Second)
-	if len(events) != 1 || events[0].Socket != req || events[0].Events&gozmq.PollOut == 0 {
-		t.Fatalf("unexpected PollOut events: %+v", events)
-	}
+	requireOnlyReady(t, waitPoll(t, pOut, 2*time.Second), req, gozmq.PollOut)
 
-	callCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := req.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("request"))); err != nil {
-		t.Fatalf("req send: %v", err)
-	}
+	callCtx := testutil.Ctx(t)
+	require.NoError(t, req.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("request"))), "req send")
 	request, err := rep.RecvMsg(callCtx)
-	if err != nil {
-		t.Fatalf("rep recv: %v", err)
-	}
+	require.NoError(t, err, "rep recv")
 	request.Release()
-	if err := rep.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("reply"))); err != nil {
-		t.Fatalf("rep send: %v", err)
-	}
+	require.NoError(t, rep.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte("reply"))), "rep send")
 
 	pIn := gozmq.NewPoller()
 	pIn.Add(req, gozmq.PollIn)
-	events = waitPoll(t, pIn, 2*time.Second)
-	if len(events) != 1 || events[0].Socket != req || events[0].Events&gozmq.PollIn == 0 {
-		t.Fatalf("unexpected PollIn events: %+v", events)
-	}
+	requireOnlyReady(t, waitPoll(t, pIn, 2*time.Second), req, gozmq.PollIn)
 }
 
 func TestPoller_PubPollOut(t *testing.T) {
@@ -146,27 +105,17 @@ func TestPoller_PubPollOut(t *testing.T) {
 
 	p := gozmq.NewPoller()
 	p.Add(pub, gozmq.PollOut)
-	events := waitPoll(t, p, 2*time.Second)
-	if len(events) != 1 || events[0].Socket != pub || events[0].Events&gozmq.PollOut == 0 {
-		t.Fatalf("unexpected poll events: %+v", events)
-	}
+	requireOnlyReady(t, waitPoll(t, p, 2*time.Second), pub, gozmq.PollOut)
 }
 
 func TestPoller_XPubPollIn(t *testing.T) {
 	_, xpub, xsub := newSocketPairTypes(t, gozmq.XPub, gozmq.XSub, "inproc://poller-xpub", nil, nil)
 
-	callCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := xsub.SendMsg(callCtx, gozmq.NewMsgFromBytes([]byte{1, 't'})); err != nil {
-		t.Fatalf("xsub subscribe: %v", err)
-	}
+	require.NoError(t, xsub.SendMsg(testutil.Ctx(t), gozmq.NewMsgFromBytes([]byte{1, 't'})), "xsub subscribe")
 
 	p := gozmq.NewPoller()
 	p.Add(xpub, gozmq.PollIn)
-	events := waitPoll(t, p, 2*time.Second)
-	if len(events) != 1 || events[0].Socket != xpub || events[0].Events&gozmq.PollIn == 0 {
-		t.Fatalf("unexpected poll events: %+v", events)
-	}
+	requireOnlyReady(t, waitPoll(t, p, 2*time.Second), xpub, gozmq.PollIn)
 }
 
 func TestPoller_StreamPollInOut(t *testing.T) {
@@ -174,41 +123,30 @@ func TestPoller_StreamPollInOut(t *testing.T) {
 	defer ctx.Close()
 
 	stream, err := ctx.NewSocket(gozmq.Stream)
-	if err != nil {
-		t.Fatalf("new stream: %v", err)
-	}
+	require.NoError(t, err, "new stream")
 	defer stream.Close()
-	if err := stream.Bind("tcp://127.0.0.1:0"); err != nil {
-		t.Fatalf("bind stream: %v", err)
-	}
+	require.NoError(t, stream.Bind("tcp://127.0.0.1:0"), "bind stream")
 
 	conn, err := net.DialTimeout("tcp", stream.LastEndpoint()[len("tcp://"):], 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial stream: %v", err)
-	}
+	require.NoError(t, err, "dial stream")
 	defer conn.Close()
-	if _, err := conn.Write([]byte("hello")); err != nil {
-		t.Fatalf("write stream peer: %v", err)
-	}
+	_, err = conn.Write([]byte("hello"))
+	require.NoError(t, err, "write stream peer")
 
 	// Block on PollIn alone first: a PollIn|PollOut registration would
 	// return immediately once the peer attaches (PollOut ready) and turn
 	// the wait into a spin loop.
 	pIn := gozmq.NewPoller()
 	pIn.Add(stream, gozmq.PollIn)
-	events := waitPoll(t, pIn, 2*time.Second)
-	if len(events) != 1 || events[0].Socket != stream || events[0].Events&gozmq.PollIn == 0 {
-		t.Fatalf("unexpected PollIn events: %+v", events)
-	}
+	requireOnlyReady(t, waitPoll(t, pIn, 2*time.Second), stream, gozmq.PollIn)
 
 	// With data still queued and the peer attached, a combined
 	// registration must report both directions ready.
 	pBoth := gozmq.NewPoller()
 	pBoth.Add(stream, gozmq.PollIn|gozmq.PollOut)
-	events = waitPoll(t, pBoth, 2*time.Second)
-	if len(events) != 1 || events[0].Events != gozmq.PollIn|gozmq.PollOut {
-		t.Fatalf("combined poll events = %+v, want PollIn|PollOut", events)
-	}
+	events := waitPoll(t, pBoth, 2*time.Second)
+	require.Len(t, events, 1, "combined poll events = %+v, want PollIn|PollOut", events)
+	require.Equal(t, gozmq.PollIn|gozmq.PollOut, events[0].Events, "combined poll events")
 }
 
 // TestPoller_RemoveStopsReporting registers a PULL, then removes it,
@@ -221,28 +159,17 @@ func TestPoller_RemoveStopsReporting(t *testing.T) {
 	p.Add(pull, gozmq.PollIn)
 	p.Remove(pull)
 
-	sendCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := push.SendMsg(sendCtx, gozmq.NewMsgFromBytes([]byte("ignored"))); err != nil {
-		t.Fatalf("send: %v", err)
-	}
+	ctx := testutil.Ctx(t)
+	require.NoError(t, push.SendMsg(ctx, gozmq.NewMsgFromBytes([]byte("ignored"))), "send")
 
-	pollCtx, cancel2 := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel2()
+	pollCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
 	events, err := p.Poll(pollCtx)
-	if err == nil {
-		t.Fatalf("removed socket still reports events: %+v", events)
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected DeadlineExceeded, got %v", err)
-	}
+	require.ErrorIs(t, err, context.DeadlineExceeded, "removed socket still reports events: %+v", events)
 
 	// Drain the message so test teardown is clean.
-	recvCtx, cancel3 := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel3()
-	if _, err := pull.RecvMsg(recvCtx); err != nil {
-		t.Fatalf("recv: %v", err)
-	}
+	_, err = pull.RecvMsg(ctx)
+	require.NoError(t, err, "recv")
 }
 
 // TestPoller_OnlySecondPullReady registers two PULL sockets and
@@ -252,59 +179,32 @@ func TestPoller_OnlySecondPullReady(t *testing.T) {
 	defer zctx.Close()
 
 	pullA, err := zctx.NewSocket(gozmq.Pull)
-	if err != nil {
-		t.Fatalf("new pullA: %v", err)
-	}
+	require.NoError(t, err, "new pullA")
 	defer pullA.Close()
-	if err := pullA.Bind("tcp://127.0.0.1:0"); err != nil {
-		t.Fatalf("bindA: %v", err)
-	}
+	require.NoError(t, pullA.Bind("tcp://127.0.0.1:0"), "bindA")
 
 	pullB, err := zctx.NewSocket(gozmq.Pull)
-	if err != nil {
-		t.Fatalf("new pullB: %v", err)
-	}
+	require.NoError(t, err, "new pullB")
 	defer pullB.Close()
-	if err := pullB.Bind("tcp://127.0.0.1:0"); err != nil {
-		t.Fatalf("bindB: %v", err)
-	}
+	require.NoError(t, pullB.Bind("tcp://127.0.0.1:0"), "bindB")
 
 	push, err := zctx.NewSocket(gozmq.Push)
-	if err != nil {
-		t.Fatalf("new push: %v", err)
-	}
+	require.NoError(t, err, "new push")
 	defer push.Close()
-	if err := push.Connect(pullB.LastEndpoint()); err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	require.NoError(t, push.Connect(pullB.LastEndpoint()), "connect")
 
-	sendCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := push.SendMsg(sendCtx, gozmq.NewMsgFromBytes([]byte("bee"))); err != nil {
-		t.Fatalf("push send: %v", err)
-	}
+	ctx := testutil.Ctx(t)
+	require.NoError(t, push.SendMsg(ctx, gozmq.NewMsgFromBytes([]byte("bee"))), "push send")
 
 	p := gozmq.NewPoller()
 	p.Add(pullA, gozmq.PollIn)
 	p.Add(pullB, gozmq.PollIn)
 
-	events := waitPoll(t, p, 2*time.Second)
-	if len(events) != 1 {
-		t.Fatalf("want exactly 1 event, got %d: %+v", len(events), events)
-	}
-	if events[0].Socket != pullB {
-		t.Fatalf("expected pullB, got different socket")
-	}
-	if events[0].Events&gozmq.PollIn == 0 {
-		t.Fatalf("expected PollIn, got %#x", events[0].Events)
-	}
+	requireOnlyReady(t, waitPoll(t, p, 2*time.Second), pullB, gozmq.PollIn)
 
 	// Drain so teardown is clean.
-	recvCtx, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel2()
-	if _, err := pullB.RecvMsg(recvCtx); err != nil {
-		t.Fatalf("recv: %v", err)
-	}
+	_, err = pullB.RecvMsg(ctx)
+	require.NoError(t, err, "recv")
 }
 
 // TestPoller_TwoWaitersSameSocket parks two Polls on one readable socket —
@@ -325,21 +225,13 @@ func TestPoller_TwoWaitersSameSocket(t *testing.T) {
 			zctx := gozmq.NewContext()
 			defer zctx.Close()
 			pull, err := zctx.NewSocket(gozmq.Pull)
-			if err != nil {
-				t.Fatalf("new pull: %v", err)
-			}
+			require.NoError(t, err, "new pull")
 			defer pull.Close()
-			if err := pull.Bind("inproc://poller-two-waiters"); err != nil {
-				t.Fatalf("bind: %v", err)
-			}
+			require.NoError(t, pull.Bind("inproc://poller-two-waiters"), "bind")
 			push, err := zctx.NewSocket(gozmq.Push)
-			if err != nil {
-				t.Fatalf("new push: %v", err)
-			}
+			require.NoError(t, err, "new push")
 			defer push.Close()
-			if err := push.Connect("inproc://poller-two-waiters"); err != nil {
-				t.Fatalf("connect: %v", err)
-			}
+			require.NoError(t, push.Connect("inproc://poller-two-waiters"), "connect")
 
 			p1, p2 := tc.pollers()
 			p1.Add(pull, gozmq.PollIn)
@@ -358,15 +250,9 @@ func TestPoller_TwoWaitersSameSocket(t *testing.T) {
 			// trivially rather than flaking.
 			time.Sleep(100 * time.Millisecond)
 
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			if err := push.SendMsg(ctx, gozmq.NewMsgFromBytes([]byte("x"))); err != nil {
-				t.Fatalf("send: %v", err)
-			}
+			require.NoError(t, push.SendMsg(testutil.Ctx(t, time.Second), gozmq.NewMsgFromBytes([]byte("x"))), "send")
 			for range 2 {
-				if err := <-res; err != nil {
-					t.Fatalf("poll on a readable socket: %v", err)
-				}
+				require.NoError(t, <-res, "poll on a readable socket")
 			}
 		})
 	}
@@ -379,13 +265,9 @@ func TestPoller_ContextCancel(t *testing.T) {
 	defer zctx.Close()
 
 	pull, err := zctx.NewSocket(gozmq.Pull)
-	if err != nil {
-		t.Fatalf("new pull: %v", err)
-	}
+	require.NoError(t, err, "new pull")
 	defer pull.Close()
-	if err := pull.Bind("tcp://127.0.0.1:0"); err != nil {
-		t.Fatalf("bind: %v", err)
-	}
+	require.NoError(t, pull.Bind("tcp://127.0.0.1:0"), "bind")
 
 	p := gozmq.NewPoller()
 	p.Add(pull, gozmq.PollIn)
@@ -397,12 +279,7 @@ func TestPoller_ContextCancel(t *testing.T) {
 	}()
 
 	events, err := p.Poll(ctx)
-	if err == nil {
-		t.Fatalf("expected error, got events %+v", events)
-	}
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected Canceled, got %v", err)
-	}
+	require.ErrorIs(t, err, context.Canceled, "expected Canceled, got events %+v", events)
 }
 
 // TestPoller_DealerRouterPollOut verifies PollOut on a DEALER once
@@ -416,16 +293,7 @@ func TestPoller_DealerRouterPollOut(t *testing.T) {
 	// DEALER does not become PollOut-ready until its session pipe is
 	// attached post-handshake; the blocking Poll parks until the
 	// attach arms the engine's out-gate.
-	events := waitPoll(t, p, 2*time.Second)
-	if len(events) != 1 {
-		t.Fatalf("want 1 event, got %d: %+v", len(events), events)
-	}
-	if events[0].Socket != dealer {
-		t.Fatalf("expected dealer socket")
-	}
-	if events[0].Events&gozmq.PollOut == 0 {
-		t.Fatalf("expected PollOut, got %#x", events[0].Events)
-	}
+	requireOnlyReady(t, waitPoll(t, p, 2*time.Second), dealer, gozmq.PollOut)
 }
 
 // BenchmarkPoller_PollReady measures steady-state Poll over a populated
@@ -439,31 +307,19 @@ func BenchmarkPoller_PollReady(b *testing.B) {
 	// Seven idle PULL sockets plus one PAIR pair with a buffered message.
 	for i := 0; i < 7; i++ {
 		s, err := zctx.NewSocket(gozmq.Pull)
-		if err != nil {
-			b.Fatal(err)
-		}
+		require.NoError(b, err)
 		defer s.Close()
 		p.Add(s, gozmq.PollIn)
 	}
 	a, err := zctx.NewSocket(gozmq.Pair)
-	if err != nil {
-		b.Fatal(err)
-	}
+	require.NoError(b, err)
 	defer a.Close()
-	if err := a.Bind("inproc://bench-poller"); err != nil {
-		b.Fatal(err)
-	}
+	require.NoError(b, a.Bind("inproc://bench-poller"))
 	z, err := zctx.NewSocket(gozmq.Pair)
-	if err != nil {
-		b.Fatal(err)
-	}
+	require.NoError(b, err)
 	defer z.Close()
-	if err := z.Connect("inproc://bench-poller"); err != nil {
-		b.Fatal(err)
-	}
-	if err := z.SendBytes(context.Background(), []byte("x")); err != nil {
-		b.Fatal(err)
-	}
+	require.NoError(b, z.Connect("inproc://bench-poller"))
+	require.NoError(b, z.SendBytes(context.Background(), []byte("x")))
 	p.Add(a, gozmq.PollIn)
 
 	ctx := context.Background()

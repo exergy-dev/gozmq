@@ -2,8 +2,6 @@ package gozmq_test
 
 import (
 	"bytes"
-	"context"
-	"errors"
 	"io"
 	"net"
 	"testing"
@@ -25,74 +23,54 @@ func TestSocketStream_TCP_HTTPEcho(t *testing.T) {
 	defer zctx.Close()
 
 	srv, err := zctx.NewSocket(gozmq.Stream)
-	if err != nil {
-		t.Fatalf("new stream srv: %v", err)
-	}
+	require.NoError(t, err, "new stream srv")
 	defer srv.Close()
 
-	if err := srv.Bind("tcp://127.0.0.1:0"); err != nil {
-		t.Fatalf("bind: %v", err)
-	}
+	require.NoError(t, srv.Bind("tcp://127.0.0.1:0"), "bind")
 	addr := srv.LastEndpoint()
 
 	// --- Raw TCP client (not gozmq) --------------------------------
 	// Use a bare net.Dial to prove the STREAM socket talks to a non-
 	// ZMQ peer — the core reason STREAM exists.
 	cli, err := net.Dial("tcp", stripScheme(addr))
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	require.NoError(t, err, "dial")
 	defer cli.Close()
 
 	ctx := testutil.Ctx(t)
 
 	const request = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
-	if _, err := cli.Write([]byte(request)); err != nil {
-		t.Fatalf("client write: %v", err)
-	}
+	_, err = cli.Write([]byte(request))
+	require.NoError(t, err, "client write")
 
 	// Server: drain bytes until the request is complete.
 	var gotReq bytes.Buffer
 	var peerID []byte
 	for gotReq.Len() < len(request) {
 		m, err := srv.RecvMsg(ctx)
-		if err != nil {
-			t.Fatalf("srv recv: %v", err)
-		}
-		if m.NumFrames() != 2 {
-			t.Fatalf("recv frames = %d, want 2 (identity + body)", m.NumFrames())
-		}
+		require.NoError(t, err, "srv recv")
+		require.Equal(t, 2, m.NumFrames(), "recv frames: want identity + body")
 		peerID = m.Frames()[0]
 		gotReq.Write(m.Frames()[1])
 	}
-	if gotReq.String() != request {
-		t.Fatalf("srv got %q, want %q", gotReq.String(), request)
-	}
+	require.Equal(t, request, gotReq.String(), "srv got")
 
 	// Echo back.
-	if err := srv.SendMsg(ctx, gozmq.NewMsgFromFrames(peerID, []byte(request))); err != nil {
-		t.Fatalf("srv send: %v", err)
-	}
+	require.NoError(t, srv.SendMsg(ctx, gozmq.NewMsgFromFrames(peerID, []byte(request))), "srv send")
 
 	buf := make([]byte, len(request))
-	if _, err := io.ReadFull(cli, buf); err != nil {
-		t.Fatalf("client read: %v", err)
-	}
-	if string(buf) != request {
-		t.Fatalf("client got %q, want %q", buf, request)
-	}
+	_, err = io.ReadFull(cli, buf)
+	require.NoError(t, err, "client read")
+	require.Equal(t, request, string(buf), "client got")
 
 	// Half-close: identity-only Msg → the session closes the TCP conn.
-	if err := srv.SendMsg(ctx, gozmq.NewMsgFromFrames(peerID)); err != nil {
-		t.Fatalf("srv half-close: %v", err)
-	}
+	require.NoError(t, srv.SendMsg(ctx, gozmq.NewMsgFromFrames(peerID)), "srv half-close")
 	// Reads on the client should now return EOF (possibly after the
 	// echo flushes).
 	_, err = io.ReadAll(cli)
-	if err != nil && !errors.Is(err, io.EOF) {
+	if err != nil {
 		// net may return a "use of closed network connection" if we
 		// already closed, but io.ReadAll translates EOF to nil err.
-		t.Fatalf("client ReadAll after half-close: %v", err)
+		require.ErrorIs(t, err, io.EOF, "client ReadAll after half-close")
 	}
 }
 
@@ -102,9 +80,7 @@ func TestSocketStream_TCP_HTTPEcho(t *testing.T) {
 func TestSocketStream_TCP_Connect(t *testing.T) {
 	// Listener that speaks plain TCP.
 	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	require.NoError(t, err, "listen")
 	defer l.Close()
 
 	type accepted struct {
@@ -121,19 +97,13 @@ func TestSocketStream_TCP_Connect(t *testing.T) {
 	defer zctx.Close()
 
 	cli, err := zctx.NewSocket(gozmq.Stream)
-	if err != nil {
-		t.Fatalf("new: %v", err)
-	}
+	require.NoError(t, err, "new")
 	defer cli.Close()
 
-	if err := cli.Connect("tcp://" + l.Addr().String()); err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	require.NoError(t, cli.Connect("tcp://"+l.Addr().String()), "connect")
 
 	a := <-accCh
-	if a.err != nil {
-		t.Fatalf("accept: %v", a.err)
-	}
+	require.NoError(t, a.err, "accept")
 	defer a.c.Close()
 
 	ctx := testutil.Ctx(t)
@@ -143,30 +113,20 @@ func TestSocketStream_TCP_Connect(t *testing.T) {
 	// The first Msg the app receives from this conn carries the
 	// synthesized identity the engine assigned — we learn it by
 	// prompting the peer to send something first.
-	if _, err := a.c.Write([]byte("hi from peer\n")); err != nil {
-		t.Fatalf("peer write: %v", err)
-	}
+	_, err = a.c.Write([]byte("hi from peer\n"))
+	require.NoError(t, err, "peer write")
 
 	m, err := cli.RecvMsg(ctx)
-	if err != nil {
-		t.Fatalf("cli recv: %v", err)
-	}
+	require.NoError(t, err, "cli recv")
 	peerID := m.Frames()[0]
-	if !bytes.Equal(m.Frames()[1], []byte("hi from peer\n")) {
-		t.Fatalf("cli body = %q", m.Frames()[1])
-	}
+	require.Equal(t, []byte("hi from peer\n"), m.Frames()[1], "cli body")
 
-	if err := cli.SendMsg(ctx, gozmq.NewMsgFromFrames(peerID, []byte("hi from gozmq\n"))); err != nil {
-		t.Fatalf("cli send: %v", err)
-	}
+	require.NoError(t, cli.SendMsg(ctx, gozmq.NewMsgFromFrames(peerID, []byte("hi from gozmq\n"))), "cli send")
 
 	buf := make([]byte, len("hi from gozmq\n"))
-	if _, err := io.ReadFull(a.c, buf); err != nil {
-		t.Fatalf("peer read: %v", err)
-	}
-	if string(buf) != "hi from gozmq\n" {
-		t.Fatalf("peer got %q", buf)
-	}
+	_, err = io.ReadFull(a.c, buf)
+	require.NoError(t, err, "peer read")
+	require.Equal(t, "hi from gozmq\n", string(buf), "peer got")
 }
 
 // stripScheme removes a leading "tcp://" if present (LastEndpoint
@@ -203,8 +163,7 @@ func TestSocketStream_SendHWMZeroUnlimited(t *testing.T) {
 	srv, cli, id := streamServerPeer(t, gozmq.WithSendHWM(0))
 	const n, size = 2048, 16 << 10 // 32 MiB
 	chunk := bytes.Repeat([]byte("z"), size)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	ctx := testutil.Ctx(t)
 	for i := 0; i < n; i++ {
 		require.NoError(t, srv.SendMsg(ctx, gozmq.NewMsgFromFrames(id, chunk)), "send %d", i)
 	}
