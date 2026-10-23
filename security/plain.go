@@ -1,4 +1,4 @@
-// PLAIN security mechanism (ZMTP 3.1 §3.3, RFC 24, design §8.2).
+// PLAIN security mechanism (ZMTP 3.1 §3.3, RFC 24).
 //
 // The PLAIN handshake is a short lock-step exchange layered on top of the
 // greeting:

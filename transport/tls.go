@@ -7,7 +7,7 @@ import (
 	"net"
 )
 
-// tlsScheme is the URL scheme this transport claims. Per design §7.4 we
+// tlsScheme is the URL scheme this transport claims. We
 // spell it "tls+tcp" so the presence of TLS is explicit at the endpoint
 // level, and the base-transport ("tcp") remains discoverable.
 const tlsScheme = "tls+tcp"

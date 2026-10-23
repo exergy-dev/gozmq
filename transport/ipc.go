@@ -16,7 +16,7 @@ import (
 const ipcScheme = "ipc"
 
 // IPCTransport implements Transport over Unix domain sockets,
-// matching libzmq's "ipc" scheme (design §7.2). Endpoint syntax:
+// matching libzmq's "ipc" scheme. Endpoint syntax:
 //
 //	ipc:///path/to/file.sock   — filesystem-namespace socket
 //	ipc://@name                — abstract-namespace socket (Linux only)

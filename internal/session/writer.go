@@ -38,7 +38,7 @@ const (
 // the reader and the heartbeat arrive via cmdCh and are written here (see
 // writerNext).
 //
-// Throughput optimization (design §11): after receiving the first
+// Throughput optimization: after receiving the first
 // message, the writer tries a non-blocking Recv for additional queued
 // messages. All accumulated frame blobs are written in a single writev
 // syscall via net.Buffers — preserving the interactive single-message

@@ -16,9 +16,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The go.mod minimum plus the two Go releases upstream supports.
-        # Dropping the minimum from this matrix is how a library silently
-        # stops building for the version its go.mod advertises.
+        # The go.mod minimum plus the two releases upstream supports. Dropping
+        # the minimum is how a library silently stops building for the
+        # version its go.mod advertises.
         go: ['1.25.x', 'oldstable', 'stable']
     steps:
       - uses: actions/checkout@v4
@@ -26,16 +26,13 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
       - name: Verify go.mod
+        if: matrix.go == 'stable'
         run: go mod tidy && git diff --exit-code go.mod go.sum
-      - name: Vet
-        run: go vet ./...
-      - name: Build (CGO off — the whole point of this project)
+      - name: Build (CGO off, the whole point of this project)
         env:
           CGO_ENABLED: '0'
         run: go build ./...
       - name: Test
-        env:
-          CGO_ENABLED: '1'
         run: go test -count=1 ./...
 
   lint:
@@ -48,45 +45,33 @@ jobs:
           go-version: stable
       # .golangci.yml lints with the interop build tag, and that package is
       # cgo against libzmq, so the linter's typecheck needs the headers too.
-      - name: Install libzmq (for typechecking the CGO interop harness)
+      - name: Install libzmq
         run: sudo apt-get update && sudo apt-get install -y libzmq3-dev
-      # Action v7+ is required for a v2 .golangci.yml; pin the linter to the
-      # version the release was gated with.
+      # Action v7+ is required for a v2 .golangci.yml; the linter is pinned to
+      # the version the release was gated with.
       - uses: golangci/golangci-lint-action@v8
         with:
           version: v2.15.0
+      - name: Dead code
+        run: test -z "$(go run golang.org/x/tools/cmd/deadcode@latest -test ./... | tee /dev/stderr)"
 
-  race:
-    name: race (whole module)
+  race-coverage:
+    name: race + coverage gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: stable
-      - name: Test with race detector
-        env:
-          CGO_ENABLED: '1'
-        # ./... rather than a hand-listed set, so a new package is covered
-        # the moment it exists.
-        run: go test -race -count=1 ./...
-
-  coverage:
-    name: coverage gate
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: stable
-      - name: Test with coverage
-        # Library packages only. examples/ and perf/ are demonstration and
-        # measurement `main` programs with no tests by design; including
-        # them would report ~72% and say nothing about the library.
+      - name: Test with the race detector and coverage
+        # One run serves both: the whole module under -race, with a coverage
+        # profile over the library packages (examples/, perf/ and soak are
+        # programs and harnesses with no tests by design).
         run: |
           set -euo pipefail
           pkgs=$(go list ./... | grep -v -e '/examples/' -e '/perf/' -e '/soak$')
-          go test -count=1 -coverprofile=cover.out -covermode=atomic $pkgs
+          go test -race -count=1 -coverprofile=cover.out -covermode=atomic $pkgs
+          go test -race -count=1 ./perf/...
       - name: Enforce minimum coverage
         env:
           MIN_COVERAGE: '80'
@@ -104,22 +89,6 @@ jobs:
   cross-build:
     name: cross-build (pure Go)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - goos: linux
-            goarch: '386'
-          - goos: linux
-            goarch: arm64
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
-          - goos: windows
-            goarch: amd64
-          - goos: freebsd
-            goarch: amd64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -128,9 +97,13 @@ jobs:
       - name: Cross-build
         env:
           CGO_ENABLED: '0'
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-        run: go build ./...
+        run: |
+          set -euo pipefail
+          for target in linux/386 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 freebsd/amd64; do
+            echo "::group::$target"
+            GOOS=${target%/*} GOARCH=${target#*/} go build ./...
+            echo "::endgroup::"
+          done
 
   fuzz-smoke:
     name: fuzz smoke (10s per target)
@@ -140,20 +113,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
-      - name: Fuzz smoke
-        # Discover every Fuzz* target via go test -list and run each for 10s.
-        # The nightly workflow runs the same targets for far longer.
-        run: |
-          set -euo pipefail
-          pkgs=$(go list ./...)
-          for pkg in $pkgs; do
-            targets=$(go test -list '^Fuzz' "$pkg" 2>/dev/null | grep '^Fuzz' || true)
-            for t in $targets; do
-              echo "::group::$pkg $t"
-              go test -run '^$' -fuzz "^${t}$" -fuzztime=10s "$pkg"
-              echo "::endgroup::"
-            done
-          done
+      - run: .github/fuzz.sh 10s
 
   interop:
     name: interop (libzmq, build-tagged)
@@ -163,9 +123,6 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
-      - name: Install libzmq (for the CGO interop harness)
+      - name: Install libzmq
         run: sudo apt-get update && sudo apt-get install -y libzmq3-dev
-      - name: Run interop tests
-        env:
-          CGO_ENABLED: '1'
-        run: go test -tags interop -race -count=1 ./interop/...
+      - run: go test -tags interop -race -count=1 ./interop/...

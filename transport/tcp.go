@@ -6,10 +6,8 @@ import (
 	"time"
 )
 
-// Defaults that match design §7.1 and the socketConfig defaults in
-// options.go. Higher layers may override on a per-Transport basis by
-// constructing TCPTransport directly and toggling the exported fields
-// before registering it on a Context.
+// Defaults. Higher layers override them by constructing a TCPTransport,
+// setting the exported fields and registering it on a Context.
 const (
 	defaultTCPKeepAlive     = true
 	defaultTCPKeepAliveIdle = 30 * time.Second

@@ -25,7 +25,7 @@
 // starting.
 package security
 
-// This file implements NULL (ZMTP 3.1 §3.2, design §8.1). The handshake is
+// This file implements NULL (ZMTP 3.1 §3.2). The handshake is
 // a single READY exchange — no cryptographic state, no per-frame rewriting.
 
 import (

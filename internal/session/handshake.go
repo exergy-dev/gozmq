@@ -115,7 +115,7 @@ func (s *Session) exchangeGreeting() error {
 		return fmt.Errorf("gozmq/session: security mechanism mismatch: peer %q, ours %q", mech, s.cfg.Mech.Name())
 	}
 	// Decode already rejected anything but ZMTP 3.x. Any minor >= 1 is
-	// treated as 3.1 (heartbeats available); design §5.4: skip PING/PONG
+	// treated as 3.1 (heartbeats available); skip PING/PONG
 	// if the peer is 3.0.
 	if peerMinor >= 0x01 {
 		s.peerHeartbeats = true

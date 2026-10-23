@@ -15,7 +15,7 @@ import (
 // interrupt the linger drain. Callers using WithLinger(-1) (infinite) should
 // use CloseCtx with a cancellable context instead.
 //
-// Teardown order (LINGER drain, design §4.7):
+// Teardown order (LINGER drain):
 //  1. Quiesce reconnectors — stop re-dialing, but KEEP current sessions
 //     alive so their outbound queues can drain to the wire.
 //  2. Close listeners — no new accepts.

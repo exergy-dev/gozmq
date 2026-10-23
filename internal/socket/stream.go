@@ -14,7 +14,7 @@ import (
 // streamEngine implements Engine for the STREAM socket type.
 //
 // STREAM carries raw bytes to and from non-ZMQ peers (HTTP/1.1, SMTP, any
-// line-oriented legacy protocol). Per design §9 there is "no ZMTP on the wire":
+// line-oriented legacy protocol). There is no ZMTP on the wire:
 // the engine never sees greeting, handshake, or frame headers, and inbound
 // bytes are whatever read(2) returned.
 //
