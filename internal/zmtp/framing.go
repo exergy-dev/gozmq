@@ -49,8 +49,8 @@ func NewFrameCodec(maxBody int64) FrameCodec {
 
 // ReadFrame implements FrameCodec.
 func (c *frameCodec) ReadFrame(r io.Reader, dst []byte, pool BodyPool) (uint8, []byte, error) {
-	var hdr [1]byte
-	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+	hdr, err := readHeader(r, dst, 1)
+	if err != nil {
 		// Surface EOF/UnexpectedEOF unwrapped so callers can use errors.Is on
 		// io.EOF to detect clean peer close. Any other error is wrapped as a
 		// malformed-frame condition because we cannot resync the stream.
@@ -66,17 +66,17 @@ func (c *frameCodec) ReadFrame(r io.Reader, dst []byte, pool BodyPool) (uint8, [
 
 	var length uint64
 	if flags&FlagLong == 0 {
-		var ln [1]byte
-		if _, err := io.ReadFull(r, ln[:]); err != nil {
+		ln, err := readHeader(r, dst, 1)
+		if err != nil {
 			return 0, nil, fmt.Errorf("gozmq/zmtp: read short length: %w", wrapEOF(err))
 		}
 		length = uint64(ln[0])
 	} else {
-		var ln [8]byte
-		if _, err := io.ReadFull(r, ln[:]); err != nil {
+		ln, err := readHeader(r, dst, 8)
+		if err != nil {
 			return 0, nil, fmt.Errorf("gozmq/zmtp: read long length: %w", wrapEOF(err))
 		}
-		length = binary.BigEndian.Uint64(ln[:])
+		length = binary.BigEndian.Uint64(ln)
 		// A LONG frame whose length fits in one byte is permitted by the
 		// spec but discouraged; we accept it for interop. The COMMAND flag
 		// has no length restriction beyond maxBody.
@@ -312,6 +312,22 @@ func reuseOrAllocate(dst []byte, n int, pool BodyPool) []byte {
 		return pool.Get(n)
 	}
 	return make([]byte, n)
+}
+
+// readHeader reads the n (<= 8) bytes of a frame header field into the
+// front of dst, which the body read then overwrites; the session's scratch
+// always has the room. A stack array would escape through io.ReadFull's
+// interface call and cost an allocation per frame, so a caller without
+// spare capacity (the handshake) pays that allocation here instead.
+func readHeader(r io.Reader, dst []byte, n int) ([]byte, error) {
+	var b []byte
+	if cap(dst) >= n {
+		b = dst[:n]
+	} else {
+		b = make([]byte, n)
+	}
+	_, err := io.ReadFull(r, b)
+	return b, err
 }
 
 // wrapEOF normalizes "stream ended mid-frame" into ErrUnexpectedEOF wrapped
