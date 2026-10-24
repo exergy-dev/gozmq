@@ -15,7 +15,9 @@ jobs:
   fuzz:
     name: fuzz (10m per target)
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # Every Fuzz* target gets the fuzztime below; fourteen targets at 10m is
+    # 140 minutes plus a build each, so the budget has to clear that.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
