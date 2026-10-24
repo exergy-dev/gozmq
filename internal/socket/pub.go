@@ -102,11 +102,14 @@ type pubEngine struct {
 	// closed flag.
 	snap atomic.Pointer[[]*pubPeer]
 	// onSub, when set, receives every subscription command from peer p
-	// right after it has been applied to p's SubTree, and reports whether
-	// it kept m (taking over its reference). It runs under mu, never
-	// after DetachPipe(p) or Close returns. XPUB installs it to maintain
-	// its refcounts and event queue; nil for PUB.
-	onSub func(p *pipe.End, subscribe bool, prefix []byte, m *msg.Msg) (kept bool)
+	// right after it has been applied to p's SubTree (held reports whether
+	// a CANCEL found the prefix there), and reports whether it kept m
+	// (taking over its reference). onDetach, when set, receives a
+	// departing peer's tree once its queued commands have been applied.
+	// Both run under mu, never after DetachPipe(p) or Close returns. XPUB
+	// installs them to maintain its refcounts and event queue; nil for PUB.
+	onSub    func(p *pipe.End, subscribe, held bool, prefix []byte, m *msg.Msg) (kept bool)
+	onDetach func(tree *SubTree)
 
 	// The in-gate is fq's (XPUB's events; PUB has no recv direction).
 	gates
@@ -122,15 +125,14 @@ type pubEngine struct {
 
 // NewPubEngine returns a new PUB socket engine.
 func NewPubEngine() Engine {
-	return newPubEngineBase(nil)
+	return newPubEngineBase()
 }
 
-// newPubEngineBase is the shared constructor used by PUB (onSub nil) and
-// XPUB.
-func newPubEngineBase(onSub func(*pipe.End, bool, []byte, *msg.Msg) bool) *pubEngine {
+// newPubEngineBase is the shared constructor used by PUB and XPUB, which
+// sets its hooks afterwards.
+func newPubEngineBase() *pubEngine {
 	e := &pubEngine{
 		peers: make(map[*pipe.End]*pubPeer),
-		onSub: onSub,
 		gates: newGates(),
 	}
 	e.fq.init(e.in)
@@ -179,6 +181,9 @@ func (e *pubEngine) DetachPipe(p *pipe.End) error {
 		}
 		e.applyLocked(peer, m)
 	}
+	if e.onDetach != nil {
+		e.onDetach(peer.tree)
+	}
 	delete(e.peers, p)
 	e.rebuildSnapLocked()
 	return e.fq.Detach(p)
@@ -218,12 +223,13 @@ func (e *pubEngine) applyLocked(peer *pubPeer, m *msg.Msg) {
 		m.Release()
 		return
 	}
+	held := true
 	if subscribe {
 		peer.tree.Add(prefix)
 	} else {
-		peer.tree.Remove(prefix)
+		held, _ = peer.tree.Remove(prefix)
 	}
-	if e.onSub == nil || !e.onSub(peer.pipe, subscribe, prefix, m) {
+	if e.onSub == nil || !e.onSub(peer.pipe, subscribe, held, prefix, m) {
 		m.Release()
 	}
 }
@@ -268,10 +274,11 @@ func (e *pubEngine) Send(ctx context.Context, m *msg.Msg) error {
 	// changes no peer's membership, so snap stays current.
 	e.applyPending()
 
-	// Single pass, no allocation: each peer's SubTree is goroutine-safe,
-	// and the snapshot entries are immutable, so matching needs no engine
-	// lock. A peer detached concurrently may still appear in a loaded
-	// snapshot; its pipe rejects the TrySend, which counts as a drop.
+	// Single pass, no allocation and no engine lock: each peer's SubTree
+	// is goroutine-safe (an atomic flag answers subscribe-to-all), and the
+	// snapshot entries are immutable. A peer detached concurrently may
+	// still appear in a loaded snapshot; its pipe rejects the TrySend,
+	// which counts as a drop.
 	//
 	// Drop-on-HWM: a peer whose pipe has no room loses the message
 	// immediately (libzmq parity — no grace deadline, so one slow

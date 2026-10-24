@@ -82,16 +82,16 @@ func TestSubTree_RefcountAddRemoveParity(t *testing.T) {
 	require.Equal(t, 1, tr.Size(), "size after two duplicate Adds")
 	require.True(t, tr.Match([]byte("foobar")), "Match after two adds")
 	// First Remove decrements refcount but the prefix is still present.
-	require.False(t, tr.Remove([]byte("foo")), "first Remove should return false (refcount still >0)")
+	require.False(t, removed(tr, []byte("foo")), "first Remove should return false (refcount still >0)")
 	require.True(t, tr.Match([]byte("foobar")), "Match after first Remove")
 	require.Equal(t, 1, tr.Size(), "size after first Remove")
 	// Second Remove actually removes it.
-	require.True(t, tr.Remove([]byte("foo")), "second Remove should return true")
+	require.True(t, removed(tr, []byte("foo")), "second Remove should return true")
 	require.False(t, tr.Match([]byte("foobar")), "Match after second Remove")
 	require.Equal(t, 0, tr.Size(), "size after second Remove")
 	// Removing an absent prefix is a no-op.
-	require.False(t, tr.Remove([]byte("foo")), "Remove on absent prefix")
-	require.False(t, tr.Remove([]byte("never-added")), "Remove on never-added prefix")
+	require.False(t, removed(tr, []byte("foo")), "Remove on absent prefix")
+	require.False(t, removed(tr, []byte("never-added")), "Remove on never-added prefix")
 }
 
 func TestSubTree_PartialPathPruning(t *testing.T) {
@@ -101,11 +101,11 @@ func TestSubTree_PartialPathPruning(t *testing.T) {
 	tr.Add([]byte("foo"))
 	tr.Add([]byte("foobar"))
 	require.Equal(t, 2, tr.Size())
-	require.True(t, tr.Remove([]byte("foobar")), "Remove(foobar)")
+	require.True(t, removed(tr, []byte("foobar")), "Remove(foobar)")
 	require.Equal(t, 1, tr.Size(), "size after remove foobar")
 	require.True(t, tr.Match([]byte("foo")), "Match(foo)")
 	require.True(t, tr.Match([]byte("foobar")), "Match(foobar) after removing foobar-sub but keeping foo-sub (foo is still a prefix)")
-	require.True(t, tr.Remove([]byte("foo")), "Remove(foo)")
+	require.True(t, removed(tr, []byte("foo")), "Remove(foo)")
 	require.False(t, tr.Match([]byte("foo")), "Match(foo) after removing both")
 }
 
@@ -149,4 +149,10 @@ func TestSubTree_ConcurrentSafety(t *testing.T) {
 	for _, p := range prefixes {
 		assert.False(t, tr.Match(p), "Match(%q) after churn = true, want false", p)
 	}
+}
+
+// removed reports whether Remove dropped p from the tree.
+func removed(tr *socket.SubTree, p []byte) bool {
+	_, gone := tr.Remove(p)
+	return gone
 }

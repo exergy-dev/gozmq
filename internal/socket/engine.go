@@ -80,6 +80,7 @@ import (
 	"sync/atomic"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
+	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -140,14 +141,30 @@ func newGates() gates {
 // Gates implements Engine.
 func (g gates) Gates() (in, out chan struct{}) { return g.in, g.out }
 
-func (g gates) armIn()  { arm(g.in) }
-func (g gates) armOut() { arm(g.out) }
+func (g gates) armIn()  { Arm(g.in) }
+func (g gates) armOut() { Arm(g.out) }
 
-// arm puts the token in gate unless it is already there.
-func arm(gate chan struct{}) {
+// Arm puts the token in gate unless it is already there. The Poller uses
+// it to re-arm the gates it reports.
+func Arm(gate chan struct{}) {
 	select {
 	case gate <- struct{}{}:
 	default:
+	}
+}
+
+// awaitPeer parks until notify fires (nil: re-check the peer set), the
+// engine closes (zmqerr.ErrSocketClosed) or ctx ends (ctx.Err()). It is the
+// shared wait of every engine whose Send or Recv has no peer yet; closed
+// may be nil for an engine whose close is signalled through notify.
+func awaitPeer(ctx context.Context, notify, closed <-chan struct{}) error {
+	select {
+	case <-notify:
+		return nil
+	case <-closed:
+		return zmqerr.ErrSocketClosed
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

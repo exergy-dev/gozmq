@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/exergy-dev/gozmq"
 	"github.com/exergy-dev/gozmq/internal/testutil"
@@ -161,6 +162,32 @@ func BenchmarkPubSubFanoutWide_Inproc(b *testing.B) {
 	})
 }
 
+// BenchmarkPubSubFanoutSelective_Inproc is the wide fan-out with topic
+// prefixes: every subscriber holds eight 8-byte prefixes and receives the
+// published topic through one of them, so each match walks the trie instead
+// of stopping at a subscribe-to-all root.
+func BenchmarkPubSubFanoutSelective_Inproc(b *testing.B) {
+	const nSub = 64
+	b.Run(fmt.Sprintf("subs=%d", nSub), func(b *testing.B) {
+		b.StopTimer()
+		pub := bind(b, gozmq.Pub, inprocEndpoint(), gozmq.WithSendHWM(benchHWM), gozmq.WithRecvHWM(benchHWM))
+		opts := []gozmq.Option{gozmq.WithSendHWM(benchHWM), gozmq.WithRecvHWM(benchHWM),
+			// syncSubs' probes must pass the filter too.
+			gozmq.WithSubscribe([]byte("gozmq-bench-sync-probe"))}
+		for i := 0; i < 8; i++ {
+			opts = append(opts, gozmq.WithSubscribe(fmt.Appendf(nil, "topic-%02d", i)))
+		}
+		subs := make([]*gozmq.Socket, nSub)
+		for i := range subs {
+			subs[i] = pub.connect(gozmq.Sub, opts...)
+		}
+		syncSubs(b, pub.sock, subs...)
+		payload := append([]byte("topic-03"), newPayload(scaleMsgSize-8)...)
+		delivered := benchStreamPayload(b, pub.sock, subs, payload, 3*time.Second)
+		b.ReportMetric(float64(delivered), "msgs-delivered")
+	})
+}
+
 // BenchmarkXPubSubscribeChurn_Inproc times one subscription event per
 // iteration: an XSUB alternately subscribes to and cancels a rotating set
 // of prefixes, and a verbose XPUB receives each event in lockstep.
@@ -219,9 +246,25 @@ func BenchmarkXPubSubscribeChurn_Inproc(b *testing.B) {
 // handshake), deliver one message and close the PUSH. The Context and the
 // PULL persist across iterations.
 func BenchmarkConnectHandshake_TCP(b *testing.B) {
+	benchConnectHandshake(b, nil, nil)
+}
+
+// BenchmarkConnectHandshake_Curve_TCP is BenchmarkConnectHandshake_TCP with
+// CURVE on both ends: dial plus the four-command handshake and its key
+// exchange.
+func BenchmarkConnectHandshake_Curve_TCP(b *testing.B) {
+	serverPub, serverSec := testutil.CurveKeys(b)
+	clientPub, clientSec := testutil.CurveKeys(b)
+	benchConnectHandshake(b,
+		[]gozmq.Option{gozmq.WithCurveServer(serverSec[:])},
+		[]gozmq.Option{gozmq.WithCurveClient(serverPub[:], clientPub[:], clientSec[:])})
+}
+
+func benchConnectHandshake(b *testing.B, pullOpts, pushOpts []gozmq.Option) {
+	b.Helper()
 	b.StopTimer()
 
-	pull := bind(b, gozmq.Pull, tcpEndpoint())
+	pull := bind(b, gozmq.Pull, tcpEndpoint(), pullOpts...)
 	ep := pull.sock.LastEndpoint()
 
 	payload := newPayload(scaleMsgSize)
@@ -230,7 +273,7 @@ func BenchmarkConnectHandshake_TCP(b *testing.B) {
 	b.ResetTimer()
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {
-		push, err := pull.ctx.NewSocket(gozmq.Push)
+		push, err := pull.ctx.NewSocket(gozmq.Push, pushOpts...)
 		if err != nil {
 			b.Fatalf("new push[%d]: %v", i, err)
 		}

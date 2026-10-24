@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"slices"
 	"sync"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
@@ -240,13 +239,16 @@ func splitRepEnvelope(m *msg.Msg) (envelope [][]byte, body *msg.Msg, ok bool) {
 	for i, f := range frames {
 		if len(f) == 0 {
 			// The envelope (including the delimiter) outlives m in
-			// e.envelope, so it gets its own slice header — and, when m is
-			// lent, its own bytes: the reply joins it to a different
-			// message's frames, and a message holds only one lease.
-			// Routing frames are small, so the copy is cheap.
-			envelope = slices.Clone(frames[:i+1])
+			// e.envelope. Frames are never modified once queued, so a plain
+			// message's prefix is kept as is (capped, so a reply's prepend
+			// cannot write into m's list). A lent message's bytes are
+			// copied: the reply joins them to a different message's
+			// frames, and a message holds only one lease. Routing frames
+			// are small, so that copy is cheap.
+			envelope = frames[: i+1 : i+1]
 			if m.Lent() {
-				for j, f := range envelope {
+				envelope = make([][]byte, i+1)
+				for j, f := range frames[:i+1] {
 					envelope[j] = bytes.Clone(f)
 				}
 			}

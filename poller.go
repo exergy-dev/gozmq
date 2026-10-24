@@ -4,6 +4,8 @@ import (
 	"context"
 	"reflect"
 	"sync"
+
+	"github.com/exergy-dev/gozmq/internal/socket"
 )
 
 // PollEvents is a bitmask of interest sets passed to Poller.Add
@@ -270,19 +272,11 @@ func rearm(ready []PollEvent) {
 	for _, ev := range ready {
 		in, out := ev.Socket.engine.Gates()
 		if ev.Events&PollIn != 0 {
-			armGate(in)
+			socket.Arm(in)
 		}
 		if ev.Events&PollOut != 0 {
-			armGate(out)
+			socket.Arm(out)
 		}
-	}
-}
-
-// armGate puts a token in gate unless one is already there.
-func armGate(gate chan struct{}) {
-	select {
-	case gate <- struct{}{}:
-	default:
 	}
 }
 

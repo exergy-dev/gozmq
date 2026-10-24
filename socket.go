@@ -34,16 +34,15 @@ func (c *Context) NewSocket(t SocketType, opts ...Option) (*Socket, error) {
 	if err := validateSocketConfig(t, cfg); err != nil {
 		return nil, err
 	}
-	engine, subHandle, err := newEngineFor(t, cfg)
+	engine, err := newEngineFor(t, cfg)
 	if err != nil {
 		return nil, err
 	}
-	// Apply any WithSubscribe options that landed before the engine
-	// existed — the Sub/XSub engines accept subscriptions via the
-	// dedicated handle rather than the config.
-	if subHandle != nil {
+	// WithSubscribe options are applied to the engine, which exists only
+	// now; validation already limited them to SUB/XSUB.
+	if sub, ok := engine.(*socket.SubEngine); ok {
 		for _, prefix := range cfg.subscriptions {
-			if err := subHandle.Subscribe(prefix); err != nil {
+			if err := sub.Subscribe(prefix); err != nil {
 				return nil, err
 			}
 		}
@@ -57,7 +56,6 @@ func (c *Context) NewSocket(t SocketType, opts ...Option) (*Socket, error) {
 		socketType: t,
 		cfg:        cfg,
 		engine:     engine,
-		subHandle:  subHandle,
 		links:      make(map[*link]struct{}),
 	}
 	// Transfer any monitor config set via options to the atomic pointer so
@@ -78,41 +76,38 @@ func (c *Context) NewSocket(t SocketType, opts ...Option) (*Socket, error) {
 }
 
 // newEngineFor returns the pattern-specific socket.Engine for the
-// supported socket types. For SUB/XSUB the returned subHandle is non-nil;
-// the public Socket uses it to implement Subscribe/Unsubscribe. ROUTER
-// honors the configured WithRouterMandatory flag.
-func newEngineFor(t SocketType, cfg *socketConfig) (socket.Engine, *socket.SubEngine, error) {
+// supported socket types. ROUTER honors the configured WithRouterMandatory
+// flag.
+func newEngineFor(t SocketType, cfg *socketConfig) (socket.Engine, error) {
 	switch t {
 	case Pair:
-		return socket.NewPairEngine(), nil, nil
+		return socket.NewPairEngine(), nil
 	case Push:
-		return socket.NewPushEngine(), nil, nil
+		return socket.NewPushEngine(), nil
 	case Pull:
-		return socket.NewPullEngine(), nil, nil
+		return socket.NewPullEngine(), nil
 	case Dealer:
-		return socket.NewDealerEngine(), nil, nil
+		return socket.NewDealerEngine(), nil
 	case Router:
-		return socket.NewRouterEngine(cfg.routerMandatory), nil, nil
+		return socket.NewRouterEngine(cfg.routerMandatory), nil
 	case Req:
-		return socket.NewReqEngine(), nil, nil
+		return socket.NewReqEngine(), nil
 	case Rep:
-		return socket.NewRepEngine(), nil, nil
+		return socket.NewRepEngine(), nil
 	case Pub:
-		return socket.NewPubEngine(), nil, nil
+		return socket.NewPubEngine(), nil
 	case Sub:
-		eng, sub := socket.NewSubEngine()
-		return eng, sub, nil
+		return socket.NewSubEngine(), nil
 	case XPub:
-		return socket.NewXPubEngineV(cfg.xpubVerbose), nil, nil
+		return socket.NewXPubEngine(cfg.xpubVerbose), nil
 	case XSub:
-		eng, sub := socket.NewXSubEngine()
-		return eng, sub, nil
+		return socket.NewXSubEngine(), nil
 	case Stream:
 		// STREAM bypasses ZMTP on the wire: its sessions run in raw
 		// mode (see sessionConfig).
-		return socket.NewStreamEngine(), nil, nil
+		return socket.NewStreamEngine(), nil
 	}
-	return nil, nil, fmt.Errorf("gozmq: unknown socket type %d", t)
+	return nil, fmt.Errorf("gozmq: unknown socket type %d", t)
 }
 
 // Socket is the user-facing message endpoint.
@@ -130,7 +125,6 @@ type Socket struct {
 	socketType SocketType
 	cfg        *socketConfig
 	engine     socket.Engine
-	subHandle  *socket.SubEngine // non-nil for Sub/XSub
 
 	closed atomic.Bool
 
@@ -151,25 +145,23 @@ type reconnectEntry struct {
 
 // Subscribe adds prefix to a SUB or XSUB socket's filter. Returns an error
 // wrapping ErrFSMViolation on other socket types.
-func (s *Socket) Subscribe(prefix []byte) error {
-	if s.closed.Load() {
-		return ErrSocketClosed
-	}
-	if s.subHandle == nil {
-		return fmt.Errorf("gozmq: Subscribe only valid on SUB/XSUB: %w", zmqerr.ErrFSMViolation)
-	}
-	return s.subHandle.Subscribe(prefix)
-}
+func (s *Socket) Subscribe(prefix []byte) error { return s.subscribe("Subscribe", prefix, true) }
 
 // Unsubscribe decrements the refcount for prefix on a SUB or XSUB socket.
-func (s *Socket) Unsubscribe(prefix []byte) error {
+func (s *Socket) Unsubscribe(prefix []byte) error { return s.subscribe("Unsubscribe", prefix, false) }
+
+func (s *Socket) subscribe(op string, prefix []byte, subscribe bool) error {
 	if s.closed.Load() {
 		return ErrSocketClosed
 	}
-	if s.subHandle == nil {
-		return fmt.Errorf("gozmq: Unsubscribe only valid on SUB/XSUB: %w", zmqerr.ErrFSMViolation)
+	sub, ok := s.engine.(*socket.SubEngine)
+	if !ok {
+		return fmt.Errorf("gozmq: %s only valid on SUB/XSUB: %w", op, zmqerr.ErrFSMViolation)
 	}
-	return s.subHandle.Unsubscribe(prefix)
+	if subscribe {
+		return sub.Subscribe(prefix)
+	}
+	return sub.Unsubscribe(prefix)
 }
 
 // Type reports the socket's SocketType.

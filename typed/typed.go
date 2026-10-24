@@ -28,7 +28,10 @@ import (
 
 // Codec marshals Go values to bytes and back. Implementations must be
 // safe for concurrent use; a single Codec may be shared across multiple
-// wrappers and called from multiple goroutines.
+// wrappers and called from multiple goroutines. Unmarshal must not keep a
+// reference to data: the wrappers release the received message, whose
+// frames may be pooled memory (gozmq.WithRecvBufferPool), as soon as it
+// returns. encoding/json copies what it keeps.
 type Codec interface {
 	Marshal(v any) ([]byte, error)
 	Unmarshal(data []byte, v any) error
@@ -83,6 +86,7 @@ func (r *Receiver[T]) Recv(ctx context.Context) (T, error) {
 		var zero T
 		return zero, err
 	}
+	defer m.Release()
 	return r.decode(m)
 }
 
@@ -160,6 +164,7 @@ func (s *Subscriber[T]) Recv(ctx context.Context) (Message[T], error) {
 	if err != nil {
 		return Message[T]{}, err
 	}
+	defer m.Release()
 	return s.decode(m)
 }
 

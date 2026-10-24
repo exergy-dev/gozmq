@@ -23,11 +23,11 @@ both directions; the matrix is in [`interop/README.md`](interop/README.md).
 
 **It is fast enough that the tradeoff is gone.** Measured two-process over
 TCP loopback against native libzmq 4.3.4 (PUSH/PULL, October 2026), gozmq
-is level or ahead from 256 B to 8 KB, at 0.8× on 64 KB frames and 0.6× on
-32 B messages, where goroutine wakeups dominate. The numbers, the method and
-the tool to reproduce them are in [`perf/REPORT.md`](perf/REPORT.md); measure
-your own workload before you switch if it is tiny messages at millions per
-second.
+is ahead from 256 B to 8 KB, at 0.9× on 64 KB frames with plain memory
+(1.9× with the opt-in receive buffer pool) and 0.6× on 32 B messages, where
+goroutine wakeups dominate. The numbers, the method and the tool to
+reproduce them are in [`perf/REPORT.md`](perf/REPORT.md); measure your own
+workload before you switch if it is tiny messages at millions per second.
 
 ## Install
 

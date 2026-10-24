@@ -49,8 +49,8 @@ func NewFrameCodec(maxBody int64) FrameCodec {
 
 // ReadFrame implements FrameCodec.
 func (c *frameCodec) ReadFrame(r io.Reader, dst []byte, pool BodyPool) (uint8, []byte, error) {
-	var hdr [1]byte
-	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+	hdr, err := readHeader(r, dst, 1)
+	if err != nil {
 		// Surface EOF/UnexpectedEOF unwrapped so callers can use errors.Is on
 		// io.EOF to detect clean peer close. Any other error is wrapped as a
 		// malformed-frame condition because we cannot resync the stream.
@@ -66,17 +66,17 @@ func (c *frameCodec) ReadFrame(r io.Reader, dst []byte, pool BodyPool) (uint8, [
 
 	var length uint64
 	if flags&FlagLong == 0 {
-		var ln [1]byte
-		if _, err := io.ReadFull(r, ln[:]); err != nil {
+		ln, err := readHeader(r, dst, 1)
+		if err != nil {
 			return 0, nil, fmt.Errorf("gozmq/zmtp: read short length: %w", wrapEOF(err))
 		}
 		length = uint64(ln[0])
 	} else {
-		var ln [8]byte
-		if _, err := io.ReadFull(r, ln[:]); err != nil {
+		ln, err := readHeader(r, dst, 8)
+		if err != nil {
 			return 0, nil, fmt.Errorf("gozmq/zmtp: read long length: %w", wrapEOF(err))
 		}
-		length = binary.BigEndian.Uint64(ln[:])
+		length = binary.BigEndian.Uint64(ln)
 		// A LONG frame whose length fits in one byte is permitted by the
 		// spec but discouraged; we accept it for interop. The COMMAND flag
 		// has no length restriction beyond maxBody.
@@ -227,78 +227,22 @@ func readBodyInto(r io.Reader, body []byte, filled int, pool BodyPool) ([]byte, 
 // intermediates recycles readBodyIncremental's intermediate buffers for
 // callers without a BodyPool through the shared bufpool. A failed read leaves
 // nothing behind: every buffer taken is Put back before returning an error.
-var intermediates BodyPool = bufpoolAdapter{}
+var intermediates BodyPool = bufpool.Shared{}
 
-type bufpoolAdapter struct{}
-
-func (bufpoolAdapter) Get(n int) []byte { return bufpool.Get(n) }
-func (bufpoolAdapter) Put(b []byte)     { bufpool.Put(b) }
-
-// WriteFrame implements FrameCodec. It always emits the smallest legal
-// length encoding: bodies <256 bytes use the short form unless the LONG flag
-// is forced by the caller. The caller-provided flags are written verbatim,
-// except LONG is forced on for bodies that don't fit in a single byte.
-func (c *frameCodec) WriteFrame(w io.Writer, flags uint8, body []byte) error {
-	useLong, n, err := c.validateWriteFrame(flags, body)
-	if err != nil {
-		return err
-	}
-	var hdr [9]byte
-	hl := packHeader(&hdr, flags, useLong, n)
-	if _, err := w.Write(hdr[:hl]); err != nil {
-		return fmt.Errorf("gozmq/zmtp: write header: %w", err)
-	}
-	if n > 0 {
-		if _, err := w.Write(body); err != nil {
-			return fmt.Errorf("gozmq/zmtp: write body: %w", err)
-		}
-	}
-	return nil
-}
-
-// AppendFrameHeader implements FrameHeaderAppender. It appends the
-// ZMTP wire header (flags byte + 1- or 8-byte big-endian length) for a body
-// of len(body) bytes onto scratch and returns the grown scratch plus the
-// number of header bytes appended. The body itself is NOT written; the
-// caller arranges the body slice in its net.Buffers tail separately.
-//
-// This is the allocation-free fast path used by the writer batching loop.
-// Bodies <=255 bytes use the 2-byte short header; longer bodies (or callers
-// that force FlagLong) use the 9-byte long header.
-func (c *frameCodec) AppendFrameHeader(scratch []byte, flags uint8, body []byte) ([]byte, int, error) {
-	useLong, n, err := c.validateWriteFrame(flags, body)
-	if err != nil {
-		return scratch, 0, err
-	}
-	var hdr [9]byte
-	hl := packHeader(&hdr, flags, useLong, n)
-	return append(scratch, hdr[:hl]...), hl, nil
-}
-
-// packHeader writes the ZMTP frame header (flags byte + 1- or 8-byte
-// big-endian length) into buf and returns the header length: 2 for the short
-// form, 9 for the long form. The caller guarantees useLong is consistent
-// with n (via validateWriteFrame).
-func packHeader(buf *[9]byte, flags uint8, useLong bool, n int) int {
-	if useLong {
-		buf[0] = flags | FlagLong
-		binary.BigEndian.PutUint64(buf[1:], uint64(n))
-		return 9
-	}
-	buf[0] = flags
-	buf[1] = byte(n)
-	return 2
-}
-
-func (c *frameCodec) validateWriteFrame(flags uint8, body []byte) (useLong bool, n int, err error) {
+// AppendFrameHeader implements FrameCodec. It emits the smallest legal
+// encoding: bodies of up to 255 bytes get the 2-byte short header unless
+// the caller forces FlagLong, longer ones the 9-byte long header.
+func (c *frameCodec) AppendFrameHeader(dst []byte, flags uint8, bodyLen int) ([]byte, error) {
 	if flags&^validFlagBits != 0 {
-		return false, 0, fmt.Errorf("gozmq/zmtp: reserved flag bits set: 0x%02x: %w", flags, zmqerr.ErrMalformedFrame)
+		return dst, fmt.Errorf("gozmq/zmtp: reserved flag bits set: 0x%02x: %w", flags, zmqerr.ErrMalformedFrame)
 	}
-	n = len(body)
-	if c.maxBody > 0 && int64(n) > c.maxBody {
-		return false, 0, fmt.Errorf("gozmq/zmtp: body length %d exceeds max %d: %w", n, c.maxBody, zmqerr.ErrMalformedFrame)
+	if c.maxBody > 0 && int64(bodyLen) > c.maxBody {
+		return dst, fmt.Errorf("gozmq/zmtp: body length %d exceeds max %d: %w", bodyLen, c.maxBody, zmqerr.ErrMalformedFrame)
 	}
-	return flags&FlagLong != 0 || n > 255, n, nil
+	if flags&FlagLong != 0 || bodyLen > 255 {
+		return binary.BigEndian.AppendUint64(append(dst, flags|FlagLong), uint64(bodyLen)), nil
+	}
+	return append(dst, flags, byte(bodyLen)), nil
 }
 
 // reuseOrAllocate returns dst[:n] when dst has the capacity, otherwise a
@@ -312,6 +256,22 @@ func reuseOrAllocate(dst []byte, n int, pool BodyPool) []byte {
 		return pool.Get(n)
 	}
 	return make([]byte, n)
+}
+
+// readHeader reads the n (<= 8) bytes of a frame header field into the
+// front of dst, which the body read then overwrites; the session's scratch
+// always has the room. A stack array would escape through io.ReadFull's
+// interface call and cost an allocation per frame, so a caller without
+// spare capacity (the handshake) pays that allocation here instead.
+func readHeader(r io.Reader, dst []byte, n int) ([]byte, error) {
+	var b []byte
+	if cap(dst) >= n {
+		b = dst[:n]
+	} else {
+		b = make([]byte, n)
+	}
+	_, err := io.ReadFull(r, b)
+	return b, err
 }
 
 // wrapEOF normalizes "stream ended mid-frame" into ErrUnexpectedEOF wrapped

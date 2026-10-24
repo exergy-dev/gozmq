@@ -71,3 +71,13 @@ func Put(b []byte) {
 	*bp = b[:0]
 	pools[i].Put(bp)
 }
+
+// Shared is the package-level pool as a value, for callers that take a
+// pool interface (zmtp.BodyPool).
+type Shared struct{}
+
+// Get calls the package Get.
+func (Shared) Get(n int) []byte { return Get(n) }
+
+// Put calls the package Put.
+func (Shared) Put(b []byte) { Put(b) }

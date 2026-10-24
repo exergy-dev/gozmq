@@ -227,3 +227,28 @@ func TestTCP_TCP6_Scheme(t *testing.T) {
 	require.NoError(t, err, "Write")
 	wg.Wait()
 }
+
+// TestConn_WriteBuffersCoalescesWithoutWritev: a conn that is not a TCP or
+// Unix socket (a *tls.Conn in production, a net.Pipe end here) gets the
+// whole batch as one Write, and the batch is consumed as WriteTo would.
+func TestConn_WriteBuffersCoalescesWithoutWritev(t *testing.T) {
+	t.Parallel()
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	c := newConn(a, "tls+tcp")
+	require.False(t, c.vectored)
+
+	got := make(chan []byte, 1)
+	go func() {
+		buf := make([]byte, 64)
+		n, _ := b.Read(buf) // a pipe Read returns one Write's bytes
+		got <- buf[:n]
+	}()
+	bufs := net.Buffers{[]byte("ab"), []byte("cde"), []byte("f")}
+	n, err := c.WriteBuffers(&bufs)
+	require.NoError(t, err)
+	require.Equal(t, int64(6), n)
+	require.Empty(t, bufs, "batch not consumed")
+	require.Equal(t, "abcdef", string(<-got), "batch arrived in more than one Write")
+}

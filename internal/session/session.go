@@ -112,14 +112,21 @@ type Session struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	reader *bufio.Reader
-	encode frameEncoder
-	decode frameDecoder
-	// directHeader enables the writer's header-only fast path (see New).
-	directHeader zmtp.FrameHeaderAppender
-	// recvPool supplies the reader's large frame buffers: recvBufPool (the
-	// shared bufpool, bodies lent to the application) when pooledRecv is
-	// set, else a per-session plainBodies whose bodies the *Msg owns
-	// outright. See Config.RecvBufferPool.
+
+	// identityMech reports that the mechanism leaves frames unchanged
+	// (NULL, PLAIN): the writer hands user frames to writev by reference
+	// and the reader copies small frames out of its scratch. Otherwise
+	// encode and decode are the mechanism's frame transforms, and
+	// appendEncode its security.FrameAppender when it has one, which the
+	// writer prefers so the wire body lands in the batch's own buffer.
+	identityMech bool
+	encode       frameFunc
+	decode       frameFunc
+	appendEncode func(dst []byte, flags uint8, plain []byte) ([]byte, uint8, error)
+
+	// recvPool supplies the reader's large frame buffers: the shared
+	// bufpool (bodies lent to the application) when pooledRecv is set, else
+	// a per-session plainBodies. See Config.RecvBufferPool.
 	recvPool   zmtp.BodyPool
 	pooledRecv bool
 
@@ -212,12 +219,6 @@ var monoEpoch = time.Now()
 
 func monoNow() int64 { return int64(time.Since(monoEpoch)) }
 
-// recvBufPool adapts the package-level bufpool to zmtp.BodyPool.
-type recvBufPool struct{}
-
-func (recvBufPool) Get(n int) []byte { return bufpool.Get(n) }
-func (recvBufPool) Put(b []byte)     { bufpool.Put(b) }
-
 // plainBodies is the reader's zmtp.BodyPool when bodies are not pooled:
 // Get is a plain allocation the *Msg adopts (Put is only reached on a failed
 // read, where the buffer is garbage anyway). The intermediate a large frame
@@ -225,15 +226,32 @@ func (recvBufPool) Put(b []byte)     { bufpool.Put(b) }
 // at a time and only up to maxRetainedRecvScratch, so a stream of large frames
 // costs exactly one allocation each, the body. The reader goroutine is the
 // only user, so there is no locking.
-type plainBodies struct{ scratch []byte }
+//
+// With reuse set (a mechanism that rewrites bodies, so the reader keeps
+// nothing of the wire body once DecodeFrame has run) Get hands out the same
+// buffer every time, grown as needed up to maxRetainedRecvScratch.
+type plainBodies struct {
+	scratch []byte
+	body    []byte
+	reuse   bool
+}
 
 // maxRetainedRecvScratch caps the intermediate a session keeps between frames;
 // it is the codec's incremental threshold, so every frame up to 2 MiB reuses
 // it and a rare larger one leaves its bigger intermediate to the GC.
 const maxRetainedRecvScratch = 128 << 10
 
-func (*plainBodies) Get(n int) []byte { return make([]byte, n) }
-func (*plainBodies) Put([]byte)       {}
+func (p *plainBodies) Get(n int) []byte {
+	if !p.reuse || n > maxRetainedRecvScratch {
+		return make([]byte, n)
+	}
+	if cap(p.body) < n {
+		p.body = make([]byte, n)
+	}
+	return p.body[:n]
+}
+
+func (*plainBodies) Put([]byte) {}
 
 func (p *plainBodies) GetScratch(n int) []byte {
 	if cap(p.scratch) >= n {
@@ -250,26 +268,16 @@ func (p *plainBodies) PutScratch(b []byte) {
 	}
 }
 
-type frameEncoder func(flags uint8, body []byte) (uint8, []byte, error)
-type frameDecoder func(flags uint8, body []byte) (uint8, []byte, error)
+// frameFunc is the shape of Mech.EncodeFrame and Mech.DecodeFrame.
+type frameFunc func(flags uint8, body []byte) (uint8, []byte, error)
 
 // identityFramer is implemented by mechanisms whose EncodeFrame and
 // DecodeFrame are the identity transform (NULL, PLAIN), opting them into
-// the zero-copy framing path.
+// the zero-copy framing path. The mechanism must declare that itself:
+// keying on Name() would silently bypass the frame transform of any custom
+// mechanism that happens to be called "NULL" or "PLAIN".
 type identityFramer interface {
 	IdentityFraming() bool
-}
-
-// sessionFramePaths picks the per-frame encode/decode functions and
-// reports whether the mechanism is an identity transform. The mechanism
-// must declare that via identityFramer: keying on Name() would silently
-// bypass the frame transform of any custom mechanism that happens to be
-// called "NULL" or "PLAIN".
-func sessionFramePaths(mech security.Mech) (frameEncoder, frameDecoder, bool) {
-	if f, ok := mech.(identityFramer); ok && f.IdentityFraming() {
-		return identityFrame, identityFrame, true
-	}
-	return mech.EncodeFrame, mech.DecodeFrame, false
 }
 
 func identityFrame(flags uint8, body []byte) (uint8, []byte, error) { return flags, body, nil }
@@ -309,26 +317,23 @@ func New(cfg Config) *Session {
 		s.sessionPipe, s.enginePipe = pipe.NewPair(cfg.RecvHWM, cfg.SendHWM, pipe.PeerInfo{}, pipe.PeerInfo{})
 		return s
 	}
-	encode, decode, identityMech := sessionFramePaths(cfg.Mech)
-	// directHeader is the writer hot-path fast lane: when the mechanism
-	// is an identity transform (NULL/PLAIN — encode does not rewrite
-	// body bytes) and the codec implements FrameHeaderAppender, the
-	// writer appends wire headers into a caller-owned scratch buffer
-	// with zero per-frame allocations.
-	var directHeader zmtp.FrameHeaderAppender
-	if identityMech {
-		if h, ok := cfg.Codec.(zmtp.FrameHeaderAppender); ok {
-			directHeader = h
+	if f, ok := cfg.Mech.(identityFramer); ok && f.IdentityFraming() {
+		s.identityMech = true
+		s.encode, s.decode = identityFrame, identityFrame
+	} else {
+		s.encode, s.decode = cfg.Mech.EncodeFrame, cfg.Mech.DecodeFrame
+		if a, ok := cfg.Mech.(security.FrameAppender); ok {
+			s.appendEncode = a.AppendEncodeFrame
 		}
 	}
 	// recvPool hands the reader pooled frame buffers (see Config.RecvBufferPool).
-	if cfg.RecvBufferPool && identityMech {
-		s.recvPool, s.pooledRecv = recvBufPool{}, true
-	} else {
-		s.recvPool = &plainBodies{}
+	switch {
+	case cfg.RecvBufferPool && s.identityMech:
+		s.recvPool, s.pooledRecv = bufpool.Shared{}, true
+	default:
+		s.recvPool = &plainBodies{reuse: !s.identityMech}
 	}
 	s.reader = bufio.NewReaderSize(cfg.Conn, sessionReadBufferSize)
-	s.encode, s.decode, s.directHeader = encode, decode, directHeader
 	s.hsOut = make(chan []byte, hsOutBacklog)
 	s.cmdCh = make(chan []byte, sessionCmdBacklog)
 	s.cmdWake = make(chan struct{}, 1)

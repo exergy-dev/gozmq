@@ -15,10 +15,6 @@ package socket
 //
 // Implementation: the same *SubEngine as NewSubEngine, with the
 // surfacing flag set; Send is re-targeted to interpret the outbound
-// message as a subscription command. Subscribe/Unsubscribe remain
-// callable on the returned *SubEngine for tests that want to drive the
-// filter via the API path rather than through synthetic wire messages.
-func NewXSubEngine() (Engine, *SubEngine) {
-	e := newSubEngineBase(true)
-	return e, e
-}
+// message as a subscription command. Subscribe/Unsubscribe work too, and
+// are how the socket layer applies WithSubscribe to an XSUB.
+func NewXSubEngine() *SubEngine { return newSubEngineBase(true) }

@@ -24,8 +24,8 @@ import (
 // pipe).
 func TestEngineConformance(t *testing.T) {
 	t.Parallel()
-	mkSub := func() socket.Engine { e, _ := socket.NewSubEngine(); return e }
-	mkXSub := func() socket.Engine { e, _ := socket.NewXSubEngine(); return e }
+	mkSub := func() socket.Engine { return socket.NewSubEngine() }
+	mkXSub := func() socket.Engine { return socket.NewXSubEngine() }
 	routed := func() *msg.Msg { return msg.FromFrames([]byte("id"), []byte("x")) }
 	plain := func() *msg.Msg { return msg.FromBytes([]byte("x")) }
 
@@ -55,7 +55,7 @@ func TestEngineConformance(t *testing.T) {
 		{"dealer", socket.NewDealerEngine, plain, true, true, true, true, zmqerr.ErrSocketClosed, zmqerr.ErrSocketClosed, true},
 		{"pub", socket.NewPubEngine, plain, false, false, false, false, zmqerr.ErrSocketClosed, zmqerr.ErrFSMViolation, true},
 		{"sub", mkSub, plain, false, true, false, true, zmqerr.ErrFSMViolation, zmqerr.ErrSocketClosed, true},
-		{"xpub", func() socket.Engine { return socket.NewXPubEngineV(false) }, plain, false, true, false, true, zmqerr.ErrSocketClosed, zmqerr.ErrSocketClosed, true},
+		{"xpub", func() socket.Engine { return socket.NewXPubEngine(false) }, plain, false, true, false, true, zmqerr.ErrSocketClosed, zmqerr.ErrSocketClosed, true},
 		{"xsub", mkXSub, plain, false, true, false, true, zmqerr.ErrSocketClosed, zmqerr.ErrSocketClosed, true},
 		{"req", socket.NewReqEngine, plain, true, false, true, false, zmqerr.ErrSocketClosed, zmqerr.ErrSocketClosed, true},
 		{"rep", socket.NewRepEngine, plain, false, true, false, true, zmqerr.ErrSocketClosed, zmqerr.ErrSocketClosed, true},

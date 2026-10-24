@@ -58,6 +58,7 @@ func handleLoop[V any](
 			return err
 		}
 		v, decodeErr := decode(m)
+		m.Release()
 		if decodeErr != nil {
 			if stop := o.report(decodeErr); stop != nil {
 				return stop

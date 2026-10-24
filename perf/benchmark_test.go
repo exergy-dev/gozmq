@@ -307,6 +307,13 @@ func warmStream(b *testing.B, sender *gozmq.Socket, size int, receivers ...*gozm
 // be proven attached (see warmStream and syncSubs).
 func benchStream(b *testing.B, sender *gozmq.Socket, receivers []*gozmq.Socket, size int, wait time.Duration) int64 {
 	b.Helper()
+	return benchStreamPayload(b, sender, receivers, newPayload(size), wait)
+}
+
+// benchStreamPayload is benchStream with the message given, so a PUB
+// benchmark can publish under a topic.
+func benchStreamPayload(b *testing.B, sender *gozmq.Socket, receivers []*gozmq.Socket, payload []byte, wait time.Duration) int64 {
+	b.Helper()
 	b.StopTimer()
 
 	recvCtx, recvCancel := context.WithCancel(context.Background())
@@ -335,10 +342,9 @@ func benchStream(b *testing.B, sender *gozmq.Socket, receivers []*gozmq.Socket, 
 		return n
 	}
 
-	payload := newPayload(size)
 	sendCtx := testutil.Ctx(b, benchTimeout)
 
-	b.SetBytes(int64(size))
+	b.SetBytes(int64(len(payload)))
 	b.ResetTimer()
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {

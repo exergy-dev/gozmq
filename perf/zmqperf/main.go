@@ -8,7 +8,9 @@
 //
 // -size and -count must match on both ends. The output format follows the
 // libzmq tools, so the same scripts can read either. The throughput
-// commands take -cpuprofile and -memprofile.
+// commands take -cpuprofile and -memprofile; local_thr takes -pool to
+// receive into the buffer pool (gozmq.WithRecvBufferPool) and release each
+// message.
 package main
 
 import (
@@ -44,6 +46,7 @@ func main() {
 	count := fs.Int("count", 0, "message or round-trip count (must match the peer)")
 	cpuProfile := fs.String("cpuprofile", "", "write a CPU profile here (thr commands)")
 	memProfile := fs.String("memprofile", "", "write a heap profile here (thr commands)")
+	pool := fs.Bool("pool", false, "local_thr: receive into the buffer pool and release each message")
 	_ = fs.Parse(os.Args[2:])
 	if *count == 0 {
 		*count = map[bool]int{true: 1_000_000, false: 100_000}[cmd == "local_thr" || cmd == "remote_thr"]
@@ -63,15 +66,15 @@ func main() {
 
 	switch cmd {
 	case "local_thr":
-		sock := socket(zctx, gozmq.Pull, *endpoint, bind, gozmq.WithSendHWM(benchHWM), gozmq.WithRecvHWM(benchHWM))
+		sock := socket(zctx, gozmq.Pull, *endpoint, bind, gozmq.WithSendHWM(benchHWM), gozmq.WithRecvHWM(benchHWM), gozmq.WithRecvBufferPool(*pool))
 		fmt.Printf("message size: %d [B]\nmessage count: %d\n", *size, *count)
 		// The clock starts after the first message, as libzmq's local_thr
 		// does, so the figure is steady state rather than connection setup.
-		recv(ctx, sock, *size, 0)
+		recv(ctx, sock, *size, 0).Release()
 		stop := profile(*cpuProfile, *memProfile)
 		start := time.Now()
 		for i := 1; i < *count; i++ {
-			recv(ctx, sock, *size, i)
+			recv(ctx, sock, *size, i).Release()
 		}
 		elapsed := max(time.Since(start), time.Nanosecond)
 		stop()

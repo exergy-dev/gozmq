@@ -61,6 +61,12 @@ type Mech interface {
 	// their wire form. NULL/PLAIN preserve both body and flags. CURVE, as
 	// libzmq does, moves MORE and COMMAND into the encrypted MESSAGE inner
 	// flags byte and clears them from the wire flags.
+	//
+	// Ownership: the returned wire is either plain itself or memory the
+	// mechanism neither reuses nor modifies after returning. The session
+	// hands it to the kernel by reference, possibly after encoding later
+	// frames. A mechanism that would otherwise recycle an output buffer
+	// should implement [FrameAppender] instead.
 	EncodeFrame(flags uint8, plain []byte) (wireFlags uint8, wire []byte, err error)
 
 	// DecodeFrame reverses EncodeFrame. The returned flags are the logical
@@ -68,6 +74,10 @@ type Mech interface {
 	// authenticates frames must derive them from authenticated data only
 	// (CURVE ignores the outer wire flags, which are not under the MAC, as
 	// libzmq does). Returns ErrMalformedFrame on MAC failure.
+	//
+	// Ownership: the returned plain is either wire itself or memory the
+	// mechanism neither reuses nor modifies after returning; in the latter
+	// case the session delivers it to the application without a copy.
 	DecodeFrame(flags uint8, wire []byte) (plainFlags uint8, plain []byte, err error)
 
 	// Metadata returns local properties sent in READY. Must return after
@@ -79,4 +89,13 @@ type Mech interface {
 	// to check Socket-Type compatibility and learn the peer's Identity; a
 	// nil map at that point fails the session.
 	PeerMetadata() map[string]string
+}
+
+// FrameAppender is optionally implemented by a mechanism whose EncodeFrame
+// produces new bytes (CURVE does). AppendEncodeFrame appends the wire form
+// of plain to dst and returns the grown slice, so the session seals each
+// frame straight into its write buffer with no allocation per frame. It
+// must produce exactly the bytes and flags EncodeFrame would.
+type FrameAppender interface {
+	AppendEncodeFrame(dst []byte, flags uint8, plain []byte) (wire []byte, wireFlags uint8, err error)
 }

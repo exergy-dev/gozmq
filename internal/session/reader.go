@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"unsafe"
 
 	"github.com/exergy-dev/gozmq/internal/bufpool"
 	"github.com/exergy-dev/gozmq/internal/pipe"
@@ -77,14 +78,7 @@ func (s *Session) readLoop() {
 	var frames, lent [][]byte
 	var currentSize int64 // decoded bytes accumulated into frames
 	for {
-		// Honor cancellation between frames. The blocking io.Read will
-		// be interrupted by Conn.Close (called from shutdown/Stop).
-		select {
-		case <-s.ctx.Done():
-			return
-		default:
-		}
-
+		// A blocking read ends when shutdown or Stop closes the conn.
 		flags, body, err := s.cfg.Codec.ReadFrame(s.reader, scratch, s.recvPool)
 		if err != nil {
 			if !zmqerr.IsShutdown(err) {
@@ -94,7 +88,8 @@ func (s *Session) readLoop() {
 		}
 
 		// Decode the body through the security mechanism. For NULL/PLAIN
-		// decoded is body itself; CURVE returns a fresh plaintext slice.
+		// decoded is body itself; CURVE returns fresh plaintext, which the
+		// Mech contract lets the message adopt.
 		plainFlags, decoded, err := s.decode(flags, body)
 		if err != nil {
 			s.cfg.Logger.Warn("gozmq/session: decode frame failed", "err", err)
@@ -127,10 +122,16 @@ func (s *Session) readLoop() {
 		}
 		frame := decoded
 		switch {
+		case !s.identityMech:
+			// The Mech contract makes decoded either the mechanism's own
+			// memory, which the message adopts, or (part of) body, which
+			// the reader reuses for the next frame.
+			if aliases(decoded, body) {
+				frame = bytes.Clone(decoded)
+			}
 		case len(body) <= len(scratch):
-			// body was read into scratch and decoded may alias it (it
-			// always does for NULL/PLAIN), so copy the frame out before
-			// the next ReadFrame overwrites it.
+			// body is scratch, which the next ReadFrame overwrites, so
+			// copy the frame out.
 			frame = bytes.Clone(decoded)
 		case s.pooledRecv:
 			// Pooled bodies exist only for identity framing, so frame is
@@ -163,6 +164,16 @@ func (s *Session) readLoop() {
 			return
 		}
 	}
+}
+
+// aliases reports whether sub's bytes lie inside buf's backing array.
+func aliases(sub, buf []byte) bool {
+	if len(sub) == 0 || cap(buf) == 0 {
+		return false
+	}
+	p := uintptr(unsafe.Pointer(unsafe.SliceData(sub)))
+	b := uintptr(unsafe.Pointer(unsafe.SliceData(buf)))
+	return p >= b && p < b+uintptr(cap(buf))
 }
 
 // lendFrames returns a lent message holding frames whose final Release

@@ -32,6 +32,10 @@ const (
 // hundred bytes.
 const handshakeMaxFrame = 64 << 10
 
+// handshakeCodec frames handshake commands; it is stateless, so one serves
+// every session.
+var handshakeCodec = zmtp.NewFrameCodec(handshakeMaxFrame)
+
 // handshake drives greeting + security handshake on the reader goroutine
 // under HandshakeTimeout, queueing outbound bytes on hsOut for the writer.
 // On failure it returns an error wrapping zmqerr.ErrHandshakeTimeout (for
@@ -132,7 +136,6 @@ func (s *Session) exchangeGreeting() error {
 // single READY command body. Reads and writes use a ZMTP codec capped at
 // handshakeMaxFrame (see there), independent of the data-phase codec.
 func (s *Session) runSecurityHandshake() error {
-	readCodec := zmtp.NewFrameCodec(handshakeMaxFrame)
 	var in []byte
 	for {
 		out, done, err := s.cfg.Mech.NextHandshake(in)
@@ -144,11 +147,11 @@ func (s *Session) runSecurityHandshake() error {
 			// Handshake frames are bounded by handshakeMaxFrame on both
 			// sides, independent of the data cap: a small
 			// WithMaxMessageSize must not break a CURVE INITIATE.
-			var frame bytes.Buffer
-			if werr := readCodec.WriteFrame(&frame, zmtp.FlagCommand, out); werr != nil {
+			frame, werr := handshakeCodec.AppendFrameHeader(nil, zmtp.FlagCommand, len(out))
+			if werr != nil {
 				return fmt.Errorf("gozmq/session: encode handshake frame: %w", werr)
 			}
-			s.hsOut <- frame.Bytes()
+			s.hsOut <- append(frame, out...)
 		}
 		if err != nil {
 			return fmt.Errorf("gozmq/session: security handshake: %w", err)
@@ -158,7 +161,7 @@ func (s *Session) runSecurityHandshake() error {
 		}
 
 		// Read the peer's next handshake message.
-		flags, body, rerr := readCodec.ReadFrame(s.reader, nil, nil)
+		flags, body, rerr := handshakeCodec.ReadFrame(s.reader, nil, nil)
 		if rerr != nil {
 			return fmt.Errorf("gozmq/session: read handshake frame: %w", rerr)
 		}
@@ -271,16 +274,12 @@ func SocketTypesCompatible(localType, peerType string) bool {
 	}
 }
 
-// nonPrintableASCII reports whether r falls outside the printable ASCII range
-// [0x20, 0x7E]. ZMTP restricts the greeting mechanism name to printable ASCII.
-func nonPrintableASCII(r rune) bool { return r < 0x20 || r > 0x7E }
-
 // encodeGreeting builds the 64-byte ZMTP 3.1 greeting block.
 func encodeGreeting(mech string, asServer bool) ([]byte, error) {
 	if len(mech) > greetingMechLen {
 		return nil, fmt.Errorf("gozmq/session: mechanism %q exceeds %d bytes: %w", mech, greetingMechLen, zmqerr.ErrMalformedFrame)
 	}
-	if i := strings.IndexFunc(mech, nonPrintableASCII); i >= 0 {
+	if i := strings.IndexFunc(mech, zmtp.NonPrintableASCII); i >= 0 {
 		return nil, fmt.Errorf("gozmq/session: mechanism %q non-printable byte 0x%02x: %w", mech, mech[i], zmqerr.ErrMalformedFrame)
 	}
 	var buf [greetingSize]byte
@@ -330,7 +329,7 @@ func decodeGreeting(buf []byte) (mech string, minor byte, asServer bool, err err
 			return "", 0, false, fmt.Errorf("%w: mechanism padding non-zero at %d", zmqerr.ErrMalformedFrame, i)
 		}
 	}
-	if i := bytes.IndexFunc(raw[:end], nonPrintableASCII); i >= 0 {
+	if i := bytes.IndexFunc(raw[:end], zmtp.NonPrintableASCII); i >= 0 {
 		return "", 0, false, fmt.Errorf("%w: mechanism non-printable 0x%02x at %d", zmqerr.ErrMalformedFrame, raw[i], i)
 	}
 	return string(raw[:end]), minor, asServerByte == 1, nil

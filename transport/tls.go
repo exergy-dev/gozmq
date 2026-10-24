@@ -74,11 +74,7 @@ func (t *TLSTransport) Scheme() string { return tlsScheme }
 // Dial connects to endpoint over TCP (honoring ctx) and returns a TLS client
 // conn whose handshake runs on first I/O; see TLSTransport.
 func (t *TLSTransport) Dial(ctx context.Context, endpoint string) (Conn, error) {
-	addr, err := parseTCPEndpoint(endpoint, tlsScheme, true)
-	if err != nil {
-		return nil, err
-	}
-	raw, err := t.base.dial(ctx, addr)
+	raw, addr, err := t.base.dialRaw(ctx, endpoint, tlsScheme)
 	if err != nil {
 		return nil, err
 	}
@@ -91,23 +87,13 @@ func (t *TLSTransport) Dial(ctx context.Context, endpoint string) (Conn, error) 
 			cfg.ServerName = host
 		}
 	}
-	return t.base.wrap(tls.Client(raw, cfg), tlsScheme), nil
+	return newConn(tls.Client(raw, cfg), tlsScheme), nil
 }
 
 // Listen binds endpoint on TCP. Accept wraps each connection with
 // tls.Server without handshaking; see TLSTransport.
 func (t *TLSTransport) Listen(ctx context.Context, endpoint string) (Listener, error) {
-	addr, err := parseTCPEndpoint(endpoint, tlsScheme, false)
-	if err != nil {
-		return nil, err
-	}
-	raw, err := t.base.listen(ctx, addr)
-	if err != nil {
-		return nil, err
-	}
-	return newNetListener(raw, formatTCPEndpoint(tlsScheme, raw.Addr()), func(c net.Conn) Conn {
-		return t.base.wrap(tls.Server(c, t.Config), tlsScheme)
-	}), nil
+	return t.base.listenRaw(ctx, endpoint, tlsScheme, func(c net.Conn) net.Conn { return tls.Server(c, t.Config) })
 }
 
 // Compile-time interface checks.

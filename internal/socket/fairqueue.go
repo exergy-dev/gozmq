@@ -140,7 +140,7 @@ func (fq *FairQueue) Attach(p *pipe.End) error {
 	p.SetNotify(func() { fq.notified(e) })
 	if p.MarkIdle() {
 		fq.activateLocked(e)
-		arm(fq.gate)
+		Arm(fq.gate)
 	}
 	fq.updateSingleLocked()
 	return nil
@@ -156,7 +156,7 @@ func (fq *FairQueue) notified(e *fqEntry) {
 	}
 	fq.mu.Unlock()
 	if live {
-		arm(fq.gate)
+		Arm(fq.gate)
 	}
 }
 
@@ -255,7 +255,7 @@ func (fq *FairQueue) takeLocked() (*msg.Msg, *pipe.End) {
 		e := fq.entries[fq.cur]
 		if m, ok := e.p.RecvOrIdle(); ok {
 			fq.cur++
-			arm(fq.gate)
+			Arm(fq.gate)
 			return m, e.p
 		}
 		// Checked after RecvOrIdle marked the pipe idle, so a close that

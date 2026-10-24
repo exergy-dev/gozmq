@@ -17,9 +17,9 @@ const (
 // the wire encoding has a single-byte length prefix.
 const MaxCommandNameLen = 255
 
-// nonPrintableASCII reports whether r falls outside the printable ASCII range
-// [0x20, 0x7E], to which ZMTP restricts command names.
-func nonPrintableASCII(r rune) bool { return r < 0x20 || r > 0x7E }
+// NonPrintableASCII reports whether r falls outside the printable ASCII
+// range [0x20, 0x7E], to which ZMTP restricts command and mechanism names.
+func NonPrintableASCII(r rune) bool { return r < 0x20 || r > 0x7E }
 
 // Command is a parsed ZMTP command frame. Body is the command-specific
 // payload (a property list for READY, a reason for ERROR, TTL plus context
@@ -76,7 +76,7 @@ func DecodeCommand(raw []byte) (Command, error) {
 		return Command{}, fmt.Errorf("gozmq/zmtp: command name length %d exceeds body %d: %w", nameLen, len(raw)-1, zmqerr.ErrMalformedFrame)
 	}
 	name := raw[1 : 1+nameLen]
-	if i := bytes.IndexFunc(name, nonPrintableASCII); i >= 0 {
+	if i := bytes.IndexFunc(name, NonPrintableASCII); i >= 0 {
 		return Command{}, fmt.Errorf("gozmq/zmtp: command name non-printable byte 0x%02x at offset %d: %w", name[i], i, zmqerr.ErrMalformedFrame)
 	}
 	return Command{Name: string(name), Body: raw[1+nameLen:]}, nil

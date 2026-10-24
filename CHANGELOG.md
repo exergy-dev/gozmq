@@ -8,6 +8,51 @@ migration hint.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-23
+
+A performance release: fewer allocations on every path, one frame encode
+path, and lock-free subscribe-to-all matching, with one contract change on
+`security.Mech`. Breaking changes are listed first, with a migration hint.
+
+### Breaking changes
+
+- **`security.Mech` gains an ownership rule for `EncodeFrame` and
+  `DecodeFrame`.** The returned slice must be either the input itself or
+  memory the mechanism neither reuses nor modifies after returning: the
+  session now hands encoded bodies to the kernel and decoded bodies to the
+  application by reference instead of copying them. The shipped mechanisms
+  already comply. Migration for an out-of-tree mechanism that recycled an
+  output buffer: return a fresh slice, or implement the new optional
+  `security.FrameAppender` (`AppendEncodeFrame`), which seals straight into
+  the writer's buffer and is what CURVE does.
+
+### Changed
+
+- Fewer allocations on every path: PUSH/PULL over TCP goes from 5 to 3
+  allocations per delivery, REQ/REP from 25 to 15 per round trip,
+  ROUTER/DEALER from 16 to 10, CURVE from 8 to 3 per message. The frame
+  reader no longer allocates its header fields, the writer has one encode
+  path for every mechanism, and a REP keeps a plain request's envelope by
+  reference.
+- A PUB answers the subscribe-to-all case from an atomic flag per peer
+  instead of taking that peer's subscription lock on every message; a
+  selective tree is still walked under the read lock.
+- CURVE derives each handshake key once (four fewer X25519 operations per
+  side per connection) and the reader reuses one ciphertext buffer for its
+  large frames.
+- Over `tls+tcp` a write batch is one TLS record and one syscall instead of
+  one per frame header and body, and `TCPTransport`'s socket options
+  (TCP_NODELAY, buffer sizes) now apply to TLS connections; they were
+  silently skipped.
+- PING/PONG commands join the write batch instead of two unbatched writes
+  each.
+- `typed.Receiver`, `typed.Subscriber` and their `Handle` loops release each
+  received message after decoding it, so `WithRecvBufferPool` recycles
+  through them. A `typed.Codec`'s `Unmarshal` must not keep a reference to
+  its input (encoding/json does not).
+- New benchmarks: `PushPullThroughput_TLS`, `PubSubFanoutSelective_Inproc`
+  and `ConnectHandshake_Curve_TCP`.
+
 ## [0.2.0] - 2026-10-23
 
 A cleanup release: the same wire behaviour and defaults as 0.1.1, with a
@@ -144,7 +189,8 @@ pushed to GitHub or a module proxy. It has the memory-exhaustion, CURVE
 and crash issues listed under 0.1.1, so it is not available and should not
 be used; the first published version is 0.1.1.
 
-[Unreleased]: https://github.com/exergy-dev/gozmq/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/exergy-dev/gozmq/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/exergy-dev/gozmq/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/exergy-dev/gozmq/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/exergy-dev/gozmq/releases/tag/v0.1.1
 [0.1.0]: https://github.com/exergy-dev/gozmq/commit/62a43b78a3561a7b8db530ce710dc57dc09b0bcd

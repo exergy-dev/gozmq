@@ -79,7 +79,7 @@ func (lb *LoadBalancer) Attach(p *pipe.End) error {
 		return nil
 	}
 	lb.changed.wake()
-	arm(lb.gate)
+	Arm(lb.gate)
 	return nil
 }
 
@@ -111,10 +111,9 @@ func (lb *LoadBalancer) Send(ctx context.Context, m *msg.Msg) error {
 		if lb.ring.len() == 0 {
 			notify := lb.changed.wait()
 			lb.mu.Unlock()
-			select {
-			case <-notify: // attach or Close; re-check under the lock
-			case <-ctx.Done():
-				return ctx.Err()
+			// notify fires on attach and on Close; re-check under the lock.
+			if err := awaitPeer(ctx, notify, nil); err != nil {
+				return err
 			}
 			continue
 		}

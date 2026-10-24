@@ -57,7 +57,7 @@ func (t *IPCTransport) Dial(ctx context.Context, endpoint string) (Conn, error) 
 	if err != nil {
 		return nil, err
 	}
-	return &conn{Conn: c, local: "ipc://" + path, remote: "ipc://" + path}, nil
+	return &conn{Conn: c, local: "ipc://" + path, remote: "ipc://" + path, vectored: true}, nil
 }
 
 // Listen binds endpoint. For filesystem paths we create the socket inode
@@ -84,7 +84,7 @@ func (t *IPCTransport) Listen(ctx context.Context, endpoint string) (Listener, e
 		}
 	}
 	endpoint = "ipc://" + path
-	return newNetListener(l, endpoint, func(c net.Conn) Conn { return &conn{Conn: c, local: endpoint, remote: endpoint} }), nil
+	return newNetListener(l, endpoint, func(c net.Conn) Conn { return &conn{Conn: c, local: endpoint, remote: endpoint, vectored: true} }), nil
 }
 
 // reclaimStaleSocket removes the socket file at path if nothing is listening

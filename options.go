@@ -87,10 +87,6 @@ type optionFunc func(*socketConfig) error
 
 func (f optionFunc) apply(c *socketConfig) error { return f(c) }
 
-func newOption(fn func(*socketConfig) error) Option {
-	return optionFunc(fn)
-}
-
 // WithIdentity sets the ROUTER/DEALER identity advertised during the ZMTP
 // handshake. The identity is the peer-visible name by which a ROUTER
 // addresses this DEALER (or by which a ROUTER peer appears in the leading
@@ -100,7 +96,7 @@ func newOption(fn func(*socketConfig) error) Option {
 // or zero-prefixed identities are rejected by NewSocket.
 // The slice is copied defensively.
 func WithIdentity(id []byte) Option {
-	return newOption(func(c *socketConfig) error {
+	return optionFunc(func(c *socketConfig) error {
 		c.identity = bytes.Clone(id)
 		return nil
 	})
@@ -117,7 +113,7 @@ func WithIdentity(id []byte) Option {
 // the message for the full peer and continue the fan-out (the drop is
 // counted in [Socket.Metrics]).
 func WithSendHWM(n int) Option {
-	return newOption(func(c *socketConfig) error { c.sendHWM = n; return nil })
+	return optionFunc(func(c *socketConfig) error { c.sendHWM = n; return nil })
 }
 
 // WithRecvHWM sets the inbound high-water mark — the maximum number of
@@ -130,7 +126,7 @@ func WithSendHWM(n int) Option {
 // sender's send HWM plus the receiver's recv HWM, and is unlimited if
 // either is zero (as in libzmq).
 func WithRecvHWM(n int) Option {
-	return newOption(func(c *socketConfig) error { c.recvHWM = n; return nil })
+	return optionFunc(func(c *socketConfig) error { c.recvHWM = n; return nil })
 }
 
 // WithLinger sets the grace period Socket.Close waits for outbound pipes
@@ -141,7 +137,7 @@ func WithRecvHWM(n int) Option {
 // never drains or reconnects, so pair it with [Socket.CloseCtx], whose
 // context bounds the wait.
 func WithLinger(d time.Duration) Option {
-	return newOption(func(c *socketConfig) error { c.linger = d; return nil })
+	return optionFunc(func(c *socketConfig) error { c.linger = d; return nil })
 }
 
 // WithReconnectInterval sets the base delay between reconnection attempts
@@ -150,7 +146,7 @@ func WithLinger(d time.Duration) Option {
 // immediate retry. The actual delay grows exponentially and is jittered by
 // 20% before each attempt, capped by [WithReconnectIntervalMax].
 func WithReconnectInterval(d time.Duration) Option {
-	return newOption(func(c *socketConfig) error { c.reconnectInterval = d; return nil })
+	return optionFunc(func(c *socketConfig) error { c.reconnectInterval = d; return nil })
 }
 
 // WithReconnectIntervalMax caps the reconnection backoff. Default is 30
@@ -159,7 +155,7 @@ func WithReconnectInterval(d time.Duration) Option {
 // NOTE this diverges from libzmq, where ZMQ_RECONNECT_IVL_MAX=0 (its
 // default) means "no exponential backoff, constant interval".
 func WithReconnectIntervalMax(d time.Duration) Option {
-	return newOption(func(c *socketConfig) error { c.reconnectIntervalMax = d; return nil })
+	return optionFunc(func(c *socketConfig) error { c.reconnectIntervalMax = d; return nil })
 }
 
 // WithHeartbeat configures the ZMTP 3.1 heartbeat. interval is how often
@@ -173,7 +169,7 @@ func WithReconnectIntervalMax(d time.Duration) Option {
 // FIN, or a NAT that dropped the flow) — disabling it is discouraged on
 // long-lived connections.
 func WithHeartbeat(interval, timeout time.Duration) Option {
-	return newOption(func(c *socketConfig) error {
+	return optionFunc(func(c *socketConfig) error {
 		c.heartbeatInterval = interval
 		c.heartbeatTimeout = timeout
 		c.heartbeatSet = true
@@ -203,7 +199,7 @@ func WithHeartbeat(interval, timeout time.Duration) Option {
 //
 // Pass 0 to disable the limit — NOT recommended for untrusted peers.
 func WithMaxMessageSize(n int64) Option {
-	return newOption(func(c *socketConfig) error { c.maxMessageSize = n; return nil })
+	return optionFunc(func(c *socketConfig) error { c.maxMessageSize = n; return nil })
 }
 
 // WithRecvBufferPool, when enabled, receives inbound frames larger than
@@ -234,7 +230,7 @@ func WithMaxMessageSize(n int64) Option {
 // for which Release does nothing. The option affects receiving only, and
 // is not applicable to STREAM sockets.
 func WithRecvBufferPool(enabled bool) Option {
-	return newOption(func(c *socketConfig) error { c.recvBufferPool = enabled; return nil })
+	return optionFunc(func(c *socketConfig) error { c.recvBufferPool = enabled; return nil })
 }
 
 // WithRouterMandatory controls ROUTER.Send behaviour for unroutable
@@ -244,7 +240,7 @@ func WithRecvBufferPool(enabled bool) Option {
 // safer default for request/response services that need to observe
 // delivery failures.
 func WithRouterMandatory(enabled bool) Option {
-	return newOption(func(c *socketConfig) error { c.routerMandatory = enabled; return nil })
+	return optionFunc(func(c *socketConfig) error { c.routerMandatory = enabled; return nil })
 }
 
 // WithXPubVerbose controls subscription deduplication on XPUB. Default is
@@ -255,7 +251,7 @@ func WithRouterMandatory(enabled bool) Option {
 // applications that track subscriber churn or implement their own
 // authorization on subscriptions.
 func WithXPubVerbose(enabled bool) Option {
-	return newOption(func(c *socketConfig) error { c.xpubVerbose = enabled; return nil })
+	return optionFunc(func(c *socketConfig) error { c.xpubVerbose = enabled; return nil })
 }
 
 // WithSubscribe adds a subscription prefix to a SUB (or XSUB) socket. May
@@ -267,7 +263,7 @@ func WithXPubVerbose(enabled bool) Option {
 // publishers. This enables independent components on the same socket to
 // manage their own subscriptions without interfering.
 func WithSubscribe(prefix []byte) Option {
-	return newOption(func(c *socketConfig) error {
+	return optionFunc(func(c *socketConfig) error {
 		c.subscriptions = append(c.subscriptions, bytes.Clone(prefix))
 		return nil
 	})
@@ -291,7 +287,7 @@ func WithSubscribe(prefix []byte) Option {
 // runs no mechanism: Bind or Connect on inproc:// fails with
 // [ErrEndpointInvalid] for a socket with any PLAIN or CURVE option.
 func WithPlainAuth(fn func(user, pass string) bool) Option {
-	return newOption(func(c *socketConfig) error { c.plainAuth = fn; c.plainAuthSet = true; return nil })
+	return optionFunc(func(c *socketConfig) error { c.plainAuth = fn; c.plainAuthSet = true; return nil })
 }
 
 // WithPlainClient makes the socket the PLAIN client, presenting (username,
@@ -302,7 +298,7 @@ func WithPlainAuth(fn func(user, pass string) bool) Option {
 // switch to CURVE for any network you do not trust. Like every mechanism,
 // it rules out inproc:// (see [WithPlainAuth]).
 func WithPlainClient(username, password string) Option {
-	return newOption(func(c *socketConfig) error {
+	return optionFunc(func(c *socketConfig) error {
 		c.plainClient = true
 		c.plainClientUser = username
 		c.plainClientPass = password
@@ -317,7 +313,7 @@ func WithPlainClient(username, password string) Option {
 // so a handler installed for PLAIN or CURVE does not start vetting every NULL
 // socket. The default is the empty domain.
 func WithZAPDomain(domain string) Option {
-	return newOption(func(c *socketConfig) error {
+	return optionFunc(func(c *socketConfig) error {
 		c.zapDomain = domain
 		return nil
 	})
@@ -337,7 +333,7 @@ func WithZAPDomain(domain string) Option {
 // inproc runs no mechanism, so a CURVE socket cannot Bind or Connect on
 // inproc:// (the call fails with [ErrEndpointInvalid]).
 func WithCurveServer(secretKey []byte) Option {
-	return newOption(func(c *socketConfig) error {
+	return optionFunc(func(c *socketConfig) error {
 		c.curveServer = true
 		c.curveSecretKey = bytes.Clone(secretKey)
 		return nil
@@ -353,7 +349,7 @@ func WithCurveServer(secretKey []byte) Option {
 // resulting channel is forward-secret (ephemeral session keys) and
 // mutually authenticated. As with [WithCurveServer], inproc:// is ruled out.
 func WithCurveClient(serverKey, publicKey, secretKey []byte) Option {
-	return newOption(func(c *socketConfig) error {
+	return optionFunc(func(c *socketConfig) error {
 		c.curveServer = false
 		c.curveClientSet = true
 		c.curveServerKey = bytes.Clone(serverKey)
@@ -392,7 +388,7 @@ func WithCurveClient(serverKey, publicKey, secretKey []byte) Option {
 // custom mechanism cannot Bind or Connect on inproc:// (the call fails
 // with [ErrEndpointInvalid]).
 func WithSecurityMech(newMech func(role security.Role, meta map[string]string) (security.Mech, error)) Option {
-	return newOption(func(c *socketConfig) error {
+	return optionFunc(func(c *socketConfig) error {
 		if newMech == nil {
 			return fmt.Errorf("gozmq: WithSecurityMech requires a non-nil constructor")
 		}
@@ -409,7 +405,7 @@ func WithSecurityMech(newMech func(role security.Role, meta map[string]string) (
 // [ErrHandshakeTimeout] and, on a client socket, the reconnector retries
 // with the configured backoff.
 func WithHandshakeTimeout(d time.Duration) Option {
-	return newOption(func(c *socketConfig) error {
+	return optionFunc(func(c *socketConfig) error {
 		c.handshakeTimeout = d
 		c.handshakeTimeoutSet = true
 		return nil
@@ -426,7 +422,7 @@ func WithHandshakeTimeout(d time.Duration) Option {
 // one may still be in flight after [Socket.Monitor] (nil) or Close
 // returns. Stop reading and let it be garbage collected instead.
 func WithMonitor(ch chan<- Event, mask EventType) Option {
-	return newOption(func(c *socketConfig) error {
+	return optionFunc(func(c *socketConfig) error {
 		c.monitor = ch
 		c.monitorMask = mask
 		return nil
@@ -436,11 +432,9 @@ func WithMonitor(ch chan<- Event, mask EventType) Option {
 // WithLogger sets the [*slog.Logger] used for internal diagnostics
 // emitted by this socket and its child sessions — handshake failures,
 // reconnect attempts, heartbeat loss, and teardown anomalies. Default is
-// [slog.Default]. Passing nil resets to the process default. This option
-// is optional; it exists primarily so tests can capture structured log
-// output without mutating the process-wide default logger.
+// [slog.Default]. Passing nil resets to the process default.
 func WithLogger(l *slog.Logger) Option {
-	return newOption(func(c *socketConfig) error { c.logger = l; return nil })
+	return optionFunc(func(c *socketConfig) error { c.logger = l; return nil })
 }
 
 func nonNeg[T int | int64 | time.Duration](name string, v T) error {
@@ -458,8 +452,8 @@ func nonNeg[T int | int64 | time.Duration](name string, v T) error {
 const MaxHWM = 1 << 20
 
 func hwmInRange(name string, v int) error {
-	if v < 0 {
-		return fmt.Errorf("gozmq: %s requires n >= 0", name)
+	if err := nonNeg(name, v); err != nil {
+		return err
 	}
 	if v > MaxHWM {
 		return fmt.Errorf("gozmq: %s(%d) exceeds MaxHWM (%d); use 0 for an unbounded queue", name, v, MaxHWM)

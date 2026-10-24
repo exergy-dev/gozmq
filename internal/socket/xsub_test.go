@@ -19,7 +19,7 @@ import (
 // updating the local filter.
 func TestXSub_SendSubscribeViaMessage(t *testing.T) {
 	t.Parallel()
-	eng, _ := socket.NewXSubEngine()
+	eng := socket.NewXSubEngine()
 	defer eng.Close()
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
@@ -49,7 +49,7 @@ func TestXSub_SendSubscribeViaMessage(t *testing.T) {
 // duplicate command.
 func TestXSub_SendDuplicateSubscribeForwardsTwice(t *testing.T) {
 	t.Parallel()
-	eng, _ := socket.NewXSubEngine()
+	eng := socket.NewXSubEngine()
 	defer eng.Close()
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
@@ -73,7 +73,7 @@ func TestXSub_SendDuplicateSubscribeForwardsTwice(t *testing.T) {
 // command; anything else is an FSM violation.
 func TestXSub_SendNonSubscribeRejected(t *testing.T) {
 	t.Parallel()
-	eng, _ := socket.NewXSubEngine()
+	eng := socket.NewXSubEngine()
 	defer eng.Close()
 
 	err := eng.Send(context.Background(), msg.FromBytes([]byte("not a sub msg")))
@@ -84,7 +84,7 @@ func TestXSub_SendNonSubscribeRejected(t *testing.T) {
 // the local subscription filter on inbound data.
 func TestXSub_RecvFiltersByLocalSubscription(t *testing.T) {
 	t.Parallel()
-	eng, _ := socket.NewXSubEngine()
+	eng := socket.NewXSubEngine()
 	defer eng.Close()
 
 	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
@@ -118,9 +118,11 @@ func TestSubXSub_SubscriptionShapedData(t *testing.T) {
 			var eng socket.Engine
 			var sub *socket.SubEngine
 			if xsub {
-				eng, sub = socket.NewXSubEngine()
+				sub = socket.NewXSubEngine()
+				eng = sub
 			} else {
-				eng, sub = socket.NewSubEngine()
+				sub = socket.NewSubEngine()
+				eng = sub
 			}
 			ctx := testutil.Ctx(t)
 			ends, peerEnds := makePairs(peers, 16, 16)

@@ -99,9 +99,8 @@ func (e *routerEngine) Send(ctx context.Context, m *msg.Msg) error {
 	return nil
 }
 
-// Metrics reports the ROUTER counters. Dropped covers silent non-mandatory
-// route-misses (including vanished peers) plus the FairQueue's
-// ctx-cancel/close drops.
+// Metrics reports the ROUTER counters. Dropped counts silent non-mandatory
+// route misses, including vanished peers.
 func (e *routerEngine) Metrics() Metrics {
 	return e.metrics(e.dropped.Load())
 }
