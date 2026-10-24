@@ -8,6 +8,12 @@ migration hint.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-23
+
+A performance release: fewer allocations on every path, one frame encode
+path, and lock-free subscribe-to-all matching, with one contract change on
+`security.Mech`. Breaking changes are listed first, with a migration hint.
+
 ### Breaking changes
 
 - **`security.Mech` gains an ownership rule for `EncodeFrame` and
@@ -183,7 +189,8 @@ pushed to GitHub or a module proxy. It has the memory-exhaustion, CURVE
 and crash issues listed under 0.1.1, so it is not available and should not
 be used; the first published version is 0.1.1.
 
-[Unreleased]: https://github.com/exergy-dev/gozmq/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/exergy-dev/gozmq/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/exergy-dev/gozmq/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/exergy-dev/gozmq/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/exergy-dev/gozmq/releases/tag/v0.1.1
 [0.1.0]: https://github.com/exergy-dev/gozmq/commit/62a43b78a3561a7b8db530ce710dc57dc09b0bcd
