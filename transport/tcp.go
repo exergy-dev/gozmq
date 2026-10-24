@@ -195,7 +195,7 @@ func (c *conn) WriteBuffers(buffers *net.Buffers) (int64, error) {
 	for _, b := range *buffers {
 		c.wbuf = append(c.wbuf, b...)
 	}
-	n, err := c.Conn.Write(c.wbuf)
+	n, err := c.Write(c.wbuf)
 	*buffers = (*buffers)[len(*buffers):] // consumed, as WriteTo would
 	if cap(c.wbuf) > maxRetainedWriteBuf {
 		c.wbuf = nil
