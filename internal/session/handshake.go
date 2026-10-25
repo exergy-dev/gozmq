@@ -11,7 +11,6 @@ import (
 
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
-	"github.com/exergy-dev/gozmq/security"
 )
 
 // Greeting layout constants (ZMTP 3.1 §2.1).
@@ -41,8 +40,8 @@ var handshakeCodec = zmtp.NewFrameCodec(handshakeMaxFrame)
 // On failure it returns an error wrapping zmqerr.ErrHandshakeTimeout (for
 // timeouts) or the underlying cause, preferring the writer's error when a
 // write failed, since the read error that follows is only its echo.
-func (s *Session) handshake() error {
-	err := s.runHandshake()
+func (s *Session) handshake() (map[string]string, error) {
+	peer, err := s.runHandshake()
 	if err != nil {
 		if werr := s.hsWriteErr.Load(); werr != nil {
 			err = fmt.Errorf("gozmq/session: write handshake: %w", *werr)
@@ -53,24 +52,26 @@ func (s *Session) handshake() error {
 			err = fmt.Errorf("%w: %w", zmqerr.ErrHandshakeTimeout, err)
 		}
 	}
-	return err
+	return peer, err
 }
 
-func (s *Session) runHandshake() error {
+// runHandshake returns the mechanism's validated peer metadata.
+func (s *Session) runHandshake() (map[string]string, error) {
 	if s.cfg.HandshakeTimeout > 0 {
 		deadline := time.Now().Add(s.cfg.HandshakeTimeout)
 		if err := s.cfg.Conn.SetDeadline(deadline); err != nil {
-			return fmt.Errorf("gozmq/session: set handshake deadline: %w", err)
+			return nil, fmt.Errorf("gozmq/session: set handshake deadline: %w", err)
 		}
 	}
 	if err := s.exchangeGreeting(); err != nil {
-		return err
+		return nil, err
 	}
 	if err := s.runSecurityHandshake(); err != nil {
-		return err
+		return nil, err
 	}
-	if err := s.finalizePeerMetadata(); err != nil {
-		return err
+	peer, err := s.finalizePeerMetadata()
+	if err != nil {
+		return nil, err
 	}
 	// Traffic-phase I/O blocks indefinitely (the heartbeat polices
 	// liveness). A failed handshake keeps the deadline so the writer's
@@ -78,7 +79,7 @@ func (s *Session) runHandshake() error {
 	if s.cfg.HandshakeTimeout > 0 {
 		_ = s.cfg.Conn.SetDeadline(time.Time{})
 	}
-	return nil
+	return peer, nil
 }
 
 // exchangeGreeting queues our greeting, reads the peer's, validates it,
@@ -177,15 +178,15 @@ func (s *Session) runSecurityHandshake() error {
 	}
 }
 
-func (s *Session) finalizePeerMetadata() error {
-	props, err := peerMetadataFromMechanism(s.cfg.Mech)
-	if err != nil {
-		return err
+func (s *Session) finalizePeerMetadata() (map[string]string, error) {
+	props := s.cfg.Mech.PeerMetadata()
+	if props == nil {
+		return nil, fmt.Errorf("gozmq/session: mechanism %q finished handshake without peer metadata", s.cfg.Mech.Name())
 	}
 	if err := validatePeerIdentity(props); err != nil {
-		return err
+		return nil, err
 	}
-	return validateSocketTypeCompatibility(s.cfg.Mech.Metadata(), props)
+	return props, validateSocketTypeCompatibility(s.cfg.Mech.Metadata(), props)
 }
 
 // validatePeerIdentity enforces ZMTP 3.1's rules on a peer-advertised
@@ -205,14 +206,6 @@ func validatePeerIdentity(props map[string]string) error {
 		return fmt.Errorf("%w: peer Identity starts with a zero byte", zmqerr.ErrMalformedFrame)
 	}
 	return nil
-}
-
-func peerMetadataFromMechanism(m security.Mech) (map[string]string, error) {
-	props := m.PeerMetadata()
-	if props == nil {
-		return nil, fmt.Errorf("gozmq/session: mechanism %q finished handshake without peer metadata", m.Name())
-	}
-	return props, nil
 }
 
 func validateSocketTypeCompatibility(localMeta, peerMeta map[string]string) error {

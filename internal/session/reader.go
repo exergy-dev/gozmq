@@ -2,8 +2,6 @@ package session
 
 import (
 	"bytes"
-	"context"
-	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -41,13 +39,12 @@ const minScratchTail = 512
 // out closes the conn.
 func (s *Session) runReader() {
 	defer s.exit()
-	err := s.handshake()
+	peer, err := s.handshake()
 	if err == nil {
 		// Seed the last-inbound clock so a heartbeat fired immediately
 		// after handshake doesn't trip the timeout.
 		s.lastInboundUnix.Store(s.cfg.Now())
-		identity := []byte(s.cfg.Mech.PeerMetadata()["Identity"])
-		s.sessionPipe, s.enginePipe = pipe.NewPair(s.cfg.RecvHWM, s.cfg.SendHWM, nil, identity)
+		s.sessionPipe, s.enginePipe = pipe.NewPair(s.cfg.RecvHWM, s.cfg.SendHWM, nil, []byte(peer["Identity"]))
 	}
 	close(s.hsOut) // the writer moves on to traffic, or exits on failure
 	if err != nil {
@@ -267,18 +264,12 @@ func (s *Session) publishInbound(m *msg.Msg) error {
 	}
 	s.flushInbound() // never block with a wakeup owed
 	s.readerParked.Store(true)
+	// Send with no abort channel fails only with io.ErrClosedPipe or
+	// s.ctx's cancellation: both are shutdown.
 	err := s.sessionPipe.Send(s.ctx, m)
 	s.lastInboundUnix.Store(s.cfg.Now())
 	s.readerParked.Store(false)
-	if err != nil {
-		// Distinguish ctx-cancel/closed-pipe (normal shutdown) from
-		// genuine errors.
-		if errors.Is(err, context.Canceled) || errors.Is(err, io.ErrClosedPipe) {
-			return err
-		}
-		return fmt.Errorf("gozmq/session: publish inbound: %w", err)
-	}
-	return nil
+	return err
 }
 
 // inboundFlushCap bounds how many published messages may wait for their
@@ -357,13 +348,7 @@ func (s *Session) handleCommand(body []byte) error {
 			s.cfg.Logger.Debug("gozmq/session: ignoring subscription command", "name", name)
 			return nil
 		}
-		if err := s.publishInbound(msg.FromBytes(zmtp.SubscriptionFrame(name == "SUBSCRIBE", rest))); err != nil {
-			if !zmqerr.IsShutdown(err) {
-				return fmt.Errorf("gozmq/session: publish subscription: %w", err)
-			}
-			return err
-		}
-		return nil
+		return s.publishInbound(msg.FromBytes(zmtp.SubscriptionFrame(name == "SUBSCRIBE", rest)))
 	case "DISCONNECT":
 		// Peer requested an orderly shutdown. Surface as a normal exit.
 		return io.EOF

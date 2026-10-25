@@ -295,12 +295,6 @@ func New(cfg Config) *Session {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	if cfg.SendHWM < 0 {
-		cfg.SendHWM = 0
-	}
-	if cfg.RecvHWM < 0 {
-		cfg.RecvHWM = 0
-	}
 	if cfg.Now == nil {
 		cfg.Now = monoNow
 	}

@@ -165,20 +165,14 @@ type conn struct {
 
 // newConn adapts c, a TCP or TLS connection, with scheme:// endpoints.
 func newConn(c net.Conn, scheme string) *conn {
+	_, isTCP := c.(*net.TCPConn)
+	_, isUnix := c.(*net.UnixConn)
 	return &conn{
 		Conn:     c,
 		local:    formatTCPEndpoint(scheme, c.LocalAddr()),
 		remote:   formatTCPEndpoint(scheme, c.RemoteAddr()),
-		vectored: isVectored(c),
+		vectored: isTCP || isUnix,
 	}
-}
-
-func isVectored(c net.Conn) bool {
-	switch c.(type) {
-	case *net.TCPConn, *net.UnixConn:
-		return true
-	}
-	return false
 }
 
 func (c *conn) LocalEndpoint() string  { return c.local }

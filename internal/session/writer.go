@@ -52,8 +52,9 @@ const (
 // *msg.Msg values from the session-side pipe, splits them into ZMTP frames
 // with MORE flags applied to all but the last, encodes each body via the
 // security mechanism, and writes them. PONG/PING commands from the reader
-// and the heartbeat arrive via cmdCh and go out the same way (see
-// writerNext).
+// and the heartbeat arrive via cmdCh and go out the same way: all
+// traffic-phase wire writes funnel through this goroutine (see the cmdCh
+// field doc).
 //
 // Throughput optimization: after receiving the first message, the writer
 // tries a non-blocking Recv for additional queued messages. All accumulated
@@ -77,9 +78,16 @@ func (s *Session) runWriter() {
 	var batch writerBatch
 
 	for {
-		m, err := s.writerNext()
+		// Block until the writer has work: a queued user message, a
+		// PING/PONG queued on cmdCh (cmdWake aborts the receive; m is then
+		// nil and writeBatchFrom finds the command), writer cancellation,
+		// or pipe closure (queued messages first, then io.EOF).
+		m, err := s.sessionPipe.RecvOr(s.writerCtx, s.cmdWake)
+		if errors.Is(err, pipe.ErrAborted) {
+			m, err = nil, nil
+		}
 		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			if errors.Is(err, context.Canceled) {
 				// writerCtx was cancelled by the socket-level linger path.
 				// Drain whatever is already queued, then exit WITHOUT
 				// tearing down the conn. No settle delay is needed: the
@@ -120,20 +128,6 @@ func (s *Session) writeHandshake() bool {
 		}
 	}
 	return !failed && s.sessionPipe != nil
-}
-
-// writerNext blocks until the writer has work: a queued user message, a
-// PING/PONG queued on cmdCh (cmdWake aborts the receive; m is then nil and
-// writeBatchFrom finds the command), writer cancellation, or pipe closure
-// (queued messages first, then io.EOF). All traffic-phase wire writes
-// funnel through the writer goroutine — see the cmdCh field doc for why
-// the reader/heartbeat goroutines never write directly.
-func (s *Session) writerNext() (*msg.Msg, error) {
-	m, err := s.sessionPipe.RecvOr(s.writerCtx, s.cmdWake)
-	if errors.Is(err, pipe.ErrAborted) {
-		return nil, nil
-	}
-	return m, err
 }
 
 // writeBatchFrom encodes the commands queued on cmdCh, then first (when
