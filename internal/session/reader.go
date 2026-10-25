@@ -252,17 +252,9 @@ func detachFrames(frames [][]byte, scratch []byte) {
 
 // lendFrames returns a lent message holding frames whose final Release
 // returns the pool buffers bufs (bufs is copied; the reader reuses it).
+// One allocation for the common one-buffer message.
 func lendFrames(frames, bufs [][]byte) *msg.Msg {
-	if len(bufs) == 1 {
-		b := bufs[0]
-		return msg.NewWithRelease(func() { bufpool.Put(b) }, frames...)
-	}
-	owned := slices.Clone(bufs)
-	return msg.NewWithRelease(func() {
-		for _, b := range owned {
-			bufpool.Put(b)
-		}
-	}, frames...)
+	return msg.NewLent(bufpool.Put, bufs, frames...)
 }
 
 // publishInbound enqueues a fully-assembled message on the session-side

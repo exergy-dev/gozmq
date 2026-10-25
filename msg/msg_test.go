@@ -216,3 +216,31 @@ func TestFromFramesCopyIsUsable(t *testing.T) {
 	s.AppendFrame([]byte("y"))
 	require.Equal(t, [][]byte{[]byte("x"), []byte("y")}, s.Frames())
 }
+
+// TestMsgNewLent: put runs once per buffer after the last reference goes,
+// Derive shares the lease, and the one-buffer message is one allocation.
+func TestMsgNewLent(t *testing.T) {
+	var got [][]byte
+	put := func(b []byte) { got = append(got, b) }
+	a, b := []byte("aaaa"), []byte("bbbb")
+
+	m := NewLent(put, [][]byte{a, b}, a[:2], b[:2])
+	require.True(t, m.Lent())
+	d := m.Derive(m.Frames()[1])
+	m.Release()
+	require.Empty(t, got, "the derived message still holds the frames")
+	d.Release()
+	require.Equal(t, [][]byte{a, b}, got)
+
+	got = nil
+	one := NewLent(put, [][]byte{a}, a)
+	one.Release()
+	require.Equal(t, [][]byte{a}, got)
+	require.Panics(t, func() { NewLent(nil, [][]byte{a}, a) })
+
+	allocs := testing.AllocsPerRun(100, func() {
+		m := NewLent(put, [][]byte{a}, a)
+		m.Release()
+	})
+	require.LessOrEqual(t, allocs, 1.0, "one-buffer lent message is one allocation")
+}

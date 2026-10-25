@@ -66,10 +66,26 @@ type Msg struct {
 	refs atomic.Int32
 }
 
-// lease tracks the messages still holding a set of lent frames.
+// lease tracks the messages still holding a set of lent frames. The
+// frames go back through release, or, for NewLent, through put once per
+// buffer in bufs.
 type lease struct {
 	holders atomic.Int32
 	release func()
+	put     func([]byte)
+	bufs    [][]byte
+}
+
+// giveBack hands the frames back to their owner; called once, by the
+// last holder.
+func (l *lease) giveBack() {
+	if l.put != nil {
+		for _, b := range l.bufs {
+			l.put(b)
+		}
+		return
+	}
+	l.release()
 }
 
 // New returns an empty Msg.
@@ -265,6 +281,36 @@ func NewWithRelease(release func(), frames ...[]byte) *Msg {
 	return m
 }
 
+// NewLent returns a lent Msg holding frames, as NewWithRelease does, whose
+// storage is the buffers bufs: put is called once with each of them after
+// the last reference is released. For one buffer the message, its lease
+// and the buffer list are a single allocation, which is why the session
+// reader uses it rather than a closure over NewWithRelease. put must not
+// be nil; bufs is copied.
+func NewLent(put func([]byte), bufs [][]byte, frames ...[]byte) *Msg {
+	if put == nil {
+		panic("gozmq: msg.NewLent with a nil put")
+	}
+	ml := &struct {
+		Msg
+		lease lease
+		one   [1][]byte
+	}{}
+	m := &ml.Msg
+	m.setFrames(frames)
+	ml.lease.put = put
+	if len(bufs) == 1 {
+		ml.one[0] = bufs[0]
+		ml.lease.bufs = ml.one[:]
+	} else {
+		ml.lease.bufs = append([][]byte(nil), bufs...)
+	}
+	ml.lease.holders.Store(1)
+	m.lease = &ml.lease
+	m.refs.Store(1)
+	return m
+}
+
 // Lent reports whether m's frames are lent memory that Release gives back
 // (see the package doc): true for NewWithRelease messages, messages
 // derived from them, and messages whose frames a socket received into
@@ -355,7 +401,7 @@ func (m *Msg) Release() {
 	case n > 0:
 	case n == 0:
 		if l.holders.Add(-1) == 0 {
-			l.release()
+			l.giveBack()
 		}
 	default:
 		panic("gozmq: Msg.Release called more times than the message was retained")
