@@ -1,7 +1,6 @@
 package curve
 
 import (
-	"encoding/binary"
 	"encoding/hex"
 	"testing"
 
@@ -93,13 +92,9 @@ func TestCurve_ForgedVouchLowOrderClientKey(t *testing.T) {
 	vouch := append(vouchR[:], box.SealAfterPrecomputation(nil, vplain, &vn, &k)...)
 	initPlain := append(append(append([]byte{}, C[:]...), vouch...),
 		security.EncodeMetadata(map[string]string{"Socket-Type": "DEALER"})...)
-	counter := cli.ourShortNonce
-	ib := sealShort(prefixInitiate, counter, initPlain, &cli.shared) // (S', c'), precomputed by parseWelcome
-	body := []byte{byte(len(cmdInitiate))}
-	body = append(body, cmdInitiate...)
+	body := zmtp.AppendCommandName(nil, cmdInitiate)
 	body = append(body, cookie...)
-	body = binary.BigEndian.AppendUint64(body, counter)
-	body = append(body, ib...)
+	body = cli.appendShortBox(body, prefixInitiate, initPlain, &cli.shared) // (S', c'), precomputed by parseWelcome
 
 	_, done, err := srv.NextHandshake(body)
 	require.ErrorIs(t, err, zmqerr.ErrAuthFailed, "server accepted a forged vouch for a low-order C")

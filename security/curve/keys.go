@@ -18,7 +18,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 
 	"golang.org/x/crypto/nacl/box"
 )
@@ -33,12 +32,7 @@ type Key [KeySize]byte
 // crypto/rand. The first return is the public key, the second the secret.
 // This matches the ordering of libzmq's zmq_curve_keypair helper.
 func GenerateKeyPair() (pub Key, priv Key, err error) {
-	return generateKeyPair(rand.Reader)
-}
-
-// generateKeyPair is the rand-injectable variant used by tests.
-func generateKeyPair(r io.Reader) (pub Key, priv Key, err error) {
-	pubPtr, privPtr, err := box.GenerateKey(r)
+	pubPtr, privPtr, err := box.GenerateKey(rand.Reader)
 	if err != nil {
 		return Key{}, Key{}, fmt.Errorf("gozmq/security/curve: GenerateKeyPair: %w", err)
 	}
@@ -138,14 +132,12 @@ func Z85EncodeKey(k Key) string { return Z85Encode(k[:]) }
 // Z85DecodeKey is a convenience wrapper that decodes a 40-character Z85
 // string into a 32-byte Key.
 func Z85DecodeKey(s string) (Key, error) {
-	var k Key
 	if len(s) != 40 {
-		return k, fmt.Errorf("%w: key must be 40 chars, got %d", ErrInvalidZ85, len(s))
+		return Key{}, fmt.Errorf("%w: key must be 40 chars, got %d", ErrInvalidZ85, len(s))
 	}
 	b, err := Z85Decode(s)
 	if err != nil {
-		return k, err
+		return Key{}, err
 	}
-	copy(k[:], b)
-	return k, nil
+	return Key(b), nil
 }
