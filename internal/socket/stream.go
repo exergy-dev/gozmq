@@ -92,6 +92,7 @@ func (e *streamEngine) Send(ctx context.Context, m *msg.Msg) error {
 		out = msg.FromBytes(bytes.Join(body, nil))
 	}
 	if err := p.SendOr(ctx, out, e.closeCh); err != nil {
+		out.Release()
 		if errors.Is(err, pipe.ErrAborted) {
 			return fmt.Errorf("stream send: %w", zmqerr.ErrSocketClosed)
 		}
