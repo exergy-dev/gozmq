@@ -46,8 +46,8 @@ func (s *Session) runReader() {
 		// Seed the last-inbound clock so a heartbeat fired immediately
 		// after handshake doesn't trip the timeout.
 		s.lastInboundUnix.Store(s.cfg.Now())
-		peerInfo := pipe.PeerInfo{Identity: []byte(s.cfg.Mech.PeerMetadata()["Identity"])}
-		s.sessionPipe, s.enginePipe = pipe.NewPair(s.cfg.RecvHWM, s.cfg.SendHWM, pipe.PeerInfo{}, peerInfo)
+		identity := []byte(s.cfg.Mech.PeerMetadata()["Identity"])
+		s.sessionPipe, s.enginePipe = pipe.NewPair(s.cfg.RecvHWM, s.cfg.SendHWM, nil, identity)
 	}
 	close(s.hsOut) // the writer moves on to traffic, or exits on failure
 	if err != nil {

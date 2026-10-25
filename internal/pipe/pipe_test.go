@@ -23,7 +23,7 @@ import (
 func TestRoundTrip_Basic(t *testing.T) {
 	forEachKind(t, func(t *testing.T, k kind) {
 		t.Parallel()
-		a, b := k.newPair(2, 2, PeerInfo{Identity: []byte("b-id")}, PeerInfo{Identity: []byte("a-id")})
+		a, b := k.newPair(2, 2, []byte("b-id"), []byte("a-id"))
 		defer a.Close()
 		defer b.Close()
 
@@ -31,7 +31,7 @@ func TestRoundTrip_Basic(t *testing.T) {
 
 		payload := msg.FromBytes([]byte("hello"))
 		require.NoError(t, a.Send(ctx, payload))
-		got, err := b.Recv(ctx)
+		got, err := b.RecvOr(ctx, nil)
 		require.NoError(t, err)
 		require.Equal(t, "hello", string(got.Bytes()))
 
@@ -46,7 +46,7 @@ func TestHWM_Blocks_Send_On_Full(t *testing.T) {
 	forEachKind(t, func(t *testing.T, k kind) {
 		t.Parallel()
 		const hwm = 3
-		a, b := k.newPair(hwm, hwm, PeerInfo{}, PeerInfo{})
+		a, b := k.newPair(hwm, hwm, nil, nil)
 		defer a.Close()
 		defer b.Close()
 
@@ -63,7 +63,7 @@ func TestHWM_Blocks_Send_On_Full(t *testing.T) {
 		require.ErrorIs(t, err, context.DeadlineExceeded, "expected DeadlineExceeded on over-HWM send")
 
 		// Drain one; another send must now succeed.
-		_, err = b.Recv(ctx)
+		_, err = b.RecvOr(ctx, nil)
 		require.NoError(t, err, "b.Recv drain")
 		require.NoError(t, a.Send(ctx, msg.FromBytes([]byte{byte(hwm)})), "a.Send post-drain")
 	})
@@ -72,7 +72,7 @@ func TestHWM_Blocks_Send_On_Full(t *testing.T) {
 func TestHWMZero_IsUnbounded(t *testing.T) {
 	forEachKind(t, func(t *testing.T, k kind) {
 		t.Parallel()
-		a, b := k.newPair(0, 0, PeerInfo{}, PeerInfo{})
+		a, b := k.newPair(0, 0, nil, nil)
 		defer a.Close()
 		defer b.Close()
 
@@ -85,7 +85,7 @@ func TestHWMZero_IsUnbounded(t *testing.T) {
 		}
 
 		for i := 0; i < 10000; i++ {
-			got, err := b.Recv(ctx)
+			got, err := b.RecvOr(ctx, nil)
 			require.NoError(t, err, "b.Recv[%d]", i)
 			require.Equal(t, byte(i), got.Bytes()[0], "b.Recv[%d]", i)
 		}
@@ -95,7 +95,7 @@ func TestHWMZero_IsUnbounded(t *testing.T) {
 func TestHWMZero_MixedDirection(t *testing.T) {
 	forEachKind(t, func(t *testing.T, k kind) {
 		t.Parallel()
-		a, b := k.newPair(0, 1, PeerInfo{}, PeerInfo{})
+		a, b := k.newPair(0, 1, nil, nil)
 		defer a.Close()
 		defer b.Close()
 
@@ -117,7 +117,7 @@ func TestHWMZero_MixedDirection(t *testing.T) {
 func TestClose_Unblocks_Send(t *testing.T) {
 	forEachKind(t, func(t *testing.T, k kind) {
 		t.Parallel()
-		a, b := k.newPair(1, 1, PeerInfo{}, PeerInfo{})
+		a, b := k.newPair(1, 1, nil, nil)
 		defer a.Close()
 		defer b.Close()
 
@@ -137,7 +137,7 @@ func TestClose_Unblocks_Send(t *testing.T) {
 func TestClose_Drains_Then_EOF(t *testing.T) {
 	forEachKind(t, func(t *testing.T, k kind) {
 		t.Parallel()
-		a, b := k.newPair(4, 4, PeerInfo{}, PeerInfo{})
+		a, b := k.newPair(4, 4, nil, nil)
 
 		ctx := context.Background()
 		for i := 0; i < 3; i++ {
@@ -146,11 +146,11 @@ func TestClose_Drains_Then_EOF(t *testing.T) {
 		require.NoError(t, a.Close())
 
 		for i := 0; i < 3; i++ {
-			m, err := b.Recv(ctx)
+			m, err := b.RecvOr(ctx, nil)
 			require.NoError(t, err, "Recv[%d]", i)
 			require.Equal(t, byte(i), m.Bytes()[0], "Recv[%d]", i)
 		}
-		_, err := b.Recv(ctx)
+		_, err := b.RecvOr(ctx, nil)
 		require.ErrorIs(t, err, io.EOF, "expected io.EOF after drain")
 	})
 }
@@ -159,7 +159,7 @@ func TestClose_Drains_Then_EOF(t *testing.T) {
 func TestCtx_Cancel_Wakes_Send(t *testing.T) {
 	forEachKind(t, func(t *testing.T, k kind) {
 		t.Parallel()
-		a, b := k.newPair(1, 1, PeerInfo{}, PeerInfo{})
+		a, b := k.newPair(1, 1, nil, nil)
 		defer a.Close()
 		defer b.Close()
 
@@ -176,13 +176,13 @@ func TestCtx_Cancel_Wakes_Send(t *testing.T) {
 func TestTrySend_FastPath(t *testing.T) {
 	forEachKind(t, func(t *testing.T, k kind) {
 		t.Parallel()
-		a, b := k.newPair(1, 1, PeerInfo{}, PeerInfo{})
+		a, b := k.newPair(1, 1, nil, nil)
 		defer a.Close()
 		defer b.Close()
 
 		require.True(t, a.TrySend(msg.FromBytes([]byte("one"))), "TrySend on empty pipe should succeed")
 		assert.False(t, a.TrySend(msg.FromBytes([]byte("two"))), "TrySend on full pipe should fail")
-		got, err := b.Recv(context.Background())
+		got, err := b.RecvOr(context.Background(), nil)
 		require.NoError(t, err)
 		require.Equal(t, "one", string(got.Bytes()))
 	})
@@ -192,7 +192,7 @@ func TestTrySend_FastPath(t *testing.T) {
 func TestDoubleClose_Idempotent(t *testing.T) {
 	forEachKind(t, func(t *testing.T, k kind) {
 		t.Parallel()
-		a, b := k.newPair(1, 1, PeerInfo{}, PeerInfo{})
+		a, b := k.newPair(1, 1, nil, nil)
 		require.NoError(t, a.Close())
 		require.NoError(t, a.Close())
 		require.NoError(t, b.Close())
@@ -203,7 +203,7 @@ func TestDoubleClose_Idempotent(t *testing.T) {
 func TestClosed_Channel(t *testing.T) {
 	forEachKind(t, func(t *testing.T, k kind) {
 		t.Parallel()
-		a, b := k.newPair(1, 1, PeerInfo{}, PeerInfo{})
+		a, b := k.newPair(1, 1, nil, nil)
 		defer a.Close()
 		defer b.Close()
 
@@ -234,7 +234,7 @@ func TestProperty_HWM_Invariant(t *testing.T) {
 		rng := rand.New(rand.NewPCG(1, 2))
 		const ops = 300
 		for hwm := 1; hwm <= 8; hwm++ {
-			a, b := k.newPair(hwm, hwm, PeerInfo{}, PeerInfo{})
+			a, b := k.newPair(hwm, hwm, nil, nil)
 			pending, sent, received := 0, 0, 0
 			for i := 0; i < ops; i++ {
 				if rng.IntN(2) == 0 {
@@ -270,7 +270,7 @@ func TestProperty_Bounded_Unblock(t *testing.T) {
 	forEachKind(t, func(t *testing.T, k kind) {
 		t.Parallel()
 		for hwm := 1; hwm <= 8; hwm++ {
-			a, b := k.newPair(hwm, hwm, PeerInfo{}, PeerInfo{})
+			a, b := k.newPair(hwm, hwm, nil, nil)
 			ctx := context.Background()
 			for i := 0; i < hwm; i++ {
 				require.NoError(t, a.Send(ctx, msg.FromBytes([]byte{byte(i)})), "hwm=%d fill[%d]", hwm, i)
@@ -285,7 +285,7 @@ func TestProperty_Bounded_Unblock(t *testing.T) {
 				return err
 			}, func() {
 				freed.Store(time.Now().UnixNano())
-				_, err := b.Recv(ctx)
+				_, err := b.RecvOr(ctx, nil)
 				require.NoError(t, err, "hwm=%d drain", hwm)
 			})
 			require.NoError(t, err, "hwm=%d blocked Send", hwm)
@@ -305,7 +305,7 @@ func TestProperty_Bounded_Unblock(t *testing.T) {
 func TestHWMZero_CloseDrainsThenEOF(t *testing.T) {
 	forEachKind(t, func(t *testing.T, k kind) {
 		t.Parallel()
-		a, b := k.newPair(0, 0, PeerInfo{}, PeerInfo{})
+		a, b := k.newPair(0, 0, nil, nil)
 		defer b.Close()
 
 		ctx := context.Background()
@@ -316,11 +316,11 @@ func TestHWMZero_CloseDrainsThenEOF(t *testing.T) {
 		require.NoError(t, a.Close())
 
 		for i := 0; i < n; i++ {
-			m, err := b.Recv(ctx)
+			m, err := b.RecvOr(ctx, nil)
 			require.NoError(t, err, "Recv[%d]", i)
 			require.Equal(t, byte(i), m.Bytes()[0], "Recv[%d]", i)
 		}
-		_, err := b.Recv(ctx)
+		_, err := b.RecvOr(ctx, nil)
 		require.ErrorIs(t, err, io.EOF, "expected io.EOF after the queue drained")
 	})
 }
@@ -365,7 +365,7 @@ func TestNotify_OnlyWhenIdle(t *testing.T) {
 		for _, hwm := range []int{4, 0} {
 			t.Run(map[int]string{4: "hwm4", 0: "hwm0"}[hwm], func(t *testing.T) {
 				t.Parallel()
-				a, b := k.newPair(hwm, hwm, PeerInfo{}, PeerInfo{})
+				a, b := k.newPair(hwm, hwm, nil, nil)
 				defer a.Close()
 				defer b.Close()
 				ctx := context.Background()
@@ -391,7 +391,7 @@ func TestNotify_OnlyWhenIdle(t *testing.T) {
 				requireNotArmed(t, gate, "second send before the receiver looked again")
 
 				for range 2 {
-					_, err := b.Recv(ctx)
+					_, err := b.RecvOr(ctx, nil)
 					require.NoError(t, err)
 				}
 				require.False(t, b.MarkIdle(), "empty")
@@ -437,7 +437,7 @@ func TestIdleNotify_NoLostWakeup(t *testing.T) {
 		for _, hwm := range []int{1, 0} {
 			t.Run(fmt.Sprintf("single/hwm%d", hwm), func(t *testing.T) {
 				for i := range iters {
-					a, b := k.newPair(hwm, hwm, PeerInfo{}, PeerInfo{})
+					a, b := k.newPair(hwm, hwm, nil, nil)
 					gate := notifyGate(b)
 					closeToo := i%2 == 1
 					// Both sides spin on go so they collide within nanoseconds.
@@ -463,7 +463,7 @@ func TestIdleNotify_NoLostWakeup(t *testing.T) {
 
 		for _, hwm := range []int{4, 0} {
 			t.Run(fmt.Sprintf("stream/hwm%d", hwm), func(t *testing.T) {
-				a, b := k.newPair(hwm, hwm, PeerInfo{}, PeerInfo{})
+				a, b := k.newPair(hwm, hwm, nil, nil)
 				defer a.Close()
 				gate := notifyGate(b)
 				go func() {
@@ -494,7 +494,7 @@ func TestTryRecv_DrainsWholeQueueAfterClose(t *testing.T) {
 		t.Parallel()
 		for _, hwm := range []int{0, 500} {
 			for _, closer := range []string{"sender", "receiver"} {
-				a, b := k.newPair(hwm, hwm, PeerInfo{}, PeerInfo{})
+				a, b := k.newPair(hwm, hwm, nil, nil)
 				ctx := context.Background()
 				n := 500
 				if hwm == 0 {
@@ -526,7 +526,7 @@ func TestTryRecv_DrainsWholeQueueAfterClose(t *testing.T) {
 func TestRecvOr_Abort(t *testing.T) {
 	forEachKind(t, func(t *testing.T, k kind) {
 		t.Parallel()
-		a, b := k.newPair(1, 1, PeerInfo{}, PeerInfo{})
+		a, b := k.newPair(1, 1, nil, nil)
 		defer a.Close()
 		defer b.Close()
 		ctx := context.Background()
@@ -552,7 +552,7 @@ func TestRecvOr_Abort(t *testing.T) {
 func TestHWMZero_ConcurrentChunkGrowth(t *testing.T) {
 	forEachKind(t, func(t *testing.T, k kind) {
 		t.Parallel()
-		a, b := k.newPair(0, 0, PeerInfo{}, PeerInfo{})
+		a, b := k.newPair(0, 0, nil, nil)
 		defer a.Close()
 		defer b.Close()
 		senders, per := 4, 5*k.span
@@ -573,7 +573,7 @@ func TestHWMZero_ConcurrentChunkGrowth(t *testing.T) {
 		}
 		next := make([]int, senders)
 		for got := 0; got < senders*per; got++ {
-			m, err := b.Recv(ctx)
+			m, err := b.RecvOr(ctx, nil)
 			require.NoError(t, err, "Recv %d stranded", got)
 			f := m.Frames()
 			s, seq := int(f[0][0]), int(f[1][0])<<16|int(f[1][1])<<8|int(f[1][2])
@@ -594,7 +594,7 @@ func TestSendDrained_FiresWhenPeerConsumed(t *testing.T) {
 		t.Parallel()
 		ctx := context.Background()
 		for _, hwm := range []int{0, 500} {
-			a, b := k.newPair(hwm, hwm, PeerInfo{}, PeerInfo{})
+			a, b := k.newPair(hwm, hwm, nil, nil)
 			n := 100
 			if hwm == 0 {
 				n = k.span + 100
@@ -609,7 +609,7 @@ func TestSendDrained_FiresWhenPeerConsumed(t *testing.T) {
 					require.FailNow(t, "SendDrained fired with messages unread", "hwm=%d read=%d", hwm, i)
 				default:
 				}
-				m, err := b.Recv(ctx)
+				m, err := b.RecvOr(ctx, nil)
 				require.NoError(t, err)
 				require.Equal(t, byte(i), m.Bytes()[0], "hwm=%d Recv[%d]", hwm, i)
 			}
@@ -622,7 +622,7 @@ func TestSendDrained_FiresWhenPeerConsumed(t *testing.T) {
 			_ = b.Close()
 
 			// Nothing consumed, but the peer closes: fires too.
-			a, b = k.newPair(hwm, hwm, PeerInfo{}, PeerInfo{})
+			a, b = k.newPair(hwm, hwm, nil, nil)
 			require.NoError(t, a.Send(ctx, msg.FromBytes([]byte("x"))))
 			drained = a.SendDrained()
 			_ = b.Close()

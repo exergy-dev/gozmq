@@ -20,7 +20,7 @@ func TestHWMZero_ChunkBoundaries(t *testing.T) {
 	t.Parallel()
 	forEachKind(t, func(t *testing.T, k kind) {
 		for _, n := range []int{1, k.span - 1, k.span, k.span + 1, 2 * k.span, 3*k.span + 5} {
-			a, b := k.newPair(0, 0, PeerInfo{}, PeerInfo{})
+			a, b := k.newPair(0, 0, nil, nil)
 			for i := range n {
 				require.True(t, a.TrySend(seqMsg(i)), "n=%d send %d", n, i)
 			}
@@ -47,7 +47,7 @@ func TestHWMZero_ChunkBoundaries(t *testing.T) {
 func TestHWMZero_Interleaved(t *testing.T) {
 	t.Parallel()
 	forEachKind(t, func(t *testing.T, k kind) {
-		a, b := k.newPair(0, 0, PeerInfo{}, PeerInfo{})
+		a, b := k.newPair(0, 0, nil, nil)
 		defer a.Close()
 		defer b.Close()
 		next, want := 0, 0
@@ -82,7 +82,7 @@ func TestHWMZero_ParkedRecvSeesBurst(t *testing.T) {
 	t.Parallel()
 	forEachKind(t, func(t *testing.T, k kind) {
 		for range 50 {
-			a, b := k.newPair(0, 0, PeerInfo{}, PeerInfo{})
+			a, b := k.newPair(0, 0, nil, nil)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			var wg sync.WaitGroup
 			wg.Add(1)
@@ -91,7 +91,7 @@ func TestHWMZero_ParkedRecvSeesBurst(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				for got < n {
-					if _, err := b.Recv(ctx); err != nil {
+					if _, err := b.RecvOr(ctx, nil); err != nil {
 						return
 					}
 					got++
@@ -109,21 +109,12 @@ func TestHWMZero_ParkedRecvSeesBurst(t *testing.T) {
 	})
 }
 
-// TestChannel_DeferredIsPlainSend: TrySendDeferred on a channel pair wakes
-// the receiver at once and Flush has nothing to do.
-func TestChannel_DeferredIsPlainSend(t *testing.T) {
+// TestChannel_DeferredPanics: TrySendDeferred is for queue-kind pipes (the
+// session reader's), and says so loudly on a channel pair.
+func TestChannel_DeferredPanics(t *testing.T) {
 	t.Parallel()
-	a, b := NewChannelPair(10, 10, PeerInfo{}, PeerInfo{})
+	a, b := NewChannelPair(10, 10, nil, nil)
 	defer a.Close()
 	defer b.Close()
-	gate := notifyGate(b)
-	_, ok := b.RecvOrIdle()
-	require.False(t, ok)
-	require.True(t, a.TrySendDeferred(msg.FromBytes([]byte("x"))))
-	requireArmed(t, gate, "TrySendDeferred on a channel pair")
-	a.Flush()
-	requireNotArmed(t, gate, "Flush on a channel pair")
-	m, ok := b.TryRecv()
-	require.True(t, ok)
-	require.Equal(t, "x", string(m.Bytes()))
+	require.Panics(t, func() { a.TrySendDeferred(msg.FromBytes([]byte("x"))) })
 }

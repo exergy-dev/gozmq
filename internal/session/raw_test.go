@@ -55,7 +55,7 @@ func TestRaw_InboundChunking(t *testing.T) {
 	ctx := testutil.Ctx(t, 2*time.Second)
 	var got bytes.Buffer
 	for got.Len() < len(payload) {
-		m, err := rs.pipe.Recv(ctx)
+		m, err := rs.pipe.RecvOr(ctx, nil)
 		require.NoError(t, err, "recv after %d bytes", got.Len())
 		require.Equal(t, 1, m.NumFrames())
 		got.Write(m.Bytes())
@@ -77,7 +77,7 @@ func TestRaw_InboundChunkSized(t *testing.T) {
 	for _, b := range []string{"a", "b"} {
 		_, err := connB.Write([]byte(b))
 		require.NoError(t, err)
-		m, err := rs.pipe.Recv(ctx)
+		m, err := rs.pipe.RecvOr(ctx, nil)
 		require.NoError(t, err)
 		chunks = append(chunks, m)
 	}
@@ -130,7 +130,7 @@ func TestRaw_PeerEOFClosesPipe(t *testing.T) {
 	rs := startRaw(t, connA, 0)
 	_ = connB.Close()
 
-	_, err := rs.pipe.Recv(testutil.Ctx(t, 2*time.Second))
+	_, err := rs.pipe.RecvOr(testutil.Ctx(t, 2*time.Second), nil)
 	require.ErrorIs(t, err, io.EOF)
 	waitClosed(t, rs.Done(), 2*time.Second, "session did not end after peer EOF")
 }
@@ -225,6 +225,6 @@ func TestRaw_ConcurrentStop(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	_, err := rs.pipe.Recv(context.Background())
+	_, err := rs.pipe.RecvOr(context.Background(), nil)
 	require.ErrorIs(t, err, io.EOF)
 }

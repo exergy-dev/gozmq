@@ -190,7 +190,7 @@ func TestWriter_BatchRetainsBufferCapacityAcrossFlushes(t *testing.T) {
 		Codec: fakeCodec{},
 	})
 	t.Cleanup(func() { _ = connA.Close() })
-	sp, ep := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	sp, ep := pipe.NewPair(8, 8, nil, nil)
 	s.sessionPipe = sp
 	_ = ep
 
@@ -250,7 +250,7 @@ func TestWriter_BatchCoalescesMultipleMessages(t *testing.T) {
 
 	// Drain on B, asserting order survived the batching.
 	for i := 0; i < N; i++ {
-		m, err := sB.Pipe().Recv(ctx)
+		m, err := sB.Pipe().RecvOr(ctx, nil)
 		require.NoError(t, err, "Recv[%d]", i)
 		assert.Equal(t, fmt.Sprintf("msg-%d", i), string(m.Bytes()), "got[%d]", i)
 	}
@@ -280,7 +280,7 @@ func TestWriter_InteractiveSingleMessage(t *testing.T) {
 
 	start := time.Now()
 	require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("solo"))), "Send")
-	got, err := sB.Pipe().Recv(ctx)
+	got, err := sB.Pipe().RecvOr(ctx, nil)
 	require.NoError(t, err, "Recv")
 	elapsed := time.Since(start)
 
@@ -314,7 +314,7 @@ func TestWriter_OrderPreservation(t *testing.T) {
 
 	// Consumer — must see the exact send order.
 	for i := 0; i < N; i++ {
-		m, err := sB.Pipe().Recv(ctx)
+		m, err := sB.Pipe().RecvOr(ctx, nil)
 		require.NoError(t, err, "Recv[%d]", i)
 		want := fmt.Sprintf("seq-%03d", i)
 		require.Equal(t, want, string(m.Bytes()), "got[%d] (ORDER VIOLATION)", i)
@@ -415,7 +415,7 @@ func runCapCase(t *testing.T, wrap func(*fakeMech) security.Mech, n, size int) (
 	wcA.setGate(nil)
 	close(gate)
 	for i := 0; i < n; i++ {
-		m, err := sB.Pipe().Recv(ctx)
+		m, err := sB.Pipe().RecvOr(ctx, nil)
 		require.NoError(t, err, "Recv[%d]", i)
 		require.Len(t, m.Bytes(), size, "message %d", i)
 		if size >= 4 {
@@ -490,7 +490,7 @@ func TestWriter_BatchLingerDrain(t *testing.T) {
 
 	// B drains to verify order + delivery.
 	for i := 0; i < N; i++ {
-		m, err := sB.Pipe().Recv(ctx)
+		m, err := sB.Pipe().RecvOr(ctx, nil)
 		require.NoError(t, err, "Recv[%d]", i)
 		want := fmt.Sprintf("d-%d", i)
 		assert.Equal(t, want, string(m.Bytes()), "got[%d]", i)
@@ -505,7 +505,7 @@ func TestWriter_BatchLingerDrain(t *testing.T) {
 	// The linger messages should have been delivered to B.
 	for i := 0; i < 3; i++ {
 		recvCtx, rc := context.WithTimeout(context.Background(), time.Second)
-		m, err := sB.Pipe().Recv(recvCtx)
+		m, err := sB.Pipe().RecvOr(recvCtx, nil)
 		rc()
 		if assert.NoError(t, err, "linger Recv[%d]", i) {
 			want := fmt.Sprintf("linger-%d", i)
@@ -526,7 +526,7 @@ func TestWriter_EmptyMessageStillEmitted(t *testing.T) {
 	ctx := testutil.Ctx(t, time.Second)
 
 	require.NoError(t, sA.Pipe().Send(ctx, msg.New()), "Send(empty)")
-	got, err := sB.Pipe().Recv(ctx)
+	got, err := sB.Pipe().RecvOr(ctx, nil)
 	require.NoError(t, err, "Recv")
 	require.Equal(t, 1, got.NumFrames(), "empty msg surfaced as wrong number of frames; want 1 zero-length frame")
 	require.Empty(t, got.Frames()[0], "frame not zero-length")
@@ -553,7 +553,7 @@ func TestWriter_MultipartBatched(t *testing.T) {
 	}
 
 	for i := 0; i < 4; i++ {
-		m, err := sB.Pipe().Recv(ctx)
+		m, err := sB.Pipe().RecvOr(ctx, nil)
 		require.NoError(t, err, "Recv[%d]", i)
 		require.Equal(t, 3, m.NumFrames(), "msg[%d] frames", i)
 		want := []string{
@@ -600,7 +600,7 @@ func TestReader_HandlesPingWhileWriterBlocked(t *testing.T) {
 	peer.sendPing(0, []byte("ctx1"))
 	// ... proven by data sent AFTER the PING still flowing to the engine.
 	peer.sendData([]byte("after-ping"))
-	got, err := sA.Pipe().Recv(testutil.Ctx(t, 2*time.Second))
+	got, err := sA.Pipe().RecvOr(testutil.Ctx(t, 2*time.Second), nil)
 	require.NoError(t, err, "reader blocked behind the wedged writer")
 	require.Equal(t, "after-ping", string(got.Bytes()))
 
@@ -628,7 +628,7 @@ func TestWriter_LingerDrainUnboundedQueue(t *testing.T) {
 				k := 0
 				for {
 					rc, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-					_, err := sB.Pipe().Recv(rc)
+					_, err := sB.Pipe().RecvOr(rc, nil)
 					cancel()
 					if err != nil {
 						got <- k
@@ -802,7 +802,7 @@ func TestWriterBatch_Caps(t *testing.T) {
 		t.Cleanup(func() { _ = connA.Close() })
 		rc := &recordingBufConn{fakeConn: connA}
 		s := New(Config{Conn: rc, Mech: mech, Codec: fakeCodec{}})
-		sp, ep := pipe.NewPair(n+1, n+1, pipe.PeerInfo{}, pipe.PeerInfo{})
+		sp, ep := pipe.NewPair(n+1, n+1, nil, nil)
 		s.sessionPipe = sp
 		body := bytes.Repeat([]byte{'x'}, size)
 		for i := 0; i < n; i++ {

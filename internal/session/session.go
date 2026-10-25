@@ -318,7 +318,7 @@ func New(cfg Config) *Session {
 	}
 	if cfg.Raw {
 		// Raw mode has no handshake: the pipes exist from the start.
-		s.sessionPipe, s.enginePipe = pipe.NewPair(cfg.RecvHWM, cfg.SendHWM, pipe.PeerInfo{}, pipe.PeerInfo{})
+		s.sessionPipe, s.enginePipe = pipe.NewPair(cfg.RecvHWM, cfg.SendHWM, nil, nil)
 		return s
 	}
 	if f, ok := cfg.Mech.(identityFramer); ok && f.IdentityFraming() {

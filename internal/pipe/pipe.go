@@ -40,47 +40,39 @@ import (
 	"github.com/exergy-dev/gozmq/msg"
 )
 
-// ErrNilMessage is returned by Send when the caller supplies a nil *Msg.
-var ErrNilMessage = errors.New("gozmq/pipe: nil message")
-
 // ErrAborted is returned by SendOr and RecvOr when their abort channel
 // fires before the operation completes.
 var ErrAborted = errors.New("gozmq/pipe: aborted")
-
-// PeerInfo carries the metadata a session advertises to its engine. Zero
-// value = unknown; fields are set at pipe construction and may not change.
-type PeerInfo struct {
-	Identity []byte
-}
 
 // NewPair returns two Ends bound to one another. aToB is the maximum
 // number of messages buffered in the A→B direction; bToA is the B→A
 // maximum. A HWM of 0 disables the limit for that direction; negative values
 // are rejected with a panic (programmer error).
 //
-// aInfo describes the peer visible to the A end (i.e. B's endpoint/identity);
-// bInfo describes what A looks like from B's side.
+// aIdentity is the ZMTP identity of the peer as seen from the A end (B's),
+// bIdentity the one B sees (A's); nil means unknown. They are fixed for the
+// life of the pair.
 //
 // The pair uses the queue kind (see the package doc).
-func NewPair(aToB, bToA int, aInfo, bInfo PeerInfo) (a, b *End) {
-	return newPair(newDirection, aToB, bToA, aInfo, bInfo)
+func NewPair(aToB, bToA int, aIdentity, bIdentity []byte) (a, b *End) {
+	return newPair(newDirection, aToB, bToA, aIdentity, bIdentity)
 }
 
 // NewChannelPair is NewPair for the channel kind (see the package doc),
 // which inproc uses. Arguments and semantics are identical.
-func NewChannelPair(aToB, bToA int, aInfo, bInfo PeerInfo) (a, b *End) {
-	return newPair(newChannelDirection, aToB, bToA, aInfo, bInfo)
+func NewChannelPair(aToB, bToA int, aIdentity, bIdentity []byte) (a, b *End) {
+	return newPair(newChannelDirection, aToB, bToA, aIdentity, bIdentity)
 }
 
-func newPair(mk func(int) *direction, aToB, bToA int, aInfo, bInfo PeerInfo) (a, b *End) {
+func newPair(mk func(int) *direction, aToB, bToA int, aIdentity, bIdentity []byte) (a, b *End) {
 	if aToB < 0 || bToA < 0 {
 		panic("gozmq/pipe: negative HWM")
 	}
 	s := &shared{either: make(chan struct{})}
 	ab := mk(aToB)
 	ba := mk(bToA)
-	a = &End{shared: s, send: ab, recv: ba, peerInfo: aInfo}
-	b = &End{shared: s, send: ba, recv: ab, peerInfo: bInfo}
+	a = &End{shared: s, send: ab, recv: ba, peerIdentity: aIdentity}
+	b = &End{shared: s, send: ba, recv: ab, peerIdentity: bIdentity}
 	a.peer, b.peer = b, a
 	return a, b
 }
@@ -273,11 +265,11 @@ func (d *direction) fireDrainLocked() {
 
 // End is one side of a pipe pair. All methods are safe for concurrent use.
 type End struct {
-	shared   *shared
-	send     *direction // this end writes, the peer reads
-	recv     *direction // the peer writes, this end reads
-	peer     *End
-	peerInfo PeerInfo
+	shared       *shared
+	send         *direction // this end writes, the peer reads
+	recv         *direction // the peer writes, this end reads
+	peer         *End
+	peerIdentity []byte
 
 	// idle and notify let a receiver that multiplexes many pipes (or a
 	// Poller) stop looking at this end until something arrives, with no
@@ -389,11 +381,11 @@ func (e *End) MarkIdle() bool {
 // metrics, not a readiness signal.
 func (e *End) Len() int { return e.recv.length() }
 
-// TrySend enqueues m for the peer without blocking. It returns false when
-// m is nil, either end is closed, or a bounded direction is full. An
-// unbounded (HWM 0) direction never refuses an open pipe.
+// TrySend enqueues m, which must not be nil, for the peer without blocking.
+// It returns false when either end is closed or a bounded direction is
+// full. An unbounded (HWM 0) direction never refuses an open pipe.
 func (e *End) TrySend(m *msg.Msg) bool {
-	if m == nil || e.shared.closed.Load() {
+	if e.shared.closed.Load() {
 		return false
 	}
 	if !e.send.produce(m) {
@@ -403,12 +395,8 @@ func (e *End) TrySend(m *msg.Msg) bool {
 	return true
 }
 
-// pushDeferred enqueues m exactly like produce but leaves the consumer
-// wakeup to Flush.
-func (d *direction) pushDeferred(m *msg.Msg) bool { return d.q.push(m) }
-
 // TrySendDeferred is TrySend for a producer that publishes messages in
-// batches: it enqueues m (visible to TryRecv and Pending at once) but wakes
+// batches, on a queue-kind End only (it panics on a channel-kind one): it enqueues m (visible to TryRecv and Pending at once) but wakes
 // no parked receiver and runs no idle notification. The caller must call
 // Flush before it blocks, goes idle or exits; Flush publishes the wakeups
 // for the whole batch at once, which is what saves the park/unpark pair per
@@ -428,14 +416,10 @@ func (d *direction) pushDeferred(m *msg.Msg) bool { return d.q.push(m) }
 // consistent), so either the consumer's re-check saw the data or Flush sees
 // the sleeper and arms rwake. The same argument covers the idle flag.
 func (e *End) TrySendDeferred(m *msg.Msg) bool {
-	if m == nil || e.shared.closed.Load() {
-		return false
-	}
 	if e.send.q == nil {
-		// A channel wakes its receiver on send; nothing is owed.
-		return e.TrySend(m)
+		panic("gozmq/pipe: TrySendDeferred on a channel-kind pipe")
 	}
-	if !e.send.pushDeferred(m) {
+	if e.shared.closed.Load() || !e.send.q.push(m) {
 		return false
 	}
 	e.owed = true
@@ -456,24 +440,17 @@ func (e *End) Flush() {
 	e.wakePeer()
 }
 
-// Send enqueues m for the peer, blocking while a bounded direction is full.
-// It returns io.ErrClosedPipe once either end is closed and ctx.Err() if
-// ctx ends first.
+// Send enqueues m, which must not be nil, for the peer, blocking while a
+// bounded direction is full. It returns io.ErrClosedPipe once either end is
+// closed and ctx.Err() if ctx ends first.
 func (e *End) Send(ctx context.Context, m *msg.Msg) error {
-	return e.enqueue(ctx, m, nil)
+	return e.SendOr(ctx, m, nil)
 }
 
 // SendOr is Send that also gives up with ErrAborted when abort fires, so an
 // engine can race a blocked send against its own close or peer-set change
-// without allocating a context.
+// without allocating a context. A nil abort never fires.
 func (e *End) SendOr(ctx context.Context, m *msg.Msg, abort <-chan struct{}) error {
-	return e.enqueue(ctx, m, abort)
-}
-
-func (e *End) enqueue(ctx context.Context, m *msg.Msg, abort <-chan struct{}) error {
-	if m == nil {
-		return ErrNilMessage
-	}
 	if e.shared.closed.Load() {
 		return io.ErrClosedPipe
 	}
@@ -519,7 +496,7 @@ func (e *End) enqueue(ctx context.Context, m *msg.Msg, abort <-chan struct{}) er
 	}
 }
 
-// enqueueChan is enqueue's blocking path for the channel kind, entered once
+// enqueueChan is SendOr's blocking path for the channel kind, entered once
 // a non-blocking send found the bounded channel full.
 func (e *End) enqueueChan(ctx context.Context, m *msg.Msg, abort <-chan struct{}) error {
 	select {
@@ -542,14 +519,10 @@ func (e *End) TryRecv() (*msg.Msg, bool) {
 	return e.recv.consume()
 }
 
-// Recv returns the next message from the peer, blocking until one arrives.
+// RecvOr returns the next message from the peer, blocking until one arrives.
 // Once either end is closed it hands out whatever is still queued and then
-// returns io.EOF; it returns ctx.Err() if ctx ends first.
-func (e *End) Recv(ctx context.Context) (*msg.Msg, error) {
-	return e.RecvOr(ctx, nil)
-}
-
-// RecvOr is Recv that also gives up with ErrAborted when abort fires.
+// returns io.EOF; it returns ctx.Err() if ctx ends first and ErrAborted if
+// abort fires first. A nil abort never fires.
 func (e *End) RecvOr(ctx context.Context, abort <-chan struct{}) (*msg.Msg, error) {
 	d := e.recv
 	if d.q == nil {
@@ -699,4 +672,4 @@ func (e *End) RoutingID() []byte {
 
 // PeerIdentity returns the ZMTP Identity advertised by the peer in its
 // READY metadata. Empty when the peer did not set one.
-func (e *End) PeerIdentity() []byte { return e.peerInfo.Identity }
+func (e *End) PeerIdentity() []byte { return e.peerIdentity }

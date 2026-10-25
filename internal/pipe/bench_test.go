@@ -17,7 +17,7 @@ import (
 // 0/1. Measures the per-op cost with no contention at all.
 func BenchmarkPipe_Uncontended(b *testing.B) {
 	forEachKindB(b, func(b *testing.B, k kind) {
-		x, y := k.newPair(1000, 1000, PeerInfo{}, PeerInfo{})
+		x, y := k.newPair(1000, 1000, nil, nil)
 		defer x.Close()
 		defer y.Close()
 		m := msg.FromBytes([]byte("x"))
@@ -38,7 +38,7 @@ func BenchmarkPipe_Uncontended(b *testing.B) {
 // Send/Recv, bounded at the default HWM. Use -cpu 2,8.
 func BenchmarkPipe_SPSC_Stream(b *testing.B) {
 	forEachKindB(b, func(b *testing.B, k kind) {
-		x, y := k.newPair(1000, 1000, PeerInfo{}, PeerInfo{})
+		x, y := k.newPair(1000, 1000, nil, nil)
 		defer x.Close()
 		defer y.Close()
 		ctx := context.Background()
@@ -49,7 +49,7 @@ func BenchmarkPipe_SPSC_Stream(b *testing.B) {
 		go func() {
 			defer close(done)
 			for i := 0; i < b.N; i++ {
-				if _, err := y.Recv(ctx); err != nil {
+				if _, err := y.RecvOr(ctx, nil); err != nil {
 					b.Error(err)
 					return
 				}
@@ -66,11 +66,12 @@ func BenchmarkPipe_SPSC_Stream(b *testing.B) {
 
 // BenchmarkPipe_SPSC_Deferred: like SPSC_Stream but the producer pushes in
 // batches of 64 with TrySendDeferred and one Flush, as the session reader
-// does. It spins (Gosched) while the bounded direction is full.
+// does (queue kind only). It spins (Gosched) while the bounded direction is
+// full.
 func BenchmarkPipe_SPSC_Deferred(b *testing.B) {
-	forEachKindB(b, func(b *testing.B, k kind) {
+	b.Run("queue", func(b *testing.B) {
 		const batch = 64
-		x, y := k.newPair(1000, 1000, PeerInfo{}, PeerInfo{})
+		x, y := NewPair(1000, 1000, nil, nil)
 		defer x.Close()
 		defer y.Close()
 		ctx := context.Background()
@@ -81,7 +82,7 @@ func BenchmarkPipe_SPSC_Deferred(b *testing.B) {
 		go func() {
 			defer close(done)
 			for i := 0; i < b.N; i++ {
-				if _, err := y.Recv(ctx); err != nil {
+				if _, err := y.RecvOr(ctx, nil); err != nil {
 					b.Error(err)
 					return
 				}
@@ -105,7 +106,7 @@ func BenchmarkPipe_SPSC_Deferred(b *testing.B) {
 // every Recv parks, so this is dominated by the wakeup path.
 func BenchmarkPipe_SPSC_PingPong(b *testing.B) {
 	forEachKindB(b, func(b *testing.B, k kind) {
-		x, y := k.newPair(1000, 1000, PeerInfo{}, PeerInfo{})
+		x, y := k.newPair(1000, 1000, nil, nil)
 		defer x.Close()
 		defer y.Close()
 		ctx := context.Background()
@@ -116,7 +117,7 @@ func BenchmarkPipe_SPSC_PingPong(b *testing.B) {
 		go func() {
 			defer close(done)
 			for i := 0; i < b.N; i++ {
-				r, err := y.Recv(ctx)
+				r, err := y.RecvOr(ctx, nil)
 				if err != nil {
 					b.Error(err)
 					return
@@ -131,7 +132,7 @@ func BenchmarkPipe_SPSC_PingPong(b *testing.B) {
 			if err := x.Send(ctx, m); err != nil {
 				b.Fatal(err)
 			}
-			if _, err := x.Recv(ctx); err != nil {
+			if _, err := x.RecvOr(ctx, nil); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -143,7 +144,7 @@ func BenchmarkPipe_SPSC_PingPong(b *testing.B) {
 func BenchmarkPipe_MPSC_4(b *testing.B) {
 	forEachKindB(b, func(b *testing.B, k kind) {
 		const producers = 4
-		x, y := k.newPair(1000, 1000, PeerInfo{}, PeerInfo{})
+		x, y := k.newPair(1000, 1000, nil, nil)
 		defer x.Close()
 		defer y.Close()
 		ctx := context.Background()
@@ -168,7 +169,7 @@ func BenchmarkPipe_MPSC_4(b *testing.B) {
 			}()
 		}
 		for i := 0; i < b.N; i++ {
-			if _, err := y.Recv(ctx); err != nil {
+			if _, err := y.RecvOr(ctx, nil); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -180,7 +181,7 @@ func BenchmarkPipe_MPSC_4(b *testing.B) {
 // for the first message, then up to 31 TryRecv for the rest of the batch.
 func BenchmarkPipe_Writer_Batch(b *testing.B) {
 	forEachKindB(b, func(b *testing.B, k kind) {
-		x, y := k.newPair(1000, 1000, PeerInfo{}, PeerInfo{})
+		x, y := k.newPair(1000, 1000, nil, nil)
 		defer x.Close()
 		defer y.Close()
 		ctx := context.Background()

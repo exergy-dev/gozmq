@@ -51,7 +51,7 @@ func (s *Session) runRawWriter() {
 	defer s.exit()
 	defer close(s.writerDone)
 	for {
-		m, err := s.sessionPipe.Recv(s.writerCtx)
+		m, err := s.sessionPipe.RecvOr(s.writerCtx, nil)
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
 				s.shutdown()

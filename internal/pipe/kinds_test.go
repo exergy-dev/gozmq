@@ -7,7 +7,7 @@ import "testing"
 // so tests probe it; HWM-0 channel pairs use that kind too.
 type kind struct {
 	name    string
-	newPair func(aToB, bToA int, aInfo, bInfo PeerInfo) (a, b *End)
+	newPair func(aToB, bToA int, aIdentity, bIdentity []byte) (a, b *End)
 	span    int
 }
 

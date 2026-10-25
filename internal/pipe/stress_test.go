@@ -33,10 +33,13 @@ func TestStress_LostWakeup_1x1(t *testing.T) {
 		t.Parallel()
 		for _, hwm := range []int{1, 7, 0} {
 			for _, mode := range []string{"send", "deferred"} {
+				if mode == "deferred" && k.name != "queue" {
+					continue // TrySendDeferred is queue kind only
+				}
 				t.Run(mode, func(t *testing.T) {
 					t.Parallel()
 					n := stressN(20000, 300000)
-					a, b := k.newPair(hwm, hwm, PeerInfo{}, PeerInfo{})
+					a, b := k.newPair(hwm, hwm, nil, nil)
 					defer a.Close()
 					defer b.Close()
 					ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -75,7 +78,7 @@ func TestStress_LostWakeup_1x1(t *testing.T) {
 
 					rng := rand.New(rand.NewPCG(2, uint64(hwm)))
 					for i := 0; i < n; i++ {
-						m, err := b.Recv(ctx)
+						m, err := b.RecvOr(ctx, nil)
 						require.NoError(t, err, "Recv[%d]", i)
 						require.Equal(t, i, seqOf(m), "order")
 						if rng.IntN(16) == 0 {
@@ -97,7 +100,7 @@ func TestStress_MultiSleeperBaton(t *testing.T) {
 		t.Parallel()
 		const consumers = 8
 		n := stressN(5000, 100000)
-		a, b := k.newPair(0, 0, PeerInfo{}, PeerInfo{})
+		a, b := k.newPair(0, 0, nil, nil)
 		defer a.Close()
 		defer b.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -112,7 +115,7 @@ func TestStress_MultiSleeperBaton(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				for {
-					m, err := b.Recv(ctx)
+					m, err := b.RecvOr(ctx, nil)
 					if err != nil {
 						errs <- err
 						return
@@ -154,14 +157,14 @@ func TestStress_CloseWhileParked(t *testing.T) {
 	forEachKind(t, func(t *testing.T, k kind) {
 		t.Parallel()
 		for round := 0; round < stressN(20, 200); round++ {
-			a, b := k.newPair(1, 1, PeerInfo{}, PeerInfo{})
+			a, b := k.newPair(1, 1, nil, nil)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			var wg sync.WaitGroup
 			for range 4 {
 				wg.Add(2)
 				go func() {
 					defer wg.Done()
-					if _, err := a.Recv(ctx); !errors.Is(err, io.EOF) {
+					if _, err := a.RecvOr(ctx, nil); !errors.Is(err, io.EOF) {
 						t.Errorf("Recv: %v", err)
 					}
 				}()
@@ -205,7 +208,7 @@ func TestLen_Accuracy(t *testing.T) {
 	forEachKind(t, func(t *testing.T, k kind) {
 		t.Parallel()
 		for _, hwm := range []int{0, k.span*3 + 5} {
-			a, b := k.newPair(hwm, hwm, PeerInfo{}, PeerInfo{})
+			a, b := k.newPair(hwm, hwm, nil, nil)
 			want := 0
 			rng := rand.New(rand.NewPCG(3, 4))
 			for step := 0; step < 20000; step++ {
@@ -243,7 +246,7 @@ func TestLen_Accuracy(t *testing.T) {
 // spare), including across many chunk boundaries.
 func TestAllocs_SteadyStateZero(t *testing.T) {
 	forEachKind(t, func(t *testing.T, k kind) {
-		a, b := k.newPair(0, 0, PeerInfo{}, PeerInfo{})
+		a, b := k.newPair(0, 0, nil, nil)
 		defer a.Close()
 		defer b.Close()
 		ctx := context.Background()
@@ -260,13 +263,15 @@ func TestAllocs_SteadyStateZero(t *testing.T) {
 		}), "TrySend/TryRecv")
 		require.Zero(t, testing.AllocsPerRun(k.span*4, func() {
 			_ = a.Send(ctx, m)
-			_, _ = b.Recv(ctx)
+			_, _ = b.RecvOr(ctx, nil)
 		}), "Send/Recv")
-		require.Zero(t, testing.AllocsPerRun(k.span*4, func() {
-			a.TrySendDeferred(m)
-			a.Flush()
-			b.TryRecv()
-		}), "TrySendDeferred/Flush")
+		if k.name == "queue" { // TrySendDeferred is queue kind only
+			require.Zero(t, testing.AllocsPerRun(k.span*4, func() {
+				a.TrySendDeferred(m)
+				a.Flush()
+				b.TryRecv()
+			}), "TrySendDeferred/Flush")
+		}
 	})
 }
 
@@ -276,7 +281,7 @@ func TestAllocs_SteadyStateZero(t *testing.T) {
 func TestSteadyState_NoAllocs(t *testing.T) {
 	forEachKind(t, func(t *testing.T, k kind) {
 		for _, depth := range []int{0, 300, 3000} {
-			a, b := k.newPair(0, 0, PeerInfo{}, PeerInfo{})
+			a, b := k.newPair(0, 0, nil, nil)
 			m := msg.FromBytes([]byte("x"))
 			for range depth {
 				require.True(t, a.TrySend(m))
