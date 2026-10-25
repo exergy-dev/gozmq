@@ -512,7 +512,9 @@ func BenchmarkPubSubTopicThroughput_TCP(b *testing.B) {
 			// syncSubs' probes must pass the filter too.
 			gozmq.WithSubscribe([]byte("gozmq-bench-sync-probe")), gozmq.WithSubscribe([]byte("topic-03")))
 		syncSubs(b, pub.sock, sub)
-		frames := [][]byte{[]byte("topic-03"), newPayload(size)}
+		// Untimed setup; the copying constructor keeps both frames in one
+		// allocation.
+		frames := gozmq.NewMsgFromFramesCopy([]byte("topic-03"), newPayload(size)).Frames()
 		delivered := benchStreamFrames(b, pub.sock, []*gozmq.Socket{sub}, frames, 3*time.Second)
 		b.ReportMetric(float64(delivered), "msgs-delivered")
 	})
