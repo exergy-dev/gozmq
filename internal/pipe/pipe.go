@@ -430,8 +430,13 @@ func (e *End) RecvOr(ctx context.Context, abort <-chan struct{}) (*msg.Msg, erro
 	if m, ok := d.consume(); ok {
 		return m, nil
 	}
+	// Stay registered in rsleepers across wakeups: a woken consumer
+	// re-checks the queue under the same registration instead of
+	// deregistering and registering again (two atomic RMWs per wake). A
+	// producer that sees the registration may arm a stale token, which only
+	// makes someone re-check.
+	d.rsleepers.Add(1) // R2
 	for {
-		d.rsleepers.Add(1)            // R2
 		if m, ok := d.consume(); ok { // C1 inside
 			d.rsleepers.Add(-1)
 			// Baton: another parked consumer may have work too.
@@ -450,7 +455,6 @@ func (e *End) RecvOr(ctx context.Context, abort <-chan struct{}) (*msg.Msg, erro
 		}
 		select {
 		case <-d.rwake:
-			d.rsleepers.Add(-1)
 		case <-abort:
 			d.rsleepers.Add(-1)
 			return nil, ErrAborted
