@@ -27,7 +27,7 @@ func (c *Context) NewSocket(t SocketType, opts ...Option) (*Socket, error) {
 	}
 	cfg := newSocketConfig()
 	for _, o := range opts {
-		if err := o.apply(cfg); err != nil {
+		if err := o(cfg); err != nil {
 			return nil, err
 		}
 	}
