@@ -99,14 +99,7 @@ func (e *pairEngine) retireLocked(p *pipe.End) {
 		return
 	}
 	e.pipe = nil
-	kept := e.retired[:0]
-	for _, r := range e.retired {
-		if r.Pending() {
-			kept = append(kept, r)
-		}
-	}
-	clear(e.retired[len(kept):])
-	e.retired = append(kept, p)
+	e.retired = append(slices.DeleteFunc(e.retired, func(r *pipe.End) bool { return !r.Pending() }), p)
 }
 
 // dropRetired removes a fully drained pipe from the retired queue.
@@ -232,13 +225,8 @@ func (e *pairEngine) CanRecvNow() bool {
 	if e.closed {
 		return false
 	}
-	for _, r := range e.retired {
-		if r.Pending() {
-			return true
-		}
-	}
 	// MarkIdle registers the wake-up a Poller needs when this is false.
-	return e.pipe != nil && e.pipe.MarkIdle()
+	return slices.ContainsFunc(e.retired, (*pipe.End).Pending) || e.pipe != nil && e.pipe.MarkIdle()
 }
 
 func (e *pairEngine) CanSendNow() bool {

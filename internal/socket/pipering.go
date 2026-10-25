@@ -40,21 +40,20 @@ func (r *pipeRing) add(p *pipe.End) bool {
 // left, and it is wrapped back into range (or reset to 0 when the ring
 // empties). Returns true if p was present.
 func (r *pipeRing) remove(p *pipe.End) bool {
-	for i, existing := range r.pipes {
-		if existing == p {
-			r.pipes = slices.Delete(r.pipes, i, i+1)
-			if len(r.pipes) == 0 {
-				r.cursor = 0
-			} else {
-				if i < r.cursor {
-					r.cursor--
-				}
-				r.cursor %= len(r.pipes)
-			}
-			return true
-		}
+	i := slices.Index(r.pipes, p)
+	if i < 0 {
+		return false
 	}
-	return false
+	r.pipes = slices.Delete(r.pipes, i, i+1)
+	if len(r.pipes) == 0 {
+		r.cursor = 0
+	} else {
+		if i < r.cursor {
+			r.cursor--
+		}
+		r.cursor %= len(r.pipes)
+	}
+	return true
 }
 
 // current returns the index and pipe the cursor points at. Callers must

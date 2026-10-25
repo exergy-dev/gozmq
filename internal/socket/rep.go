@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
@@ -234,26 +235,24 @@ func (e *repEngine) Send(ctx context.Context, m *msg.Msg) error {
 // the Send path prepends it verbatim to produce a reply.
 func splitRepEnvelope(m *msg.Msg) (envelope [][]byte, body *msg.Msg, ok bool) {
 	frames := m.Frames()
-	for i, f := range frames {
-		if len(f) == 0 {
-			// The envelope (including the delimiter) outlives m in
-			// e.envelope. Frames are never modified once queued, so a plain
-			// message's prefix is kept as is (capped, so a reply's prepend
-			// cannot write into m's list). A lent message's bytes are
-			// copied: the reply joins them to a different message's
-			// frames, and a message holds only one lease. Routing frames
-			// are small, so that copy is cheap.
-			envelope = frames[: i+1 : i+1]
-			if m.Lent() {
-				envelope = make([][]byte, i+1)
-				for j, f := range frames[:i+1] {
-					envelope[j] = bytes.Clone(f)
-				}
-			}
-			return envelope, m.Derive(frames[i+1:]...), true
+	i := slices.IndexFunc(frames, func(f []byte) bool { return len(f) == 0 })
+	if i < 0 {
+		return nil, nil, false
+	}
+	// The envelope (including the delimiter) outlives m in e.envelope.
+	// Frames are never modified once queued, so a plain message's prefix is
+	// kept as is (capped, so a reply's prepend cannot write into m's list).
+	// A lent message's bytes are copied: the reply joins them to a
+	// different message's frames, and a message holds only one lease.
+	// Routing frames are small, so that copy is cheap.
+	envelope = frames[: i+1 : i+1]
+	if m.Lent() {
+		envelope = make([][]byte, i+1)
+		for j, f := range frames[:i+1] {
+			envelope[j] = bytes.Clone(f)
 		}
 	}
-	return nil, nil, false
+	return envelope, m.Derive(frames[i+1:]...), true
 }
 
 // Metrics reports the REP engine's counters. recv is incremented on
