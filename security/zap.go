@@ -160,12 +160,12 @@ func (h ZAPHandler) ServeRequest(reqFrames [][]byte) [][]byte {
 		resp.Metadata = metadata
 	case errors.Is(perr, ErrZAPTemporary):
 		resp.StatusCode = ZAPStatusTempError
-		resp.StatusText = perr.Error()
 	case errors.Is(perr, zmqerr.ErrAuthFailed):
 		resp.StatusCode = ZAPStatusClientError
-		resp.StatusText = perr.Error()
 	default:
 		resp.StatusCode = ZAPStatusServerError
+	}
+	if perr != nil {
 		resp.StatusText = perr.Error()
 	}
 	return EncodeZAPResponse(resp)
@@ -192,6 +192,10 @@ func EncodeZAPRequest(req *ZAPRequest) [][]byte {
 	frames = append(frames, req.Credentials...)
 	return frames
 }
+
+// zapCredentialCount is the number of credential frames each mechanism
+// carries: none for NULL, user and password for PLAIN, the public key for CURVE.
+var zapCredentialCount = map[string]int{"NULL": 0, "PLAIN": 2, "CURVE": 1}
 
 // DecodeZAPRequest parses a multi-frame ZAP request. The returned
 // ZAPRequest's byte-slice fields reference the input frames — callers that
@@ -223,24 +227,15 @@ func DecodeZAPRequest(frames [][]byte) (*ZAPRequest, error) {
 	// key. NULL must carry zero credential frames. Everything else is
 	// rejected with ErrMalformedFrame so a misconfigured server trips a
 	// deterministic error rather than crashing the policy.
-	switch req.Mechanism {
-	case "NULL":
-		if len(req.Credentials) != 0 {
-			return nil, fmt.Errorf("gozmq/security/zap: NULL expects 0 credentials, got %d: %w", len(req.Credentials), zmqerr.ErrMalformedFrame)
-		}
-	case "PLAIN":
-		if len(req.Credentials) != 2 {
-			return nil, fmt.Errorf("gozmq/security/zap: PLAIN expects 2 credentials (user, pass), got %d: %w", len(req.Credentials), zmqerr.ErrMalformedFrame)
-		}
-	case "CURVE":
-		if len(req.Credentials) != 1 {
-			return nil, fmt.Errorf("gozmq/security/zap: CURVE expects 1 credential (public key), got %d: %w", len(req.Credentials), zmqerr.ErrMalformedFrame)
-		}
-		if len(req.Credentials[0]) != 32 {
-			return nil, fmt.Errorf("gozmq/security/zap: CURVE public key must be 32 bytes, got %d: %w", len(req.Credentials[0]), zmqerr.ErrMalformedFrame)
-		}
-	default:
+	want, known := zapCredentialCount[req.Mechanism]
+	if !known {
 		return nil, fmt.Errorf("gozmq/security/zap: unknown mechanism %q: %w", req.Mechanism, zmqerr.ErrMalformedFrame)
+	}
+	if len(req.Credentials) != want {
+		return nil, fmt.Errorf("gozmq/security/zap: %s expects %d credentials, got %d: %w", req.Mechanism, want, len(req.Credentials), zmqerr.ErrMalformedFrame)
+	}
+	if req.Mechanism == "CURVE" && len(req.Credentials[0]) != 32 {
+		return nil, fmt.Errorf("gozmq/security/zap: CURVE public key must be 32 bytes, got %d: %w", len(req.Credentials[0]), zmqerr.ErrMalformedFrame)
 	}
 	return req, nil
 }
@@ -259,7 +254,7 @@ func EncodeZAPResponse(resp *ZAPResponse) [][]byte {
 		version = zapVersion
 	}
 	statusCode, statusText, userID, meta := resp.StatusCode, resp.StatusText, resp.UserID, resp.Metadata
-	if err := validateZAPMetadata(meta); err != nil {
+	if err := zmtp.ValidateMetadata(meta); err != nil {
 		statusCode, statusText, userID, meta = ZAPStatusServerError, err.Error(), "", nil
 	}
 
@@ -271,20 +266,6 @@ func EncodeZAPResponse(resp *ZAPResponse) [][]byte {
 		[]byte(userID),
 		zmtp.EncodeMetadata(meta),
 	}
-}
-
-// validateZAPMetadata reports whether meta fits a ZMTP property list, whose
-// encoder panics otherwise.
-func validateZAPMetadata(meta map[string]string) error {
-	for name, value := range meta {
-		if len(name) > 255 {
-			return fmt.Errorf("gozmq/security/zap: metadata name length %d exceeds 255", len(name))
-		}
-		if uint64(len(value)) > 0xFFFFFFFF {
-			return fmt.Errorf("gozmq/security/zap: metadata %q value length %d exceeds 2^32-1", name, len(value))
-		}
-	}
-	return nil
 }
 
 // DecodeZAPResponse parses a multi-frame ZAP response. Version mismatch or a
