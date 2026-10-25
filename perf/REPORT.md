@@ -47,6 +47,17 @@ Go defaults (GOGC=100), three consecutive runs, ratio = gozmq/libzmq:
 | 8 KB | 0.45M | 0.37–0.39M | 1.17–1.23× |
 | 64 KB | 0.08–0.09M (43–47 Gb/s) | 0.09M (45–46 Gb/s) | 0.95–1.01× |
 
+Receiver with `WithRecvBufferPool` (`GOZMQ_LOCAL_FLAGS=-pool`, default GOGC,
+one run):
+
+| size | gozmq | libzmq | ratio |
+| :--- | ---: | ---: | ---: |
+| 32 B | 9.60M | 8.86M | 1.08× |
+| 256 B | 6.98M | 3.71M | 1.88× |
+| 1 KB | 2.49M | 2.27M | 1.10× |
+| 8 KB | 0.76M (50 Gb/s) | 0.41M (27 Gb/s) | 1.85× |
+| 64 KB | 0.15M (78 Gb/s) | 0.11M (57 Gb/s) | 1.38× |
+
 Before this branch (`main`, same session, interleaved with the branch's
 binary): 32 B ran at 3.4–5.3M msg/s, 0.6× of libzmq. The mixed pairings at
 32 B are 8.6M (gozmq PUSH → libzmq PULL) and 9.1M (libzmq PUSH → gozmq PULL),
@@ -113,9 +124,10 @@ own branch and gate:
    actual depth and a ring of eight spare chunks recycles it without
    allocating.
 
-Pipe microbenchmarks stay uncontended-neutral to slightly worse (an
-uncontended push+pop is ~35 ns against ~26 ns for the channel) and that is
-the trade-off below.
+An uncontended push+pop on the new queue is ~35 ns against ~26 ns for the
+channel; that is the trade-off below. (The branch history keeps the round-1
+commit "back direction with the chunked queue (kill criteria NOT met)": that
+was the queue without deferred wakes, superseded by the commits after it.)
 
 ## In-repo benchmarks, perf-parity vs v0.3.0 (count 10, idle machine)
 
