@@ -30,7 +30,7 @@ import (
 // safe for concurrent use; a single Codec may be shared across multiple
 // wrappers and called from multiple goroutines. Unmarshal must not keep a
 // reference to data: the wrappers release the received message, whose
-// frames may be pooled memory (gozmq.WithRecvBufferPool), as soon as it
+// frames are pooled memory by default (gozmq.WithRecvBufferPool), as soon as it
 // returns. encoding/json copies what it keeps.
 type Codec interface {
 	Marshal(v any) ([]byte, error)

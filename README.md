@@ -26,8 +26,8 @@ TCP loopback against native libzmq 4.3.4 (PUSH/PULL, October 2026), gozmq
 at Go's default settings is at or ahead of libzmq from 32 B (1.04–1.10×)
 through 8 KB (1.0×; 1.8× at 256 B), and at 0.6–0.7× on 64 KB frames, where
 a receiver allocating fresh 64 KiB bodies at 4 GB/s is paced by the
-collector: the opt-in receive buffer pool makes that row 1.4×, GOGC=400
-alone brings it to parity. REQ/REP round trips over TCP are 20% shorter
+collector, which is why large received frames come from a recycling buffer
+pool by default (`WithRecvBufferPool(false)` opts out). REQ/REP round trips over TCP are 20% shorter
 than libzmq's. The numbers, the method
 and the tools to reproduce them are in [`perf/REPORT.md`](perf/REPORT.md).
 

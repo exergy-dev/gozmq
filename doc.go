@@ -39,14 +39,15 @@
 //	msg, _ := server.RecvMsg(callCtx)
 //	fmt.Printf("%s\n", msg.Bytes()) // "ping"
 //
-// Received frames are ordinary Go memory owned by the caller; there is
-// nothing to release ((*Msg).Release does nothing for them).
+// Received frames of up to 4 KiB are ordinary Go memory owned by the
+// caller, and Release does nothing for them. Larger frames are lent; see
+// the next section.
 //
 // # Receive buffer pool
 //
-// A socket created with [WithRecvBufferPool](true) receives frames larger
-// than 4 KiB into pooled buffers, which avoids a large allocation and its
-// garbage-collection cost per frame. Those messages are lent ([Msg.Lent]),
+// By default (opt out with [WithRecvBufferPool](false)) a socket receives
+// frames larger than 4 KiB into pooled buffers, which avoids a large
+// allocation and its garbage-collection cost per frame. Those messages are lent ([Msg.Lent]),
 // with an explicit contract: the receiver owns one reference and calls
 // [Msg.Release] when done; the frames are valid until the last reference
 // is released and are then reused; [Msg.Retain] adds a reference; releasing

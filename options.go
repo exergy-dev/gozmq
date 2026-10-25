@@ -34,7 +34,7 @@ type socketConfig struct {
 	maxMessageSize       int64
 	routerMandatory      bool
 	xpubVerbose          bool
-	recvBufferPool       bool
+	recvBufferPool       *bool // nil = default (on, except STREAM)
 	subscriptions        [][]byte
 	handshakeTimeout     time.Duration
 	zapDomain            string
@@ -202,13 +202,18 @@ func WithMaxMessageSize(n int64) Option {
 	return optionFunc(func(c *socketConfig) error { c.maxMessageSize = n; return nil })
 }
 
-// WithRecvBufferPool, when enabled, receives inbound frames larger than
-// 4 KiB into buffers drawn from a shared, size-tiered pool instead of a
+// WithRecvBufferPool controls whether inbound frames larger than 4 KiB are
+// received into buffers drawn from a shared, size-tiered pool instead of a
 // fresh allocation per frame, which saves the allocation and garbage
-// collection cost that dominates large-frame throughput. Default is false.
+// collection cost that dominates large-frame throughput.
 //
-// It changes the ownership of received messages, which is why it is opt-in.
-// A message carrying pooled frames is lent (see [Msg.Lent]):
+// The default is ON for every socket type except STREAM (where it is
+// silently off). Pass WithRecvBufferPool(false) to opt out and receive
+// plain, garbage-collected memory. Explicit WithRecvBufferPool(true) on a
+// STREAM socket is an error.
+//
+// With the pool, received messages carrying pooled frames are lent (see
+// [Msg.Lent]):
 //
 //   - The receiver holds one reference and must call [Msg.Release] when
 //     done with the message; [Msg.Retain] adds a reference, each needing
@@ -225,12 +230,15 @@ func WithMaxMessageSize(n int64) Option {
 //     simply collected by the garbage collector instead of being reused.
 //   - Releasing more times than retained panics.
 //
+// Code that calls Release and then keeps using the frames must copy them
+// first or opt out with WithRecvBufferPool(false).
+//
 // Smaller frames, and frames on CURVE or custom-mechanism sessions (whose
 // decoding produces a fresh plaintext anyway), are always ordinary memory,
 // for which Release does nothing. The option affects receiving only, and
 // is not applicable to STREAM sockets.
 func WithRecvBufferPool(enabled bool) Option {
-	return optionFunc(func(c *socketConfig) error { c.recvBufferPool = enabled; return nil })
+	return optionFunc(func(c *socketConfig) error { c.recvBufferPool = &enabled; return nil })
 }
 
 // WithRouterMandatory controls ROUTER.Send behaviour for unroutable
@@ -547,7 +555,7 @@ func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 			return fmt.Errorf("gozmq: WithHandshakeTimeout is not applicable to STREAM sockets (no ZMTP handshake)")
 		case cfg.zapDomain != "":
 			return fmt.Errorf("gozmq: WithZAPDomain is not applicable to STREAM sockets (no ZMTP handshake)")
-		case cfg.recvBufferPool:
+		case cfg.recvBufferPool != nil && *cfg.recvBufferPool:
 			return fmt.Errorf("gozmq: WithRecvBufferPool is not applicable to STREAM sockets (no ZMTP framing)")
 		}
 	}

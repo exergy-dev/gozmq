@@ -91,12 +91,12 @@ func socketTypeName(t SocketType) string {
 // names; unknown values render as "SocketType(n)".
 func (t SocketType) String() string { return socketTypeName(t) }
 
-// Msg is a ZMTP multipart message. Frames delivered by RecvMsg are
-// ordinary Go memory owned by the caller: safe to retain, stash, re-send,
-// or pass between goroutines, and reclaimed by the garbage collector;
-// (*Msg).Release and Retain do nothing for them. The exception is a socket
-// created with [WithRecvBufferPool], whose large frames are lent until
-// Release (see that option and the msg package's "Lent frames").
+// Msg is a ZMTP multipart message. Frames delivered by RecvMsg larger than
+// 4 KiB are, by default, lent from a buffer pool: valid until the message's
+// final Release, then recycled (see [WithRecvBufferPool], which also
+// explains how to opt out, and the msg package's "Lent frames"). Smaller
+// frames, and all frames with WithRecvBufferPool(false), are ordinary Go
+// memory owned by the caller, for which Release and Retain do nothing.
 //
 // Msg is an alias for [msg.Msg]; see that package for the full method
 // set. There is
