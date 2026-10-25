@@ -74,6 +74,58 @@ frames are pooled by default. No wire change. See `perf/REPORT.md`.
   inproc profile and taxed the TCP figures of earlier reports), and runs at
   the runtime's GC setting (`-gogc` is an option, not a default).
 
+### Removed
+
+A simplification pass (about 520 fewer non-test lines, no wire change):
+hand-rolled helpers replaced by the standard library, duplicated engine,
+mechanism and pipe code shared, dead branches dropped. Removals, with the
+replacement:
+
+- `gozmq.NewMsg` and `msg.New`: use `NewMsgFromFrames()` / `msg.FromFrames()`
+  with no arguments, which builds the same empty message.
+- `msg.NewWithRelease`: use `msg.NewLent(put, bufs, frames...)`, which
+  takes the buffers to hand back instead of a closure (one allocation with
+  the message). A lease now has one callback; `Lent`, `Retain`, `Release`
+  and `Derive` are unchanged.
+- `Option` and `ContextOption` are plain function types
+  (`func(*socketConfig) error`, `func(*Context)`) instead of interfaces.
+  Code that only passes `With*` values is unaffected; code that
+  implemented the interface (impossible outside the package) does not exist.
+
+### Fixed
+
+- A STREAM `Send` whose peer pipe had closed between the identity lookup
+  and the write leaked the lease reference it had taken on a pooled frame,
+  so the buffer never returned to the pool. It is released on every
+  failure path now, as ROUTER already did; both engines have regression
+  tests through every outcome (unknown identity, vanished peer, counted
+  drop).
+
+### Changed (simplification)
+
+- The mechanism options (`WithPlainAuth`, `WithPlainClient`,
+  `WithCurveServer`, `WithCurveClient`, `WithSecurityMech`) validate their
+  arguments when applied, so `NewSocket` reports a nil authenticator, a
+  wrong key length or an over-long credential from the option itself;
+  applying two different mechanism options is reported as
+  "<option> and <option> are mutually exclusive". `errors.Is` targets are
+  unchanged; wording is.
+- An inproc pipe with HWM 0 (unbounded) uses the chunked queue instead of
+  a channel with an overflow slice. Default-HWM inproc pipes still use the
+  channel, so their rows are unchanged; the HWM-0 round trip costs the
+  queue's known ~6% (new gate rows `ReqRepRoundTrip_InprocHWM0` and
+  `PushPullThroughput_InprocHWM0`), and HWM-0 streaming is twice as fast.
+- `Bind` emits `EventListening` before its accept goroutine starts, so it
+  always precedes the first `EventAccepted`.
+- `security` exports the handshake helpers the shipped mechanisms share
+  (`Malformed`, `AuthFailed`, `RequireInput`, `RequireNoInput`,
+  `DecodeReply`), usable by an out-of-tree `Mech`.
+- CURVE translates the per-frame MESSAGE flags without branches and keeps
+  its nonce templates precomputed (8–17% faster frame encode/decode on
+  bodies of 1 KiB and up); PLAIN/NULL/CURVE share one reply decoder.
+- `zmqperf`'s subcommands share their timed loops; `remote_lat` releases
+  its replies like the other receivers.
+
 ## [0.3.0] - 2026-10-23
 
 A performance release: fewer allocations on every path, one frame encode
