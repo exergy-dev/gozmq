@@ -8,7 +8,7 @@ perf/
   cli_test.go                              # end-to-end check of zmqperf
   benchgate.sh                             # working tree vs a base commit (the regression rule is in its header)
   zmqperf/                                 # local_thr | remote_thr | local_lat | remote_lat, as in libzmq's perf/
-  libzmq_thr/                              # compare_all.sh: two-process gozmq vs native libzmq throughput
+  libzmq_thr/                              # compare_all.sh / compare_lat.sh: two-process gozmq vs native libzmq
   REPORT.md                                # measured numbers and method
 ```
 
@@ -44,9 +44,19 @@ benchmarks for inproc). The throughput commands accept `-cpuprofile` and
 
 ## Against native libzmq
 
-`libzmq_thr/compare_all.sh` builds libzmq's own `local_thr`/`remote_thr`
-from their C sources (needs gcc and libzmq-dev) and runs them against
+`libzmq_thr/compare_all.sh` compiles the minimal C `local_thr.c`/`remote_thr.c`
+in that directory (repo-written, not libzmq's canonical perf sources; needs
+gcc and libzmq-dev) against the system libzmq and runs them against
 `zmqperf` over TCP and IPC, retrying each measurement until it is valid.
+A second table covers the two mixed pairings (gozmq PUSH to libzmq PULL and
+the reverse). `TRANSPORTS` and `COUNT_SCALE` (a multiplier on the message
+counts) override the defaults.
 Only the TCP table is apples to apples: libzmq's tool uses its default HWM of
 1000 and allocates per message, and over IPC that visibly flatters gozmq.
+
+`libzmq_thr/compare_lat.sh` does the same for REQ/REP round-trip latency
+(`local_lat.c`/`remote_lat.c`) at 32 B and 1 KB, for all four pairings
+(gozmq or libzmq on each side). It prints the full round trip in microseconds;
+libzmq's own tools print one-way (round trip / 2), which the script avoids by
+reading the `roundtrip latency` line of `remote_lat.c`.
 Results and the machine they came from are in `REPORT.md`.
