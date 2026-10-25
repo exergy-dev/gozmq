@@ -129,9 +129,15 @@ may only be tightened.
 - **Engines and pipes run no goroutines.** Receivers read the pipes
   themselves (§3.4), PUB/XPUB apply subscriptions on the application's own
   calls, and readiness is signalled by arming channels (§3.5). A pipe
-  direction with a positive HWM is a buffered channel of that capacity; HWM 0
-  is a 1024-slot channel plus an overflow slice the receiving end refills
-  from, so an unbounded direction costs memory, not a relay goroutine.
+  direction is a chunked FIFO (256-slot chunks, a ring of spare chunks) with
+  a producer-side and a consumer-side mutex, so concurrent callers on one
+  side are safe while producer and consumer never share a lock; the HWM is a
+  count checked against published head/tail counters, and HWM 0 just never
+  refuses, so an unbounded direction costs memory, not a relay goroutine. A
+  parked receiver waits on a cap-1 token channel that the producer arms when
+  a sleeper is registered; the session reader publishes with
+  `TrySendDeferred` and `Flush`es once per read batch, so a receiver is woken
+  once per batch rather than once per message.
 - **Public calls** are safe for concurrent use; each engine serialises what
   its pattern requires (REQ/REP reject a concurrent call that would break
   lock-step with `ErrFSMViolation`). One goroutine per socket is still the
@@ -246,8 +252,10 @@ ROUTER. A STREAM `Connect` dials once with no reconnector.
   interval) tears the session down. A session parked on local backpressure is
   not treated as peer-dead.
 - Traffic phase: frames accumulate into a `Msg` until one without `MORE`.
-  Frames up to 4 KiB are read into a per-reader scratch buffer and copied
-  out; larger ones get their own allocation (or a pooled buffer). A body
+  Frames up to 4 KiB are read into a per-reader scratch buffer, where a
+  message's frames stay until its last frame arrives and all of them are
+  copied into one allocation (`msg.FromFramesCopy`); larger ones get their
+  own allocation (or a pooled buffer). A body
   above 128 KiB is allocated as its bytes arrive, so a peer that announces a
   huge frame and stalls pins at most 17× what it sent plus 128 KiB, not the
   cap. `MaxMessageSize` bounds the whole multipart message on both sides.
@@ -361,15 +369,18 @@ closed; every other error is treated as per-connection and retried.
 
 - Plain memory by default; `WithRecvBufferPool` trades the per-frame
   allocation for the explicit `Release` contract.
-- Reads go through a 16 KiB `bufio.Reader`; the writer coalesces up to 32
-  queued messages (2 MiB) into one `net.Buffers` write, appending frame
-  headers into a reusable scratch buffer so bodies are not copied. Queued
-  PING/PONG commands open the batch. Over TLS the batch goes out as one
-  record.
+- Reads go through a 16 KiB `bufio.Reader`; the writer coalesces queued
+  messages into one write, appending frame headers and bodies up to 1 KiB
+  into a reusable scratch buffer so a run of small frames is one iovec,
+  and passing larger bodies by reference. A batch is bounded by 64 KiB
+  copied, 1000 iovecs, 2 MiB in total and 4096 messages; a fully coalesced
+  batch is one `write(2)`. Queued PING/PONG commands open the batch. Over
+  TLS the batch is one `Write`, split into records by crypto/tls.
 - inproc passes `*Msg` values with no framing, copy or goroutine.
 - A multi-peer receive walks only the pipes that have data; a single-peer
-  receive blocks in the one pipe without a lock. Bounded channels express the
-  HWM directly.
+  receive blocks in the one pipe. The pipe queue's HWM is a counter, so a
+  peer's queue costs what it holds, not its capacity; the session reader
+  wakes the receiver once per read batch.
 - PUB/XPUB `Send` reads a copy-on-write snapshot of the peers (no lock, no
   per-message slice) and answers a peer's subscribe-to-all from an atomic
   flag; only a selective tree takes that peer's read lock.

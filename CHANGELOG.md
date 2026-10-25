@@ -8,6 +8,48 @@ migration hint.
 
 ## [Unreleased]
 
+A throughput release: small-message PUSH/PULL over TCP now matches native
+libzmq (32 B: 1.04–1.10× in the two-process comparison, from 0.6×), with no
+wire or API change. One additive export. See `perf/REPORT.md` for the
+tables and the trade-off on inproc request/reply latency.
+
+### Added
+
+- `msg.FromFramesCopy` / `NewMsgFromFramesCopy`: a message whose frames are
+  copied into one message-owned allocation (what the reader now builds for
+  small received messages).
+- `perf/libzmq_thr/compare_lat.sh` and the C `local_lat`/`remote_lat` tools:
+  REQ/REP round-trip comparison against libzmq in all four pairings;
+  `compare_all.sh` prints the two mixed PUSH/PULL pairings and takes
+  `COUNT_SCALE` and `GOZMQ_GOGC`. New benchmarks `PubSubThroughput_TCP` and
+  `PubSubTopicThroughput_TCP`.
+
+### Changed
+
+- The session writer copies frame bodies up to 1 KiB behind their headers
+  so a run of small frames is one iovec, bounds a batch by bytes and iovecs
+  (64 KiB copied, 1000 iovecs, 2 MiB total) instead of 32 messages, and
+  sends a fully coalesced batch with one `write(2)`. Per million 32 B
+  messages the sender makes 675 syscalls instead of 31,251 and the receiver
+  2,100 reads instead of 19,702. Wire bytes are identical.
+- One allocation per small received message: PUSH/PULL over TCP 3 → 2
+  allocations per delivery, REQ/REP 14 → 10 per round trip, ROUTER/DEALER
+  10 → 8, two-frame topic+payload 6 → 3.
+- Pipes are chunked two-lock queues (256-slot chunks, libzmq's `yqueue`
+  shape) instead of HWM-sized channels: producers and consumers no longer
+  share a lock, the session reader wakes a receiver once per read batch
+  instead of once per message, and a HWM no longer allocates its full
+  capacity up front (a peer at HWM 1000 used 8 KiB per direction before any
+  message; the zmqperf tool's 1,000,000 HWM used 8 MiB). Throughput rows
+  gain 20–50% (TCP 32 B −39%, XPUB/XSUB inproc −47%, PUB fan-out 2 peers
+  −41%); inproc REQ/REP and ROUTER/DEALER round trips cost 8–9% more
+  (about 80 ns on 1 µs) and a 64-subscriber inproc fan-out 26% more,
+  because an uncontended hop to a parked receiver is ~20 ns dearer than a
+  channel handoff.
+- The reader stamps the heartbeat's inbound clock once per read batch
+  instead of once per message.
+- `zmqperf local_thr` divides by the messages it actually timed (`count-1`).
+
 ## [0.3.0] - 2026-10-23
 
 A performance release: fewer allocations on every path, one frame encode
