@@ -35,6 +35,10 @@
 #
 # GOZMQ_LOCAL_FLAGS passes extra flags to gozmq's receiver, e.g.
 # GOZMQ_LOCAL_FLAGS=-pool for the receive buffer pool (WithRecvBufferPool).
+# GOZMQ_GOGC sets GOGC for both gozmq processes (unset = Go's default 100):
+# libzmq has no collector, and at 64 KB x 70k msg/s a 3 MB live heap makes
+# Go's default pacer run a cycle every ~40 messages; GOZMQ_GOGC=400 is the
+# tuning a receiver at that rate would apply (REPORT.md shows both).
 #
 # Requires: gcc, libzmq-dev (pkg-config libzmq), a built Go toolchain.
 set -euo pipefail
@@ -64,13 +68,13 @@ one_run() { # recv_kind send_kind transport size count -> echoes msg/s (0 on fai
     timeout "$PER_RUN_TIMEOUT" "$tmp/c_local_thr"  "$ep" "$size" "$count" > "$srv" 2>/dev/null & local p=$!
   else
     # shellcheck disable=SC2086 # GOZMQ_LOCAL_FLAGS is a flag list
-    timeout "$PER_RUN_TIMEOUT" "$tmp/zmqperf" local_thr  -endpoint "$ep" -size "$size" -count "$count" ${GOZMQ_LOCAL_FLAGS-} > "$srv" 2>/dev/null & local p=$!
+    GOGC=${GOZMQ_GOGC-} timeout "$PER_RUN_TIMEOUT" "$tmp/zmqperf" local_thr  -endpoint "$ep" -size "$size" -count "$count" ${GOZMQ_LOCAL_FLAGS-} > "$srv" 2>/dev/null & local p=$!
   fi
   sleep 0.5
   if [ "$sk" = c ]; then
     timeout "$PER_RUN_TIMEOUT" "$tmp/c_remote_thr" "$ep" "$size" "$count" >/dev/null 2>&1 || true
   else
-    timeout "$PER_RUN_TIMEOUT" "$tmp/zmqperf" remote_thr -endpoint "$ep" -size "$size" -count "$count" >/dev/null 2>&1 || true
+    GOGC=${GOZMQ_GOGC-} timeout "$PER_RUN_TIMEOUT" "$tmp/zmqperf" remote_thr -endpoint "$ep" -size "$size" -count "$count" >/dev/null 2>&1 || true
   fi
   wait $p 2>/dev/null || true
   [ "$tr" = ipc ] && rm -f "${ep#ipc://}"

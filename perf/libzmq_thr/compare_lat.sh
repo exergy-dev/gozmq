@@ -14,7 +14,7 @@
 # compiled against the system libzmq; they are not libzmq's own perf sources.
 #
 # Overrides: SIZES (default "32 1024"), LAT_COUNT (round trips, default
-# 50000), MAX_TRIES (default 5).
+# 50000), MAX_TRIES (default 5), GOZMQ_GOGC (GOGC for the gozmq processes).
 #
 # Robustness: same as compare_all.sh. Each process is wrapped in `timeout`,
 # TCP ports are never reused, a measurement is retried until valid and the
@@ -44,14 +44,14 @@ one_run() { # client server size -> echoes full round-trip us (0 on failure)
   if [ "$srv" = c ]; then
     timeout "$PER_RUN_TIMEOUT" "$tmp/c_local_lat" "$ep" "$size" "$COUNT" >/dev/null 2>&1 & p=$!
   else
-    timeout "$PER_RUN_TIMEOUT" "$tmp/zmqperf" local_lat -endpoint "$ep" -size "$size" -count "$COUNT" >/dev/null 2>&1 & p=$!
+    GOGC=${GOZMQ_GOGC-} timeout "$PER_RUN_TIMEOUT" "$tmp/zmqperf" local_lat -endpoint "$ep" -size "$size" -count "$COUNT" >/dev/null 2>&1 & p=$!
   fi
   sleep 0.5
   if [ "$cli" = c ]; then
     timeout "$PER_RUN_TIMEOUT" "$tmp/c_remote_lat" "$ep" "$size" "$COUNT" > "$out" 2>/dev/null || true
     sed -n 's/^roundtrip latency: \([0-9.]*\) \[us\].*/\1/p' "$out" | head -1
   else
-    timeout "$PER_RUN_TIMEOUT" "$tmp/zmqperf" remote_lat -endpoint "$ep" -size "$size" -count "$COUNT" > "$out" 2>/dev/null || true
+    GOGC=${GOZMQ_GOGC-} timeout "$PER_RUN_TIMEOUT" "$tmp/zmqperf" remote_lat -endpoint "$ep" -size "$size" -count "$COUNT" > "$out" 2>/dev/null || true
     sed -n 's/^average latency: \([0-9.]*\) \[us\].*/\1/p' "$out" | head -1
   fi
   kill "$p" 2>/dev/null || true
