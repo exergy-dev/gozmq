@@ -23,3 +23,11 @@ func forEachKind(t *testing.T, fn func(t *testing.T, k kind)) {
 		t.Run(k.name, func(t *testing.T) { fn(t, k) })
 	}
 }
+
+// forEachKindB runs fn as a sub-benchmark against every pipe kind.
+func forEachKindB(b *testing.B, fn func(b *testing.B, k kind)) {
+	b.Helper()
+	for _, k := range kinds {
+		b.Run(k.name, func(b *testing.B) { fn(b, k) })
+	}
+}
