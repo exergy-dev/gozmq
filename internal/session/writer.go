@@ -372,7 +372,10 @@ func (b *writerBatch) appendSealed(s *Session, flags uint8, body []byte, sizeSoF
 }
 
 // flushBatch writes the accumulated frame blobs to the conn in a
-// single writev syscall (where supported by the underlying net.Conn).
+// single syscall (where supported by the underlying net.Conn). It always
+// goes through WriteBuffers when the conn has one, even for a single
+// buffer: the transport turns a one-buffer batch (a fully coalesced one)
+// into a plain write(2) and several into writev(2). Otherwise
 // net.Buffers.WriteTo preserves order and detects io.Writer shortcuts
 // for *net.TCPConn / *net.UnixConn to use writev(2); for other writers
 // it falls back to a Write loop. Either way, ordering is preserved.
