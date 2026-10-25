@@ -1,13 +1,8 @@
-// Package zmqerr holds the error sentinels returned across gozmq. It
-// exists so internal packages (session, socket, transport, zmtp, security)
-// can wrap these sentinels without importing the public gozmq package —
-// which would create an import cycle once gozmq itself imports those
-// internal packages to wire the driver.
-//
-// The root gozmq package re-exports every sentinel here as a variable
-// alias (e.g. gozmq.ErrSocketClosed = zmqerr.ErrSocketClosed) so the two
-// names refer to the same underlying error value. errors.Is works
-// transparently across either reference.
+// Package zmqerr holds the error sentinels returned across gozmq, so internal
+// packages can wrap them without importing the root package (an import
+// cycle). The root package re-exports each as a variable alias
+// (gozmq.ErrSocketClosed = zmqerr.ErrSocketClosed): the same error value,
+// so errors.Is works with either name.
 package zmqerr
 
 import (

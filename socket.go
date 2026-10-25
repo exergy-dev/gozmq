@@ -58,8 +58,6 @@ func (c *Context) NewSocket(t SocketType, opts ...Option) (*Socket, error) {
 		engine:     engine,
 		links:      make(map[*link]struct{}),
 	}
-	// Transfer any monitor config set via options to the atomic pointer so
-	// emit() can read it lock-free.
 	if cfg.monitor != nil {
 		s.monitorCfg.Store(&monitorState{ch: cfg.monitor, mask: cfg.monitorMask})
 	}
@@ -75,9 +73,6 @@ func (c *Context) NewSocket(t SocketType, opts ...Option) (*Socket, error) {
 	return s, nil
 }
 
-// newEngineFor returns the pattern-specific socket.Engine for the
-// supported socket types. ROUTER honors the configured WithRouterMandatory
-// flag.
 func newEngineFor(t SocketType, cfg *socketConfig) (socket.Engine, error) {
 	switch t {
 	case Pair:

@@ -9,13 +9,6 @@ import (
 	"github.com/exergy-dev/gozmq/msg"
 )
 
-// This file holds the package-wide value types (SocketType, Msg) and the
-// small cross-cutting Socket helpers (emit, logger, handshake-event
-// classification). The Context lifecycle lives in context.go; the Socket
-// type and its Send/Recv/Bind/Connect surface in socket.go; session and
-// mechanism wiring (STREAM's raw-mode sessions included) in wiring.go;
-// inproc in inproc.go; and the LINGER teardown in close.go.
-
 // SocketType enumerates the ZMTP socket patterns.
 type SocketType uint8
 

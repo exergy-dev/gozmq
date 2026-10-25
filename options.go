@@ -12,8 +12,8 @@ import (
 	"github.com/exergy-dev/gozmq/security/curve"
 )
 
-// Option configures a Socket at construction time. The option type is opaque;
-// construct values via the With* helpers. Options that are inapplicable to
+// Option configures a Socket at construction time; construct values via the
+// With* helpers. Options that are inapplicable to
 // the socket type are rejected with an error at Socket construction rather
 // than silently ignored: pattern-specific options (WithRouterMandatory,
 // WithXPubVerbose, WithSubscribe) on the wrong pattern, and ZMTP-layer
@@ -21,8 +21,6 @@ import (
 // on STREAM sockets, which bypass ZMTP entirely.
 type Option func(*socketConfig) error
 
-// socketConfig is the concrete aggregate that every Option mutates. Defaults
-// are set in newSocketConfig.
 type socketConfig struct {
 	identity             []byte
 	sendHWM              int
@@ -40,9 +38,7 @@ type socketConfig struct {
 	handshakeTimeout     time.Duration
 	zapDomain            string
 
-	// Set-flags for options whose zero/default values are
-	// indistinguishable from "not configured" — needed so
-	// validateSocketConfig can reject explicit use on STREAM sockets.
+	// Set when the option was applied, so STREAM can reject explicit use.
 	heartbeatSet        bool
 	handshakeTimeoutSet bool
 

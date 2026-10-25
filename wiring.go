@@ -9,9 +9,8 @@ import (
 	"github.com/exergy-dev/gozmq/transport"
 )
 
-// sessionConfig builds the session configuration for conn, with the
-// mechanism and codec configured for this Socket; startSession adds the
-// callbacks. An error means the security mechanism could not be
+// sessionConfig builds the session configuration for conn; startSession adds
+// the callbacks. An error means the security mechanism could not be
 // constructed (e.g. ephemeral CURVE keygen failure); the connection must
 // be torn down rather than proceeding with a weaker mechanism.
 func (s *Socket) sessionConfig(conn transport.Conn, role security.Role) (session.Config, error) {

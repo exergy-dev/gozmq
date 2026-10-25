@@ -9,10 +9,9 @@ import (
 	"github.com/exergy-dev/gozmq/internal/socket"
 )
 
-// PollEvents is a bitmask of interest sets passed to Poller.Add
-// and surfaced inside [PollEvent] when Poll reports readiness. The bit
-// values match the libzmq ZMQ_POLLIN / ZMQ_POLLOUT convention so they
-// are easy to mentally translate between gozmq and zmq_poll-style code.
+// PollEvents is a bitmask of interest sets passed to Poller.Add and
+// surfaced inside [PollEvent] when Poll reports readiness. The bit values
+// match libzmq's ZMQ_POLLIN / ZMQ_POLLOUT.
 type PollEvents uint8
 
 const (
@@ -235,17 +234,13 @@ func gateDirs(eng socket.Engine) [2]pollDir {
 	return [2]pollDir{{PollIn, in}, {PollOut, out}}
 }
 
-// pollerReg pairs a registered Socket with its interest mask.
 type pollerReg struct {
 	sock *Socket
 	mask PollEvents
 }
 
-// scanReady performs a non-blocking pass across the registration set,
-// returning the subset whose engine reports ready right now. The
-// returned events are the intersection of each entry's mask with the
-// engine's current readiness, so callers never see bits they did not
-// register.
+// scanReady is a non-blocking pass over regs: the sockets whose engine is
+// ready right now, with events limited to each entry's mask.
 func scanReady(regs []pollerReg) []PollEvent {
 	var out []PollEvent
 	for _, r := range regs {
