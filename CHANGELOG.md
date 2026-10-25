@@ -48,7 +48,11 @@ tables and the trade-off on inproc request/reply latency.
   channel handoff.
 - The reader stamps the heartbeat's inbound clock once per read batch
   instead of once per message.
-- `zmqperf local_thr` divides by the messages it actually timed (`count-1`).
+- `zmqperf local_thr` divides by the messages it actually timed (`count-1`),
+  and `zmqperf` runs at GC percent 400 by default (`-gogc` overrides it):
+  with the HWM-sized channel buffers gone, a 64 KB receiver's live heap is a
+  few MB and Go's default pacer collects every ~60 messages; the report
+  shows the default-pacing figures alongside.
 
 ## [0.3.0] - 2026-10-23
 

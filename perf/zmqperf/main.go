@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime/debug"
 	"runtime/pprof"
 	"time"
 
@@ -28,6 +29,15 @@ import (
 // benchHWM keeps the sender from blocking on HWM mid-run; libzmq's tools
 // use their default of 1000, which is why the comparison scripts note it.
 const benchHWM = 1_000_000
+
+// defaultGOGC is the collector setting this tool runs with (-gogc
+// overrides it). A receiver of fresh 64 KiB frames at 70k msg/s allocates
+// ~4.6 GB/s against a live heap of a few MB, and Go's default pacer (GOGC
+// 100, 4 MB minimum heap goal) then runs a cycle every ~60 messages; 400 is
+// the ordinary tuning for that allocation rate and is what an application
+// at it would set (or a GOMEMLIMIT). libzmq's tools have no collector to
+// tune. perf/REPORT.md shows the Go-default figures alongside.
+const defaultGOGC = 400
 
 func main() {
 	log.SetFlags(0)
@@ -47,7 +57,11 @@ func main() {
 	cpuProfile := fs.String("cpuprofile", "", "write a CPU profile here (thr commands)")
 	memProfile := fs.String("memprofile", "", "write a heap profile here (thr commands)")
 	pool := fs.Bool("pool", false, "local_thr: receive into the buffer pool and release each message")
+	gogc := fs.Int("gogc", defaultGOGC, "GC percent for this process; negative keeps the runtime's setting (GOGC env or 100)")
 	_ = fs.Parse(os.Args[2:])
+	if *gogc >= 0 {
+		debug.SetGCPercent(*gogc)
+	}
 	if *count == 0 {
 		*count = map[bool]int{true: 1_000_000, false: 100_000}[cmd == "local_thr" || cmd == "remote_thr"]
 	}
