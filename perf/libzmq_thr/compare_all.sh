@@ -33,8 +33,10 @@
 # cross-implementation comparison; read the IPC libzmq column as "stock libzmq
 # perf-tool settings," not a tuned ceiling.
 #
-# GOZMQ_LOCAL_FLAGS passes extra flags to gozmq's receiver, e.g.
-# GOZMQ_LOCAL_FLAGS=-pool for the receive buffer pool (WithRecvBufferPool).
+# GOZMQ_LOCAL_FLAGS passes extra flags to gozmq's receiver. zmqperf's receiver
+# uses the receive buffer pool (WithRecvBufferPool, Release per message) by
+# default, like libzmq's local_thr closes each message; GOZMQ_LOCAL_FLAGS=-pool=false
+# measures plain memory.
 # GOZMQ_GOGC passes -gogc to both gozmq processes. zmqperf's own default is
 # 400 (see its doc: libzmq has no collector, and at 64 KB x 70k msg/s Go's
 # default pacer runs a cycle every ~60 messages); GOZMQ_GOGC=100 measures

@@ -8,9 +8,11 @@
 //
 // -size and -count must match on both ends. The output format follows the
 // libzmq tools, so the same scripts can read either. The throughput
-// commands take -cpuprofile and -memprofile; local_thr takes -pool to
-// receive into the buffer pool (gozmq.WithRecvBufferPool) and release each
-// message.
+// commands take -cpuprofile and -memprofile. local_thr receives into the
+// buffer pool (gozmq.WithRecvBufferPool) and releases each message, which
+// is the library's large-frame receive path and the counterpart of
+// libzmq's local_thr closing each message; -pool=false receives into plain
+// memory instead. The collector runs at GC percent 400 (-gogc).
 package main
 
 import (
@@ -56,7 +58,7 @@ func main() {
 	count := fs.Int("count", 0, "message or round-trip count (must match the peer)")
 	cpuProfile := fs.String("cpuprofile", "", "write a CPU profile here (thr commands)")
 	memProfile := fs.String("memprofile", "", "write a heap profile here (thr commands)")
-	pool := fs.Bool("pool", false, "local_thr: receive into the buffer pool and release each message")
+	pool := fs.Bool("pool", true, "local_thr: receive into the buffer pool (WithRecvBufferPool) and release each message; -pool=false receives into plain memory")
 	gogc := fs.Int("gogc", defaultGOGC, "GC percent for this process; negative keeps the runtime's setting (GOGC env or 100)")
 	_ = fs.Parse(os.Args[2:])
 	if *gogc >= 0 {
