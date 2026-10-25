@@ -303,7 +303,7 @@ func TestRecvBytes(t *testing.T) {
 
 // TestPlainAuth_WrongPassword: a PLAIN client presenting bad credentials
 // must surface EventHandshakeFailedAuth on its monitor channel
-// (exercising classifyHandshakeEvent's ErrAuthFailed branch).
+// (the ErrAuthFailed branch of the handshake-failure classification).
 func TestPlainAuth_WrongPassword(t *testing.T) {
 	t.Parallel()
 	cliEvents := make(chan gozmq.Event, 64)
@@ -361,7 +361,7 @@ func TestSocketType_String(t *testing.T) {
 // contract for caller-constructed messages.
 func TestNewMsg(t *testing.T) {
 	t.Parallel()
-	m := gozmq.NewMsg()
+	m := gozmq.NewMsgFromFrames()
 	require.Equal(t, 0, m.NumFrames(), "NewMsg NumFrames")
 	m.AppendFrame([]byte("alpha"))
 	m.AppendFrame([]byte("beta"))
@@ -376,7 +376,7 @@ func TestNewMsg(t *testing.T) {
 	require.Equal(t, [][]byte{[]byte("alpha"), []byte("beta")}, got.Frames())
 
 	// Release on a caller-constructed message is documented as always safe.
-	empty := gozmq.NewMsg()
+	empty := gozmq.NewMsgFromFrames()
 	empty.Release()
 }
 

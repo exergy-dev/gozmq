@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"io"
+	"maps"
 	"net"
 	"slices"
 	"testing"
@@ -116,13 +117,7 @@ func Greeting(mech string, minor byte) []byte {
 // Metadata encodes props as a ZMTP property list, keys in sorted order.
 func Metadata(props map[string]string) []byte {
 	var b []byte
-	for _, k := range slices.Sorted(func(yield func(string) bool) {
-		for k := range props {
-			if !yield(k) {
-				return
-			}
-		}
-	}) {
+	for _, k := range slices.Sorted(maps.Keys(props)) {
 		b = append(b, byte(len(k)))
 		b = append(b, k...)
 		b = binary.BigEndian.AppendUint32(b, uint32(len(props[k])))
@@ -163,9 +158,7 @@ func RawNullHandshake(t testing.TB, addr string, minor byte, socketType string, 
 	_, err = io.ReadFull(c, make([]byte, 64))
 	require.NoError(t, err, "server greeting")
 	props := map[string]string{"Socket-Type": socketType}
-	for k, v := range meta {
-		props[k] = v
-	}
+	maps.Copy(props, meta)
 	// A NULL server is passive: the client sends READY first.
 	_, err = c.Write(Command("READY", Metadata(props)))
 	require.NoError(t, err)

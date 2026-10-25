@@ -139,7 +139,7 @@ func TestRouter_SendRejectsEmptyMessage(t *testing.T) {
 	eng := socket.NewRouterEngine(false)
 	defer eng.Close()
 
-	err := eng.Send(context.Background(), msg.New())
+	err := eng.Send(context.Background(), msg.FromFrames())
 	require.ErrorIs(t, err, zmqerr.ErrRouteUnknown)
 }
 

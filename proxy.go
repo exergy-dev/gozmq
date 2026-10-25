@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
@@ -69,15 +70,10 @@ func Proxy(ctx context.Context, frontend, backend, capture *Socket) error {
 	// direction would fail instantly with ErrFSMViolation and take the
 	// working direction down with it, so skip it — the same net effect as
 	// libzmq's zmq_proxy, where those sockets simply never poll ready.
-	dirs := make([]struct{ from, to *Socket }, 0, 2)
-	for _, d := range [2]struct{ from, to *Socket }{
-		{frontend, backend},
-		{backend, frontend},
-	} {
-		if canRecv(d.from.Type()) && canSend(d.to.Type()) {
-			dirs = append(dirs, d)
-		}
-	}
+	type dir struct{ from, to *Socket }
+	dirs := slices.DeleteFunc([]dir{{frontend, backend}, {backend, frontend}}, func(d dir) bool {
+		return !canRecv(d.from.Type()) || !canSend(d.to.Type())
+	})
 	if len(dirs) == 0 {
 		return fmt.Errorf("gozmq: Proxy cannot forward in either direction between %s and %s",
 			frontend.Type(), backend.Type())
@@ -89,12 +85,10 @@ func Proxy(ctx context.Context, frontend, backend, capture *Socket) error {
 	var wg sync.WaitGroup
 	errs := make([]error, len(dirs))
 	for i, dir := range dirs {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer cancel()
 			errs[i] = proxyOneWay(runCtx, dir.from, dir.to, tap)
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -138,18 +132,15 @@ func startCaptureTap(capture *Socket) *captureTap {
 		// path, and backpressure just fills t.ch, which then drops. ctx
 		// only bounds them at shutdown, where a capture socket with no
 		// peer (PUSH, DEALER) would otherwise block stop forever.
+		// Once a send fails the capture socket is gone or the proxy is
+		// stopping: keep draining so senders never block, but stop
+		// trying to send.
+		var err error
 		for m := range t.ch {
-			err := capture.SendMsg(ctx, m)
-			m.Release()
-			if err != nil {
-				// The capture socket is gone or the proxy is
-				// stopping; keep draining so senders never block,
-				// but stop trying to send.
-				for m := range t.ch {
-					m.Release()
-				}
-				return
+			if err == nil {
+				err = capture.SendMsg(ctx, m)
 			}
+			m.Release()
 		}
 	}()
 	return t

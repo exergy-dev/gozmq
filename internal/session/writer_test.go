@@ -525,7 +525,7 @@ func TestWriter_EmptyMessageStillEmitted(t *testing.T) {
 
 	ctx := testutil.Ctx(t, time.Second)
 
-	require.NoError(t, sA.Pipe().Send(ctx, msg.New()), "Send(empty)")
+	require.NoError(t, sA.Pipe().Send(ctx, msg.FromFrames()), "Send(empty)")
 	got, err := sB.Pipe().Recv(ctx)
 	require.NoError(t, err, "Recv")
 	require.Equal(t, 1, got.NumFrames(), "empty msg surfaced as wrong number of frames; want 1 zero-length frame")

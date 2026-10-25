@@ -11,7 +11,7 @@ import (
 )
 
 func TestMsgAppendFrame(t *testing.T) {
-	m := New()
+	m := FromFrames()
 	m.AppendFrame([]byte("a"))
 	m.AppendFrame([]byte("bb"))
 	require.Equal(t, 2, m.NumFrames())
@@ -57,15 +57,15 @@ func TestMsgRetainReleaseAreNoops(t *testing.T) {
 }
 
 // lentMsg returns a lent single-frame message and a counter of the times
-// its release func has run.
+// its put func has run.
 func lentMsg() (*Msg, *atomic.Int32) {
 	released := new(atomic.Int32)
-	return NewWithRelease(func() { released.Add(1) }, []byte("lent")), released
+	buf := []byte("lent")
+	return NewLent(func([]byte) { released.Add(1) }, [][]byte{buf}, buf), released
 }
 
 func TestMsgLent(t *testing.T) {
 	require.False(t, FromBytes([]byte("x")).Lent())
-	require.False(t, NewWithRelease(nil, []byte("x")).Lent(), "nil release makes a plain message")
 	require.False(t, FromBytes([]byte("x")).Derive([]byte("y")).Lent())
 	m, _ := lentMsg()
 	require.True(t, m.Lent())

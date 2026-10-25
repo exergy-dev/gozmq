@@ -75,7 +75,7 @@ func (s *Socket) checkInproc(endpoint string) error {
 		return fmt.Errorf("%w: inproc endpoint requires a non-empty name", ErrEndpointInvalid)
 	case s.socketType == Stream:
 		return fmt.Errorf("%w: %q: STREAM sockets carry raw bytes and do not support inproc", ErrEndpointInvalid, endpoint)
-	case s.cfg.securityConfigured():
+	case s.cfg.mech != nil:
 		return fmt.Errorf("%w: %q: inproc runs no security handshake, so a socket with PLAIN, CURVE or WithSecurityMech cannot use it",
 			ErrEndpointInvalid, endpoint)
 	}
@@ -159,12 +159,8 @@ func inprocHWM(send, recv int) int {
 	if send == 0 || recv == 0 {
 		return 0
 	}
-	// Both are at most MaxHWM, so the sum cannot overflow; saturate anyway
-	// so a future relaxation of the cap cannot produce a negative HWM.
-	if sum := send + recv; sum > 0 {
-		return sum
-	}
-	return 2 * MaxHWM
+	// Both are at most MaxHWM after validation, so the sum cannot overflow.
+	return send + recv
 }
 
 // wireInproc joins cl's socket (the connector) to bind with one pipe pair.

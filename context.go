@@ -34,11 +34,7 @@ type Context struct {
 }
 
 // ContextOption configures a Context at construction.
-type ContextOption interface{ applyContext(*Context) }
-
-type contextOptionFunc func(*Context)
-
-func (f contextOptionFunc) applyContext(c *Context) { f(c) }
+type ContextOption func(*Context)
 
 // WithZAPHandler installs a context-level RFC 27 ZAP handler. It authorizes
 // the peer on the server side of every PLAIN and CURVE handshake, whether that
@@ -52,7 +48,7 @@ func (f contextOptionFunc) applyContext(c *Context) { f(c) }
 // handshaken deadlocks. A rejection fails the handshake with an error
 // wrapping the handler's own. A nil handler removes it.
 func WithZAPHandler(handler security.ZAPHandler) ContextOption {
-	return contextOptionFunc(func(c *Context) { c.zapHandler = handler })
+	return func(c *Context) { c.zapHandler = handler }
 }
 
 // NewContext creates a new Context. Call Close to release resources.
@@ -79,7 +75,7 @@ func NewContext(opts ...ContextOption) *Context {
 		c.transports[t.Scheme()] = t
 	}
 	for _, o := range opts {
-		o.applyContext(c)
+		o(c)
 	}
 	return c
 }

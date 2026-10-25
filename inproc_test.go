@@ -160,7 +160,7 @@ func TestInproc_IdentityBothWays(t *testing.T) {
 		src, dst *Socket
 		to, from string
 	}{{b, a, "A", "B"}, {a, b, "B", "A"}} {
-		m := NewMsg()
+		m := NewMsgFromFrames()
 		m.AppendFrame([]byte(tc.to))
 		m.AppendFrame([]byte("hi"))
 		require.NoError(t, tc.src.SendMsg(ctx, m))

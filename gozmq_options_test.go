@@ -47,12 +47,12 @@ func TestNewSocketOptionValidation(t *testing.T) {
 		{"curve-client-short-key", Dealer, []Option{WithCurveClient(key, key, make([]byte, 31))}, "err"},
 		{"security-mech-nil", Rep, []Option{WithSecurityMech(nil)}, "err"},
 
-		{"plain server+client", Pair, []Option{auth, WithPlainClient("u", "p")}, "mutually exclusive"},
+		{"plain server+client", Pair, []Option{auth, WithPlainClient("u", "p")}, "WithPlainAuth and WithPlainClient are mutually exclusive"},
 		{"plain server+curve", Pair, []Option{auth, WithCurveServer(key)}, "mutually exclusive"},
 		{"plain client+curve", Pair, []Option{WithPlainClient("u", "p"), WithCurveClient(key, key, key)}, "mutually exclusive"},
-		{"custom+plain server", Rep, []Option{custom, auth}, "mutually exclusive with the PLAIN options"},
-		{"custom+plain client", Req, []Option{custom, WithPlainClient("u", "p")}, "mutually exclusive with the PLAIN options"},
-		{"custom+curve server", Rep, []Option{custom, WithCurveServer(key)}, "mutually exclusive with the CURVE options"},
+		{"custom+plain server", Rep, []Option{custom, auth}, "WithSecurityMech and WithPlain"},
+		{"custom+plain client", Req, []Option{custom, WithPlainClient("u", "p")}, "WithSecurityMech and WithPlain"},
+		{"custom+curve server", Rep, []Option{custom, WithCurveServer(key)}, "WithSecurityMech and WithCurveServer are mutually exclusive"},
 
 		{"plain-auth-on-stream", Stream, []Option{auth}, "err"},
 		{"plain-client-on-stream", Stream, []Option{WithPlainClient("user", "pass")}, "err"},
