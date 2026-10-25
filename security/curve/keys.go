@@ -73,20 +73,13 @@ func Z85Encode(b []byte) string {
 	out := make([]byte, outLen)
 	oi := 0
 	for i := 0; i < len(b); i += 4 {
-		// Big-endian uint32 over the 4-byte chunk. i+3 is always in
-		// range: the loop steps by 4 and len(b)%4 == 0 is enforced by the
-		// panic above.
+		// Big-endian uint32 over the 4-byte chunk, emitted as 5 base-85
+		// digits, least significant last.
 		v := binary.BigEndian.Uint32(b[i : i+4])
-		// Emit 5 base-85 digits most-significant first.
-		out[oi+4] = z85Alphabet[v%85]
-		v /= 85
-		out[oi+3] = z85Alphabet[v%85]
-		v /= 85
-		out[oi+2] = z85Alphabet[v%85]
-		v /= 85
-		out[oi+1] = z85Alphabet[v%85]
-		v /= 85
-		out[oi+0] = z85Alphabet[v%85]
+		for j := 4; j >= 0; j-- {
+			out[oi+j] = z85Alphabet[v%85]
+			v /= 85
+		}
 		oi += 5
 	}
 	return string(out)
@@ -107,7 +100,7 @@ func Z85Decode(s string) ([]byte, error) {
 	oi := 0
 	for i := 0; i < len(s); i += 5 {
 		var v uint64
-		for j := 0; j < 5; j++ {
+		for j := range 5 {
 			d := z85Decoder[s[i+j]]
 			if d == 0xFF {
 				return nil, fmt.Errorf("%w: character %q at index %d", ErrInvalidZ85, s[i+j], i+j)
