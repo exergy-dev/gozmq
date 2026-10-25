@@ -53,7 +53,7 @@ func (e *pairEngine) AttachPipe(p *pipe.End) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
-		return fmt.Errorf("pair attach: %w", zmqerr.ErrSocketClosed)
+		return errClosed("pair attach")
 	}
 	if e.pipe != nil {
 		select {
@@ -123,7 +123,7 @@ func (e *pairEngine) Send(ctx context.Context, m *msg.Msg) error {
 		e.mu.Lock()
 		if e.closed {
 			e.mu.Unlock()
-			return fmt.Errorf("pair send: %w", zmqerr.ErrSocketClosed)
+			return errClosed("pair send")
 		}
 		p := e.pipe
 		attached := e.attached.wait()
@@ -142,7 +142,7 @@ func (e *pairEngine) Send(ctx context.Context, m *msg.Msg) error {
 			e.sent.Add(1)
 			return nil
 		case errors.Is(err, pipe.ErrAborted):
-			return fmt.Errorf("pair send: %w", zmqerr.ErrSocketClosed)
+			return errClosed("pair send")
 		case errors.Is(err, io.ErrClosedPipe):
 			e.retire(p)
 		default:
@@ -156,7 +156,7 @@ func (e *pairEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		e.mu.Lock()
 		if e.closed {
 			e.mu.Unlock()
-			return nil, fmt.Errorf("pair recv: %w", zmqerr.ErrSocketClosed)
+			return nil, errClosed("pair recv")
 		}
 		var old *pipe.End
 		if len(e.retired) > 0 {
@@ -188,7 +188,7 @@ func (e *pairEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 			e.recv.Add(1)
 			return rm, nil
 		case errors.Is(err, pipe.ErrAborted):
-			return nil, fmt.Errorf("pair recv: %w", zmqerr.ErrSocketClosed)
+			return nil, errClosed("pair recv")
 		case errors.Is(err, io.EOF):
 			e.retire(p)
 		default:
@@ -207,12 +207,9 @@ func (e *pairEngine) retire(p *pipe.End) {
 // messages queued in the attached and retired pipes.
 func (e *pairEngine) Metrics() Metrics {
 	e.mu.Lock()
-	var depth int
+	depth := sumLen(e.retired...)
 	if e.pipe != nil {
-		depth = e.pipe.Len()
-	}
-	for _, r := range e.retired {
-		depth += r.Len()
+		depth += e.pipe.Len()
 	}
 	e.mu.Unlock()
 	return e.snapshot(uint64(depth))

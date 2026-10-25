@@ -95,7 +95,7 @@ func (e *reqEngine) AttachPipe(p *pipe.End) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
-		return fmt.Errorf("req attach: %w", zmqerr.ErrSocketClosed)
+		return errClosed("req attach")
 	}
 	if !e.ring.add(p) {
 		return nil
@@ -130,7 +130,7 @@ func (e *reqEngine) Send(ctx context.Context, m *msg.Msg) error {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
-		return fmt.Errorf("req send: %w", zmqerr.ErrSocketClosed)
+		return errClosed("req send")
 	}
 	if e.state != reqStateCanSend {
 		state := e.state
@@ -182,7 +182,7 @@ func (e *reqEngine) send(ctx context.Context, m *msg.Msg) error {
 		e.mu.Lock()
 		if e.closed {
 			e.mu.Unlock()
-			return fmt.Errorf("req send: %w", zmqerr.ErrSocketClosed)
+			return errClosed("req send")
 		}
 		if e.ring.len() == 0 {
 			notify := e.attached.wait()
@@ -219,7 +219,7 @@ func (e *reqEngine) send(ctx context.Context, m *msg.Msg) error {
 			_ = e.DetachPipe(p)
 			continue
 		case errors.Is(err, pipe.ErrAborted):
-			return fmt.Errorf("req send: %w", zmqerr.ErrSocketClosed)
+			return errClosed("req send")
 		default:
 			return err
 		}
@@ -229,7 +229,7 @@ func (e *reqEngine) send(ctx context.Context, m *msg.Msg) error {
 			// Close won this race. The peer received the request; the
 			// caller will see ErrSocketClosed on the subsequent Recv.
 			e.mu.Unlock()
-			return fmt.Errorf("req send: %w", zmqerr.ErrSocketClosed)
+			return errClosed("req send")
 		}
 		// Advance cursor past p if it's still at idx.
 		e.ring.advancePast(idx, p)
@@ -253,7 +253,7 @@ func (e *reqEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
-		return nil, fmt.Errorf("req recv: %w", zmqerr.ErrSocketClosed)
+		return nil, errClosed("req recv")
 	}
 	if e.state != reqStateCanRecv {
 		state := e.state
@@ -310,7 +310,7 @@ func (e *reqEngine) recvSticky(ctx context.Context, sticky *pipe.End) (*msg.Msg,
 		// Sticky peer detached between Send and Recv. Treat as peer gone.
 		select {
 		case <-e.closeCh:
-			return nil, fmt.Errorf("req recv: %w", zmqerr.ErrSocketClosed)
+			return nil, errClosed("req recv")
 		default:
 		}
 		return nil, fmt.Errorf("req recv: peer gone: %w", zmqerr.ErrSocketClosed)
@@ -320,7 +320,7 @@ func (e *reqEngine) recvSticky(ctx context.Context, sticky *pipe.End) (*msg.Msg,
 	case err == nil:
 		return m, nil
 	case errors.Is(err, pipe.ErrAborted):
-		return nil, fmt.Errorf("req recv: %w", zmqerr.ErrSocketClosed)
+		return nil, errClosed("req recv")
 	case errors.Is(err, io.EOF):
 		// Peer gone, and any reply it sent before closing was delivered.
 		return nil, fmt.Errorf("req recv: peer gone: %w", zmqerr.ErrSocketClosed)
@@ -362,10 +362,7 @@ func stripReqDelimiter(m *msg.Msg) (*msg.Msg, error) {
 // messages queued in the attached pipes.
 func (e *reqEngine) Metrics() Metrics {
 	e.mu.Lock()
-	var depth int
-	for _, p := range e.ring.pipes {
-		depth += p.Len()
-	}
+	depth := sumLen(e.ring.pipes...)
 	e.mu.Unlock()
 	return e.snapshot(uint64(depth))
 }

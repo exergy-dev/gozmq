@@ -152,7 +152,7 @@ func (e *pubEngine) AttachPipe(p *pipe.End) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.snap.Load() == nil {
-		return fmt.Errorf("pub attach: %w", zmqerr.ErrSocketClosed)
+		return errClosed("pub attach")
 	}
 	if _, ok := e.peers[p]; ok {
 		return nil
@@ -261,7 +261,7 @@ func (e *pubEngine) CanSendNow() bool {
 func (e *pubEngine) Send(ctx context.Context, m *msg.Msg) error {
 	snap := e.snap.Load()
 	if snap == nil {
-		return fmt.Errorf("pub send: %w", zmqerr.ErrSocketClosed)
+		return errClosed("pub send")
 	}
 	if m == nil || m.NumFrames() == 0 {
 		return nil

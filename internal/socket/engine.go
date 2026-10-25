@@ -77,6 +77,7 @@ package socket
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
@@ -172,6 +173,19 @@ func Arm(gate chan struct{}) {
 	case gate <- struct{}{}:
 	default:
 	}
+}
+
+// errClosed is the error of operation op ("pair send") that found its
+// engine closed or was aborted by it closing: it wraps zmqerr.ErrSocketClosed.
+func errClosed(op string) error { return fmt.Errorf("%s: %w", op, zmqerr.ErrSocketClosed) }
+
+// sumLen is the number of messages queued in ps.
+func sumLen(ps ...*pipe.End) int {
+	n := 0
+	for _, p := range ps {
+		n += p.Len()
+	}
+	return n
 }
 
 // awaitPeer parks until notify fires (nil: re-check the peer set), the

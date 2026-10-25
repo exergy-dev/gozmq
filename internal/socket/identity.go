@@ -91,7 +91,7 @@ func (e *identityRouter) AttachPipe(p *pipe.End) error {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
-		return fmt.Errorf("%s attach: %w", e.name, zmqerr.ErrSocketClosed)
+		return errClosed(e.name + " attach")
 	}
 	if _, ok := e.idOf[p]; ok {
 		e.mu.Unlock()
@@ -139,7 +139,7 @@ func (e *identityRouter) lookup(id []byte, name string, mandatory bool) (*pipe.E
 	e.mu.Unlock()
 	switch {
 	case closed:
-		return nil, fmt.Errorf("%s send: %w", name, zmqerr.ErrSocketClosed)
+		return nil, errClosed(name + " send")
 	case ok:
 		return p, nil
 	case mandatory:
@@ -162,7 +162,7 @@ func (e *identityRouter) deliver(ctx context.Context, p *pipe.End, out *msg.Msg,
 		e.sent.Add(1)
 		return nil
 	case errors.Is(err, pipe.ErrAborted):
-		err = fmt.Errorf("%s send: %w", name, zmqerr.ErrSocketClosed)
+		err = errClosed(name + " send")
 	case !errors.Is(err, io.ErrClosedPipe):
 	case mandatory:
 		err = fmt.Errorf("%s send: identity %q: peer disconnected: %w", name, id, zmqerr.ErrRouteUnknown)

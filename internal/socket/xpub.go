@@ -2,11 +2,9 @@ package socket
 
 import (
 	"context"
-	"fmt"
 	"sync"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
-	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -152,7 +150,7 @@ func (e *xpubEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 			if m, ok := e.pop(); ok {
 				return m, nil
 			}
-			return nil, fmt.Errorf("xpub recv: %w", zmqerr.ErrSocketClosed)
+			return nil, errClosed("xpub recv")
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}

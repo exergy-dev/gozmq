@@ -110,7 +110,7 @@ func (e *SubEngine) AttachPipe(p *pipe.End) error {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
-		return fmt.Errorf("sub attach: %w", zmqerr.ErrSocketClosed)
+		return errClosed("sub attach")
 	}
 	if _, ok := e.peers[p]; ok {
 		e.mu.Unlock()
@@ -156,7 +156,7 @@ func (e *SubEngine) subscribe(prefix []byte, subscribe bool) error {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
-		return fmt.Errorf("sub subscribe: %w", zmqerr.ErrSocketClosed)
+		return errClosed("sub subscribe")
 	}
 	// Only the first add or last remove is forwarded, so peers see one
 	// command per unique prefix; refcount duplicates stay local.
@@ -222,7 +222,7 @@ func (e *SubEngine) xsubSend(ctx context.Context, m *msg.Msg) error {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
-		return fmt.Errorf("xsub send: %w", zmqerr.ErrSocketClosed)
+		return errClosed("xsub send")
 	}
 	isSub, subscribe, prefix := isSubscriptionMsg(m)
 	if !isSub {

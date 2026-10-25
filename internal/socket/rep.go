@@ -101,7 +101,7 @@ func (e *repEngine) AttachPipe(p *pipe.End) error {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
-		return fmt.Errorf("rep attach: %w", zmqerr.ErrSocketClosed)
+		return errClosed("rep attach")
 	}
 	e.mu.Unlock()
 	return e.fq.Attach(p)
@@ -123,7 +123,7 @@ func (e *repEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
-		return nil, fmt.Errorf("rep recv: %w", zmqerr.ErrSocketClosed)
+		return nil, errClosed("rep recv")
 	}
 	switch e.state {
 	case repStateCanRecv:
@@ -160,7 +160,7 @@ func (e *repEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		if e.closed {
 			e.mu.Unlock()
 			body.Release()
-			return nil, fmt.Errorf("rep recv: %w", zmqerr.ErrSocketClosed)
+			return nil, errClosed("rep recv")
 		}
 		e.currentPeer = src
 		e.envelope = envelope
@@ -176,7 +176,7 @@ func (e *repEngine) Send(ctx context.Context, m *msg.Msg) error {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
-		return fmt.Errorf("rep send: %w", zmqerr.ErrSocketClosed)
+		return errClosed("rep send")
 	}
 	if e.state != repStateCanSend {
 		e.mu.Unlock()
@@ -217,7 +217,7 @@ func (e *repEngine) Send(ctx context.Context, m *msg.Msg) error {
 		m.Release()
 		return nil
 	case errors.Is(err, pipe.ErrAborted):
-		return fmt.Errorf("rep send: %w", zmqerr.ErrSocketClosed)
+		return errClosed("rep send")
 	default:
 		return err
 	}

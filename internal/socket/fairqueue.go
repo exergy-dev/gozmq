@@ -3,13 +3,11 @@ package socket
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
-	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -125,7 +123,7 @@ func (fq *FairQueue) Attach(p *pipe.End) error {
 	fq.mu.Lock()
 	defer fq.mu.Unlock()
 	if fq.closed {
-		return fmt.Errorf("fairqueue attach: %w", zmqerr.ErrSocketClosed)
+		return errClosed("fairqueue attach")
 	}
 	if _, ok := fq.byPipe[p]; ok {
 		return nil
@@ -204,7 +202,7 @@ func (fq *FairQueue) RecvWithSource(ctx context.Context) (*msg.Msg, *pipe.End, e
 		fq.mu.Lock()
 		if fq.closed {
 			fq.mu.Unlock()
-			return nil, nil, fmt.Errorf("fairqueue recv: %w", zmqerr.ErrSocketClosed)
+			return nil, nil, errClosed("fairqueue recv")
 		}
 		if fq.single.Load() != nil {
 			fq.mu.Unlock()
