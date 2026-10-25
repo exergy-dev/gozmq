@@ -23,6 +23,14 @@ func seqOf(m *msg.Msg) int {
 
 // TestQueue_FIFOAcrossChunks fills and drains the bare queue at sizes that
 // straddle chunk boundaries, for bounded and unbounded queues.
+// newQueue returns an empty queue holding at most hwm messages (0 for no
+// limit). Head and tail start in the same chunk.
+func newQueue(hwm int) *queue {
+	q := &queue{}
+	initQueue(q, hwm, new(chunk))
+	return q
+}
+
 func TestQueue_FIFOAcrossChunks(t *testing.T) {
 	t.Parallel()
 	for _, hwm := range []int{1, chunkSize - 1, chunkSize, chunkSize + 1, 1000, 0} {

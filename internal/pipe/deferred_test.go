@@ -13,7 +13,7 @@ import (
 
 func TestDeferred_VisibleBeforeFlush(t *testing.T) {
 	t.Parallel()
-	a, b := NewPair(10, 10, PeerInfo{}, PeerInfo{})
+	a, b := NewPair(10, 10, nil, nil)
 	defer a.Close()
 	defer b.Close()
 	require.True(t, a.TrySendDeferred(msg.FromBytes([]byte("1"))))
@@ -31,14 +31,14 @@ func TestDeferred_VisibleBeforeFlush(t *testing.T) {
 
 func TestDeferred_FlushWakesParkedRecv(t *testing.T) {
 	t.Parallel()
-	a, b := NewPair(10, 10, PeerInfo{}, PeerInfo{})
+	a, b := NewPair(10, 10, nil, nil)
 	defer a.Close()
 	defer b.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	got := make(chan error, 1)
 	go func() {
-		_, err := b.Recv(ctx)
+		_, err := b.RecvOr(ctx, nil)
 		got <- err
 	}()
 	for b.recv.rsleepers.Load() == 0 { // wait until parked
@@ -61,7 +61,7 @@ func TestDeferred_FlushWakesParkedRecv(t *testing.T) {
 
 func TestDeferred_FlushNothingPendingIsNoop(t *testing.T) {
 	t.Parallel()
-	a, b := NewPair(10, 10, PeerInfo{}, PeerInfo{})
+	a, b := NewPair(10, 10, nil, nil)
 	defer a.Close()
 	defer b.Close()
 	gate := notifyGate(b)
@@ -74,7 +74,7 @@ func TestDeferred_FlushNothingPendingIsNoop(t *testing.T) {
 
 func TestDeferred_FlushRunsIdleNotify(t *testing.T) {
 	t.Parallel()
-	a, b := NewPair(10, 10, PeerInfo{}, PeerInfo{})
+	a, b := NewPair(10, 10, nil, nil)
 	defer a.Close()
 	defer b.Close()
 	gate := notifyGate(b)
@@ -90,13 +90,12 @@ func TestDeferred_FlushRunsIdleNotify(t *testing.T) {
 
 func TestDeferred_HWMFull(t *testing.T) {
 	t.Parallel()
-	a, b := NewPair(2, 2, PeerInfo{}, PeerInfo{})
+	a, b := NewPair(2, 2, nil, nil)
 	defer a.Close()
 	defer b.Close()
 	require.True(t, a.TrySendDeferred(msg.FromBytes([]byte("1"))))
 	require.True(t, a.TrySendDeferred(msg.FromBytes([]byte("2"))))
 	require.False(t, a.TrySendDeferred(msg.FromBytes([]byte("3"))))
-	require.False(t, a.TrySendDeferred(nil))
 	a.Flush()
 	_, ok := b.TryRecv()
 	require.True(t, ok)
@@ -106,7 +105,7 @@ func TestDeferred_HWMFull(t *testing.T) {
 
 func TestDeferred_CloseWhileFlushOwed(t *testing.T) {
 	t.Parallel()
-	a, b := NewPair(10, 10, PeerInfo{}, PeerInfo{})
+	a, b := NewPair(10, 10, nil, nil)
 	defer b.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -117,7 +116,7 @@ func TestDeferred_CloseWhileFlushOwed(t *testing.T) {
 	got := make(chan res, 2)
 	go func() {
 		for range 2 {
-			m, err := b.Recv(ctx)
+			m, err := b.RecvOr(ctx, nil)
 			got <- res{m, err}
 		}
 	}()

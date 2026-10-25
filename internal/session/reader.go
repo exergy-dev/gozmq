@@ -2,8 +2,6 @@ package session
 
 import (
 	"bytes"
-	"context"
-	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -27,9 +25,9 @@ const readScratchSize = 4 * 1024
 // minScratchTail is the least free scratch the reader wants before
 // reading the next frame of a message in progress. Below it the pending
 // frames are copied out and the whole scratch reused: the codec's header
-// read needs 8 spare bytes (zmtp.readHeader allocates otherwise), and a
+// read needs 9 spare bytes (zmtp.headerBuf allocates otherwise), and a
 // tail this small would push even modest frames into their own buffers.
-// Must stay >= 8.
+// Must stay >= 9.
 const minScratchTail = 512
 
 // runReader is the session's reading goroutine. It performs the
@@ -41,13 +39,12 @@ const minScratchTail = 512
 // out closes the conn.
 func (s *Session) runReader() {
 	defer s.exit()
-	err := s.handshake()
+	peer, err := s.handshake()
 	if err == nil {
 		// Seed the last-inbound clock so a heartbeat fired immediately
 		// after handshake doesn't trip the timeout.
-		s.lastInboundUnix.Store(s.cfg.Now())
-		peerInfo := pipe.PeerInfo{Identity: []byte(s.cfg.Mech.PeerMetadata()["Identity"])}
-		s.sessionPipe, s.enginePipe = pipe.NewPair(s.cfg.RecvHWM, s.cfg.SendHWM, pipe.PeerInfo{}, peerInfo)
+		s.lastInboundNanos.Store(s.cfg.Now())
+		s.sessionPipe, s.enginePipe = pipe.NewPair(s.cfg.RecvHWM, s.cfg.SendHWM, nil, []byte(peer["Identity"]))
 	}
 	close(s.hsOut) // the writer moves on to traffic, or exits on failure
 	if err != nil {
@@ -56,15 +53,10 @@ func (s *Session) runReader() {
 	}
 
 	defer s.shutdown()
-	if s.cfg.OnReady != nil {
-		if err := s.cfg.OnReady(s.enginePipe); err != nil {
-			s.cfg.Logger.Debug("gozmq/session: pipe refused", "err", err)
-			return
-		}
+	if s.attach() {
+		s.startHeartbeat()
+		s.readLoop()
 	}
-	s.attached.Store(true)
-	s.startHeartbeat()
-	s.readLoop()
 }
 
 // readLoop is the wire->pipe traffic phase. It loops reading frames;
@@ -91,17 +83,12 @@ func (s *Session) readLoop() {
 	// GC, which is always safe. Both slices are reused across messages.
 	var frames, lent [][]byte
 	var currentSize int64 // decoded bytes accumulated into frames
-	// Whatever exit path, wake the engine for messages published but not
-	// yet flushed (the pipe close in shutdown wakes it too; this keeps the
+	// Every blocking read goes through flushReader, which publishes the
+	// batch's wakeup and liveness stamp first; this covers the exit paths
+	// (the pipe close in shutdown wakes the engine too; this keeps the
 	// bound explicit).
 	defer s.flushInbound()
 	for {
-		// The next ReadFrame is about to block in a syscall: publish the
-		// batch's wakeup and liveness stamp now. (flushReader covers the
-		// case where bytes are buffered but the frame is incomplete.)
-		if s.inboundOwed > 0 && s.reader.Buffered() == 0 {
-			s.flushInbound()
-		}
 		// Out of scratch for the message in progress: copy its pending
 		// frames out and start over at the front. Frames that did not
 		// fit scratch already own their memory.
@@ -112,23 +99,23 @@ func (s *Session) readLoop() {
 		// A blocking read ends when shutdown or Stop closes the conn.
 		flags, body, err := s.cfg.Codec.ReadFrame(s.reader, scratch[used:], s.recvPool)
 		if err != nil {
-			if !zmqerr.IsShutdown(err) {
-				s.cfg.Logger.Debug("gozmq/session: reader exit", "err", err)
-			}
+			logUnlessShutdown(s.cfg.Logger, "gozmq/session: reader exit", err)
 			return
 		}
 
-		// Decode the body through the security mechanism. For NULL/PLAIN
-		// decoded is body itself; CURVE returns fresh plaintext, which the
-		// Mech contract lets the message adopt.
-		plainFlags, decoded, err := s.decode(flags, body)
-		if err != nil {
-			s.cfg.Logger.Warn("gozmq/session: decode frame failed", "err", err)
-			return
+		// Decode the body through the security mechanism. NULL/PLAIN have
+		// no decode step (decoded is body itself); CURVE returns fresh
+		// plaintext, which the Mech contract lets the message adopt.
+		plainFlags, decoded := flags, body
+		if s.decode != nil {
+			if plainFlags, decoded, err = s.decode(flags, body); err != nil {
+				s.cfg.Logger.Warn("gozmq/session: decode frame failed", "err", err)
+				return
+			}
 		}
 
 		if plainFlags&zmtp.FlagCommand != 0 {
-			s.lastInboundUnix.Store(s.cfg.Now())
+			s.lastInboundNanos.Store(s.cfg.Now())
 			if cmdErr := s.handleCommand(decoded); cmdErr != nil {
 				s.cfg.Logger.Warn("gozmq/session: command handling failed", "err", cmdErr)
 				return
@@ -137,9 +124,6 @@ func (s *Session) readLoop() {
 		}
 
 		// User-message frame. Accumulate until MORE clears.
-		if len(frames) == 0 {
-			currentSize = 0
-		}
 		// Enforce the logical-message size cap BEFORE appending: the
 		// codec's per-frame limit does not bound a MORE chain, so without
 		// this a peer could balloon memory indefinitely (remote OOM DoS).
@@ -188,32 +172,30 @@ func (s *Session) readLoop() {
 
 		// Last frame in the logical message — publish.
 		var m *msg.Msg
-		switch {
-		case s.identityMech && len(lent) == 0 && allEmptyOrIn(frames, scratch):
+		if s.identityMech && len(lent) == 0 && allEmptyOrIn(frames, scratch) {
 			// Every frame is in scratch (or empty): the message and its
 			// frame bytes are one allocation.
 			m = msg.FromFramesCopy(frames...)
-		case len(lent) > 0:
+		} else {
 			if s.identityMech {
 				detachFrames(frames, scratch)
 			}
-			m = lendFrames(frames, lent)
-			clear(lent)
-			lent = lent[:0]
-		default:
-			if s.identityMech {
-				detachFrames(frames, scratch)
+			if len(lent) > 0 {
+				// The message's final Release returns the pooled buffers
+				// (NewLent copies lent; the reader reuses it).
+				m = msg.NewLent(bufpool.Put, lent, frames...)
+				clear(lent)
+				lent = lent[:0]
+			} else {
+				m = msg.FromFrames(frames...)
 			}
-			m = msg.FromFrames(frames...)
 		}
-		used = 0
+		used, currentSize = 0, 0
 		clear(frames) // the message has its own copy of the list
 		frames = frames[:0]
 		if err := s.publishInbound(m); err != nil {
 			m.Release() // never queued: the buffers can go back now
-			if !zmqerr.IsShutdown(err) {
-				s.cfg.Logger.Debug("gozmq/session: publish inbound", "err", err)
-			}
+			logUnlessShutdown(s.cfg.Logger, "gozmq/session: publish inbound", err)
 			return
 		}
 	}
@@ -250,13 +232,6 @@ func detachFrames(frames [][]byte, scratch []byte) {
 	}
 }
 
-// lendFrames returns a lent message holding frames whose final Release
-// returns the pool buffers bufs (bufs is copied; the reader reuses it).
-// One allocation for the common one-buffer message.
-func lendFrames(frames, bufs [][]byte) *msg.Msg {
-	return msg.NewLent(bufpool.Put, bufs, frames...)
-}
-
 // publishInbound enqueues a fully-assembled message on the session-side
 // pipe, honoring backpressure (HWM) by blocking until either the engine drains a slot or
 // the session is cancelled. While blocked it raises
@@ -267,31 +242,24 @@ func lendFrames(frames, bufs [][]byte) *msg.Msg {
 func (s *Session) publishInbound(m *msg.Msg) error {
 	// Non-blocking fast path keeps the readerParked bookkeeping (and the
 	// extra inbound stamp) off the common no-backpressure case. The wakeup
-	// is deferred to flushInbound, which readLoop runs before every
+	// is deferred to flushInbound, which flushReader runs before every
 	// blocking read, at most inboundFlushCap messages later, and below
 	// before blocking here.
 	if s.sessionPipe.TrySendDeferred(m) {
 		s.inboundOwed++
-		// Raw mode has no read loop to flush for it: flush per message.
-		if s.inboundOwed >= inboundFlushCap || s.cfg.Raw {
+		if s.inboundOwed >= inboundFlushCap {
 			s.flushInbound()
 		}
 		return nil
 	}
 	s.flushInbound() // never block with a wakeup owed
 	s.readerParked.Store(true)
+	// Send with no abort channel fails only with io.ErrClosedPipe or
+	// s.ctx's cancellation: both are shutdown.
 	err := s.sessionPipe.Send(s.ctx, m)
-	s.lastInboundUnix.Store(s.cfg.Now())
+	s.lastInboundNanos.Store(s.cfg.Now())
 	s.readerParked.Store(false)
-	if err != nil {
-		// Distinguish ctx-cancel/closed-pipe (normal shutdown) from
-		// genuine errors.
-		if errors.Is(err, context.Canceled) || errors.Is(err, io.ErrClosedPipe) {
-			return err
-		}
-		return fmt.Errorf("gozmq/session: publish inbound: %w", err)
-	}
-	return nil
+	return err
 }
 
 // inboundFlushCap bounds how many published messages may wait for their
@@ -308,13 +276,14 @@ func (s *Session) flushInbound() {
 	}
 	s.inboundOwed = 0
 	s.sessionPipe.Flush()
-	s.lastInboundUnix.Store(s.cfg.Now())
+	s.lastInboundNanos.Store(s.cfg.Now())
 }
 
 // flushReader wraps the conn under the session's bufio.Reader and flushes
 // before every underlying Read, which is the only place the reader can
-// block waiting for the peer. That covers a partial frame in the buffer,
-// where Buffered() > 0 yet the next ReadFrame still blocks.
+// block waiting for the peer. It is the single flush point of the read
+// loop, and it covers a partial frame in the buffer, where Buffered() > 0
+// yet the next ReadFrame still blocks.
 type flushReader struct {
 	s *Session
 	r io.Reader
@@ -369,13 +338,7 @@ func (s *Session) handleCommand(body []byte) error {
 			s.cfg.Logger.Debug("gozmq/session: ignoring subscription command", "name", name)
 			return nil
 		}
-		if err := s.publishInbound(msg.FromBytes(zmtp.SubscriptionFrame(name == "SUBSCRIBE", rest))); err != nil {
-			if !zmqerr.IsShutdown(err) {
-				return fmt.Errorf("gozmq/session: publish subscription: %w", err)
-			}
-			return err
-		}
-		return nil
+		return s.publishInbound(msg.FromBytes(zmtp.SubscriptionFrame(name == "SUBSCRIBE", rest)))
 	case "DISCONNECT":
 		// Peer requested an orderly shutdown. Surface as a normal exit.
 		return io.EOF

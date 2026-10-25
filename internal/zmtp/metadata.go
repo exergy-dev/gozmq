@@ -3,6 +3,7 @@ package zmtp
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
@@ -32,7 +33,7 @@ func EncodeMetadata(props map[string]string) []byte {
 		if len(name) > 255 {
 			panic(fmt.Sprintf("gozmq/zmtp: metadata name length %d exceeds 255", len(name)))
 		}
-		if uint64(len(value)) > 0xFFFFFFFF {
+		if uint64(len(value)) > math.MaxUint32 {
 			panic(fmt.Sprintf("gozmq/zmtp: metadata value length %d exceeds 2^32-1", len(value)))
 		}
 		total += 1 + len(name) + 4 + len(value)
@@ -42,9 +43,7 @@ func EncodeMetadata(props map[string]string) []byte {
 	for name, value := range props {
 		out = append(out, byte(len(name)))
 		out = append(out, name...)
-		var vln [4]byte
-		binary.BigEndian.PutUint32(vln[:], uint32(len(value)))
-		out = append(out, vln[:]...)
+		out = binary.BigEndian.AppendUint32(out, uint32(len(value)))
 		out = append(out, value...)
 	}
 	return out

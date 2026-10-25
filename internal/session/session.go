@@ -27,10 +27,11 @@ import (
 )
 
 // Config bundles the inputs to New. Conn is required, and Mech and Codec
-// unless Raw is set. The timeout/heartbeat values are used exactly as given:
-// zero disables the corresponding behavior (no handshake deadline, no
-// heartbeats, no inbound size cap). New applies no defaults to them —
-// the socket layer is responsible for supplying production values.
+// unless Raw is set. New applies no defaults to the timeout and heartbeat
+// values; the socket layer supplies production ones. Zero HandshakeTimeout
+// means no handshake deadline, zero HeartbeatInterval no heartbeats, zero
+// MaxMessageSize no inbound size cap; a zero HeartbeatTimeout does not
+// disable the liveness check, it means three times the interval.
 type Config struct {
 	Conn              transport.Conn
 	Mech              security.Mech
@@ -115,10 +116,11 @@ type Session struct {
 
 	// identityMech reports that the mechanism leaves frames unchanged
 	// (NULL, PLAIN): the writer hands user frames to writev by reference
-	// and the reader copies small frames out of its scratch. Otherwise
-	// encode and decode are the mechanism's frame transforms, and
-	// appendEncode its security.FrameAppender when it has one, which the
-	// writer prefers so the wire body lands in the batch's own buffer.
+	// and the reader copies small frames out of its scratch. Then encode
+	// and decode are nil and never called. Otherwise they are the
+	// mechanism's frame transforms, and appendEncode its
+	// security.FrameAppender when it has one, which the writer prefers so
+	// the wire body lands in the batch's own buffer.
 	identityMech bool
 	encode       frameFunc
 	decode       frameFunc
@@ -181,12 +183,12 @@ type Session struct {
 	// Written and read on the reader goroutine only.
 	peerHeartbeats bool
 
-	// lastInboundUnix records the monotonic nanos (relative to
-	// monoEpoch) of the last frame received during traffic phase. The
-	// heartbeat tick reads this to decide whether the peer is alive; the
-	// reader writes it on every command frame and once per read batch of
-	// user messages (flushInbound), so it can lag by one batch.
-	lastInboundUnix atomic.Int64
+	// lastInboundNanos is the cfg.Now timestamp (monotonic nanoseconds) of
+	// the last frame received during the traffic phase. The heartbeat tick
+	// reads it to decide whether the peer is alive; the reader writes it on
+	// every command frame and once per read batch of user messages
+	// (flushInbound), so it can lag by one batch.
+	lastInboundNanos atomic.Int64
 
 	// inboundOwed counts messages the reader published with
 	// TrySendDeferred since its last flushInbound. Reader goroutine only.
@@ -284,8 +286,6 @@ type identityFramer interface {
 	IdentityFraming() bool
 }
 
-func identityFrame(flags uint8, body []byte) (uint8, []byte, error) { return flags, body, nil }
-
 // New constructs a Session around cfg.Conn; Start runs it. New lets the
 // caller register the session (for Close) before any callback can fire.
 //
@@ -295,12 +295,6 @@ func identityFrame(flags uint8, body []byte) (uint8, []byte, error) { return fla
 func New(cfg Config) *Session {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
-	}
-	if cfg.SendHWM < 0 {
-		cfg.SendHWM = 0
-	}
-	if cfg.RecvHWM < 0 {
-		cfg.RecvHWM = 0
 	}
 	if cfg.Now == nil {
 		cfg.Now = monoNow
@@ -318,12 +312,11 @@ func New(cfg Config) *Session {
 	}
 	if cfg.Raw {
 		// Raw mode has no handshake: the pipes exist from the start.
-		s.sessionPipe, s.enginePipe = pipe.NewPair(cfg.RecvHWM, cfg.SendHWM, pipe.PeerInfo{}, pipe.PeerInfo{})
+		s.sessionPipe, s.enginePipe = pipe.NewPair(cfg.RecvHWM, cfg.SendHWM, nil, nil)
 		return s
 	}
 	if f, ok := cfg.Mech.(identityFramer); ok && f.IdentityFraming() {
 		s.identityMech = true
-		s.encode, s.decode = identityFrame, identityFrame
 	} else {
 		s.encode, s.decode = cfg.Mech.EncodeFrame, cfg.Mech.DecodeFrame
 		if a, ok := cfg.Mech.(security.FrameAppender); ok {
@@ -365,8 +358,8 @@ func (s *Session) Stop() error {
 	// A plain close: the kernel keeps delivering already-written data
 	// after close(2), whereas a timed SO_LINGER would block here (per
 	// session, sequentially during Socket.Close) and RST on expiry.
-	// isShutdownErr covers both the test double's io.ErrClosedPipe and the
-	// net.ErrClosed of a conn the session already closed itself.
+	// zmqerr.IsShutdown covers both the test double's io.ErrClosedPipe and
+	// the net.ErrClosed of a conn the session already closed itself.
 	err := s.cfg.Conn.Close()
 	<-s.done
 	if err != nil && !zmqerr.IsShutdown(err) {
@@ -423,6 +416,28 @@ func (s *Session) enqueueCommand(name string, body []byte) {
 		}
 	default:
 		s.cfg.Logger.Debug("gozmq/session: command channel full; dropping", "name", name)
+	}
+}
+
+// attach hands the engine-facing pipe end to OnReady (nil accepts) and
+// records the session as attached. It reports false when the engine
+// refused the pipe, and the reader must exit.
+func (s *Session) attach() bool {
+	if s.cfg.OnReady != nil {
+		if err := s.cfg.OnReady(s.enginePipe); err != nil {
+			s.cfg.Logger.Debug("gozmq/session: pipe refused", "err", err)
+			return false
+		}
+	}
+	s.attached.Store(true)
+	return true
+}
+
+// logUnlessShutdown logs err at debug level unless it is the ordinary
+// result of the session or its conn being closed.
+func logUnlessShutdown(l *slog.Logger, msg string, err error) {
+	if !zmqerr.IsShutdown(err) {
+		l.Debug(msg, "err", err)
 	}
 }
 

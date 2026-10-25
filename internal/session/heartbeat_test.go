@@ -238,7 +238,7 @@ func TestHeartbeat_InboundTrafficSuppressesTimeout(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		clk.Advance(900 * time.Millisecond)
 		peer.sendData([]byte("keepalive"))
-		m, err := s.Pipe().Recv(ctx)
+		m, err := s.Pipe().RecvOr(ctx, nil)
 		require.NoError(t, err, "Recv keepalive %d", i)
 		require.Equal(t, "keepalive", string(m.Bytes()))
 	}
@@ -277,7 +277,7 @@ func TestHeartbeat_ReaderParkedOnBackpressureIsNotTimeout(t *testing.T) {
 	// clock, so the stale 5s gap must not be charged against the peer.
 	ctx := testutil.Ctx(t, 2*time.Second)
 	for _, want := range []string{"m1", "m2"} {
-		m, err := s.Pipe().Recv(ctx)
+		m, err := s.Pipe().RecvOr(ctx, nil)
 		require.NoError(t, err, "Recv %s", want)
 		require.Equal(t, want, string(m.Bytes()))
 	}

@@ -17,12 +17,6 @@ import (
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
-// MaxBodyUnlimited is a sentinel value for NewFrameCodec meaning "accept any
-// length the spec permits" (i.e. up to 2^63-1 bytes). Sessions enforce a
-// finite cap via WithMaxMessageSize; pass that cap directly. Tests typically
-// use a small finite cap to exercise the rejection path.
-const MaxBodyUnlimited int64 = 0
-
 // validFlagBits is the set of bits the spec reserves; any bit outside this
 // mask in a received flags byte is a protocol violation.
 const validFlagBits uint8 = FlagMore | FlagLong | FlagCommand
@@ -38,8 +32,8 @@ type frameCodec struct {
 // NewFrameCodec returns a ZMTP 3.1 frame codec. maxBody bounds the size of
 // any body the codec will accept on the read side; bodies larger than maxBody
 // fail with an error wrapping zmqerr.ErrMalformedFrame so callers can treat
-// the connection as poisoned. Pass MaxBodyUnlimited (0) to disable the cap;
-// non-positive values other than 0 panic (programmer error).
+// the connection as poisoned. 0 disables the cap; negative values panic
+// (programmer error).
 func NewFrameCodec(maxBody int64) FrameCodec {
 	if maxBody < 0 {
 		panic(fmt.Sprintf("gozmq/zmtp: NewFrameCodec maxBody=%d must be >= 0", maxBody))
@@ -49,34 +43,36 @@ func NewFrameCodec(maxBody int64) FrameCodec {
 
 // ReadFrame implements FrameCodec.
 func (c *frameCodec) ReadFrame(r io.Reader, dst []byte, pool BodyPool) (uint8, []byte, error) {
-	hdr, err := readHeader(r, dst, 1)
+	// The header is the flags byte plus a one-byte length, or for a LONG
+	// frame the flags byte plus eight. Read the first two bytes in one go
+	// and the other seven only for a LONG frame.
+	hdr := headerBuf(dst)
+	n, err := io.ReadFull(r, hdr[:2])
 	if err != nil {
-		// Surface EOF/UnexpectedEOF unwrapped so callers can use errors.Is on
-		// io.EOF to detect clean peer close. Any other error is wrapped as a
-		// malformed-frame condition because we cannot resync the stream.
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		// EOF before the first byte is a clean peer close (EOF and
+		// UnexpectedEOF are surfaced unwrapped, so callers can use errors.Is
+		// on io.EOF). Any other error is wrapped, and a stream that ends
+		// after the flags byte is a malformed-frame condition because we
+		// cannot resync it.
+		switch {
+		case n == 0 && IsEOF(err):
 			return 0, nil, err
+		case n == 0:
+			return 0, nil, fmt.Errorf("gozmq/zmtp: read flags: %w", err)
 		}
-		return 0, nil, fmt.Errorf("gozmq/zmtp: read flags: %w", err)
+		return 0, nil, fmt.Errorf("gozmq/zmtp: read length: %w", wrapEOF(err))
 	}
 	flags := hdr[0]
 	if flags&^validFlagBits != 0 {
 		return 0, nil, fmt.Errorf("gozmq/zmtp: reserved flag bits set: 0x%02x: %w", flags, zmqerr.ErrMalformedFrame)
 	}
 
-	var length uint64
-	if flags&FlagLong == 0 {
-		ln, err := readHeader(r, dst, 1)
-		if err != nil {
-			return 0, nil, fmt.Errorf("gozmq/zmtp: read short length: %w", wrapEOF(err))
-		}
-		length = uint64(ln[0])
-	} else {
-		ln, err := readHeader(r, dst, 8)
-		if err != nil {
+	length := uint64(hdr[1])
+	if flags&FlagLong != 0 {
+		if _, err := io.ReadFull(r, hdr[2:9]); err != nil {
 			return 0, nil, fmt.Errorf("gozmq/zmtp: read long length: %w", wrapEOF(err))
 		}
-		length = binary.BigEndian.Uint64(ln)
+		length = binary.BigEndian.Uint64(hdr[1:9])
 		// A LONG frame whose length fits in one byte is permitted by the
 		// spec but discouraged; we accept it for interop. The COMMAND flag
 		// has no length restriction beyond maxBody.
@@ -91,20 +87,20 @@ func (c *frameCodec) ReadFrame(r io.Reader, dst []byte, pool BodyPool) (uint8, [
 		return flags, nil, fmt.Errorf("gozmq/zmtp: frame length %d exceeds max %d: %w", length, c.maxBody, zmqerr.ErrMalformedFrame)
 	}
 
-	n := int(length)
-	if cap(dst) < n && n > incrementalBodyThreshold {
+	size := int(length)
+	if cap(dst) < size && size > incrementalBodyThreshold {
 		// Do not trust a large length header: a peer that announces a
 		// huge frame and then stalls must not pin maxBody per connection.
-		body, err := readBodyIncremental(r, n, pool)
+		body, err := readBodyIncremental(r, size, pool)
 		if err != nil {
-			return flags, nil, fmt.Errorf("gozmq/zmtp: read body (%d bytes): %w", n, wrapEOF(err))
+			return flags, nil, fmt.Errorf("gozmq/zmtp: read body (%d bytes): %w", size, wrapEOF(err))
 		}
 		return flags, body, nil
 	}
-	body := reuseOrAllocate(dst, n, pool)
-	if n > 0 {
+	body := reuseOrAllocate(dst, size, pool)
+	if size > 0 {
 		if _, err := io.ReadFull(r, body); err != nil {
-			return flags, nil, fmt.Errorf("gozmq/zmtp: read body (%d bytes): %w", n, wrapEOF(err))
+			return flags, nil, fmt.Errorf("gozmq/zmtp: read body (%d bytes): %w", size, wrapEOF(err))
 		}
 	}
 	return flags, body, nil
@@ -188,13 +184,14 @@ func readBodyIncremental(r io.Reader, n int, pool BodyPool) ([]byte, error) {
 
 // getScratch and putScratch route readBodyIncremental's intermediates: to
 // the caller's ScratchPool when it has one, else through its BodyPool, else
-// through the shared bufpool. Intermediates never reach the caller.
+// through the shared bufpool. Intermediates never reach the caller, and a
+// failed read puts every buffer taken back before returning.
 func getScratch(pool BodyPool, n int) []byte {
 	switch p := pool.(type) {
 	case ScratchPool:
 		return p.GetScratch(n)
 	case nil:
-		return intermediates.Get(n)
+		return bufpool.Shared{}.Get(n)
 	default:
 		return p.Get(n)
 	}
@@ -205,7 +202,7 @@ func putScratch(pool BodyPool, b []byte) {
 	case ScratchPool:
 		p.PutScratch(b)
 	case nil:
-		intermediates.Put(b)
+		bufpool.Shared{}.Put(b)
 	default:
 		p.Put(b)
 	}
@@ -223,11 +220,6 @@ func readBodyInto(r io.Reader, body []byte, filled int, pool BodyPool) ([]byte, 
 	}
 	return body, nil
 }
-
-// intermediates recycles readBodyIncremental's intermediate buffers for
-// callers without a BodyPool through the shared bufpool. A failed read leaves
-// nothing behind: every buffer taken is Put back before returning an error.
-var intermediates BodyPool = bufpool.Shared{}
 
 // AppendFrameHeader implements FrameCodec. It emits the smallest legal
 // encoding: bodies of up to 255 bytes get the 2-byte short header unless
@@ -258,20 +250,26 @@ func reuseOrAllocate(dst []byte, n int, pool BodyPool) []byte {
 	return make([]byte, n)
 }
 
-// readHeader reads the n (<= 8) bytes of a frame header field into the
-// front of dst, which the body read then overwrites; the session's scratch
-// always has the room. A stack array would escape through io.ReadFull's
-// interface call and cost an allocation per frame, so a caller without
-// spare capacity (the handshake) pays that allocation here instead.
-func readHeader(r io.Reader, dst []byte, n int) ([]byte, error) {
-	var b []byte
-	if cap(dst) >= n {
-		b = dst[:n]
-	} else {
-		b = make([]byte, n)
+// maxHeaderLen is the longest frame header: the flags byte plus an
+// eight-byte length.
+const maxHeaderLen = 9
+
+// headerBuf returns the buffer a frame header is read into: the front of
+// dst, which the body read then overwrites (the session's scratch always has
+// the room). A stack array would escape through io.ReadFull's interface call
+// and cost an allocation per frame, so a caller without spare capacity (the
+// handshake) pays that allocation here instead.
+func headerBuf(dst []byte) []byte {
+	if cap(dst) >= maxHeaderLen {
+		return dst[:maxHeaderLen]
 	}
-	_, err := io.ReadFull(r, b)
-	return b, err
+	return make([]byte, maxHeaderLen)
+}
+
+// IsEOF reports whether err is io.EOF or io.ErrUnexpectedEOF: the stream
+// ended, cleanly or not.
+func IsEOF(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 // wrapEOF normalizes "stream ended mid-frame" into ErrUnexpectedEOF wrapped
@@ -279,7 +277,7 @@ func readHeader(r io.Reader, dst []byte, n int) ([]byte, error) {
 // catch the truncation. A clean io.EOF before the flags byte is handled in
 // ReadFrame directly.
 func wrapEOF(err error) error {
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+	if IsEOF(err) {
 		return fmt.Errorf("%w: %w", zmqerr.ErrMalformedFrame, io.ErrUnexpectedEOF)
 	}
 	return err

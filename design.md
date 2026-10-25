@@ -138,12 +138,13 @@ may only be tightened.
   producer arms when a sleeper is registered, and the session reader
   publishes with `TrySendDeferred` and `Flush`es once per read batch, so a
   receiver is woken once per batch rather than once per message. Inproc
-  pipes (`NewChannelPair`) use a buffered channel of HWM capacity (HWM 0: a
-  1024-slot channel plus an overflow slice): there is no batching producer
-  to amortise wakeups, the patterns are one uncontended hop per message,
-  and a channel's direct handoff to a parked receiver is ~20 ns cheaper
-  than the queue's lock, counters and token. Either way an unbounded
-  direction costs memory, not a relay goroutine.
+  pipes (`NewChannelPair`) use a buffered channel of HWM capacity: there is
+  no batching producer to amortise wakeups, the patterns are one
+  uncontended hop per message, and a channel's direct handoff to a parked
+  receiver is ~20 ns cheaper than the queue's lock, counters and token. An
+  inproc direction with HWM 0 has no capacity to size, so it uses the queue
+  kind too. Either way an unbounded direction costs memory, not a relay
+  goroutine.
 - **Public calls** are safe for concurrent use; each engine serialises what
   its pattern requires (REQ/REP reject a concurrent call that would break
   lock-step with `ErrFSMViolation`). One goroutine per socket is still the
@@ -153,10 +154,19 @@ may only be tightened.
 
 ### 3.3 Pipes and the idle notification
 
-`pipe.NewPair` returns two `*pipe.End` values. Each carries the peer's
-`PeerInfo` (its ZMTP `Identity`) and, once a ROUTER or STREAM engine has
-assigned one, its routing identity, so a message received after detach is
-still stamped with the right peer.
+`pipe.NewPair` and `pipe.NewChannelPair` return two `*pipe.End` values
+bound to one another, one per direction pair. The first (the queue kind)
+backs session pipes; the second (the channel kind) backs inproc: a
+buffered channel of HWM capacity per direction, except that HWM 0 gets a
+queue-kind direction, so there is no overflow slice and no unbounded
+channel. Both kinds share every `End` guarantee: HWM semantics, close and
+drain behaviour, the idle protocol below, and `SendDrained`, whose state is
+one `draining` flag on the direction for either kind. Each `End` carries the
+peer's ZMTP `Identity` (a plain `[]byte` given at construction) and, once a
+ROUTER or STREAM engine has assigned one, its routing identity, so a
+message received after detach is still stamped with the right peer.
+`TrySendDeferred` (deferred wakeups, flushed once per batch) is queue-kind
+only; the session reader is its only user.
 
 A receiver multiplexing many pipes must neither poll them nor run a goroutine
 per pipe. Each `End` therefore has an `idle` flag and a `notify` callback:
@@ -165,8 +175,12 @@ does the same without consuming. After every enqueue, and on `Close`, the
 sender loads `idle` and runs `notify` only on a true→false CAS, on its own
 goroutine. The receiver sets `idle` with a full barrier and only then
 re-checks; the sender publishes and only then loads `idle`; one of the two
-always sees the other, so no wakeup is lost. `SendDrained` is the linger
-signal for inproc (§3.7).
+always sees the other, so no wakeup is lost. On the channel kind the
+re-check is a plain `len(ch)`: the `idle` swap is an atomic
+read-modify-write and so a full barrier, and the sender's channel send
+publishes under the channel lock before its `idle` load, so the argument
+holds without an extra atomic on the receive path. `SendDrained` is the
+linger signal for inproc (§3.7).
 
 ### 3.4 Fair queueing and load balancing
 

@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 )
@@ -53,7 +54,7 @@ type TLSTransport struct {
 // a security-oriented transport.
 func NewTLSTransport(cfg *tls.Config) (*TLSTransport, error) {
 	if cfg == nil {
-		return nil, fmt.Errorf("tls: config required")
+		return nil, errors.New("tls: config required")
 	}
 	cfg = cfg.Clone()
 	switch {

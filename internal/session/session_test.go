@@ -285,7 +285,7 @@ func TestSession_Handshake_AndRoundTrip(t *testing.T) {
 	out := msg.FromFrames([]byte("hello"), []byte("world"), []byte("!"))
 	ctx := testutil.Ctx(t, 2*time.Second)
 	require.NoError(t, sA.Pipe().Send(ctx, out), "A.Pipe.Send")
-	got, err := sB.Pipe().Recv(ctx)
+	got, err := sB.Pipe().RecvOr(ctx, nil)
 	require.NoError(t, err, "B.Pipe.Recv")
 	require.Equal(t, 3, got.NumFrames(), "got frames count (frames=%v)", got.Frames())
 	want := []string{"hello", "world", "!"}
@@ -296,7 +296,7 @@ func TestSession_Handshake_AndRoundTrip(t *testing.T) {
 	// Round-trip the other direction too, to exercise B's writer / A's
 	// reader paths.
 	require.NoError(t, sB.Pipe().Send(ctx, msg.FromBytes([]byte("ack"))), "B.Pipe.Send")
-	got2, err := sA.Pipe().Recv(ctx)
+	got2, err := sA.Pipe().RecvOr(ctx, nil)
 	require.NoError(t, err, "A.Pipe.Recv")
 	assert.Equal(t, 1, got2.NumFrames(), "ack roundtrip frame count")
 	assert.Equal(t, "ack", string(got2.Bytes()), "ack roundtrip payload")
@@ -431,7 +431,7 @@ func TestSession_Drain_DoesNotCloseConnUntilStop(t *testing.T) {
 	}
 
 	for i := 0; i < 4; i++ {
-		m, err := sB.Pipe().Recv(ctx)
+		m, err := sB.Pipe().RecvOr(ctx, nil)
 		require.NoError(t, err, "Recv[%d]", i)
 		want := fmt.Sprintf("linger-%d", i)
 		require.Equal(t, want, string(m.Bytes()), "Recv[%d]", i)
@@ -499,13 +499,13 @@ func TestSession_FramePathsIgnoreMechName(t *testing.T) {
 			require.False(t, identity, "name alone must not select identity framing")
 			ctx := testutil.Ctx(t, 2*time.Second)
 			require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("hello"))))
-			got, err := sB.Pipe().Recv(ctx)
+			got, err := sB.Pipe().RecvOr(ctx, nil)
 			require.NoError(t, err)
 			require.Equal(t, xorBytes([]byte("hello")), got.Bytes(), "A's EncodeFrame was bypassed")
 
 			// And the reverse direction: A must DecodeFrame what B sends.
 			require.NoError(t, sB.Pipe().Send(ctx, msg.FromBytes(xorBytes([]byte("back")))))
-			got, err = sA.Pipe().Recv(ctx)
+			got, err = sA.Pipe().RecvOr(ctx, nil)
 			require.NoError(t, err)
 			require.Equal(t, "back", string(got.Bytes()), "A's DecodeFrame was bypassed")
 		})
@@ -796,7 +796,7 @@ func TestReader_MaxMessageSize(t *testing.T) {
 			require.NoError(t, sA.Pipe().Send(ctx, msg.FromFrames(frames...)), "Send")
 
 			if !tc.over {
-				got, err := sB.Pipe().Recv(ctx)
+				got, err := sB.Pipe().RecvOr(ctx, nil)
 				require.NoError(t, err, "Recv")
 				require.Equal(t, tc.frames, got.NumFrames(), "frame count")
 				require.Equal(t, 256*tc.frames, got.TotalSize(), "total size")
@@ -804,7 +804,7 @@ func TestReader_MaxMessageSize(t *testing.T) {
 			}
 			waitClosed(t, sB.Done(), 2*time.Second, "receiver did not tear down on oversized multipart")
 			// The rejected message must not surface on B's pipe.
-			_, err := sB.Pipe().Recv(testutil.Ctx(t, time.Second))
+			_, err := sB.Pipe().RecvOr(testutil.Ctx(t, time.Second), nil)
 			require.Error(t, err, "oversized message surfaced on the pipe")
 			// A sees the disconnect (B closed the conn during shutdown).
 			waitClosed(t, sA.Done(), 2*time.Second, "sender did not observe receiver teardown")
@@ -827,9 +827,9 @@ func startZmtpPair(t *testing.T, hwm int) (sA, sB *tSession) {
 	connA, connB := newFakeConnPair()
 	return startPair(t,
 		Config{Conn: connA, Mech: identityFramingMech{newFakeMech("NULL", false, nil)},
-			Codec: zmtp.NewFrameCodec(zmtp.MaxBodyUnlimited), SendHWM: hwm, RecvHWM: hwm},
+			Codec: zmtp.NewFrameCodec(0), SendHWM: hwm, RecvHWM: hwm},
 		Config{Conn: connB, Mech: identityFramingMech{newFakeMech("NULL", true, nil)},
-			Codec: zmtp.NewFrameCodec(zmtp.MaxBodyUnlimited), SendHWM: hwm, RecvHWM: hwm},
+			Codec: zmtp.NewFrameCodec(0), SendHWM: hwm, RecvHWM: hwm},
 	)
 }
 
@@ -852,7 +852,7 @@ func TestReader_ScratchSizeBoundary(t *testing.T) {
 		require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes(bytes.Clone(p))), "Send[%d]", i)
 	}
 	for i, p := range payloads {
-		got, err := sB.Pipe().Recv(ctx)
+		got, err := sB.Pipe().RecvOr(ctx, nil)
 		require.NoError(t, err, "Recv[%d]", i)
 		require.Equal(t, p, got.Bytes(), "payload[%d]", i)
 	}
@@ -880,12 +880,12 @@ func TestReader_SmallFrameBurstIndependentPayloads(t *testing.T) {
 	// Drain only after everything is sent so messages queue in the pipe —
 	// scratch aliasing between queued messages would corrupt payloads.
 	for i := 0; i < N; i++ {
-		m, err := sB.Pipe().Recv(ctx)
+		m, err := sB.Pipe().RecvOr(ctx, nil)
 		require.NoError(t, err, "Recv[%d]", i)
 		require.Equal(t, fmt.Sprintf("payload-%03d", i), string(m.Bytes()), "payload[%d]", i)
 		require.Equal(t, len(m.Bytes()), cap(m.Bytes()), "cap[%d]: an append must not reach a neighbour", i)
 	}
-	mp, err := sB.Pipe().Recv(ctx)
+	mp, err := sB.Pipe().RecvOr(ctx, nil)
 	require.NoError(t, err, "Recv(multipart)")
 	require.Equal(t, 3, mp.NumFrames(), "multipart frame count")
 	want := []string{"frame-a", "frame-b", "frame-c"}
@@ -928,10 +928,10 @@ func TestReader_ManyFrameMessageFlushesScratch(t *testing.T) {
 	require.NoError(t, sA.Pipe().Send(ctx, msg.FromFrames(big...)))
 	require.NoError(t, sA.Pipe().Send(ctx, msg.FromFrames(small...)))
 
-	got, err := sB.Pipe().Recv(ctx)
+	got, err := sB.Pipe().RecvOr(ctx, nil)
 	require.NoError(t, err)
 	requireIndependentFrames(t, got, big, "20x300")
-	got, err = sB.Pipe().Recv(ctx)
+	got, err = sB.Pipe().RecvOr(ctx, nil)
 	require.NoError(t, err)
 	requireIndependentFrames(t, got, small, "after flush")
 }
@@ -953,7 +953,7 @@ func TestReader_EmptyDelimiterFrame(t *testing.T) {
 		require.NoError(t, sA.Pipe().Send(ctx, msg.FromFrames(fr...)))
 	}
 	for i, fr := range msgs {
-		got, err := sB.Pipe().Recv(ctx)
+		got, err := sB.Pipe().RecvOr(ctx, nil)
 		require.NoError(t, err)
 		requireIndependentFrames(t, got, fr, fmt.Sprintf("msg[%d]", i))
 	}
@@ -968,9 +968,9 @@ func TestReader_PooledMidSizeFrames(t *testing.T) {
 	connA, connB := newFakeConnPair()
 	sA, sB := startPair(t,
 		Config{Conn: connA, Mech: identityFramingMech{newFakeMech("NULL", false, nil)},
-			Codec: zmtp.NewFrameCodec(zmtp.MaxBodyUnlimited), SendHWM: 8, RecvHWM: 8},
+			Codec: zmtp.NewFrameCodec(0), SendHWM: 8, RecvHWM: 8},
 		Config{Conn: connB, Mech: identityFramingMech{newFakeMech("NULL", true, nil)},
-			Codec: zmtp.NewFrameCodec(zmtp.MaxBodyUnlimited), SendHWM: 8, RecvHWM: 8,
+			Codec: zmtp.NewFrameCodec(0), SendHWM: 8, RecvHWM: 8,
 			RecvBufferPool: true},
 	)
 	ctx := testutil.Ctx(t, 5*time.Second)
@@ -978,7 +978,7 @@ func TestReader_PooledMidSizeFrames(t *testing.T) {
 	for round := 0; round < 3; round++ {
 		fr := [][]byte{bytes.Repeat([]byte{0xA1}, 3000), bytes.Repeat([]byte{0xB2}, 3000)}
 		require.NoError(t, sA.Pipe().Send(ctx, msg.FromFrames(fr...)))
-		got, err := sB.Pipe().Recv(ctx)
+		got, err := sB.Pipe().RecvOr(ctx, nil)
 		require.NoError(t, err)
 		require.False(t, got.Lent(), "round %d: frames <= 4 KiB are never lent", round)
 		requireIndependentFrames(t, got, fr, fmt.Sprintf("round %d", round))
@@ -986,7 +986,7 @@ func TestReader_PooledMidSizeFrames(t *testing.T) {
 	// A frame above scratch is still lent.
 	huge := bytes.Repeat([]byte{0xC3}, readScratchSize+1)
 	require.NoError(t, sA.Pipe().Send(ctx, msg.FromFrames([]byte("hdr"), huge)))
-	got, err := sB.Pipe().Recv(ctx)
+	got, err := sB.Pipe().RecvOr(ctx, nil)
 	require.NoError(t, err)
 	require.True(t, got.Lent(), "large frame must be lent")
 	require.Equal(t, "hdr", string(got.Frames()[0]))
@@ -1003,7 +1003,7 @@ func TestReader_CommandBetweenMoreFrames(t *testing.T) {
 	s := startTestSession(Config{
 		Conn:    connA,
 		Mech:    identityFramingMech{newFakeMech("NULL", false, nil)},
-		Codec:   zmtp.NewFrameCodec(zmtp.MaxBodyUnlimited),
+		Codec:   zmtp.NewFrameCodec(0),
 		SendHWM: 8,
 		RecvHWM: 8,
 	})
@@ -1020,7 +1020,7 @@ func TestReader_CommandBetweenMoreFrames(t *testing.T) {
 	peer.sendPing(10, []byte("ctx"))
 	require.NoError(t, fakeCodec{}.WriteFrame(peer.conn, 0, second))
 
-	got, err := s.Pipe().Recv(ctx)
+	got, err := s.Pipe().RecvOr(ctx, nil)
 	require.NoError(t, err)
 	requireIndependentFrames(t, got, [][]byte{first, second}, "message around PING")
 	require.Equal(t, []byte("ctx"), waitCommand(t, frames, "PONG", 2*time.Second))
@@ -1047,7 +1047,7 @@ func TestReader_SubscriptionCommands(t *testing.T) {
 
 		var got []string
 		for {
-			m, err := sB.Pipe().Recv(ctx)
+			m, err := sB.Pipe().RecvOr(ctx, nil)
 			require.NoError(t, err, "enabled=%v", enabled)
 			if string(m.Bytes()) == "data2" {
 				break
@@ -1104,7 +1104,7 @@ func TestReader_SingleMessagePromptDelivery(t *testing.T) {
 	for i := range 20 {
 		got := make(chan error, 1)
 		go func() {
-			m, err := sB.Pipe().Recv(ctx)
+			m, err := sB.Pipe().RecvOr(ctx, nil)
 			if err == nil && string(m.Bytes()) != fmt.Sprintf("one-%d", i) {
 				err = fmt.Errorf("got %q", m.Bytes())
 			}
@@ -1143,7 +1143,7 @@ func TestReader_BurstDeliveredInOrder(t *testing.T) {
 				sendErr <- nil
 			}()
 			for i := range N {
-				m, err := sB.Pipe().Recv(ctx)
+				m, err := sB.Pipe().RecvOr(ctx, nil)
 				require.NoError(t, err, "Recv[%d]", i)
 				require.Equal(t, fmt.Sprintf("m%04d", i), string(m.Bytes()), "order[%d]", i)
 				if i%97 == 0 {
@@ -1160,7 +1160,7 @@ func TestReader_BurstDeliveredInOrder(t *testing.T) {
 // > 0, so the wrapper flushes before every underlying Read.
 func TestFlushReader_FlushesBeforeUnderlyingRead(t *testing.T) {
 	t.Parallel()
-	a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(8, 8, nil, nil)
 	defer a.Close()
 	defer b.Close()
 	var now atomic.Int64
@@ -1186,7 +1186,7 @@ func TestFlushReader_FlushesBeforeUnderlyingRead(t *testing.T) {
 	case <-time.After(time.Second):
 		require.Fail(t, "idle notification not run by the flush")
 	}
-	require.EqualValues(t, 42, s.lastInboundUnix.Load(), "inbound clock stamped at the flush")
+	require.EqualValues(t, 42, s.lastInboundNanos.Load(), "inbound clock stamped at the flush")
 }
 
 type readerFunc func([]byte) (int, error)

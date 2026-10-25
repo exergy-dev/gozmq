@@ -98,14 +98,6 @@ type queue struct {
 	_      [128]byte
 }
 
-// newQueue returns an empty queue holding at most hwm messages (0 for no
-// limit). Head and tail start in the same chunk.
-func newQueue(hwm int) *queue {
-	q := &queue{}
-	initQueue(q, hwm, new(chunk))
-	return q
-}
-
 // initQueue sets q up empty with first as its only chunk. first may live
 // inside a larger allocation (newDirection); once drained it enters the
 // spare ring like any other chunk, which is fine because the queue never

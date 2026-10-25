@@ -12,12 +12,10 @@ import (
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
-// listenerClosedErr is returned by Accept once the listener is closed. It
+// errListenerClosed is returned by Accept once the listener is closed. It
 // matches net.ErrClosed, the terminal condition documented on
 // Listener.Accept, as well as ErrEndpointInvalid.
-func listenerClosedErr() error {
-	return fmt.Errorf("%w: listener closed: %w", zmqerr.ErrEndpointInvalid, net.ErrClosed)
-}
+var errListenerClosed = fmt.Errorf("%w: listener closed: %w", zmqerr.ErrEndpointInvalid, net.ErrClosed)
 
 // aLongTimeAgo is a non-zero deadline in the past; setting it on a listener
 // wakes a blocked Accept immediately.
@@ -73,7 +71,7 @@ func (l *netListener) Accept(ctx context.Context) (Conn, error) {
 		case err == nil:
 			return l.wrap(c), nil
 		case errors.Is(err, net.ErrClosed):
-			return nil, listenerClosedErr()
+			return nil, errListenerClosed
 		case errors.Is(err, os.ErrDeadlineExceeded):
 			// Our ctx fired (the loop head returns its error), or a late
 			// AfterFunc from an earlier Accept's ctx did; retry.
