@@ -60,10 +60,14 @@ pacing, one run):
 | 8 KB | 0.76M (50 Gb/s) | 0.41M (27 Gb/s) | 1.85× |
 | 64 KB | 0.15M (78 Gb/s) | 0.11M (57 Gb/s) | 1.38× |
 
-The 64 KB default-path remainder is the zeroing of each fresh 64 KiB body
-(`memclrNoHeapPointers`, 12% of the receiver's profile; `make` zeroes, malloc
-does not) plus the copy of the first 16 KiB out of the buffered reader;
-the pool removes the first and is what a receiver at that rate uses.
+The 64 KB row is parity within libzmq's own variance: in interleaved
+two-process rounds gozmq is stable at 97–102k msg/s while libzmq alternates
+between ~65k and ~100k+ (GOMAXPROCS 2, 4, 8 and 32 make no difference on
+the gozmq side), and best-of-N picks libzmq's good mode. The default-path
+remainder is the zeroing of each fresh 64 KiB body (`memclrNoHeapPointers`,
+12% of the receiver's profile; `make` zeroes, malloc does not) and the
+netpoll park/wake per read that returns EAGAIN, both runtime-level; the
+pool removes the first and is what a receiver at that rate uses.
 
 Before this branch (`main`, same session, interleaved with the branch's
 binary): 32 B ran at 3.4–5.3M msg/s, 0.6× of libzmq. The mixed pairings at
@@ -187,10 +191,15 @@ pay it: inproc REQ/REP and ROUTER/DEALER round trips (+8–9% on ~1 µs), the
 wide PUB fan-out (64 parked subscribers, +26%). Paths with any contention or
 batching gain 20–50%. Bounded spinning before parking (8, 64 and 512 polls)
 made the latency rows worse and was dropped. A direct-handoff fast path
-(deliver through the wake token when the queue is empty and a consumer is
-parked) would close this gap and is the next step if those rows matter;
-reverting the single merge commit of the pipe branch gives the previous
-pipe with the writer and allocation changes kept (32 B then at ~0.75×).
+(the message travels through the wake channel when the queue is empty and
+a consumer is parked, branch `pp-pipe3`, not merged) was built and
+measured: it recovers about 2 of those points on the round-trip rows
+(+5.7–7.0% vs main) and 8 on the wide fan-out (+18%), needs a FIFO guard on
+every receive path and an HWM+1 slack, so it was left out. The rest is the
+two per-side locks and the published counters themselves, i.e. the price
+of the lock-free streaming path. Reverting the single merge commit of the
+pipe branch gives the previous pipe with the writer and allocation changes
+kept (32 B then at ~0.75×).
 
 ## Decisions these numbers rest on
 
