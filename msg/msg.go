@@ -94,6 +94,138 @@ func FromFrames(frames ...[]byte) *Msg {
 	return out
 }
 
+// FromFramesCopy returns a Msg holding copies of frames, in order, so the
+// caller may reuse or mutate the inputs afterwards. Small messages cost a
+// single allocation: the Msg, its frame list and the frame bytes share one
+// object whose size is a Go allocator size class (one frame up to 256
+// bytes in total, two frames up to 144). Anything larger takes two
+// allocations (the bytes, and the Msg with its list), or three past two
+// frames; still fewer than copying each frame separately.
+//
+// Every frame is carved from the shared memory with its capacity capped at
+// its length, so appending to one frame reallocates instead of overwriting
+// its neighbour. An empty frame is non-nil and empty. The shared object is
+// one scanned allocation, so the frame bytes are kept alive as long as any
+// frame, or the Msg, is; that is negligible at these sizes. The result is
+// a plain (not lent) message.
+func FromFramesCopy(frames ...[]byte) *Msg {
+	total := 0
+	for _, f := range frames {
+		total += len(f)
+	}
+	switch len(frames) {
+	case 0:
+		return FromFrames()
+	case 1:
+		switch {
+		case total <= 32:
+			x := &struct {
+				Msg
+				buf [32]byte
+			}{}
+			x.carve1(x.buf[:], frames[0])
+			return &x.Msg
+		case total <= 64:
+			x := &struct {
+				Msg
+				buf [64]byte
+			}{}
+			x.carve1(x.buf[:], frames[0])
+			return &x.Msg
+		case total <= 128:
+			x := &struct {
+				Msg
+				buf [128]byte
+			}{}
+			x.carve1(x.buf[:], frames[0])
+			return &x.Msg
+		case total <= 256:
+			x := &struct {
+				Msg
+				buf [256]byte
+			}{}
+			x.carve1(x.buf[:], frames[0])
+			return &x.Msg
+		}
+	case 2:
+		switch {
+		case total <= 32:
+			x := &struct {
+				Msg
+				list [2][]byte
+				buf  [32]byte
+			}{}
+			x.carve2(&x.list, x.buf[:], frames)
+			return &x.Msg
+		case total <= 48:
+			x := &struct {
+				Msg
+				list [2][]byte
+				buf  [48]byte
+			}{}
+			x.carve2(&x.list, x.buf[:], frames)
+			return &x.Msg
+		case total <= 80:
+			x := &struct {
+				Msg
+				list [2][]byte
+				buf  [80]byte
+			}{}
+			x.carve2(&x.list, x.buf[:], frames)
+			return &x.Msg
+		case total <= 144:
+			x := &struct {
+				Msg
+				list [2][]byte
+				buf  [144]byte
+			}{}
+			x.carve2(&x.list, x.buf[:], frames)
+			return &x.Msg
+		}
+	}
+	// Larger messages: one buffer for the bytes, plus the Msg and, past
+	// one frame, the list (co-allocated with the Msg for two frames).
+	buf := make([]byte, total)
+	var m *Msg
+	switch len(frames) {
+	case 1:
+		m = &Msg{}
+		m.carve1(buf, frames[0])
+		return m
+	case 2:
+		x := &struct {
+			Msg
+			list [2][]byte
+		}{}
+		x.carve2(&x.list, buf, frames)
+		return &x.Msg
+	}
+	m = &Msg{frames: make([][]byte, len(frames))}
+	off := 0
+	for i, f := range frames {
+		off += copy(buf[off:], f)
+		m.frames[i] = buf[off-len(f) : off : off]
+	}
+	return m
+}
+
+// carve1 copies f into the front of buf and stores it as the only frame.
+func (m *Msg) carve1(buf, f []byte) {
+	n := copy(buf, f)
+	m.inlineFrames[0] = buf[:n:n]
+	m.frames = m.inlineFrames[:1]
+}
+
+// carve2 copies the two frames back to back into buf and stores them in
+// list, which becomes the frame list.
+func (m *Msg) carve2(list *[2][]byte, buf []byte, frames [][]byte) {
+	n0 := copy(buf, frames[0])
+	n1 := copy(buf[n0:], frames[1])
+	list[0] = buf[:n0:n0]
+	list[1] = buf[n0 : n0+n1 : n0+n1]
+	m.frames = list[:]
+}
+
 // setFrames stores a copy of the frame list, inline when it fits.
 func (m *Msg) setFrames(frames [][]byte) {
 	if len(frames) <= len(m.inlineFrames) {

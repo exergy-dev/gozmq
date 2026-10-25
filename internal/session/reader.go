@@ -18,10 +18,19 @@ import (
 
 // readScratchSize sizes the reader's reusable frame buffer. Frames that
 // fit are read into it (no codec allocation) and user frames are then
-// copied out; larger frames get their own buffer — from the pool with
-// Config.RecvBufferPool, else from the codec's make — which the *Msg
-// adopts without a copy.
+// copied out, all of a message's frames at once into a single allocation
+// (msg.FromFramesCopy); larger frames get their own buffer — from the
+// pool with Config.RecvBufferPool, else from the codec's make — which the
+// *Msg adopts without a copy.
 const readScratchSize = 4 * 1024
+
+// minScratchTail is the least free scratch the reader wants before
+// reading the next frame of a message in progress. Below it the pending
+// frames are copied out and the whole scratch reused: the codec's header
+// read needs 8 spare bytes (zmtp.readHeader allocates otherwise), and a
+// tail this small would push even modest frames into their own buffers.
+// Must stay >= 8.
+const minScratchTail = 512
 
 // runReader is the session's reading goroutine. It performs the
 // handshake, builds the pipe pair, hands the engine end to OnReady and
@@ -65,10 +74,15 @@ func (s *Session) runReader() {
 // It returns on EOF or any I/O error; runReader then shuts the session
 // down so the writer exits too.
 func (s *Session) readLoop() {
-	// scratch is overwritten by every ReadFrame, so nothing aliasing it
-	// may outlive a loop iteration: handleCommand copies whatever it
-	// keeps, and user frames read into it are cloned below.
+	// scratch holds the small frames of the message in progress, scratch
+	// [:used]; each ReadFrame reads into the rest. Frames of a message
+	// stay there until its last frame arrives, when msg.FromFramesCopy
+	// copies them all into the message in one allocation (identity
+	// mechanisms only). Nothing aliasing scratch may outlive the message:
+	// handleCommand copies whatever it keeps, and the frames are copied
+	// out at publish or, when scratch runs low, earlier (below).
 	scratch := make([]byte, readScratchSize)
+	used := 0
 
 	// frames accumulates the message in progress; it is built once the
 	// last frame arrives, so a lent message costs no extra allocation.
@@ -78,8 +92,15 @@ func (s *Session) readLoop() {
 	var frames, lent [][]byte
 	var currentSize int64 // decoded bytes accumulated into frames
 	for {
+		// Out of scratch for the message in progress: copy its pending
+		// frames out and start over at the front. Frames that did not
+		// fit scratch already own their memory.
+		if s.identityMech && len(scratch)-used < minScratchTail {
+			detachFrames(frames, scratch)
+			used = 0
+		}
 		// A blocking read ends when shutdown or Stop closes the conn.
-		flags, body, err := s.cfg.Codec.ReadFrame(s.reader, scratch, s.recvPool)
+		flags, body, err := s.cfg.Codec.ReadFrame(s.reader, scratch[used:], s.recvPool)
 		if err != nil {
 			if !zmqerr.IsShutdown(err) {
 				s.cfg.Logger.Debug("gozmq/session: reader exit", "err", err)
@@ -129,10 +150,21 @@ func (s *Session) readLoop() {
 			if aliases(decoded, body) {
 				frame = bytes.Clone(decoded)
 			}
-		case len(body) <= len(scratch):
-			// body is scratch, which the next ReadFrame overwrites, so
-			// copy the frame out.
-			frame = bytes.Clone(decoded)
+		case len(decoded) == 0 || aliases(decoded, scratch):
+			// The frame sits in scratch after the message's earlier
+			// frames; keep the view until the message is published.
+			// Empty frames count (the REQ/REP delimiter is one) and are
+			// plain empty slices, which retain nothing of scratch.
+			if len(decoded) == 0 {
+				frame = []byte{}
+			}
+			used += len(decoded)
+		case s.pooledRecv && len(body) <= readScratchSize:
+			// Too big for the rest of scratch but within what
+			// Config.RecvBufferPool promises never to lend: copy it out
+			// and recycle the pool buffer.
+			frame = slices.Clip(bytes.Clone(decoded))
+			bufpool.Put(body)
 		case s.pooledRecv:
 			// Pooled bodies exist only for identity framing, so frame is
 			// body, the pool buffer: the codec guarantees that the body it
@@ -147,13 +179,25 @@ func (s *Session) readLoop() {
 
 		// Last frame in the logical message — publish.
 		var m *msg.Msg
-		if len(lent) > 0 {
+		switch {
+		case s.identityMech && len(lent) == 0 && allEmptyOrIn(frames, scratch):
+			// Every frame is in scratch (or empty): the message and its
+			// frame bytes are one allocation.
+			m = msg.FromFramesCopy(frames...)
+		case len(lent) > 0:
+			if s.identityMech {
+				detachFrames(frames, scratch)
+			}
 			m = lendFrames(frames, lent)
 			clear(lent)
 			lent = lent[:0]
-		} else {
+		default:
+			if s.identityMech {
+				detachFrames(frames, scratch)
+			}
 			m = msg.FromFrames(frames...)
 		}
+		used = 0
 		clear(frames) // the message has its own copy of the list
 		frames = frames[:0]
 		if err := s.publishInbound(m); err != nil {
@@ -174,6 +218,27 @@ func aliases(sub, buf []byte) bool {
 	p := uintptr(unsafe.Pointer(unsafe.SliceData(sub)))
 	b := uintptr(unsafe.Pointer(unsafe.SliceData(buf)))
 	return p >= b && p < b+uintptr(cap(buf))
+}
+
+// allEmptyOrIn reports whether every frame is empty or lies inside buf.
+func allEmptyOrIn(frames [][]byte, buf []byte) bool {
+	for _, f := range frames {
+		if len(f) > 0 && !aliases(f, buf) {
+			return false
+		}
+	}
+	return true
+}
+
+// detachFrames makes frames independent of scratch, in place: the ones
+// lying in it are copied out (with capacity clipped to length), so the
+// next ReadFrame cannot overwrite them.
+func detachFrames(frames [][]byte, scratch []byte) {
+	for i, f := range frames {
+		if aliases(f, scratch) {
+			frames[i] = slices.Clip(bytes.Clone(f))
+		}
+	}
 }
 
 // lendFrames returns a lent message holding frames whose final Release

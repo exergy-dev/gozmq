@@ -113,6 +113,11 @@ func NewMsgFromBytes(b []byte) *Msg { return msg.FromBytes(b) }
 // NewMsgFromFrames wraps the provided frames in a multipart message.
 func NewMsgFromFrames(frames ...[]byte) *Msg { return msg.FromFrames(frames...) }
 
+// NewMsgFromFramesCopy returns a multipart message holding copies of the
+// provided frames, so the caller may reuse them at once. Small messages
+// cost a single allocation; see [msg.FromFramesCopy].
+func NewMsgFromFramesCopy(frames ...[]byte) *Msg { return msg.FromFramesCopy(frames...) }
+
 // monitorState bundles the monitor channel and event mask so they can be
 // swapped atomically without holding a mutex on the hot emit() path.
 type monitorState struct {

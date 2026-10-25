@@ -1,9 +1,11 @@
 package msg
 
 import (
+	"bytes"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"unsafe"
 
 	"github.com/stretchr/testify/require"
 )
@@ -119,4 +121,98 @@ func TestMsgConcurrentRelease(t *testing.T) {
 		wg.Wait()
 		require.EqualValues(t, 1, released.Load())
 	}
+}
+
+var copySink *Msg
+
+// TestFromFramesCopyAllocs pins the allocation count per size tier. The
+// tier arithmetic rests on Msg being 64 bytes (Go size classes 96/128/192/
+// 320 for one frame, 144/160/192/256 for two).
+func TestFromFramesCopyAllocs(t *testing.T) {
+	require.EqualValues(t, 64, unsafe.Sizeof(Msg{}), "tier sizes assume a 64-byte Msg")
+	fr := func(ns ...int) [][]byte {
+		out := make([][]byte, len(ns))
+		for i, n := range ns {
+			out[i] = bytes.Repeat([]byte{byte('a' + i)}, n)
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name   string
+		frames [][]byte
+		allocs float64
+	}{
+		{"1x0", fr(0), 1},
+		{"1x1", fr(1), 1},
+		{"1x32", fr(32), 1},
+		{"1x33", fr(33), 1},
+		{"1x64", fr(64), 1},
+		{"1x65", fr(65), 1},
+		{"1x128", fr(128), 1},
+		{"1x129", fr(129), 1},
+		{"1x256", fr(256), 1},
+		{"1x300", fr(300), 2},
+		{"2x[0,32]", fr(0, 32), 1},
+		{"2x[8,24]", fr(8, 24), 1},
+		{"2x[8,32]", fr(8, 32), 1},
+		{"2x[8,40]", fr(8, 40), 1},
+		{"2x[8,64]", fr(8, 64), 1},
+		{"2x[8,72]", fr(8, 72), 1},
+		{"2x[8,136]", fr(8, 136), 1},
+		{"2x[8,137]", fr(8, 137), 2},
+		{"3x[8,8,8]", fr(8, 8, 8), 3},
+	} {
+		got := testing.AllocsPerRun(100, func() { copySink = FromFramesCopy(tc.frames...) })
+		require.Equal(t, tc.allocs, got, tc.name)
+	}
+}
+
+// TestFromFramesCopyContents: the frames equal the inputs, are independent
+// of them, and each has cap == len so an append cannot reach a neighbour.
+func TestFromFramesCopyContents(t *testing.T) {
+	for _, lens := range [][]int{
+		{}, {0}, {1}, {32}, {33}, {256}, {257}, {5000},
+		{0, 0}, {0, 32}, {8, 32}, {8, 64}, {8, 137}, {3000, 3000},
+		{1, 2, 3}, {0, 5, 0}, {8, 8, 8, 8, 300},
+	} {
+		in := make([][]byte, len(lens))
+		want := make([][]byte, len(lens))
+		for i, n := range lens {
+			in[i] = bytes.Repeat([]byte{byte(0x41 + i)}, n)
+			want[i] = bytes.Clone(in[i])
+		}
+		m := FromFramesCopy(in...)
+		for i := range in { // mutate after: the message must not follow
+			for j := range in[i] {
+				in[i][j] = 0xFF
+			}
+		}
+		require.Equal(t, len(lens), m.NumFrames(), "%v", lens)
+		require.False(t, m.Lent(), "%v", lens)
+		for i, f := range m.Frames() {
+			require.Equal(t, want[i], f, "%v frame %d", lens, i)
+			require.NotNil(t, f, "%v frame %d non-nil", lens, i)
+			require.Equal(t, len(f), cap(f), "%v frame %d cap", lens, i)
+		}
+		// Appending to a frame must not overwrite its neighbour.
+		if len(lens) > 1 {
+			_ = append(m.Frames()[0], 0xEE)
+			require.Equal(t, want[1], m.Frames()[1], "%v append leaked", lens)
+		}
+		m.Release() // no-op, must not panic
+	}
+}
+
+// TestFromFramesCopyIsUsable: the co-allocated Msg behaves like any other
+// (AppendFrame, Derive, TotalSize).
+func TestFromFramesCopyIsUsable(t *testing.T) {
+	m := FromFramesCopy([]byte("topic"), []byte("payload"))
+	require.Equal(t, 12, m.TotalSize())
+	m.AppendFrame([]byte("more"))
+	require.Equal(t, 3, m.NumFrames())
+	d := m.Derive(m.Frames()[1])
+	require.Equal(t, "payload", string(d.Bytes()))
+	s := FromFramesCopy([]byte("x"))
+	s.AppendFrame([]byte("y"))
+	require.Equal(t, [][]byte{[]byte("x"), []byte("y")}, s.Frames())
 }
