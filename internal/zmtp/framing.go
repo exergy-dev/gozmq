@@ -54,7 +54,7 @@ func (c *frameCodec) ReadFrame(r io.Reader, dst []byte, pool BodyPool) (uint8, [
 		// Surface EOF/UnexpectedEOF unwrapped so callers can use errors.Is on
 		// io.EOF to detect clean peer close. Any other error is wrapped as a
 		// malformed-frame condition because we cannot resync the stream.
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		if IsEOF(err) {
 			return 0, nil, err
 		}
 		return 0, nil, fmt.Errorf("gozmq/zmtp: read flags: %w", err)
@@ -274,12 +274,18 @@ func readHeader(r io.Reader, dst []byte, n int) ([]byte, error) {
 	return b, err
 }
 
+// IsEOF reports whether err is io.EOF or io.ErrUnexpectedEOF: the stream
+// ended, cleanly or not.
+func IsEOF(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
 // wrapEOF normalizes "stream ended mid-frame" into ErrUnexpectedEOF wrapped
 // with ErrMalformedFrame so callers using errors.Is(err, zmqerr.ErrMalformedFrame)
 // catch the truncation. A clean io.EOF before the flags byte is handled in
 // ReadFrame directly.
 func wrapEOF(err error) error {
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+	if IsEOF(err) {
 		return fmt.Errorf("%w: %w", zmqerr.ErrMalformedFrame, io.ErrUnexpectedEOF)
 	}
 	return err

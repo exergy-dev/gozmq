@@ -95,11 +95,9 @@ func (s *Session) runWriter() {
 				// drainSessionPipe's final flushBatch, and Socket.CloseCtx
 				// waits on it before Stop closes the conn, so the final
 				// burst cannot race teardown.
-				s.drainSessionPipe()
+				s.drainSessionPipe(func(m *msg.Msg) bool { return s.writeBatchFrom(&batch, m) == nil })
 			} else {
-				if !zmqerr.IsShutdown(err) {
-					s.cfg.Logger.Debug("gozmq/session: writer recv exit", "err", err)
-				}
+				logUnlessShutdown(s.cfg.Logger, "gozmq/session: writer recv exit", err)
 				s.shutdown()
 			}
 			return
@@ -411,20 +409,16 @@ func (s *Session) flushBatch(buffers *net.Buffers) error {
 	return nil
 }
 
-// drainSessionPipe flushes every remaining queued message via the shared
-// batching path. Returns when the queue is exhausted or a write error
-// occurs (writeBatchFrom logs and shuts the session down on genuine
-// errors; Stop closing the conn when the linger expires is one). Called
-// after writerCtx cancellation, which follows engine.Close, so nothing
-// more is queued and an empty TryRecv is the true end of the queue.
-func (s *Session) drainSessionPipe() {
-	var batch writerBatch
+// drainSessionPipe hands every remaining queued message to write, which
+// reports whether to go on (it fails when a write does; writeBatchFrom and
+// writeRaw log and shut the session down on genuine errors, and Stop
+// closing the conn when the linger expires is one). Called after writerCtx
+// cancellation, which follows engine.Close, so nothing more is queued and
+// an empty TryRecv is the true end of the queue.
+func (s *Session) drainSessionPipe(write func(*msg.Msg) bool) {
 	for {
 		m, ok := s.sessionPipe.TryRecv()
-		if !ok {
-			return
-		}
-		if err := s.writeBatchFrom(&batch, m); err != nil {
+		if !ok || !write(m) {
 			return
 		}
 	}

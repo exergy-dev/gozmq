@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 
-	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -20,13 +19,9 @@ const rawReadSize = 32 * 1024
 func (s *Session) runRawReader() {
 	defer s.exit()
 	defer s.shutdown()
-	if s.cfg.OnReady != nil {
-		if err := s.cfg.OnReady(s.enginePipe); err != nil {
-			s.cfg.Logger.Debug("gozmq/session: pipe refused", "err", err)
-			return
-		}
+	if !s.attach() {
+		return
 	}
-	s.attached.Store(true)
 	buf := make([]byte, rawReadSize)
 	for {
 		n, err := s.cfg.Conn.Read(buf)
@@ -37,6 +32,7 @@ func (s *Session) runRawReader() {
 			if s.publishInbound(msg.FromBytes(bytes.Clone(buf[:n]))) != nil {
 				return
 			}
+			s.flushInbound() // no read loop to flush for us in raw mode
 		}
 		if err != nil {
 			return
@@ -53,16 +49,12 @@ func (s *Session) runRawWriter() {
 	for {
 		m, err := s.sessionPipe.RecvOr(s.writerCtx, nil)
 		if err != nil {
-			if !errors.Is(err, context.Canceled) {
+			if errors.Is(err, context.Canceled) {
+				s.drainSessionPipe(s.writeRaw)
+			} else {
 				s.shutdown()
-				return
 			}
-			for {
-				m, ok := s.sessionPipe.TryRecv()
-				if !ok || !s.writeRaw(m) {
-					return
-				}
-			}
+			return
 		}
 		if !s.writeRaw(m) {
 			return
@@ -83,8 +75,8 @@ func (s *Session) writeRaw(m *msg.Msg) bool {
 	if len(body) > 0 && err == nil {
 		return true
 	}
-	if err != nil && !zmqerr.IsShutdown(err) {
-		s.cfg.Logger.Debug("gozmq/session: raw write", "err", err)
+	if err != nil {
+		logUnlessShutdown(s.cfg.Logger, "gozmq/session: raw write", err)
 	}
 	s.shutdown()
 	return false

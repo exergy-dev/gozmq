@@ -94,7 +94,7 @@ func (s *Session) exchangeGreeting() error {
 
 	var buf [greetingSize]byte
 	if _, err := io.ReadFull(s.reader, buf[:]); err != nil {
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		if zmtp.IsEOF(err) {
 			return fmt.Errorf("%w: greeting truncated: %w", zmqerr.ErrMalformedFrame, err)
 		}
 		return fmt.Errorf("gozmq/session: read greeting: %w", err)

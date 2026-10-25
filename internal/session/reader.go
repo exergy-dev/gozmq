@@ -53,15 +53,10 @@ func (s *Session) runReader() {
 	}
 
 	defer s.shutdown()
-	if s.cfg.OnReady != nil {
-		if err := s.cfg.OnReady(s.enginePipe); err != nil {
-			s.cfg.Logger.Debug("gozmq/session: pipe refused", "err", err)
-			return
-		}
+	if s.attach() {
+		s.startHeartbeat()
+		s.readLoop()
 	}
-	s.attached.Store(true)
-	s.startHeartbeat()
-	s.readLoop()
 }
 
 // readLoop is the wire->pipe traffic phase. It loops reading frames;
@@ -104,9 +99,7 @@ func (s *Session) readLoop() {
 		// A blocking read ends when shutdown or Stop closes the conn.
 		flags, body, err := s.cfg.Codec.ReadFrame(s.reader, scratch[used:], s.recvPool)
 		if err != nil {
-			if !zmqerr.IsShutdown(err) {
-				s.cfg.Logger.Debug("gozmq/session: reader exit", "err", err)
-			}
+			logUnlessShutdown(s.cfg.Logger, "gozmq/session: reader exit", err)
 			return
 		}
 
@@ -202,9 +195,7 @@ func (s *Session) readLoop() {
 		frames = frames[:0]
 		if err := s.publishInbound(m); err != nil {
 			m.Release() // never queued: the buffers can go back now
-			if !zmqerr.IsShutdown(err) {
-				s.cfg.Logger.Debug("gozmq/session: publish inbound", "err", err)
-			}
+			logUnlessShutdown(s.cfg.Logger, "gozmq/session: publish inbound", err)
 			return
 		}
 	}
@@ -256,8 +247,7 @@ func (s *Session) publishInbound(m *msg.Msg) error {
 	// before blocking here.
 	if s.sessionPipe.TrySendDeferred(m) {
 		s.inboundOwed++
-		// Raw mode has no read loop to flush for it: flush per message.
-		if s.inboundOwed >= inboundFlushCap || s.cfg.Raw {
+		if s.inboundOwed >= inboundFlushCap {
 			s.flushInbound()
 		}
 		return nil

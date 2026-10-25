@@ -418,6 +418,28 @@ func (s *Session) enqueueCommand(name string, body []byte) {
 	}
 }
 
+// attach hands the engine-facing pipe end to OnReady (nil accepts) and
+// records the session as attached. It reports false when the engine
+// refused the pipe, and the reader must exit.
+func (s *Session) attach() bool {
+	if s.cfg.OnReady != nil {
+		if err := s.cfg.OnReady(s.enginePipe); err != nil {
+			s.cfg.Logger.Debug("gozmq/session: pipe refused", "err", err)
+			return false
+		}
+	}
+	s.attached.Store(true)
+	return true
+}
+
+// logUnlessShutdown logs err at debug level unless it is the ordinary
+// result of the session or its conn being closed.
+func logUnlessShutdown(l *slog.Logger, msg string, err error) {
+	if !zmqerr.IsShutdown(err) {
+		l.Debug(msg, "err", err)
+	}
+}
+
 // shutdown is the one-stop teardown path used by the reader and writer
 // when they detect a fatal condition, and by exit. It stops the
 // heartbeat, cancels the context (waking the other goroutine), closes the
