@@ -43,34 +43,36 @@ func NewFrameCodec(maxBody int64) FrameCodec {
 
 // ReadFrame implements FrameCodec.
 func (c *frameCodec) ReadFrame(r io.Reader, dst []byte, pool BodyPool) (uint8, []byte, error) {
-	hdr, err := readHeader(r, dst, 1)
+	// The header is the flags byte plus a one-byte length, or for a LONG
+	// frame the flags byte plus eight. Read the first two bytes in one go
+	// and the other seven only for a LONG frame.
+	hdr := headerBuf(dst)
+	n, err := io.ReadFull(r, hdr[:2])
 	if err != nil {
-		// Surface EOF/UnexpectedEOF unwrapped so callers can use errors.Is on
-		// io.EOF to detect clean peer close. Any other error is wrapped as a
-		// malformed-frame condition because we cannot resync the stream.
-		if IsEOF(err) {
+		// EOF before the first byte is a clean peer close (EOF and
+		// UnexpectedEOF are surfaced unwrapped, so callers can use errors.Is
+		// on io.EOF). Any other error is wrapped, and a stream that ends
+		// after the flags byte is a malformed-frame condition because we
+		// cannot resync it.
+		switch {
+		case n == 0 && IsEOF(err):
 			return 0, nil, err
+		case n == 0:
+			return 0, nil, fmt.Errorf("gozmq/zmtp: read flags: %w", err)
 		}
-		return 0, nil, fmt.Errorf("gozmq/zmtp: read flags: %w", err)
+		return 0, nil, fmt.Errorf("gozmq/zmtp: read length: %w", wrapEOF(err))
 	}
 	flags := hdr[0]
 	if flags&^validFlagBits != 0 {
 		return 0, nil, fmt.Errorf("gozmq/zmtp: reserved flag bits set: 0x%02x: %w", flags, zmqerr.ErrMalformedFrame)
 	}
 
-	var length uint64
-	if flags&FlagLong == 0 {
-		ln, err := readHeader(r, dst, 1)
-		if err != nil {
-			return 0, nil, fmt.Errorf("gozmq/zmtp: read short length: %w", wrapEOF(err))
-		}
-		length = uint64(ln[0])
-	} else {
-		ln, err := readHeader(r, dst, 8)
-		if err != nil {
+	length := uint64(hdr[1])
+	if flags&FlagLong != 0 {
+		if _, err := io.ReadFull(r, hdr[2:9]); err != nil {
 			return 0, nil, fmt.Errorf("gozmq/zmtp: read long length: %w", wrapEOF(err))
 		}
-		length = binary.BigEndian.Uint64(ln)
+		length = binary.BigEndian.Uint64(hdr[1:9])
 		// A LONG frame whose length fits in one byte is permitted by the
 		// spec but discouraged; we accept it for interop. The COMMAND flag
 		// has no length restriction beyond maxBody.
@@ -85,20 +87,20 @@ func (c *frameCodec) ReadFrame(r io.Reader, dst []byte, pool BodyPool) (uint8, [
 		return flags, nil, fmt.Errorf("gozmq/zmtp: frame length %d exceeds max %d: %w", length, c.maxBody, zmqerr.ErrMalformedFrame)
 	}
 
-	n := int(length)
-	if cap(dst) < n && n > incrementalBodyThreshold {
+	size := int(length)
+	if cap(dst) < size && size > incrementalBodyThreshold {
 		// Do not trust a large length header: a peer that announces a
 		// huge frame and then stalls must not pin maxBody per connection.
-		body, err := readBodyIncremental(r, n, pool)
+		body, err := readBodyIncremental(r, size, pool)
 		if err != nil {
-			return flags, nil, fmt.Errorf("gozmq/zmtp: read body (%d bytes): %w", n, wrapEOF(err))
+			return flags, nil, fmt.Errorf("gozmq/zmtp: read body (%d bytes): %w", size, wrapEOF(err))
 		}
 		return flags, body, nil
 	}
-	body := reuseOrAllocate(dst, n, pool)
-	if n > 0 {
+	body := reuseOrAllocate(dst, size, pool)
+	if size > 0 {
 		if _, err := io.ReadFull(r, body); err != nil {
-			return flags, nil, fmt.Errorf("gozmq/zmtp: read body (%d bytes): %w", n, wrapEOF(err))
+			return flags, nil, fmt.Errorf("gozmq/zmtp: read body (%d bytes): %w", size, wrapEOF(err))
 		}
 	}
 	return flags, body, nil
@@ -248,20 +250,20 @@ func reuseOrAllocate(dst []byte, n int, pool BodyPool) []byte {
 	return make([]byte, n)
 }
 
-// readHeader reads the n (<= 8) bytes of a frame header field into the
-// front of dst, which the body read then overwrites; the session's scratch
-// always has the room. A stack array would escape through io.ReadFull's
-// interface call and cost an allocation per frame, so a caller without
-// spare capacity (the handshake) pays that allocation here instead.
-func readHeader(r io.Reader, dst []byte, n int) ([]byte, error) {
-	var b []byte
-	if cap(dst) >= n {
-		b = dst[:n]
-	} else {
-		b = make([]byte, n)
+// maxHeaderLen is the longest frame header: the flags byte plus an
+// eight-byte length.
+const maxHeaderLen = 9
+
+// headerBuf returns the buffer a frame header is read into: the front of
+// dst, which the body read then overwrites (the session's scratch always has
+// the room). A stack array would escape through io.ReadFull's interface call
+// and cost an allocation per frame, so a caller without spare capacity (the
+// handshake) pays that allocation here instead.
+func headerBuf(dst []byte) []byte {
+	if cap(dst) >= maxHeaderLen {
+		return dst[:maxHeaderLen]
 	}
-	_, err := io.ReadFull(r, b)
-	return b, err
+	return make([]byte, maxHeaderLen)
 }
 
 // IsEOF reports whether err is io.EOF or io.ErrUnexpectedEOF: the stream

@@ -25,9 +25,9 @@ const readScratchSize = 4 * 1024
 // minScratchTail is the least free scratch the reader wants before
 // reading the next frame of a message in progress. Below it the pending
 // frames are copied out and the whole scratch reused: the codec's header
-// read needs 8 spare bytes (zmtp.readHeader allocates otherwise), and a
+// read needs 9 spare bytes (zmtp.headerBuf allocates otherwise), and a
 // tail this small would push even modest frames into their own buffers.
-// Must stay >= 8.
+// Must stay >= 9.
 const minScratchTail = 512
 
 // runReader is the session's reading goroutine. It performs the
