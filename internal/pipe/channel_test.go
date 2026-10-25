@@ -1,0 +1,124 @@
+package pipe
+
+import (
+	"context"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/exergy-dev/gozmq/msg"
+)
+
+// Tests for the channel kind's overflow slice (HWM 0): the
+// unboundedChanCap boundaries and the refill paths.
+
+// TestChannel_OverflowBoundaries sends n messages around the channel
+// capacity into an HWM-0 direction and checks FIFO order, Len and Pending
+// at every stage.
+func TestChannel_OverflowBoundaries(t *testing.T) {
+	t.Parallel()
+	for _, n := range []int{1, unboundedChanCap - 1, unboundedChanCap, unboundedChanCap + 1, 2 * unboundedChanCap, 3*unboundedChanCap + 5} {
+		a, b := NewChannelPair(0, 0, PeerInfo{}, PeerInfo{})
+		for i := range n {
+			require.True(t, a.TrySend(seqMsg(i)), "n=%d send %d", n, i)
+		}
+		require.Equal(t, n, b.Len(), "n=%d", n)
+		require.True(t, b.Pending())
+		for i := range n {
+			m, ok := b.TryRecv()
+			require.True(t, ok, "n=%d recv %d", n, i)
+			require.Equal(t, i, seqOf(m), "n=%d recv %d", n, i)
+		}
+		_, ok := b.TryRecv()
+		require.False(t, ok)
+		require.Zero(t, b.Len())
+		require.False(t, b.Pending())
+		a.Close()
+		b.Close()
+	}
+}
+
+// TestChannel_OverflowInterleaved alternates bursts larger than the
+// channel with partial drains, so the overflow slice is refilled, compacted
+// and emptied repeatedly while FIFO order holds.
+func TestChannel_OverflowInterleaved(t *testing.T) {
+	t.Parallel()
+	a, b := NewChannelPair(0, 0, PeerInfo{}, PeerInfo{})
+	defer a.Close()
+	defer b.Close()
+	next, want := 0, 0
+	for round := range 20 {
+		burst := unboundedChanCap/2 + round*unboundedChanCap/3
+		for range burst {
+			require.True(t, a.TrySend(seqMsg(next)))
+			next++
+		}
+		drain := burst * 2 / 3
+		for range drain {
+			m, ok := b.TryRecv()
+			require.True(t, ok)
+			require.Equal(t, want, seqOf(m))
+			want++
+		}
+		require.Equal(t, next-want, b.Len())
+	}
+	for want < next {
+		m, ok := b.TryRecv()
+		require.True(t, ok)
+		require.Equal(t, want, seqOf(m))
+		want++
+	}
+	require.False(t, b.Pending())
+}
+
+// TestChannel_ParkedRecvSeesOverflow checks that a receiver blocked on an
+// empty channel is woken by a spill burst (the slowOverflow invariant).
+func TestChannel_ParkedRecvSeesOverflow(t *testing.T) {
+	t.Parallel()
+	for range 50 {
+		a, b := NewChannelPair(0, 0, PeerInfo{}, PeerInfo{})
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		var wg sync.WaitGroup
+		wg.Add(1)
+		got := 0
+		const n = 2*unboundedChanCap + 3
+		go func() {
+			defer wg.Done()
+			for got < n {
+				if _, err := b.Recv(ctx); err != nil {
+					return
+				}
+				got++
+			}
+		}()
+		for i := range n {
+			require.True(t, a.TrySend(seqMsg(i)))
+		}
+		wg.Wait()
+		require.Equal(t, n, got)
+		cancel()
+		a.Close()
+		b.Close()
+	}
+}
+
+// TestChannel_DeferredIsPlainSend: TrySendDeferred on a channel pair wakes
+// the receiver at once and Flush has nothing to do.
+func TestChannel_DeferredIsPlainSend(t *testing.T) {
+	t.Parallel()
+	a, b := NewChannelPair(10, 10, PeerInfo{}, PeerInfo{})
+	defer a.Close()
+	defer b.Close()
+	gate := notifyGate(b)
+	_, ok := b.RecvOrIdle()
+	require.False(t, ok)
+	require.True(t, a.TrySendDeferred(msg.FromBytes([]byte("x"))))
+	requireArmed(t, gate, "TrySendDeferred on a channel pair")
+	a.Flush()
+	requireNotArmed(t, gate, "Flush on a channel pair")
+	m, ok := b.TryRecv()
+	require.True(t, ok)
+	require.Equal(t, "x", string(m.Bytes()))
+}
