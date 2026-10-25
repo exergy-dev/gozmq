@@ -5,7 +5,7 @@
 #
 # (inproc:// is single-process by definition, so a two-binary gozmq-vs-libzmq
 # comparison is impossible; tls+tcp:// is a gozmq-only scheme libzmq does not
-# speak. Both are out of scope here — use the in-repo Go benchmarks for inproc.)
+# speak. Both are out of scope here — use compare_inproc.sh for inproc, which runs both peers in one process.)
 #
 # Both sides run as two processes over the chosen transport with NO CGO —
 # gozmq via perf/zmqperf, libzmq via the repo-written minimal C local_thr.c +
@@ -33,8 +33,10 @@
 # cross-implementation comparison; read the IPC libzmq column as "stock libzmq
 # perf-tool settings," not a tuned ceiling.
 #
-# GOZMQ_LOCAL_FLAGS passes extra flags to gozmq's receiver, e.g.
-# GOZMQ_LOCAL_FLAGS=-pool for the receive buffer pool (WithRecvBufferPool).
+# GOZMQ_LOCAL_FLAGS passes extra flags to gozmq's receiver. zmqperf already
+# receives into the buffer pool and releases every message (-pool, the
+# default, like libzmq's zmq_msg_close); GOZMQ_LOCAL_FLAGS=-pool=false selects
+# plain-memory receive instead.
 # GOZMQ_GOGC passes -gogc to both gozmq processes (unset: Go's defaults).
 # libzmq has no collector; at 64 KB x 70k msg/s Go's default pacer runs a
 # cycle every ~60 messages, and GOZMQ_GOGC=400 is the usual tuning for a
