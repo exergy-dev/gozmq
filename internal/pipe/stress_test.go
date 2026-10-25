@@ -2,6 +2,7 @@ package pipe
 
 import (
 	"context"
+	"errors"
 	"io"
 	"math/rand/v2"
 	"runtime"
@@ -155,7 +156,7 @@ func TestStress_CloseWhileParked(t *testing.T) {
 			wg.Add(2)
 			go func() {
 				defer wg.Done()
-				if _, err := a.Recv(ctx); err != io.EOF {
+				if _, err := a.Recv(ctx); !errors.Is(err, io.EOF) {
 					t.Errorf("Recv: %v", err)
 				}
 			}()
@@ -165,7 +166,7 @@ func TestStress_CloseWhileParked(t *testing.T) {
 		for range 4 {
 			go func() {
 				defer wg.Done()
-				if err := a.Send(ctx, seqMsg(1)); err != io.ErrClosedPipe {
+				if err := a.Send(ctx, seqMsg(1)); !errors.Is(err, io.ErrClosedPipe) {
 					t.Errorf("Send: %v", err)
 				}
 			}()
