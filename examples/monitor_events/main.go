@@ -45,11 +45,11 @@ func printEvents(label string, ch <-chan gozmq.Event) {
 	for {
 		select {
 		case ev := <-ch:
-			if ev.Reason == "" {
-				fmt.Printf("%s event: %-24s endpoint=%s\n", label, eventName(ev.Type), ev.Endpoint)
-				continue
+			reason := ""
+			if ev.Reason != "" {
+				reason = " reason=" + ev.Reason
 			}
-			fmt.Printf("%s event: %-24s endpoint=%s reason=%s\n", label, eventName(ev.Type), ev.Endpoint, ev.Reason)
+			fmt.Printf("%s event: %-24s endpoint=%s%s\n", label, eventName(ev.Type), ev.Endpoint, reason)
 		default:
 			return
 		}
