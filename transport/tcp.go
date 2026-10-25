@@ -194,7 +194,7 @@ func (c *conn) WriteBuffers(buffers *net.Buffers) (int64, error) {
 		// the slice header as WriteTo would.
 		b := (*buffers)[0]
 		*buffers = (*buffers)[1:]
-		n, err := c.Conn.Write(b)
+		n, err := c.Write(b)
 		return int64(n), err
 	}
 	if c.vectored {
