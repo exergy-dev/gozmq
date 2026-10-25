@@ -1093,3 +1093,102 @@ func TestPlainBodiesRetainsOneScratch(t *testing.T) {
 	p.Put(body)
 	require.Equal(t, 65<<10, cap(p.scratch))
 }
+
+// TestReader_SingleMessagePromptDelivery: one message to a receiver parked
+// in Recv arrives at once. The reader finds nothing buffered after the
+// frame, so it flushes (the deferred wakeup) before its next blocking read.
+func TestReader_SingleMessagePromptDelivery(t *testing.T) {
+	t.Parallel()
+	sA, sB := startZmtpPair(t, 16)
+	ctx := testutil.Ctx(t, 5*time.Second)
+	for i := range 20 {
+		got := make(chan error, 1)
+		go func() {
+			m, err := sB.Pipe().Recv(ctx)
+			if err == nil && string(m.Bytes()) != fmt.Sprintf("one-%d", i) {
+				err = fmt.Errorf("got %q", m.Bytes())
+			}
+			got <- err
+		}()
+		time.Sleep(2 * time.Millisecond) // let Recv park
+		require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte(fmt.Sprintf("one-%d", i)))))
+		select {
+		case err := <-got:
+			require.NoError(t, err, "round %d", i)
+		case <-time.After(2 * time.Second):
+			require.Fail(t, "message not delivered promptly", "round %d", i)
+		}
+	}
+}
+
+// TestReader_BurstDeliveredInOrder: 1000 messages through a small HWM (so
+// the reader repeatedly hits the full-pipe path and the 256-message flush
+// cap) all arrive, in order, to a receiver that sometimes parks.
+func TestReader_BurstDeliveredInOrder(t *testing.T) {
+	t.Parallel()
+	for _, hwm := range []int{8, 0} {
+		t.Run(fmt.Sprintf("hwm=%d", hwm), func(t *testing.T) {
+			t.Parallel()
+			const N = 1000
+			sA, sB := startZmtpPair(t, hwm)
+			ctx := testutil.Ctx(t, 20*time.Second)
+			sendErr := make(chan error, 1)
+			go func() {
+				for i := range N {
+					if err := sA.Pipe().Send(ctx, msg.FromBytes([]byte(fmt.Sprintf("m%04d", i)))); err != nil {
+						sendErr <- err
+						return
+					}
+				}
+				sendErr <- nil
+			}()
+			for i := range N {
+				m, err := sB.Pipe().Recv(ctx)
+				require.NoError(t, err, "Recv[%d]", i)
+				require.Equal(t, fmt.Sprintf("m%04d", i), string(m.Bytes()), "order[%d]", i)
+				if i%97 == 0 {
+					time.Sleep(time.Millisecond) // let the pipe fill / the receiver park
+				}
+			}
+			require.NoError(t, <-sendErr)
+		})
+	}
+}
+
+// TestFlushReader_FlushesBeforeUnderlyingRead: a partial frame in the
+// bufio buffer can leave the reader blocked in a conn Read with Buffered()
+// > 0, so the wrapper flushes before every underlying Read.
+func TestFlushReader_FlushesBeforeUnderlyingRead(t *testing.T) {
+	t.Parallel()
+	a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	defer a.Close()
+	defer b.Close()
+	var now atomic.Int64
+	now.Store(42)
+	s := &Session{sessionPipe: a, cfg: Config{Now: now.Load}}
+	idle := make(chan struct{}, 1)
+	b.SetNotify(func() { idle <- struct{}{} })
+	_, ok := b.RecvOrIdle()
+	require.False(t, ok)
+
+	require.True(t, a.TrySendDeferred(msg.FromBytes([]byte("x"))))
+	s.inboundOwed = 1
+	var sawFlush bool
+	r := flushReader{s: s, r: readerFunc(func([]byte) (int, error) {
+		sawFlush = s.inboundOwed == 0
+		return 0, io.EOF
+	})}
+	_, err := r.Read(make([]byte, 1))
+	require.ErrorIs(t, err, io.EOF)
+	require.True(t, sawFlush, "flush must precede the underlying Read")
+	select {
+	case <-idle:
+	case <-time.After(time.Second):
+		require.Fail(t, "idle notification not run by the flush")
+	}
+	require.EqualValues(t, 42, s.lastInboundUnix.Load(), "inbound clock stamped at the flush")
+}
+
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
