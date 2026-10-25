@@ -88,7 +88,7 @@ import (
 // metric counters struct, the readiness gates and the broadcast helper. The
 // two large reusable primitives live in sibling files in this package:
 // LoadBalancer in loadbalancer.go, FairQueue in fairqueue.go. The simple
-// combinator engines (PUSH/PULL/DEALER) are in combinators.go.
+// PUSH/PULL/DEALER engine is in queues.go.
 
 // counters holds the standard per-engine metric counters. Engines embed it so
 // the promoted sent/recv/dropped fields work in place (e.counters.sent ==
