@@ -290,6 +290,19 @@ func benchRouterDealer(b *testing.B, endpoint string, size int) {
 func BenchmarkReqRepRoundTrip_Inproc(b *testing.B) {
 	forEachSize(b, sizes, inprocEndpoint, benchReqRep)
 }
+
+// unboundedHWM makes every queue of a socket unbounded (HWM 0), which
+// selects the inproc pipe's unbounded path.
+var unboundedHWM = []gozmq.Option{gozmq.WithSendHWM(0), gozmq.WithRecvHWM(0)}
+
+// BenchmarkReqRepRoundTrip_InprocHWM0 is the inproc round trip with both
+// sockets unbounded (HWM 0), so the cost of the unbounded pipe path stays
+// visible to the gate.
+func BenchmarkReqRepRoundTrip_InprocHWM0(b *testing.B) {
+	forEachSize(b, sizes[:1], inprocEndpoint, func(b *testing.B, endpoint string, size int) {
+		benchEcho(b, gozmq.Rep, gozmq.Req, unboundedHWM, unboundedHWM, endpoint, size)
+	})
+}
 func BenchmarkReqRepRoundTrip_TCP(b *testing.B) { forEachSize(b, sizes, tcpEndpoint, benchReqRep) }
 
 // BenchmarkReqRepRoundTrip_IPC is the REQ/REP round trip over a unix socket.
@@ -496,6 +509,14 @@ func benchPushPull(b *testing.B, endpoint string, size int) {
 
 func BenchmarkPushPullThroughput_Inproc(b *testing.B) {
 	forEachSize(b, sizes, inprocEndpoint, benchPushPull)
+}
+
+// BenchmarkPushPullThroughput_InprocHWM0 streams through an unbounded
+// (HWM 0) inproc pipe; see BenchmarkReqRepRoundTrip_InprocHWM0.
+func BenchmarkPushPullThroughput_InprocHWM0(b *testing.B) {
+	forEachSize(b, sizes[:1], inprocEndpoint, func(b *testing.B, endpoint string, size int) {
+		benchPushPullThroughput(b, endpoint, size, unboundedHWM, unboundedHWM)
+	})
 }
 
 func BenchmarkPushPullThroughput_TCP(b *testing.B) { forEachSize(b, sizes, tcpEndpoint, benchPushPull) }
