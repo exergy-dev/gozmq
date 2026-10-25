@@ -91,17 +91,12 @@ func (s *Session) readLoop() {
 	// GC, which is always safe. Both slices are reused across messages.
 	var frames, lent [][]byte
 	var currentSize int64 // decoded bytes accumulated into frames
-	// Whatever exit path, wake the engine for messages published but not
-	// yet flushed (the pipe close in shutdown wakes it too; this keeps the
+	// Every blocking read goes through flushReader, which publishes the
+	// batch's wakeup and liveness stamp first; this covers the exit paths
+	// (the pipe close in shutdown wakes the engine too; this keeps the
 	// bound explicit).
 	defer s.flushInbound()
 	for {
-		// The next ReadFrame is about to block in a syscall: publish the
-		// batch's wakeup and liveness stamp now. (flushReader covers the
-		// case where bytes are buffered but the frame is incomplete.)
-		if s.inboundOwed > 0 && s.reader.Buffered() == 0 {
-			s.flushInbound()
-		}
 		// Out of scratch for the message in progress: copy its pending
 		// frames out and start over at the front. Frames that did not
 		// fit scratch already own their memory.
@@ -139,9 +134,6 @@ func (s *Session) readLoop() {
 		}
 
 		// User-message frame. Accumulate until MORE clears.
-		if len(frames) == 0 {
-			currentSize = 0
-		}
 		// Enforce the logical-message size cap BEFORE appending: the
 		// codec's per-frame limit does not bound a MORE chain, so without
 		// this a peer could balloon memory indefinitely (remote OOM DoS).
@@ -190,25 +182,25 @@ func (s *Session) readLoop() {
 
 		// Last frame in the logical message — publish.
 		var m *msg.Msg
-		switch {
-		case s.identityMech && len(lent) == 0 && allEmptyOrIn(frames, scratch):
+		if s.identityMech && len(lent) == 0 && allEmptyOrIn(frames, scratch) {
 			// Every frame is in scratch (or empty): the message and its
 			// frame bytes are one allocation.
 			m = msg.FromFramesCopy(frames...)
-		case len(lent) > 0:
+		} else {
 			if s.identityMech {
 				detachFrames(frames, scratch)
 			}
-			m = lendFrames(frames, lent)
-			clear(lent)
-			lent = lent[:0]
-		default:
-			if s.identityMech {
-				detachFrames(frames, scratch)
+			if len(lent) > 0 {
+				// The message's final Release returns the pooled buffers
+				// (NewLent copies lent; the reader reuses it).
+				m = msg.NewLent(bufpool.Put, lent, frames...)
+				clear(lent)
+				lent = lent[:0]
+			} else {
+				m = msg.FromFrames(frames...)
 			}
-			m = msg.FromFrames(frames...)
 		}
-		used = 0
+		used, currentSize = 0, 0
 		clear(frames) // the message has its own copy of the list
 		frames = frames[:0]
 		if err := s.publishInbound(m); err != nil {
@@ -252,13 +244,6 @@ func detachFrames(frames [][]byte, scratch []byte) {
 	}
 }
 
-// lendFrames returns a lent message holding frames whose final Release
-// returns the pool buffers bufs (bufs is copied; the reader reuses it).
-// One allocation for the common one-buffer message.
-func lendFrames(frames, bufs [][]byte) *msg.Msg {
-	return msg.NewLent(bufpool.Put, bufs, frames...)
-}
-
 // publishInbound enqueues a fully-assembled message on the session-side
 // pipe, honoring backpressure (HWM) by blocking until either the engine drains a slot or
 // the session is cancelled. While blocked it raises
@@ -269,7 +254,7 @@ func lendFrames(frames, bufs [][]byte) *msg.Msg {
 func (s *Session) publishInbound(m *msg.Msg) error {
 	// Non-blocking fast path keeps the readerParked bookkeeping (and the
 	// extra inbound stamp) off the common no-backpressure case. The wakeup
-	// is deferred to flushInbound, which readLoop runs before every
+	// is deferred to flushInbound, which flushReader runs before every
 	// blocking read, at most inboundFlushCap messages later, and below
 	// before blocking here.
 	if s.sessionPipe.TrySendDeferred(m) {
@@ -315,8 +300,9 @@ func (s *Session) flushInbound() {
 
 // flushReader wraps the conn under the session's bufio.Reader and flushes
 // before every underlying Read, which is the only place the reader can
-// block waiting for the peer. That covers a partial frame in the buffer,
-// where Buffered() > 0 yet the next ReadFrame still blocks.
+// block waiting for the peer. It is the single flush point of the read
+// loop, and it covers a partial frame in the buffer, where Buffered() > 0
+// yet the next ReadFrame still blocks.
 type flushReader struct {
 	s *Session
 	r io.Reader
