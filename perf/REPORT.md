@@ -38,7 +38,9 @@ are pooled (`WithRecvBufferPool`, "Decisions" below).
 
 ## gozmq vs native libzmq 4.3.4, PUSH/PULL over TCP loopback
 
-Three consecutive runs on the final branch, ratio = gozmq/libzmq:
+Three consecutive runs at 3605aa8 (every library change except the two
+allocation-footprint commits after it), ratio = gozmq/libzmq; a fourth run
+at the branch head follows the table:
 
 | size | gozmq | libzmq | ratio (3 runs) |
 | :--- | ---: | ---: | ---: |
@@ -47,6 +49,12 @@ Three consecutive runs on the final branch, ratio = gozmq/libzmq:
 | 1 KB | 2.29–2.45M (18.7–20.1 Gb/s) | 2.28–2.33M (18.7–19.1 Gb/s) | 1.00–1.05× |
 | 8 KB | 0.58–0.72M (38–47 Gb/s) | 0.33–0.35M (22–23 Gb/s) | 1.66–2.06× |
 | 64 KB | 0.13–0.14M (69–75 Gb/s) | 0.10M (51–54 Gb/s) | **1.30–1.44×** |
+
+Head (332f2ab, one run, after the lease and pipe-allocation commits):
+32 B 12.0M vs 8.8M (1.36×), 256 B 1.69×, 1 KB 2.62M vs 2.32M (1.13×),
+8 KB 2.01×, 64 KB 0.13M vs 0.11M (1.18×); the in-repo gate of head against
+3605aa8 is flat on every streaming row (TCP 32 B 102.0 → 102.7 ns, p=0.33)
+and the pipe microbenchmarks are 6–12% faster on the queue kind.
 
 Mixed pairings (run 1; the other runs are within 5%): gozmq PUSH → libzmq
 PULL 9.1M at 32 B and 0.09M at 64 KB; libzmq PUSH → gozmq PULL 10.5M at
@@ -95,8 +103,9 @@ the stopped state and never drains the kernel queue, so the tail of a
 burst is lost and its tool waits forever (96,548 of 100,000 messages arrive
 at RCVHWM 1000, all 1,000,000 with it raised; gozmq's sender writes every
 byte either way, verified with strace). It does not happen over TCP, where
-there is no HUP until both directions close, nor with libzmq's own sender,
-whose SNDHWM of 1000 keeps the receiver's pipe from filling.
+there is no HUP until both directions close, and the libzmq↔libzmq ipc
+cell completes with the stock setting (presumably because its sender's own
+SNDHWM of 1000 keeps the receiver's pipe from filling).
 
 ### REQ/REP round trip over TCP
 
