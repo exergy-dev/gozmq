@@ -7,13 +7,20 @@
 //	zmqperf remote_lat -endpoint tcp://127.0.0.1:5555 -size 32 -count 100000    # connects REQ, reports latency
 //
 // -size and -count must match on both ends. The output format follows the
-// libzmq tools, so the same scripts can read either. The throughput
-// commands take -cpuprofile and -memprofile. Everything runs at Go's
-// defaults (plain-memory receive, GOGC 100). Two options exist for the
-// large-frame case, where a receiver allocating fresh 64 KiB bodies at
-// 4 GB/s is paced by the collector: local_thr -pool receives into the
-// buffer pool (gozmq.WithRecvBufferPool) and releases each message, and
-// -gogc N sets the GC percent for the process (400 is a usual value).
+// libzmq tools, so the same scripts can read either. Two more subcommands run
+// both peers inside one process, the peer on a goroutine, like libzmq's
+// perf/inproc_thr and inproc_lat (inproc:// cannot span processes):
+//
+//	zmqperf inproc_thr -size 32 -count 1000000   # PUSH goroutine -> PULL, reports throughput
+//	zmqperf inproc_lat -size 32 -count 100000    # REQ -> REP goroutine, reports latency
+//
+// The throughput commands take -cpuprofile and -memprofile. Every received
+// message is released, as libzmq's local_thr does with zmq_msg_close, so
+// -pool (the default) receives into the buffer pool; -pool=false is the
+// plain-memory opt-out. The option is always passed explicitly, so the tool
+// behaves the same whatever the library's default is. -gogc N sets the GC
+// percent for the process; the default keeps the runtime's setting, and 400
+// is a usual value for 64 KiB frames at several GB/s.
 package main
 
 import (
@@ -24,6 +31,8 @@ import (
 	"os"
 	"runtime/debug"
 	"runtime/pprof"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/exergy-dev/gozmq"
@@ -50,14 +59,14 @@ func main() {
 	count := fs.Int("count", 0, "message or round-trip count (must match the peer)")
 	cpuProfile := fs.String("cpuprofile", "", "write a CPU profile here (thr commands)")
 	memProfile := fs.String("memprofile", "", "write a heap profile here (thr commands)")
-	pool := fs.Bool("pool", false, "local_thr: receive into the buffer pool (WithRecvBufferPool) and release each message instead of plain memory")
+	pool := fs.Bool("pool", true, "local_thr, inproc_thr: receive into the buffer pool (WithRecvBufferPool) and release each message; -pool=false receives into plain memory")
 	gogc := fs.Int("gogc", -1, "GC percent for this process (e.g. 400 for large frames); negative, the default, keeps the runtime's setting (GOGC env or 100)")
 	_ = fs.Parse(os.Args[2:])
 	if *gogc >= 0 {
 		debug.SetGCPercent(*gogc)
 	}
 	if *count == 0 {
-		*count = map[bool]int{true: 1_000_000, false: 100_000}[cmd == "local_thr" || cmd == "remote_thr"]
+		*count = map[bool]int{true: 1_000_000, false: 100_000}[strings.HasSuffix(cmd, "_thr")]
 	}
 	if *size < 0 || *count <= 0 {
 		log.Fatal("size must be >= 0 and count > 0")
@@ -119,13 +128,61 @@ func main() {
 		elapsed := max(time.Since(start), time.Nanosecond)
 		fmt.Printf("average latency: %.3f [us]\n", float64(elapsed.Nanoseconds())/float64(*count)/1000)
 		fmt.Printf("roundtrip rate: %.0f [msg/s]\n", float64(*count)/elapsed.Seconds())
+	case "inproc_thr":
+		pull := socket(zctx, gozmq.Pull, "inproc://zmqperf-thr", true, gozmq.WithSendHWM(benchHWM), gozmq.WithRecvHWM(benchHWM), gozmq.WithRecvBufferPool(*pool))
+		push := socket(zctx, gozmq.Push, "inproc://zmqperf-thr", false, gozmq.WithLinger(-1), gozmq.WithSendHWM(benchHWM), gozmq.WithRecvHWM(benchHWM))
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < *count; i++ {
+				send(ctx, push, payload, i)
+			}
+		}()
+		fmt.Printf("message size: %d [B]\nmessage count: %d\n", *size, *count)
+		recv(ctx, pull, *size, 0).Release() // the clock starts after the first message
+		stop := profile(*cpuProfile, *memProfile)
+		start := time.Now()
+		for i := 1; i < *count; i++ {
+			recv(ctx, pull, *size, i).Release()
+		}
+		elapsed := max(time.Since(start), time.Nanosecond)
+		stop()
+		wg.Wait()
+		check(push.Close(), "close")
+		timed := float64(*count - 1)
+		fmt.Printf("mean throughput: %.0f [msg/s]\n", timed/elapsed.Seconds())
+		fmt.Printf("mean throughput: %.3f [Mb/s]\n", timed*float64(*size)*8/1e6/elapsed.Seconds())
+	case "inproc_lat":
+		rep := socket(zctx, gozmq.Rep, "inproc://zmqperf-lat", true)
+		req := socket(zctx, gozmq.Req, "inproc://zmqperf-lat", false)
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < *count; i++ {
+				m := recv(ctx, rep, *size, i)
+				send(ctx, rep, m.Bytes(), i)
+			}
+		}()
+		fmt.Printf("message size: %d [B]\nroundtrip count: %d\n", *size, *count)
+		start := time.Now()
+		for i := 0; i < *count; i++ {
+			send(ctx, req, payload, i)
+			recv(ctx, req, *size, i).Release()
+		}
+		elapsed := max(time.Since(start), time.Nanosecond)
+		wg.Wait()
+		// Full round trip, as remote_lat prints it.
+		fmt.Printf("average latency: %.3f [us]\n", float64(elapsed.Nanoseconds())/float64(*count)/1000)
+		fmt.Printf("roundtrip rate: %.0f [msg/s]\n", float64(*count)/elapsed.Seconds())
 	default:
 		usage()
 	}
 }
 
 func usage() {
-	log.Fatal("usage: zmqperf local_thr|remote_thr|local_lat|remote_lat [-endpoint E] [-size N] [-count N]")
+	log.Fatal("usage: zmqperf local_thr|remote_thr|local_lat|remote_lat|inproc_thr|inproc_lat [-endpoint E] [-size N] [-count N]")
 }
 
 func socket(zctx *gozmq.Context, typ gozmq.SocketType, endpoint string, bind bool, opts ...gozmq.Option) *gozmq.Socket {
