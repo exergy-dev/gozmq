@@ -6,13 +6,10 @@ import (
 	"time"
 )
 
-// Defaults. Higher layers override them by constructing a TCPTransport,
-// setting the exported fields and registering it on a Context.
-const (
-	defaultTCPKeepAlive     = true
-	defaultTCPKeepAliveIdle = 30 * time.Second
-	defaultTCPNoDelay       = true
-)
+// defaultTCPKeepAliveIdle is the keepalive idle period. Higher layers
+// override the TCP defaults (keepalive and nodelay on) by constructing a
+// TCPTransport, setting the exported fields and registering it on a Context.
+const defaultTCPKeepAliveIdle = 30 * time.Second
 
 // TCPTransport implements Transport over the standard library's
 // net.Dial / net.Listen. The exported fields are configuration knobs the
@@ -48,9 +45,9 @@ func newTCP(network string) *TCPTransport {
 	return &TCPTransport{
 		Network:         network,
 		scheme:          network,
-		KeepAlive:       defaultTCPKeepAlive,
+		KeepAlive:       true,
 		KeepAlivePeriod: defaultTCPKeepAliveIdle,
-		NoDelay:         defaultTCPNoDelay,
+		NoDelay:         true,
 	}
 }
 

@@ -827,9 +827,9 @@ func startZmtpPair(t *testing.T, hwm int) (sA, sB *tSession) {
 	connA, connB := newFakeConnPair()
 	return startPair(t,
 		Config{Conn: connA, Mech: identityFramingMech{newFakeMech("NULL", false, nil)},
-			Codec: zmtp.NewFrameCodec(zmtp.MaxBodyUnlimited), SendHWM: hwm, RecvHWM: hwm},
+			Codec: zmtp.NewFrameCodec(0), SendHWM: hwm, RecvHWM: hwm},
 		Config{Conn: connB, Mech: identityFramingMech{newFakeMech("NULL", true, nil)},
-			Codec: zmtp.NewFrameCodec(zmtp.MaxBodyUnlimited), SendHWM: hwm, RecvHWM: hwm},
+			Codec: zmtp.NewFrameCodec(0), SendHWM: hwm, RecvHWM: hwm},
 	)
 }
 
@@ -968,9 +968,9 @@ func TestReader_PooledMidSizeFrames(t *testing.T) {
 	connA, connB := newFakeConnPair()
 	sA, sB := startPair(t,
 		Config{Conn: connA, Mech: identityFramingMech{newFakeMech("NULL", false, nil)},
-			Codec: zmtp.NewFrameCodec(zmtp.MaxBodyUnlimited), SendHWM: 8, RecvHWM: 8},
+			Codec: zmtp.NewFrameCodec(0), SendHWM: 8, RecvHWM: 8},
 		Config{Conn: connB, Mech: identityFramingMech{newFakeMech("NULL", true, nil)},
-			Codec: zmtp.NewFrameCodec(zmtp.MaxBodyUnlimited), SendHWM: 8, RecvHWM: 8,
+			Codec: zmtp.NewFrameCodec(0), SendHWM: 8, RecvHWM: 8,
 			RecvBufferPool: true},
 	)
 	ctx := testutil.Ctx(t, 5*time.Second)
@@ -1003,7 +1003,7 @@ func TestReader_CommandBetweenMoreFrames(t *testing.T) {
 	s := startTestSession(Config{
 		Conn:    connA,
 		Mech:    identityFramingMech{newFakeMech("NULL", false, nil)},
-		Codec:   zmtp.NewFrameCodec(zmtp.MaxBodyUnlimited),
+		Codec:   zmtp.NewFrameCodec(0),
 		SendHWM: 8,
 		RecvHWM: 8,
 	})

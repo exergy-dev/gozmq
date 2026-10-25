@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"time"
 
@@ -317,10 +318,8 @@ func decodeGreeting(buf []byte) (mech string, minor byte, asServer bool, err err
 	if end < 0 {
 		end = len(raw)
 	}
-	for i := end; i < len(raw); i++ {
-		if raw[i] != 0 {
-			return "", 0, false, fmt.Errorf("%w: mechanism padding non-zero at %d", zmqerr.ErrMalformedFrame, i)
-		}
+	if i := slices.IndexFunc(raw[end:], func(b byte) bool { return b != 0 }); i >= 0 {
+		return "", 0, false, fmt.Errorf("%w: mechanism padding non-zero at %d", zmqerr.ErrMalformedFrame, end+i)
 	}
 	if i := bytes.IndexFunc(raw[:end], zmtp.NonPrintableASCII); i >= 0 {
 		return "", 0, false, fmt.Errorf("%w: mechanism non-printable 0x%02x at %d", zmqerr.ErrMalformedFrame, raw[i], i)

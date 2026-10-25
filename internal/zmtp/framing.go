@@ -17,12 +17,6 @@ import (
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
-// MaxBodyUnlimited is a sentinel value for NewFrameCodec meaning "accept any
-// length the spec permits" (i.e. up to 2^63-1 bytes). Sessions enforce a
-// finite cap via WithMaxMessageSize; pass that cap directly. Tests typically
-// use a small finite cap to exercise the rejection path.
-const MaxBodyUnlimited int64 = 0
-
 // validFlagBits is the set of bits the spec reserves; any bit outside this
 // mask in a received flags byte is a protocol violation.
 const validFlagBits uint8 = FlagMore | FlagLong | FlagCommand
@@ -38,8 +32,8 @@ type frameCodec struct {
 // NewFrameCodec returns a ZMTP 3.1 frame codec. maxBody bounds the size of
 // any body the codec will accept on the read side; bodies larger than maxBody
 // fail with an error wrapping zmqerr.ErrMalformedFrame so callers can treat
-// the connection as poisoned. Pass MaxBodyUnlimited (0) to disable the cap;
-// non-positive values other than 0 panic (programmer error).
+// the connection as poisoned. 0 disables the cap; negative values panic
+// (programmer error).
 func NewFrameCodec(maxBody int64) FrameCodec {
 	if maxBody < 0 {
 		panic(fmt.Sprintf("gozmq/zmtp: NewFrameCodec maxBody=%d must be >= 0", maxBody))
@@ -188,13 +182,14 @@ func readBodyIncremental(r io.Reader, n int, pool BodyPool) ([]byte, error) {
 
 // getScratch and putScratch route readBodyIncremental's intermediates: to
 // the caller's ScratchPool when it has one, else through its BodyPool, else
-// through the shared bufpool. Intermediates never reach the caller.
+// through the shared bufpool. Intermediates never reach the caller, and a
+// failed read puts every buffer taken back before returning.
 func getScratch(pool BodyPool, n int) []byte {
 	switch p := pool.(type) {
 	case ScratchPool:
 		return p.GetScratch(n)
 	case nil:
-		return intermediates.Get(n)
+		return bufpool.Shared{}.Get(n)
 	default:
 		return p.Get(n)
 	}
@@ -205,7 +200,7 @@ func putScratch(pool BodyPool, b []byte) {
 	case ScratchPool:
 		p.PutScratch(b)
 	case nil:
-		intermediates.Put(b)
+		bufpool.Shared{}.Put(b)
 	default:
 		p.Put(b)
 	}
@@ -223,11 +218,6 @@ func readBodyInto(r io.Reader, body []byte, filled int, pool BodyPool) ([]byte, 
 	}
 	return body, nil
 }
-
-// intermediates recycles readBodyIncremental's intermediate buffers for
-// callers without a BodyPool through the shared bufpool. A failed read leaves
-// nothing behind: every buffer taken is Put back before returning an error.
-var intermediates BodyPool = bufpool.Shared{}
 
 // AppendFrameHeader implements FrameCodec. It emits the smallest legal
 // encoding: bodies of up to 255 bytes get the 2-byte short header unless

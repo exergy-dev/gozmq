@@ -57,7 +57,13 @@ func (t *IPCTransport) Dial(ctx context.Context, endpoint string) (Conn, error) 
 	if err != nil {
 		return nil, err
 	}
-	return &conn{Conn: c, local: "ipc://" + path, remote: "ipc://" + path, vectored: true}, nil
+	return newIPCConn(c, "ipc://"+path), nil
+}
+
+// newIPCConn adapts c, a Unix socket, with the same endpoint on both sides
+// (a Unix socket has no useful peer address).
+func newIPCConn(c net.Conn, endpoint string) *conn {
+	return &conn{Conn: c, local: endpoint, remote: endpoint, vectored: true}
 }
 
 // Listen binds endpoint. For filesystem paths we create the socket inode
@@ -80,11 +86,11 @@ func (t *IPCTransport) Listen(ctx context.Context, endpoint string) (Listener, e
 	if !abstract && t.FilePerm != 0 {
 		if err := os.Chmod(path, t.FilePerm); err != nil {
 			_ = l.Close() // unlinks the file
-			return nil, fmt.Errorf("%w: chmod socket: %s", zmqerr.ErrEndpointInvalid, err.Error())
+			return nil, fmt.Errorf("%w: chmod socket: %w", zmqerr.ErrEndpointInvalid, err)
 		}
 	}
 	endpoint = "ipc://" + path
-	return newNetListener(l, endpoint, func(c net.Conn) Conn { return &conn{Conn: c, local: endpoint, remote: endpoint, vectored: true} }), nil
+	return newNetListener(l, endpoint, func(c net.Conn) Conn { return newIPCConn(c, endpoint) }), nil
 }
 
 // reclaimStaleSocket removes the socket file at path if nothing is listening
@@ -112,12 +118,9 @@ func reclaimStaleSocket(ctx context.Context, path string) bool {
 // parseIPCAddress decodes an ipc endpoint into the path handed to the OS
 // ("/path" or "@name") and whether it names the abstract namespace.
 func parseIPCAddress(endpoint string) (path string, abstract bool, err error) {
-	scheme, raw, err := splitEndpoint(endpoint)
+	raw, err := splitEndpoint(endpoint, ipcScheme)
 	if err != nil {
 		return "", false, err
-	}
-	if scheme != ipcScheme {
-		return "", false, fmt.Errorf("%w: scheme %q passed to ipc transport", zmqerr.ErrEndpointInvalid, scheme)
 	}
 	if raw == "" {
 		return "", false, fmt.Errorf("%w: empty ipc path", zmqerr.ErrEndpointInvalid)
