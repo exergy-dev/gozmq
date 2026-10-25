@@ -277,6 +277,11 @@ func (b *writerBatch) appendMessage(s *Session, m *msg.Msg, sizeSoFar int) (int,
 	return sizeSoFar, nil
 }
 
+// hdrTmp holds a frame header while appendSealed rotates it ahead of its
+// body. Codec headers are at most 11 bytes (ZMTP: 2 or 9; the test fake
+// 11); a longer one takes the two-entry path.
+type hdrTmp [16]byte
+
 // pushRun publishes scratch[off:len(scratch)], the bytes this frame
 // appended. base is unsafe.SliceData(b.scratch) captured by the caller
 // BEFORE any append for this frame. The last buffers entry is extended
@@ -346,10 +351,14 @@ func (b *writerBatch) appendFrame(s *Session, flags uint8, body []byte, sizeSoFa
 }
 
 // appendSealed adds a frame whose mechanism seals the body into scratch
-// (security.FrameAppender): the body lands at scratch[off:bodyEnd), its
-// header after it, and the two go to buffers in wire order (header first).
+// (security.FrameAppender): the body lands at scratch[off:bodyEnd) and the
+// header is appended after it. A small frame is then rotated in place into
+// wire order (header, body) so it joins the tail run like an identity
+// frame; a large one goes to buffers as two entries, header first, to
+// avoid a big memmove.
 func (b *writerBatch) appendSealed(s *Session, flags uint8, body []byte, sizeSoFar int) (int, error) {
 	off := len(b.scratch)
+	base := unsafe.SliceData(b.scratch)
 	var err error
 	var wireFlags uint8
 	if b.scratch, wireFlags, err = s.appendEncode(b.scratch, flags, body); err != nil {
@@ -361,14 +370,25 @@ func (b *writerBatch) appendSealed(s *Session, flags uint8, body []byte, sizeSoF
 		return sizeSoFar, fmt.Errorf("gozmq/session: serialize frame: %w", err)
 	}
 	end := len(b.scratch)
-	hdr := b.scratch[bodyEnd:end:end]
-	b.copied += len(hdr)
-	b.buffers = append(b.buffers, hdr)
+	hdrLen := end - bodyEnd
+	if n <= coalesceBodyMax && hdrLen <= len(hdrTmp{}) {
+		// Rotate [body|hdr] to [hdr|body] within [off:end). No published
+		// entry covers that range, and it happens before pushRun does.
+		var tmp hdrTmp
+		copy(tmp[:], b.scratch[bodyEnd:end])
+		copy(b.scratch[off+hdrLen:end], b.scratch[off:bodyEnd])
+		copy(b.scratch[off:], tmp[:hdrLen])
+		b.copied += hdrLen + n
+		b.pushRun(off, base)
+		return sizeSoFar + hdrLen + n, nil
+	}
+	b.copied += hdrLen
+	b.buffers = append(b.buffers, b.scratch[bodyEnd:end:end])
 	if n > 0 {
 		b.buffers = append(b.buffers, b.scratch[off:bodyEnd:bodyEnd])
 	}
 	b.tailRun = false
-	return sizeSoFar + len(hdr) + n, nil
+	return sizeSoFar + hdrLen + n, nil
 }
 
 // flushBatch writes the accumulated frame blobs to the conn in a

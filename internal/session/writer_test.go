@@ -859,3 +859,39 @@ func (c *recordingBufConn) WriteBuffers(bufs *net.Buffers) (int64, error) {
 	*bufs = (*bufs)[len(*bufs):]
 	return int64(n), nil
 }
+
+// TestWriterBatch_AppendMechRotates: a FrameAppender mechanism's small
+// frames are rotated into wire order (header first) and fold into one run;
+// a large sealed body stays in place and goes out as header + body entries.
+func TestWriterBatch_AppendMechRotates(t *testing.T) {
+	t.Parallel()
+	s := newBatchSession(t, appendMech{newFakeMech("NULL", false, nil)})
+	var batch writerBatch
+	batch.scratch = make([]byte, 0, 1<<16) // warm: no relocation splits
+
+	var msgs [][][]byte
+	for i := 0; i < 30; i++ {
+		msgs = append(msgs, [][]byte{[]byte(fmt.Sprintf("sealed-%02d", i))})
+	}
+	appendAll(t, s, &batch, msgs...)
+	require.Len(t, batch.buffers, 1, "small sealed frames did not fold into one run")
+	flags, bodies := decodeFake(t, flatten(batch.buffers))
+	require.Len(t, bodies, len(msgs), "header-first order broken")
+	for i, m := range msgs {
+		require.Equal(t, string(m[0]), string(bodies[i]), "frame %d", i)
+		require.Zero(t, flags[i])
+	}
+	batch.release()
+
+	large := bytes.Repeat([]byte{'S'}, coalesceBodyMax+1)
+	appendAll(t, s, &batch, [][]byte{[]byte("small-1")}, [][]byte{large}, [][]byte{[]byte("small-2")})
+	// small-1 | large header | large body | small-2
+	require.Len(t, batch.buffers, 4)
+	require.Equal(t, large, batch.buffers[2])
+	require.LessOrEqual(t, len(batch.buffers[1]), 11, "second entry should be the large frame's header")
+	_, bodies = decodeFake(t, flatten(batch.buffers))
+	require.Len(t, bodies, 3)
+	require.Equal(t, "small-1", string(bodies[0]))
+	require.Equal(t, large, bodies[1])
+	require.Equal(t, "small-2", string(bodies[2]))
+}
