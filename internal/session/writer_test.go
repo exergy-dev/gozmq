@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -443,6 +444,17 @@ func TestWriter_BatchCap(t *testing.T) {
 		}
 		t.Logf("flushes=%d iovecs=%v", len(sizes), bufs)
 	})
+	t.Run("copied", func(t *testing.T) {
+		t.Parallel()
+		// Identity framing copies ~1 KiB bodies into scratch, so
+		// maxBatchCopied (64 KiB) binds long before the iovec or byte cap.
+		sizes, bufs := runCapCase(t, func(m *fakeMech) security.Mech { return identityFramingMech{m} }, 300, 1000)
+		assert.GreaterOrEqual(t, len(sizes), 2, "expected multiple flushes")
+		for i, sz := range sizes {
+			assert.LessOrEqual(t, sz, maxBatchCopied+1024+16, "flush %d size=%d", i, sz)
+		}
+		t.Logf("flushes=%d sizes=%v iovecs=%v", len(sizes), sizes, bufs)
+	})
 	t.Run("bytes", func(t *testing.T) {
 		t.Parallel()
 		// 40 x 128 KiB = 5 MiB against the 2 MiB byte cap.
@@ -632,4 +644,218 @@ func TestWriter_LingerDrainUnboundedQueue(t *testing.T) {
 			require.Equal(t, N, <-got, "messages delivered by the linger drain")
 		})
 	}
+}
+
+// --------------------------------------------------------------------------
+// writerBatch layout tests. They drive appendMessage / writeBatchFrom on an
+// unstarted session and inspect the iovec list directly.
+// --------------------------------------------------------------------------
+
+// newBatchSession builds an unstarted session around mech for driving the
+// writer's batch code directly (fakeCodec framing, no wire).
+func newBatchSession(t *testing.T, mech security.Mech) *Session {
+	t.Helper()
+	connA, _ := newFakeConnPair()
+	t.Cleanup(func() { _ = connA.Close() })
+	return New(Config{Conn: connA, Mech: mech, Codec: fakeCodec{}})
+}
+
+func identitySession(t *testing.T) *Session {
+	return newBatchSession(t, identityFramingMech{newFakeMech("NULL", false, nil)})
+}
+
+// appendAll appends each frame list as one message and returns the batch.
+func appendAll(t *testing.T, s *Session, batch *writerBatch, msgs ...[][]byte) {
+	t.Helper()
+	var size int
+	var err error
+	for i, frames := range msgs {
+		size, err = batch.appendMessage(s, msg.FromFrames(frames...), size)
+		require.NoError(t, err, "appendMessage[%d]", i)
+	}
+}
+
+func flatten(bufs net.Buffers) []byte {
+	var all []byte
+	for _, b := range bufs {
+		all = append(all, b...)
+	}
+	return all
+}
+
+// decodeFake parses a fakeCodec byte stream (flags, uvarint length, body)
+// into (flags, body) pairs.
+func decodeFake(t *testing.T, wire []byte) (flags []uint8, bodies [][]byte) {
+	t.Helper()
+	for len(wire) > 0 {
+		f := wire[0]
+		n, k := binary.Uvarint(wire[1:])
+		require.Positive(t, k, "bad length varint")
+		wire = wire[1+k:]
+		require.LessOrEqual(t, int(n), len(wire), "truncated frame")
+		flags = append(flags, f)
+		bodies = append(bodies, wire[:n:n])
+		wire = wire[n:]
+	}
+	return flags, bodies
+}
+
+// TestWriterBatch_CoalescesSmallFrames: small identity frames, headers and
+// bodies alike, collapse into ONE iovec, and the bytes decode to the
+// frames in order with MORE flags intact.
+func TestWriterBatch_CoalescesSmallFrames(t *testing.T) {
+	t.Parallel()
+	s := identitySession(t)
+	// Pre-sized like a warm batch: a cold scratch relocates as it grows,
+	// and each relocation legitimately starts a new entry.
+	batch := writerBatch{scratch: make([]byte, 0, 4096)}
+	var want [][]byte
+	for i := 0; i < 50; i++ {
+		var frames [][]byte
+		if i%5 == 0 {
+			frames = [][]byte{[]byte(fmt.Sprintf("a-%d", i)), nil, []byte(fmt.Sprintf("b-%d", i))}
+		} else {
+			frames = [][]byte{[]byte(fmt.Sprintf("m-%d", i))}
+		}
+		want = append(want, frames...)
+		appendAll(t, s, &batch, frames)
+	}
+	require.Len(t, batch.buffers, 1, "small frames did not coalesce into one run")
+	flags, bodies := decodeFake(t, flatten(batch.buffers))
+	require.Len(t, bodies, len(want))
+	for i := range want {
+		require.Equal(t, string(want[i]), string(bodies[i]), "frame %d", i)
+	}
+	require.Equal(t, uint8(0x01), flags[0]&0x01, "MORE flag lost on first frame of a multipart message")
+	require.Equal(t, len(batch.scratch), batch.copied, "identity run is all copied bytes")
+}
+
+// TestWriterBatch_LargeBodyByReference: a body over coalesceBodyMax is
+// handed to the wire by reference between two runs.
+func TestWriterBatch_LargeBodyByReference(t *testing.T) {
+	t.Parallel()
+	s := identitySession(t)
+	var batch writerBatch
+	large := bytes.Repeat([]byte{'L'}, coalesceBodyMax+1)
+	appendAll(t, s, &batch, [][]byte{[]byte("small-1")}, [][]byte{large}, [][]byte{[]byte("small-2")})
+	bufs := batch.buffers
+	// small-1 + large's header, then large by reference, then small-2.
+	require.Len(t, bufs, 3)
+	require.Same(t, &large[0], &bufs[1][0], "large body was copied, not sent by reference")
+	require.Equal(t, large, bufs[1])
+	_, bodies := decodeFake(t, flatten(bufs))
+	require.Len(t, bodies, 3)
+	require.Equal(t, "small-1", string(bodies[0]))
+	require.Equal(t, large, bodies[1])
+	require.Equal(t, "small-2", string(bodies[2]))
+}
+
+// TestWriterBatch_ScratchRelocation: appends that outgrow scratch relocate
+// it; earlier entries keep pointing at the old array, new bytes start a
+// new entry, and the flattened stream is still exact.
+func TestWriterBatch_ScratchRelocation(t *testing.T) {
+	t.Parallel()
+	s := identitySession(t)
+	var batch writerBatch
+	batch.scratch = make([]byte, 0, 8)
+	var msgs [][][]byte
+	for i := 0; i < 20; i++ {
+		msgs = append(msgs, [][]byte{[]byte(fmt.Sprintf("reloc-%02d", i))})
+	}
+	appendAll(t, s, &batch, msgs...)
+	require.Greater(t, len(batch.buffers), 1, "scratch never relocated; test setup failure")
+	_, bodies := decodeFake(t, flatten(batch.buffers))
+	require.Len(t, bodies, len(msgs))
+	for i, m := range msgs {
+		require.Equal(t, string(m[0]), string(bodies[i]), "frame %d", i)
+	}
+	// Entries stay capped so nothing can append through them.
+	for i, b := range batch.buffers {
+		require.Equal(t, len(b), cap(b), "buffer %d not capacity-capped", i)
+	}
+}
+
+// TestWriterBatch_DefaultPathByReference: a mechanism that returns fresh
+// wire memory keeps header-in-scratch, body-by-reference.
+func TestWriterBatch_DefaultPathByReference(t *testing.T) {
+	t.Parallel()
+	s := newBatchSession(t, xorMech{newFakeMech("NULL", false, nil)})
+	var batch writerBatch
+	appendAll(t, s, &batch, [][]byte{[]byte("one")}, [][]byte{[]byte("two")}, [][]byte{nil})
+	// hdr, body, hdr, body, hdr(empty body omitted)
+	require.Len(t, batch.buffers, 5)
+	_, bodies := decodeFake(t, flatten(batch.buffers))
+	require.Len(t, bodies, 3)
+	require.Equal(t, xorBytes([]byte("one")), bodies[0])
+	require.Equal(t, xorBytes([]byte("two")), bodies[1])
+	require.Empty(t, bodies[2])
+}
+
+// TestWriterBatch_Caps: the pull loop honours maxBatchMessages and
+// maxBatchIovecs. Drives writeBatchFrom against a conn that records each
+// flush.
+func TestWriterBatch_Caps(t *testing.T) {
+	t.Parallel()
+	run := func(t *testing.T, mech security.Mech, n, size int) (flushes []recordedFlush) {
+		t.Helper()
+		connA, _ := newFakeConnPair()
+		t.Cleanup(func() { _ = connA.Close() })
+		rc := &recordingBufConn{fakeConn: connA}
+		s := New(Config{Conn: rc, Mech: mech, Codec: fakeCodec{}})
+		sp, ep := pipe.NewPair(n+1, n+1, pipe.PeerInfo{}, pipe.PeerInfo{})
+		s.sessionPipe = sp
+		body := bytes.Repeat([]byte{'x'}, size)
+		for i := 0; i < n; i++ {
+			require.True(t, ep.TrySend(msg.FromBytes(body)))
+		}
+		var batch writerBatch
+		for {
+			m, ok := sp.TryRecv()
+			if !ok {
+				break
+			}
+			require.NoError(t, s.writeBatchFrom(&batch, m))
+		}
+		return rc.flushes
+	}
+
+	t.Run("messages", func(t *testing.T) {
+		t.Parallel()
+		// 2-byte bodies coalesce into one iovec, so the message cap binds.
+		fl := run(t, identityFramingMech{newFakeMech("NULL", false, nil)}, 5000, 2)
+		require.GreaterOrEqual(t, len(fl), 2)
+		var total int
+		for i, f := range fl {
+			total += f.bytes / 4 // flags + len + 2 body bytes
+			require.LessOrEqual(t, f.bytes/4, maxBatchMessages, "flush %d", i)
+		}
+		require.Equal(t, 5000, total)
+	})
+	t.Run("iovecs", func(t *testing.T) {
+		t.Parallel()
+		// 2 KiB bodies go by reference: two iovecs per message.
+		fl := run(t, identityFramingMech{newFakeMech("NULL", false, nil)}, 200*10, 2<<10)
+		require.GreaterOrEqual(t, len(fl), 2)
+		for i, f := range fl {
+			require.LessOrEqual(t, f.bufs, maxBatchIovecs+2, "flush %d", i)
+		}
+	})
+}
+
+type recordedFlush struct{ bufs, bytes int }
+
+// recordingBufConn records every WriteBuffers call and consumes the batch.
+type recordingBufConn struct {
+	*fakeConn
+	flushes []recordedFlush
+}
+
+func (c *recordingBufConn) WriteBuffers(bufs *net.Buffers) (int64, error) {
+	var n int
+	for _, b := range *bufs {
+		n += len(b)
+	}
+	c.flushes = append(c.flushes, recordedFlush{len(*bufs), n})
+	*bufs = (*bufs)[len(*bufs):]
+	return int64(n), nil
 }

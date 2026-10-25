@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"unsafe"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
@@ -19,6 +20,13 @@ import (
 // unbounded memory growth and keep latency predictable under sustained
 // sender bursts.
 const (
+	// coalesceBodyMax is the largest body (bytes) an identity-mechanism
+	// frame copies into scratch right after its header, so that header,
+	// body and the following small frames form one contiguous run (one
+	// iovec, one write). Larger bodies go to the wire by reference: the
+	// copy would cost more than the extra iovec saves.
+	coalesceBodyMax = 1024
+
 	// maxBatchCopied caps the bytes the batch copies into scratch (headers
 	// and small bodies). Large sealed CURVE bodies are not counted: they
 	// are one memmove each and bounded by maxBatchBytes.
@@ -211,6 +219,16 @@ type writerBatch struct {
 	// copied counts the bytes this batch copied into scratch (headers and
 	// small bodies); it bounds the batch together with maxBatchCopied.
 	copied int
+
+	// tailRun is set when buffers[len-1] is exactly
+	// scratch[tailOff:len(scratch)] of the CURRENT backing array, so the
+	// next frame's scratch bytes can be folded into that entry instead of
+	// opening a new iovec. Invariants (see pushRun): wire order is buffers
+	// order; only the LAST entry is ever extended, and only beyond its
+	// current end; a scratch array that append relocated is never written
+	// again, which keeps entries pointing into it valid.
+	tailRun bool
+	tailOff int
 }
 
 // maxRetainedScratch bounds the scratch capacity a batch keeps between
@@ -230,6 +248,7 @@ func (b *writerBatch) release() {
 		b.scratch = b.scratch[:0]
 	}
 	b.copied = 0
+	b.tailRun, b.tailOff = false, 0
 	clear(b.buffers) // drop body references so sent frames can be collected
 	b.buffers = b.buffers[:0]
 	b.flush = nil
@@ -258,43 +277,97 @@ func (b *writerBatch) appendMessage(s *Session, m *msg.Msg, sizeSoFar int) (int,
 	return sizeSoFar, nil
 }
 
-// appendFrame adds one frame to the batch: its wire body first (when the
-// mechanism writes into scratch), then its header, then both to buffers in
-// wire order. It returns sizeSoFar plus the frame's wire size.
+// pushRun publishes scratch[off:len(scratch)], the bytes this frame
+// appended. base is unsafe.SliceData(b.scratch) captured by the caller
+// BEFORE any append for this frame. The last buffers entry is extended
+// only if it is the tail run (it ends at off) AND scratch was not
+// relocated (base unchanged); otherwise a new entry starts here. Every
+// path that appends a non-scratch entry (a body by reference) or a
+// non-contiguous pair clears tailRun right after.
+func (b *writerBatch) pushRun(off int, base *byte) {
+	end := len(b.scratch)
+	if end == off {
+		return
+	}
+	if b.tailRun && len(b.buffers) > 0 && unsafe.SliceData(b.scratch) == base {
+		b.buffers[len(b.buffers)-1] = b.scratch[b.tailOff:end:end]
+		return
+	}
+	b.tailRun, b.tailOff = true, off
+	b.buffers = append(b.buffers, b.scratch[off:end:end])
+}
+
+// appendFrame adds one frame to the batch and returns sizeSoFar plus the
+// frame's wire size. Small identity bodies are copied behind their header
+// so consecutive small frames collapse into one iovec (the wire bytes are
+// the same, only the iovec layout differs); large bodies and bodies from a
+// mechanism that returns fresh memory go to the wire by reference.
 func (b *writerBatch) appendFrame(s *Session, flags uint8, body []byte, sizeSoFar int) (int, error) {
-	wire, wireFlags := body, flags
 	off := len(b.scratch)
+	base := unsafe.SliceData(b.scratch)
 	var err error
 	switch {
 	case s.identityMech:
+		if b.scratch, err = s.cfg.Codec.AppendFrameHeader(b.scratch, flags, len(body)); err != nil {
+			return sizeSoFar, fmt.Errorf("gozmq/session: serialize frame: %w", err)
+		}
+		hdrLen := len(b.scratch) - off
+		if len(body) <= coalesceBodyMax {
+			b.scratch = append(b.scratch, body...)
+			b.copied += len(b.scratch) - off
+			b.pushRun(off, base)
+		} else {
+			b.copied += hdrLen
+			b.pushRun(off, base)
+			b.buffers = append(b.buffers, body)
+			b.tailRun = false
+		}
+		return sizeSoFar + hdrLen + len(body), nil
 	case s.appendEncode != nil:
-		b.scratch, wireFlags, err = s.appendEncode(b.scratch, flags, body)
-		wire = nil // b.scratch[off:bodyEnd], sliced once the header is in
-	default:
-		wireFlags, wire, err = s.encode(flags, body)
+		return b.appendSealed(s, flags, body, sizeSoFar)
 	}
+	wireFlags, wire, err := s.encode(flags, body)
 	if err != nil {
 		return sizeSoFar, fmt.Errorf("gozmq/session: encode frame: %w", err)
 	}
-	bodyEnd := len(b.scratch)
-	n := len(wire)
-	if wire == nil {
-		n = bodyEnd - off
-	}
-	if b.scratch, err = s.cfg.Codec.AppendFrameHeader(b.scratch, wireFlags, n); err != nil {
+	if b.scratch, err = s.cfg.Codec.AppendFrameHeader(b.scratch, wireFlags, len(wire)); err != nil {
 		return sizeSoFar, fmt.Errorf("gozmq/session: serialize frame: %w", err)
 	}
-	hdr := b.scratch[bodyEnd:len(b.scratch):len(b.scratch)]
-	if wire == nil {
-		wire = b.scratch[off:bodyEnd:bodyEnd]
-	}
-	b.copied += len(hdr)
-	b.buffers = append(b.buffers, hdr)
-	if n > 0 {
+	hdrLen := len(b.scratch) - off
+	b.copied += hdrLen
+	b.pushRun(off, base)
+	if len(wire) > 0 {
 		// Empty bodies are left out to keep writev's iovec count minimal;
 		// the header already says length 0.
 		b.buffers = append(b.buffers, wire)
+		b.tailRun = false
 	}
+	return sizeSoFar + hdrLen + len(wire), nil
+}
+
+// appendSealed adds a frame whose mechanism seals the body into scratch
+// (security.FrameAppender): the body lands at scratch[off:bodyEnd), its
+// header after it, and the two go to buffers in wire order (header first).
+func (b *writerBatch) appendSealed(s *Session, flags uint8, body []byte, sizeSoFar int) (int, error) {
+	off := len(b.scratch)
+	var err error
+	var wireFlags uint8
+	if b.scratch, wireFlags, err = s.appendEncode(b.scratch, flags, body); err != nil {
+		return sizeSoFar, fmt.Errorf("gozmq/session: encode frame: %w", err)
+	}
+	bodyEnd := len(b.scratch)
+	n := bodyEnd - off
+	if b.scratch, err = s.cfg.Codec.AppendFrameHeader(b.scratch, wireFlags, n); err != nil {
+		return sizeSoFar, fmt.Errorf("gozmq/session: serialize frame: %w", err)
+	}
+	end := len(b.scratch)
+	hdr := b.scratch[bodyEnd:end:end]
+	b.copied += len(hdr)
+	b.buffers = append(b.buffers, hdr)
+	if n > 0 {
+		b.buffers = append(b.buffers, b.scratch[off:bodyEnd:bodyEnd])
+	}
+	b.tailRun = false
 	return sizeSoFar + len(hdr) + n, nil
 }
 
