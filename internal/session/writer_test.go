@@ -667,11 +667,8 @@ func identitySession(t *testing.T) *Session {
 // appendAll appends each frame list as one message and returns the batch.
 func appendAll(t *testing.T, s *Session, batch *writerBatch, msgs ...[][]byte) {
 	t.Helper()
-	var size int
-	var err error
 	for i, frames := range msgs {
-		size, err = batch.appendMessage(s, msg.FromFrames(frames...), size)
-		require.NoError(t, err, "appendMessage[%d]", i)
+		require.NoError(t, batch.appendMessage(s, msg.FromFrames(frames...)), "appendMessage[%d]", i)
 	}
 }
 

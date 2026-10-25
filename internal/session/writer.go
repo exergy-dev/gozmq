@@ -139,34 +139,30 @@ func (s *Session) writeHandshake() bool {
 // logs, and triggers a session shutdown unless the error is an expected
 // teardown artifact; the caller just exits on a non-nil return.
 func (s *Session) writeBatchFrom(batch *writerBatch, first *msg.Msg) error {
-	var batchBytes int
 	var err error
-	for err == nil {
-		select {
-		case c := <-s.cmdCh:
-			batchBytes, err = batch.appendFrame(s, zmtp.FlagCommand, c, batchBytes)
-			continue
-		default:
-		}
-		break
+	// The writer is cmdCh's only receiver, so a non-empty channel cannot
+	// drain under us.
+	for err == nil && len(s.cmdCh) > 0 {
+		err = batch.appendFrame(s, zmtp.FlagCommand, <-s.cmdCh)
 	}
 	if err == nil && first != nil {
-		batchBytes, err = batch.appendMessage(s, first, batchBytes)
+		err = batch.appendMessage(s, first)
 	}
 	if err == nil {
-		for n := 1; n < maxBatchMessages && batchBytes < maxBatchBytes &&
+		for n := 1; n < maxBatchMessages && batch.wireBytes < maxBatchBytes &&
 			batch.copied < maxBatchCopied && len(batch.buffers) < maxBatchIovecs; n++ {
 			next, ok := s.sessionPipe.TryRecv()
 			if !ok {
 				break
 			}
-			batchBytes, err = batch.appendMessage(s, next, batchBytes)
-			if err != nil {
+			if err = batch.appendMessage(s, next); err != nil {
 				break
 			}
 		}
 	}
-	if err == nil {
+	if err != nil {
+		err = fmt.Errorf("gozmq/session: encode frame: %w", err)
+	} else {
 		// writev consumes the slice header it is handed (*v = (*v)[i:] as
 		// data drains), so it gets a copy: buffers keeps the backing
 		// array for the next batch.
@@ -201,7 +197,11 @@ type bufferWriter interface {
 // the capacity, so a warm batch allocates nothing.
 type writerBatch struct {
 	buffers net.Buffers
-	flush   net.Buffers // the header writev consumes; see writeBatchFrom
+	// flush is the slice header writev consumes (see writeBatchFrom). It is
+	// a field, not a local: &flush goes through the Conn's WriteBuffers
+	// interface call, so a local would escape and cost an allocation per
+	// batch.
+	flush   net.Buffers
 	scratch []byte
 
 	// lent are the batched lent messages. Each pipe item carries a
@@ -212,7 +212,10 @@ type writerBatch struct {
 
 	// copied counts the bytes this batch copied into scratch (headers and
 	// small bodies); it bounds the batch together with maxBatchCopied.
-	copied int
+	// wireBytes counts all the wire bytes batched, including bodies sent by
+	// reference; maxBatchBytes bounds it.
+	copied    int
+	wireBytes int
 
 	// tailRun is set when buffers[len-1] is exactly
 	// scratch[tailOff:len(scratch)] of the CURRENT backing array, so the
@@ -241,20 +244,20 @@ func (b *writerBatch) release() {
 	} else {
 		b.scratch = b.scratch[:0]
 	}
-	b.copied = 0
+	b.copied, b.wireBytes = 0, 0
 	b.tailRun, b.tailOff = false, 0
 	clear(b.buffers) // drop body references so sent frames can be collected
 	b.buffers = b.buffers[:0]
 	b.flush = nil
 }
 
-func (b *writerBatch) appendMessage(s *Session, m *msg.Msg, sizeSoFar int) (int, error) {
+func (b *writerBatch) appendMessage(s *Session, m *msg.Msg) error {
 	if m.Lent() {
 		b.lent = append(b.lent, m)
 	}
 	frames := m.Frames()
 	if len(frames) == 0 {
-		return b.appendFrame(s, 0, nil, sizeSoFar)
+		return b.appendFrame(s, 0, nil)
 	}
 	last := len(frames) - 1
 	for i, body := range frames {
@@ -262,19 +265,12 @@ func (b *writerBatch) appendMessage(s *Session, m *msg.Msg, sizeSoFar int) (int,
 		if i < last {
 			flags |= zmtp.FlagMore
 		}
-		var err error
-		sizeSoFar, err = b.appendFrame(s, flags, body, sizeSoFar)
-		if err != nil {
-			return sizeSoFar, err
+		if err := b.appendFrame(s, flags, body); err != nil {
+			return err
 		}
 	}
-	return sizeSoFar, nil
+	return nil
 }
-
-// hdrTmp holds a frame header while appendSealed rotates it ahead of its
-// body. Codec headers are at most 11 bytes (ZMTP: 2 or 9; the test fake
-// 11); a longer one takes the two-entry path.
-type hdrTmp [16]byte
 
 // pushRun publishes scratch[off:len(scratch)], the bytes this frame
 // appended. base is unsafe.SliceData(b.scratch) captured by the caller
@@ -296,19 +292,19 @@ func (b *writerBatch) pushRun(off int, base *byte) {
 	b.buffers = append(b.buffers, b.scratch[off:end:end])
 }
 
-// appendFrame adds one frame to the batch and returns sizeSoFar plus the
-// frame's wire size. Small identity bodies are copied behind their header
+// appendFrame adds one frame to the batch and its wire size to wireBytes.
+// Small identity bodies are copied behind their header
 // so consecutive small frames collapse into one iovec (the wire bytes are
 // the same, only the iovec layout differs); large bodies and bodies from a
 // mechanism that returns fresh memory go to the wire by reference.
-func (b *writerBatch) appendFrame(s *Session, flags uint8, body []byte, sizeSoFar int) (int, error) {
+func (b *writerBatch) appendFrame(s *Session, flags uint8, body []byte) error {
 	off := len(b.scratch)
 	base := unsafe.SliceData(b.scratch)
 	var err error
 	switch {
 	case s.identityMech:
 		if b.scratch, err = s.cfg.Codec.AppendFrameHeader(b.scratch, flags, len(body)); err != nil {
-			return sizeSoFar, fmt.Errorf("gozmq/session: serialize frame: %w", err)
+			return err
 		}
 		hdrLen := len(b.scratch) - off
 		if len(body) <= coalesceBodyMax {
@@ -321,16 +317,17 @@ func (b *writerBatch) appendFrame(s *Session, flags uint8, body []byte, sizeSoFa
 			b.buffers = append(b.buffers, body)
 			b.tailRun = false
 		}
-		return sizeSoFar + hdrLen + len(body), nil
+		b.wireBytes += hdrLen + len(body)
+		return nil
 	case s.appendEncode != nil:
-		return b.appendSealed(s, flags, body, sizeSoFar)
+		return b.appendSealed(s, flags, body)
 	}
 	wireFlags, wire, err := s.encode(flags, body)
 	if err != nil {
-		return sizeSoFar, fmt.Errorf("gozmq/session: encode frame: %w", err)
+		return err
 	}
 	if b.scratch, err = s.cfg.Codec.AppendFrameHeader(b.scratch, wireFlags, len(wire)); err != nil {
-		return sizeSoFar, fmt.Errorf("gozmq/session: serialize frame: %w", err)
+		return err
 	}
 	hdrLen := len(b.scratch) - off
 	b.copied += hdrLen
@@ -341,7 +338,8 @@ func (b *writerBatch) appendFrame(s *Session, flags uint8, body []byte, sizeSoFa
 		b.buffers = append(b.buffers, wire)
 		b.tailRun = false
 	}
-	return sizeSoFar + hdrLen + len(wire), nil
+	b.wireBytes += hdrLen + len(wire)
+	return nil
 }
 
 // appendSealed adds a frame whose mechanism seals the body into scratch
@@ -350,31 +348,35 @@ func (b *writerBatch) appendFrame(s *Session, flags uint8, body []byte, sizeSoFa
 // wire order (header, body) so it joins the tail run like an identity
 // frame; a large one goes to buffers as two entries, header first, to
 // avoid a big memmove.
-func (b *writerBatch) appendSealed(s *Session, flags uint8, body []byte, sizeSoFar int) (int, error) {
+func (b *writerBatch) appendSealed(s *Session, flags uint8, body []byte) error {
 	off := len(b.scratch)
 	base := unsafe.SliceData(b.scratch)
 	var err error
 	var wireFlags uint8
 	if b.scratch, wireFlags, err = s.appendEncode(b.scratch, flags, body); err != nil {
-		return sizeSoFar, fmt.Errorf("gozmq/session: encode frame: %w", err)
+		return err
 	}
 	bodyEnd := len(b.scratch)
 	n := bodyEnd - off
 	if b.scratch, err = s.cfg.Codec.AppendFrameHeader(b.scratch, wireFlags, n); err != nil {
-		return sizeSoFar, fmt.Errorf("gozmq/session: serialize frame: %w", err)
+		return err
 	}
 	end := len(b.scratch)
 	hdrLen := end - bodyEnd
-	if n <= coalesceBodyMax && hdrLen <= len(hdrTmp{}) {
+	b.wireBytes += hdrLen + n
+	// tmp holds the header while the small-frame path below rotates it
+	// ahead of the body. Codec headers are at most 11 bytes (ZMTP: 2 or 9;
+	// the test fake 11); a longer one takes the two-entry path.
+	var tmp [16]byte
+	if n <= coalesceBodyMax && hdrLen <= len(tmp) {
 		// Rotate [body|hdr] to [hdr|body] within [off:end). No published
 		// entry covers that range, and it happens before pushRun does.
-		var tmp hdrTmp
 		copy(tmp[:], b.scratch[bodyEnd:end])
 		copy(b.scratch[off+hdrLen:end], b.scratch[off:bodyEnd])
 		copy(b.scratch[off:], tmp[:hdrLen])
 		b.copied += hdrLen + n
 		b.pushRun(off, base)
-		return sizeSoFar + hdrLen + n, nil
+		return nil
 	}
 	b.copied += hdrLen
 	b.buffers = append(b.buffers, b.scratch[bodyEnd:end:end])
@@ -382,7 +384,7 @@ func (b *writerBatch) appendSealed(s *Session, flags uint8, body []byte, sizeSoF
 		b.buffers = append(b.buffers, b.scratch[off:bodyEnd:bodyEnd])
 	}
 	b.tailRun = false
-	return sizeSoFar + hdrLen + n, nil
+	return nil
 }
 
 // flushBatch writes the accumulated frame blobs to the conn in a
