@@ -89,12 +89,10 @@ func Proxy(ctx context.Context, frontend, backend, capture *Socket) error {
 	var wg sync.WaitGroup
 	errs := make([]error, len(dirs))
 	for i, dir := range dirs {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer cancel()
 			errs[i] = proxyOneWay(runCtx, dir.from, dir.to, tap)
-		}()
+		})
 	}
 	wg.Wait()
 

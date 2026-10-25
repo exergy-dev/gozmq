@@ -198,7 +198,7 @@ func (s *Socket) Bind(endpoint string) error {
 	// Close may have run while Listen was in flight. Re-check under s.mu,
 	// which CloseCtx takes to snapshot s.listeners: either Close sees this
 	// listener and closes it, or we see closed and close it ourselves. The
-	// acceptWG.Add sits in the same critical section so it cannot race
+	// acceptWG.Go sits in the same critical section so it cannot race
 	// CloseCtx's acceptWG.Wait.
 	s.mu.Lock()
 	if s.closed.Load() {
@@ -209,11 +209,9 @@ func (s *Socket) Bind(endpoint string) error {
 	s.listeners = append(s.listeners, l)
 	resolved := l.Endpoint()
 	s.lastEndpoint = resolved
-	s.acceptWG.Add(1)
-	s.mu.Unlock()
-
 	s.emit(EventListening, resolved, "")
-	go s.acceptLoop(l)
+	s.acceptWG.Go(func() { s.acceptLoop(l) })
+	s.mu.Unlock()
 	return nil
 }
 
@@ -375,7 +373,6 @@ func (s *Socket) Disconnect(endpoint string) error {
 }
 
 func (s *Socket) acceptLoop(l transport.Listener) {
-	defer s.acceptWG.Done()
 	// Retry backoff after an Accept error: a persistent failure (EMFILE,
 	// say) must not spin, but a transient one should recover quickly.
 	const (
@@ -397,11 +394,9 @@ func (s *Socket) acceptLoop(l transport.Listener) {
 			}
 			s.emit(EventAcceptFailed, bound, err.Error())
 			backoff = min(max(2*backoff, minBackoff), maxBackoff)
-			t := time.NewTimer(backoff)
 			select {
-			case <-t.C:
+			case <-time.After(backoff):
 			case <-s.runCtx.Done():
-				t.Stop()
 				return
 			}
 			continue

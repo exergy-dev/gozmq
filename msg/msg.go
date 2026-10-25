@@ -127,10 +127,7 @@ func FromFrames(frames ...[]byte) *Msg {
 // frame, or the Msg, is; that is negligible at these sizes. The result is
 // a plain (not lent) message.
 func FromFramesCopy(frames ...[]byte) *Msg {
-	total := 0
-	for _, f := range frames {
-		total += len(f)
-	}
+	total := sumLen(frames)
 	switch len(frames) {
 	case 0:
 		return FromFrames()
@@ -412,9 +409,10 @@ func (m *Msg) Release() {
 }
 
 // TotalSize returns the sum of all frame lengths in bytes.
-func (m *Msg) TotalSize() int {
-	n := 0
-	for _, f := range m.frames {
+func (m *Msg) TotalSize() int { return sumLen(m.frames) }
+
+func sumLen(frames [][]byte) (n int) {
+	for _, f := range frames {
 		n += len(f)
 	}
 	return n

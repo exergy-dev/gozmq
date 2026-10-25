@@ -99,11 +99,11 @@ func Register[T any](
 
 	// Insert preserving descending-length order so Run's linear scan
 	// naturally picks the longest match first.
-	if i := slices.IndexFunc(r.entries, func(e muxEntry) bool { return len(topic) > len(e.topic) }); i >= 0 {
-		r.entries = slices.Insert(r.entries, i, entry)
-	} else {
-		r.entries = append(r.entries, entry)
+	i := slices.IndexFunc(r.entries, func(e muxEntry) bool { return len(topic) > len(e.topic) })
+	if i < 0 {
+		i = len(r.entries)
 	}
+	r.entries = slices.Insert(r.entries, i, entry)
 	return nil
 }
 

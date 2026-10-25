@@ -2,6 +2,7 @@ package gozmq
 
 import (
 	"bytes"
+	"cmp"
 	"fmt"
 	"log/slog"
 	"time"
@@ -480,7 +481,7 @@ func (c *socketConfig) plainConfigured() bool { return c.plainAuthSet || c.plain
 func (c *socketConfig) curveConfigured() bool { return c.curveServer || c.curveClientSet }
 
 func validateSocketConfig(t SocketType, cfg *socketConfig) error {
-	for _, check := range []error{
+	if err := cmp.Or(
 		hwmInRange("WithSendHWM", cfg.sendHWM),
 		hwmInRange("WithRecvHWM", cfg.recvHWM),
 		nonNeg("WithMaxMessageSize", cfg.maxMessageSize),
@@ -489,10 +490,8 @@ func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 		nonNeg("WithReconnectIntervalMax", cfg.reconnectIntervalMax),
 		nonNeg("WithHeartbeat interval", cfg.heartbeatInterval),
 		nonNeg("WithHeartbeat timeout", cfg.heartbeatTimeout),
-	} {
-		if check != nil {
-			return check
-		}
+	); err != nil {
+		return err
 	}
 	if len(cfg.identity) > 0 {
 		if len(cfg.identity) > 255 {

@@ -1,6 +1,7 @@
 package gozmq
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -158,10 +159,7 @@ func (s *Socket) emit(eventType EventType, endpoint, reason string) {
 // slog.Default when none was installed via WithLogger. Centralising
 // the fallback keeps the call sites terse.
 func (s *Socket) logger() *slog.Logger {
-	if s.cfg.logger != nil {
-		return s.cfg.logger
-	}
-	return slog.Default()
+	return cmp.Or(s.cfg.logger, slog.Default())
 }
 
 // classifyHandshakeEvent maps a handshake error to the appropriate
