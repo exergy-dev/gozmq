@@ -153,10 +153,7 @@ func (s *Socket) subscribe(op string, prefix []byte, subscribe bool) error {
 	if !ok {
 		return fmt.Errorf("gozmq: %s only valid on SUB/XSUB: %w", op, zmqerr.ErrFSMViolation)
 	}
-	if subscribe {
-		return sub.Subscribe(prefix)
-	}
-	return sub.Unsubscribe(prefix)
+	return sub.SetSubscription(prefix, subscribe)
 }
 
 // Type reports the socket's SocketType.
