@@ -140,7 +140,7 @@ func TestCurveMessageFlagsRoundTrip(t *testing.T) {
 func openInnerFlags(t *testing.T, recv *curveMech, wire []byte) byte {
 	t.Helper()
 	off := 1 + len(cmdMessage)
-	nonce := shortNonce(recv.decPrefix, binary.BigEndian.Uint64(wire[off:off+8]))
+	nonce := withCounter(recv.decNonce, binary.BigEndian.Uint64(wire[off:off+8]))
 	plain, ok := box.OpenAfterPrecomputation(nil, wire[off+8:], &nonce, &recv.shared)
 	require.True(t, ok, "box open")
 	require.NotEmpty(t, plain, "inner plaintext")
@@ -152,7 +152,7 @@ func openInnerFlags(t *testing.T, recv *curveMech, wire []byte) byte {
 func sealMessage(sender *curveMech, inner []byte) []byte {
 	counter := sender.ourShortNonce
 	sender.ourShortNonce++
-	nonce := shortNonce(sender.encPrefix, counter)
+	nonce := withCounter(sender.encNonce, counter)
 	body := append([]byte{byte(len(cmdMessage))}, cmdMessage...)
 	body = binary.BigEndian.AppendUint64(body, counter)
 	return box.SealAfterPrecomputation(body, inner, &nonce, &sender.shared)
@@ -610,4 +610,12 @@ func TestCurveZAP_AcceptMergesMetadata(t *testing.T) {
 	peer := server.(*curveMech).PeerMetadata()
 	require.Equal(t, "DEALER", peer["Socket-Type"], "client property lost")
 	require.Equal(t, "alice", peer["User-Id"], "ZAP user-id not surfaced")
+}
+
+// TestInnerFlagConstants pins the relationships EncodeFrame/DecodeFrame's
+// branchless MORE/COMMAND translation relies on.
+func TestInnerFlagConstants(t *testing.T) {
+	require.Equal(t, zmtp.FlagMore, innerFlagMore, "MORE bit")
+	require.Equal(t, zmtp.FlagCommand>>1, innerFlagCommand, "COMMAND bit")
+	require.Zero(t, zmtp.FlagMore&zmtp.FlagCommand)
 }

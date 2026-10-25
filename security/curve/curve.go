@@ -73,7 +73,9 @@ const (
 	// Bits of the encrypted MESSAGE flags byte (libzmq curve_mechanism_base
 	// flag_mask_more / flag_mask_command). A frame's MORE and COMMAND state
 	// travel here, inside the box; the outer ZMTP frame carrying a MESSAGE
-	// has neither flag set.
+	// has neither flag set. EncodeFrame/DecodeFrame translate with masks
+	// and a shift, relying on zmtp.FlagMore == innerFlagMore and
+	// zmtp.FlagCommand == innerFlagCommand<<1 (pinned by a test).
 	innerFlagMore    uint8 = 0x01
 	innerFlagCommand uint8 = 0x02
 )
@@ -130,11 +132,11 @@ type curveMech struct {
 	ourShortNonce  uint64
 	peerShortNonce uint64
 
-	// Prefix strings chosen by role for MESSAGE encode/decode. The client
-	// encodes with "CurveZMQMESSAGEC" and decodes with "CurveZMQMESSAGES";
-	// the server is the mirror.
-	encPrefix string
-	decPrefix string
+	// MESSAGE nonce templates chosen by role: prefix with a zero counter.
+	// The client encodes with "CurveZMQMESSAGEC" and decodes with
+	// "CurveZMQMESSAGES"; the server is the mirror.
+	encNonce [24]byte
+	decNonce [24]byte
 
 	state curveState
 
@@ -235,11 +237,11 @@ func newMech(role security.Role, ownSecret, ownPublicHint, peerLongTerm Key, loc
 
 	// Per-role MESSAGE prefix assignment.
 	if role == security.RoleClient {
-		m.encPrefix, m.decPrefix = prefixMessageC, prefixMessageS
+		m.encNonce, m.decNonce = shortNonce(prefixMessageC, 0), shortNonce(prefixMessageS, 0)
 		m.hsKey = precompute(&m.peerPublic, &m.ourEphSecret)
 		return m, nil
 	}
-	m.encPrefix, m.decPrefix = prefixMessageS, prefixMessageC
+	m.encNonce, m.decNonce = shortNonce(prefixMessageS, 0), shortNonce(prefixMessageC, 0)
 	// Server-side cookie key is a fresh 32-byte random used only to
 	// secretbox cookies across HELLO → INITIATE. It never leaves the
 	// server. Generate now so any RNG error surfaces during construction,
@@ -697,7 +699,7 @@ func (m *curveMech) AppendEncodeFrame(dst []byte, flags uint8, plain []byte) ([]
 		return dst, 0, err
 	}
 	counter := m.nextCounter()
-	nonce := shortNonce(m.encPrefix, counter)
+	nonce := withCounter(m.encNonce, counter)
 
 	// Box plaintext: 1-byte flags || frame body. The shared key was
 	// precomputed in finishHandshake, so sealing is pure XSalsa20/Poly1305,
@@ -708,13 +710,7 @@ func (m *curveMech) AppendEncodeFrame(dst []byte, flags uint8, plain []byte) ([]
 		m.encScratch = make([]byte, 1+len(plain))
 	}
 	inner := m.encScratch[:1+len(plain)]
-	inner[0] = 0 // encScratch is reused: clear the previous frame's flags
-	if flags&zmtp.FlagMore != 0 {
-		inner[0] |= innerFlagMore
-	}
-	if flags&zmtp.FlagCommand != 0 {
-		inner[0] |= innerFlagCommand
-	}
+	inner[0] = flags&zmtp.FlagMore | (flags&zmtp.FlagCommand)>>1
 	copy(inner[1:], plain)
 
 	dst = zmtp.AppendCommandName(dst, cmdMessage)
@@ -753,7 +749,7 @@ func (m *curveMech) DecodeFrame(flags uint8, wire []byte) (uint8, []byte, error)
 	if err := m.requireCounterAdvance(counter, "MESSAGE"); err != nil {
 		return 0, nil, err
 	}
-	nonce := shortNonce(m.decPrefix, counter)
+	nonce := withCounter(m.decNonce, counter)
 	plain, ok := box.OpenAfterPrecomputation(nil, wire[off:], &nonce, &m.shared)
 	if !ok {
 		return 0, nil, malformed("MESSAGE box open failed")
@@ -773,15 +769,8 @@ func (m *curveMech) DecodeFrame(flags uint8, wire []byte) (uint8, []byte, error)
 	// the outer flags of a MESSAGE.
 	// plain is a fresh slice produced by box.Open; slicing it (rather than
 	// make+copy) is safe — the backing array has no other referents.
-	var out uint8
-	if inner&innerFlagMore != 0 {
-		out |= zmtp.FlagMore
-	}
-	if inner&innerFlagCommand != 0 {
-		out |= zmtp.FlagCommand
-	}
 	m.peerShortNonce = counter + 1
-	return out, plain[1:], nil
+	return inner&innerFlagMore | (inner&innerFlagCommand)<<1, plain[1:], nil
 }
 
 // zeros64 is the HELLO signature plaintext.
