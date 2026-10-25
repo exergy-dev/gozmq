@@ -105,9 +105,9 @@ func WithIdentity(id []byte) Option {
 // WithSendHWM sets the outbound high-water mark — the maximum number of
 // messages queued per peer pipe before backpressure engages. Default is
 // 1000, maximum [MaxHWM]. Zero disables the limit (unbounded growth; not
-// recommended for untrusted peers). A positive HWM is the capacity of a
-// channel allocated per peer connection, so very large values cost memory
-// up front. When the HWM is reached, Send behavior depends on the
+// recommended for untrusted peers). The queue grows with the actual depth
+// in fixed-size chunks, so a large HWM costs nothing until messages are
+// queued. When the HWM is reached, Send behavior depends on the
 // socket pattern: blocking sockets (PAIR, PUSH, DEALER, REQ, REP, ROUTER)
 // wait for a Recv on the peer to drain queue space, while PUB/XPUB drop
 // the message for the full peer and continue the fan-out (the drop is
@@ -120,7 +120,7 @@ func WithSendHWM(n int) Option {
 // messages buffered per peer pipe before the reader goroutine stops
 // accepting frames from the wire and exerts TCP backpressure on the peer.
 // Default is 1000, maximum [MaxHWM]. Zero disables the limit. As with
-// [WithSendHWM], a positive HWM is allocated per peer connection.
+// [WithSendHWM], storage grows with the actual queue depth, not the HWM.
 //
 // On inproc, where one pipe joins the two sockets, each direction holds the
 // sender's send HWM plus the receiver's recv HWM, and is unlimited if
@@ -444,11 +444,10 @@ func nonNeg[T int | int64 | time.Duration](name string, v T) error {
 	return nil
 }
 
-// MaxHWM is the largest value WithSendHWM and WithRecvHWM accept. A positive
-// HWM is the capacity of a per-peer channel allocated when the connection is
-// made (8 bytes per slot), so a cap keeps a typo from reserving gigabytes per
-// connection or overflowing the channel allocator. Use 0 for an unbounded
-// queue.
+// MaxHWM is the largest value WithSendHWM and WithRecvHWM accept. Queues
+// grow with their actual depth (8 bytes per queued message plus the messages
+// themselves), so the cap is a sanity bound on a typo rather than an upfront
+// reservation. Use 0 for an unbounded queue.
 const MaxHWM = 1 << 20
 
 func hwmInRange(name string, v int) error {

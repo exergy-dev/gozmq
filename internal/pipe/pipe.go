@@ -10,6 +10,10 @@
 // involved, so an End that is never closed leaks nothing but memory the GC
 // reclaims.
 //
+// Producers wake a parked consumer per message (TrySend, Send), except the
+// session reader, which publishes a read batch with TrySendDeferred and
+// wakes once with Flush, as libzmq's ypipe does.
+//
 // All I/O goes through End methods (there is no raw channel access). That is
 // what keeps the wakeups, the idle notification and the SendDrained signal
 // impossible to skip.
