@@ -1186,7 +1186,7 @@ func TestFlushReader_FlushesBeforeUnderlyingRead(t *testing.T) {
 	case <-time.After(time.Second):
 		require.Fail(t, "idle notification not run by the flush")
 	}
-	require.EqualValues(t, 42, s.lastInboundUnix.Load(), "inbound clock stamped at the flush")
+	require.EqualValues(t, 42, s.lastInboundNanos.Load(), "inbound clock stamped at the flush")
 }
 
 type readerFunc func([]byte) (int, error)

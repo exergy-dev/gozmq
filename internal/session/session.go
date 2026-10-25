@@ -27,10 +27,11 @@ import (
 )
 
 // Config bundles the inputs to New. Conn is required, and Mech and Codec
-// unless Raw is set. The timeout/heartbeat values are used exactly as given:
-// zero disables the corresponding behavior (no handshake deadline, no
-// heartbeats, no inbound size cap). New applies no defaults to them —
-// the socket layer is responsible for supplying production values.
+// unless Raw is set. New applies no defaults to the timeout and heartbeat
+// values; the socket layer supplies production ones. Zero HandshakeTimeout
+// means no handshake deadline, zero HeartbeatInterval no heartbeats, zero
+// MaxMessageSize no inbound size cap; a zero HeartbeatTimeout does not
+// disable the liveness check, it means three times the interval.
 type Config struct {
 	Conn              transport.Conn
 	Mech              security.Mech
@@ -182,12 +183,12 @@ type Session struct {
 	// Written and read on the reader goroutine only.
 	peerHeartbeats bool
 
-	// lastInboundUnix records the monotonic nanos (relative to
-	// monoEpoch) of the last frame received during traffic phase. The
-	// heartbeat tick reads this to decide whether the peer is alive; the
-	// reader writes it on every command frame and once per read batch of
-	// user messages (flushInbound), so it can lag by one batch.
-	lastInboundUnix atomic.Int64
+	// lastInboundNanos is the cfg.Now timestamp (monotonic nanoseconds) of
+	// the last frame received during the traffic phase. The heartbeat tick
+	// reads it to decide whether the peer is alive; the reader writes it on
+	// every command frame and once per read batch of user messages
+	// (flushInbound), so it can lag by one batch.
+	lastInboundNanos atomic.Int64
 
 	// inboundOwed counts messages the reader published with
 	// TrySendDeferred since its last flushInbound. Reader goroutine only.
@@ -357,8 +358,8 @@ func (s *Session) Stop() error {
 	// A plain close: the kernel keeps delivering already-written data
 	// after close(2), whereas a timed SO_LINGER would block here (per
 	// session, sequentially during Socket.Close) and RST on expiry.
-	// isShutdownErr covers both the test double's io.ErrClosedPipe and the
-	// net.ErrClosed of a conn the session already closed itself.
+	// zmqerr.IsShutdown covers both the test double's io.ErrClosedPipe and
+	// the net.ErrClosed of a conn the session already closed itself.
 	err := s.cfg.Conn.Close()
 	<-s.done
 	if err != nil && !zmqerr.IsShutdown(err) {

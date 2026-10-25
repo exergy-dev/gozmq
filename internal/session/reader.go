@@ -43,7 +43,7 @@ func (s *Session) runReader() {
 	if err == nil {
 		// Seed the last-inbound clock so a heartbeat fired immediately
 		// after handshake doesn't trip the timeout.
-		s.lastInboundUnix.Store(s.cfg.Now())
+		s.lastInboundNanos.Store(s.cfg.Now())
 		s.sessionPipe, s.enginePipe = pipe.NewPair(s.cfg.RecvHWM, s.cfg.SendHWM, nil, []byte(peer["Identity"]))
 	}
 	close(s.hsOut) // the writer moves on to traffic, or exits on failure
@@ -115,7 +115,7 @@ func (s *Session) readLoop() {
 		}
 
 		if plainFlags&zmtp.FlagCommand != 0 {
-			s.lastInboundUnix.Store(s.cfg.Now())
+			s.lastInboundNanos.Store(s.cfg.Now())
 			if cmdErr := s.handleCommand(decoded); cmdErr != nil {
 				s.cfg.Logger.Warn("gozmq/session: command handling failed", "err", cmdErr)
 				return
@@ -257,7 +257,7 @@ func (s *Session) publishInbound(m *msg.Msg) error {
 	// Send with no abort channel fails only with io.ErrClosedPipe or
 	// s.ctx's cancellation: both are shutdown.
 	err := s.sessionPipe.Send(s.ctx, m)
-	s.lastInboundUnix.Store(s.cfg.Now())
+	s.lastInboundNanos.Store(s.cfg.Now())
 	s.readerParked.Store(false)
 	return err
 }
@@ -276,7 +276,7 @@ func (s *Session) flushInbound() {
 	}
 	s.inboundOwed = 0
 	s.sessionPipe.Flush()
-	s.lastInboundUnix.Store(s.cfg.Now())
+	s.lastInboundNanos.Store(s.cfg.Now())
 }
 
 // flushReader wraps the conn under the session's bufio.Reader and flushes
