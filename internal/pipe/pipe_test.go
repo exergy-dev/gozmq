@@ -284,7 +284,7 @@ func TestHWMZero_CloseDrainsThenEOF(t *testing.T) {
 	defer b.Close()
 
 	ctx := context.Background()
-	const n = 3*unboundedChanCap + 7
+	const n = 3*chunkSize + 7
 	for i := 0; i < n; i++ {
 		require.NoError(t, a.Send(ctx, msg.FromBytes([]byte{byte(i)})), "a.Send[%d]", i)
 	}
@@ -440,7 +440,7 @@ func TestIdleNotify_NoLostWakeup(t *testing.T) {
 			go func() {
 				// Bursts of varying size push HWM 0 in and out of overflow.
 				for sent := 0; sent < iters; {
-					burst := min(1+sent%(3*unboundedChanCap), iters-sent)
+					burst := min(1+sent%(3*chunkSize), iters-sent)
 					for range burst {
 						if a.Send(ctx, msg.FromBytes([]byte("x"))) != nil {
 							return
@@ -467,7 +467,7 @@ func TestTryRecv_DrainsWholeQueueAfterClose(t *testing.T) {
 			ctx := context.Background()
 			n := 500
 			if hwm == 0 {
-				n = 2*unboundedChanCap + 3
+				n = 2*chunkSize + 3
 			}
 			for i := 0; i < n; i++ {
 				require.NoError(t, a.Send(ctx, msg.FromBytes([]byte{byte(i)})), "hwm=%d Send[%d]", hwm, i)
@@ -511,7 +511,7 @@ func TestRecvOr_Abort(t *testing.T) {
 	require.Equal(t, "x", string(m.Bytes()))
 }
 
-// TestHWMZero_ConcurrentOverflow stresses the overflow refill: several
+// TestHWMZero_ConcurrentOverflow stresses chunk growth: several
 // senders race a receiver on an HWM-0 direction with far more messages than
 // the channel holds. Everything must arrive, in per-sender order, and a
 // blocking Recv must never be stranded on an empty channel while overflow
@@ -521,7 +521,7 @@ func TestHWMZero_ConcurrentOverflow(t *testing.T) {
 	a, b := NewPair(0, 0, PeerInfo{}, PeerInfo{})
 	defer a.Close()
 	defer b.Close()
-	const senders, per = 4, 5 * unboundedChanCap
+	const senders, per = 4, 5 * chunkSize
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var wg sync.WaitGroup
@@ -561,7 +561,7 @@ func TestSendDrained_FiresWhenPeerConsumed(t *testing.T) {
 		a, b := NewPair(hwm, hwm, PeerInfo{}, PeerInfo{})
 		n := 100
 		if hwm == 0 {
-			n = unboundedChanCap + 100
+			n = chunkSize + 100
 		}
 		for i := 0; i < n; i++ {
 			require.NoError(t, a.Send(ctx, msg.FromBytes([]byte{byte(i)})), "hwm=%d Send[%d]", hwm, i)

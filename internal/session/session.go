@@ -184,9 +184,13 @@ type Session struct {
 	// lastInboundUnix records the monotonic nanos (relative to
 	// monoEpoch) of the last frame received during traffic phase. The
 	// heartbeat tick reads this to decide whether the peer is alive; the
-	// reader writes it on every first inbound message frame and on
-	// command frames.
+	// reader writes it on every command frame and once per read batch of
+	// user messages (flushInbound), so it can lag by one batch.
 	lastInboundUnix atomic.Int64
+
+	// inboundOwed counts messages the reader published with
+	// TrySendDeferred since its last flushInbound. Reader goroutine only.
+	inboundOwed int
 
 	// readerParked is set while the reader goroutine is blocked
 	// publishing an inbound message into the session pipe (local engine
@@ -333,7 +337,7 @@ func New(cfg Config) *Session {
 	default:
 		s.recvPool = &plainBodies{reuse: !s.identityMech}
 	}
-	s.reader = bufio.NewReaderSize(cfg.Conn, sessionReadBufferSize)
+	s.reader = bufio.NewReaderSize(flushReader{s: s, r: cfg.Conn}, sessionReadBufferSize)
 	s.hsOut = make(chan []byte, hsOutBacklog)
 	s.cmdCh = make(chan []byte, sessionCmdBacklog)
 	s.cmdWake = make(chan struct{}, 1)

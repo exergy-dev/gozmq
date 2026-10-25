@@ -91,7 +91,17 @@ func (s *Session) readLoop() {
 	// GC, which is always safe. Both slices are reused across messages.
 	var frames, lent [][]byte
 	var currentSize int64 // decoded bytes accumulated into frames
+	// Whatever exit path, wake the engine for messages published but not
+	// yet flushed (the pipe close in shutdown wakes it too; this keeps the
+	// bound explicit).
+	defer s.flushInbound()
 	for {
+		// The next ReadFrame is about to block in a syscall: publish the
+		// batch's wakeup and liveness stamp now. (flushReader covers the
+		// case where bytes are buffered but the frame is incomplete.)
+		if s.inboundOwed > 0 && s.reader.Buffered() == 0 {
+			s.flushInbound()
+		}
 		// Out of scratch for the message in progress: copy its pending
 		// frames out and start over at the front. Frames that did not
 		// fit scratch already own their memory.
@@ -128,7 +138,6 @@ func (s *Session) readLoop() {
 
 		// User-message frame. Accumulate until MORE clears.
 		if len(frames) == 0 {
-			s.lastInboundUnix.Store(s.cfg.Now())
 			currentSize = 0
 		}
 		// Enforce the logical-message size cap BEFORE appending: the
@@ -265,10 +274,19 @@ func lendFrames(frames, bufs [][]byte) *msg.Msg {
 // restarts from the unpark, not from the last pre-park frame.
 func (s *Session) publishInbound(m *msg.Msg) error {
 	// Non-blocking fast path keeps the readerParked bookkeeping (and the
-	// extra inbound stamp) off the common no-backpressure case.
-	if s.sessionPipe.TrySend(m) {
+	// extra inbound stamp) off the common no-backpressure case. The wakeup
+	// is deferred to flushInbound, which readLoop runs before every
+	// blocking read, at most inboundFlushCap messages later, and below
+	// before blocking here.
+	if s.sessionPipe.TrySendDeferred(m) {
+		s.inboundOwed++
+		// Raw mode has no read loop to flush for it: flush per message.
+		if s.inboundOwed >= inboundFlushCap || s.cfg.Raw {
+			s.flushInbound()
+		}
 		return nil
 	}
+	s.flushInbound() // never block with a wakeup owed
 	s.readerParked.Store(true)
 	err := s.sessionPipe.Send(s.ctx, m)
 	s.lastInboundUnix.Store(s.cfg.Now())
@@ -282,6 +300,37 @@ func (s *Session) publishInbound(m *msg.Msg) error {
 		return fmt.Errorf("gozmq/session: publish inbound: %w", err)
 	}
 	return nil
+}
+
+// inboundFlushCap bounds how many published messages may wait for their
+// wakeup while the reader keeps finding buffered input.
+const inboundFlushCap = 256
+
+// flushInbound publishes the wakeup owed for messages published with
+// TrySendDeferred and stamps the inbound clock once for the whole read
+// batch (the heartbeat only needs "traffic since", at batch granularity).
+// Reader goroutine only.
+func (s *Session) flushInbound() {
+	if s.inboundOwed == 0 {
+		return
+	}
+	s.inboundOwed = 0
+	s.sessionPipe.Flush()
+	s.lastInboundUnix.Store(s.cfg.Now())
+}
+
+// flushReader wraps the conn under the session's bufio.Reader and flushes
+// before every underlying Read, which is the only place the reader can
+// block waiting for the peer. That covers a partial frame in the buffer,
+// where Buffered() > 0 yet the next ReadFrame still blocks.
+type flushReader struct {
+	s *Session
+	r io.Reader
+}
+
+func (f flushReader) Read(p []byte) (int, error) {
+	f.s.flushInbound()
+	return f.r.Read(p)
 }
 
 // maxPingContextLen is the ZMTP 3.1 limit on the opaque PING context.
