@@ -108,7 +108,7 @@ func TestQueue_Layout(t *testing.T) {
 	pubTail := unsafe.Offsetof(q.pubTail)
 	cmu := unsafe.Offsetof(q.cmu)
 	pubHead := unsafe.Offsetof(q.pubHead)
-	spare := unsafe.Offsetof(q.spare)
+	spare := unsafe.Offsetof(q.spares)
 	offs := []uintptr{pmu, pubTail, cmu, pubHead, spare}
 	for i := 1; i < len(offs); i++ {
 		require.GreaterOrEqual(t, offs[i]-offs[i-1], uintptr(128), "group %d too close to %d", i, i-1)

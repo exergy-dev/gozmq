@@ -12,6 +12,9 @@ import (
 // chunk per chunkSize messages.
 const chunkSize = 256
 
+// spareSlots is the capacity of the spare-chunk ring.
+const spareSlots = 8
+
 type chunk struct {
 	vals [chunkSize]*msg.Msg
 	next atomic.Pointer[chunk]
@@ -55,7 +58,7 @@ type chunk struct {
 //	RULE 2: the consumer crosses a chunk boundary only AFTER proving
 //	        head < tail, so the next pointer is non-nil (RULE 1 plus
 //	        sequential consistency).
-//	RULE 3: the consumer clears old.next BEFORE parking old in spare, so a
+//	RULE 3: the consumer clears old.next BEFORE parking old in spares, so a
 //	        recycled chunk never links to a stale successor.
 type queue struct {
 	hwm uint64 // 0 = unbounded
@@ -66,6 +69,7 @@ type queue struct {
 	tailPos    uint32
 	tail       uint64
 	cachedHead uint64
+	getIdx     uint32 // next spares slot to take from; guarded by pmu
 	_          [128]byte
 
 	pubTail atomic.Uint64 // == tail, stored after the slot write
@@ -77,15 +81,21 @@ type queue struct {
 	headPos    uint32
 	head       uint64
 	cachedTail uint64
+	putIdx     uint32 // next spares slot to fill; guarded by cmu
 	_          [128]byte
 
 	pubHead atomic.Uint64 // == head, stored after the slot is nil-ed
 	_       [128]byte
 
-	// spare is one drained chunk the consumer parks for the producer to
-	// reuse before it allocates. It keeps the steady state allocation-free.
-	spare atomic.Pointer[chunk]
-	_     [128]byte
+	// spares is a small ring of drained chunks the consumer parks for the
+	// producer to reuse before it allocates. The consumer fills slots in
+	// ring order (CAS nil->chunk at putIdx, advancing only on success, so a
+	// full ring drops the chunk to the GC) and the producer empties them in
+	// the same order (Swap nil at getIdx, advancing only on success). Both
+	// walk the ring in step, so a burst of chunk turnover is absorbed by up
+	// to len(spares) parked chunks instead of one.
+	spares [spareSlots]atomic.Pointer[chunk]
+	_      [128]byte
 }
 
 // newQueue returns an empty queue holding at most hwm messages (0 for no
@@ -109,8 +119,10 @@ func (q *queue) push(m *msg.Msg) bool {
 		}
 	}
 	if q.tailPos == chunkSize {
-		c := q.spare.Swap(nil)
-		if c == nil {
+		var c *chunk
+		if c = q.spares[q.getIdx].Swap(nil); c != nil {
+			q.getIdx = (q.getIdx + 1) % spareSlots
+		} else {
 			c = new(chunk)
 		}
 		q.tailChunk.next.Store(c) // RULE 1
@@ -139,7 +151,9 @@ func (q *queue) pop() (*msg.Msg, bool) {
 		old := q.headChunk
 		q.headChunk, q.headPos = old.next.Load(), 0
 		old.next.Store(nil) // RULE 3
-		q.spare.CompareAndSwap(nil, old)
+		if q.spares[q.putIdx].CompareAndSwap(nil, old) {
+			q.putIdx = (q.putIdx + 1) % spareSlots
+		}
 	}
 	m := q.headChunk.vals[q.headPos]
 	q.headChunk.vals[q.headPos] = nil // let the GC have it

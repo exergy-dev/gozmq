@@ -253,3 +253,26 @@ func TestAllocs_SteadyStateZero(t *testing.T) {
 		b.TryRecv()
 	}), "TrySendDeferred/Flush")
 }
+
+// TestSteadyState_NoAllocs: with a constant queue depth (0, 300, 3000) the
+// producer and consumer cross chunk boundaries continuously; chunks must
+// recycle through the spares ring with no allocation.
+func TestSteadyState_NoAllocs(t *testing.T) {
+	for _, depth := range []int{0, 300, 3000} {
+		a, b := NewPair(0, 0, PeerInfo{}, PeerInfo{})
+		m := msg.FromBytes([]byte("x"))
+		for range depth {
+			require.True(t, a.TrySend(m))
+		}
+		for range chunkSize * 3 { // warm up
+			a.TrySend(m)
+			b.TryRecv()
+		}
+		require.Zero(t, testing.AllocsPerRun(chunkSize*20, func() {
+			a.TrySend(m)
+			b.TryRecv()
+		}), "depth %d", depth)
+		a.Close()
+		b.Close()
+	}
+}
