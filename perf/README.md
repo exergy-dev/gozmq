@@ -37,12 +37,11 @@ go run ./perf/zmqperf local_lat  -endpoint tcp://*:5555         -size 32  -count
 go run ./perf/zmqperf remote_lat -endpoint tcp://127.0.0.1:5555 -size 32  -count 100000
 ```
 
-`-size` and `-count` must match on both ends. `local_thr` receives into the
-buffer pool and releases each message (`-pool=false` for plain memory), and
-the tool runs the Go collector at GC percent 400 (`-gogc N` overrides it,
-negative leaves the runtime's setting): libzmq has no collector, and at
-64 KB frames Go's default pacer would collect every ~60 messages. `ipc://`
-endpoints work too;
+`-size` and `-count` must match on both ends. Everything runs at Go's
+defaults; for large frames two options exist: `local_thr -pool` receives
+into the buffer pool and releases each message, and `-gogc N` sets the
+collector's percent (libzmq has no collector, and at 64 KB frames Go's
+default pacer collects every ~60 messages). `ipc://` endpoints work too;
 `inproc://` cannot, since it needs both sockets in one process (use the Go
 benchmarks for inproc). The throughput commands accept `-cpuprofile` and
 `-memprofile`; `*.pprof` files are gitignored.
