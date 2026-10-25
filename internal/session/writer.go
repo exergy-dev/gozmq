@@ -14,18 +14,27 @@ import (
 
 // Batch caps for write coalescing. The writer pulls additional messages
 // from the session pipe non-blocking after the first one and emits all
-// accumulated frames in one writev-backed syscall via net.Buffers. These
-// caps prevent unbounded memory growth and keep latency predictable under
-// sustained sender bursts.
+// accumulated frames in one flush. The caps are checked BEFORE each pull,
+// so one message may overshoot a cap by its own size. They prevent
+// unbounded memory growth and keep latency predictable under sustained
+// sender bursts.
 const (
-	// maxBatchMessages caps the number of messages coalesced into one
-	// writev. Picked to balance syscall amortization against worst-case
-	// latency if a single syscall stalls.
-	maxBatchMessages = 32
+	// maxBatchCopied caps the bytes the batch copies into scratch (headers
+	// and small bodies). Large sealed CURVE bodies are not counted: they
+	// are one memmove each and bounded by maxBatchBytes.
+	maxBatchCopied = 64 << 10
 
-	// maxBatchBytes caps the total encoded bytes coalesced into one
-	// writev. Primary guard against pathological large-payload bursts
-	// pinning megabytes in the writer's buffer list.
+	// maxBatchIovecs stops pulling once the batch holds this many buffers,
+	// below IOV_MAX (1024) so one writev takes the whole batch.
+	maxBatchIovecs = 1000
+
+	// maxBatchMessages is a sanity cap for pathological tiny or empty
+	// messages; it also bounds the lent slice.
+	maxBatchMessages = 4096
+
+	// maxBatchBytes caps the total wire bytes in one batch, including
+	// bodies sent by reference. Primary guard against pathological
+	// large-payload bursts pinning megabytes in the writer.
 	maxBatchBytes = 2 << 20 // 2 MiB
 )
 
@@ -121,7 +130,7 @@ func (s *Session) writerNext() (*msg.Msg, error) {
 
 // writeBatchFrom encodes the commands queued on cmdCh, then first (when
 // not nil) plus any immediately-queued messages (bounded by
-// maxBatchMessages/maxBatchBytes) into batch and flushes them in one
+// the maxBatch* caps) into batch and flushes them in one
 // writev. Commands go first so a PONG never waits behind a data burst and
 // a command queued before a message precedes it on the wire. Shared by the
 // runWriter hot loop and the linger drain. On error it releases the batch,
@@ -143,7 +152,8 @@ func (s *Session) writeBatchFrom(batch *writerBatch, first *msg.Msg) error {
 		batchBytes, err = batch.appendMessage(s, first, batchBytes)
 	}
 	if err == nil {
-		for msgCount := 1; msgCount < maxBatchMessages && batchBytes < maxBatchBytes; msgCount++ {
+		for n := 1; n < maxBatchMessages && batchBytes < maxBatchBytes &&
+			batch.copied < maxBatchCopied && len(batch.buffers) < maxBatchIovecs; n++ {
 			next, ok := s.sessionPipe.TryRecv()
 			if !ok {
 				break
@@ -197,6 +207,10 @@ type writerBatch struct {
 	// after the flush, because frame bodies go to writev by reference.
 	// (Release on a plain message does nothing, so those are not tracked.)
 	lent []*msg.Msg
+
+	// copied counts the bytes this batch copied into scratch (headers and
+	// small bodies); it bounds the batch together with maxBatchCopied.
+	copied int
 }
 
 // maxRetainedScratch bounds the scratch capacity a batch keeps between
@@ -215,6 +229,7 @@ func (b *writerBatch) release() {
 	} else {
 		b.scratch = b.scratch[:0]
 	}
+	b.copied = 0
 	clear(b.buffers) // drop body references so sent frames can be collected
 	b.buffers = b.buffers[:0]
 	b.flush = nil
@@ -273,6 +288,7 @@ func (b *writerBatch) appendFrame(s *Session, flags uint8, body []byte, sizeSoFa
 	if wire == nil {
 		wire = b.scratch[off:bodyEnd:bodyEnd]
 	}
+	b.copied += len(hdr)
 	b.buffers = append(b.buffers, hdr)
 	if n > 0 {
 		// Empty bodies are left out to keep writev's iovec count minimal;

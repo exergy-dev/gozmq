@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"sync"
@@ -15,6 +16,7 @@ import (
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/msg"
+	"github.com/exergy-dev/gozmq/security"
 )
 
 // countingConn wraps a fakeConn and records every Write call: count,
@@ -73,6 +75,17 @@ type writevConn struct {
 	// gateWaiting counts WriteBuffers calls currently parked on the
 	// gate, so tests can wait until the writer is provably stalled.
 	gateWaiting atomic.Int32
+
+	// bufCounts records len(*bufs) of every WriteBuffers call.
+	bufMu     sync.Mutex
+	bufCounts []int
+}
+
+// BufCounts returns the iovec count of each WriteBuffers call so far.
+func (c *writevConn) BufCounts() []int {
+	c.bufMu.Lock()
+	defer c.bufMu.Unlock()
+	return append([]int(nil), c.bufCounts...)
 }
 
 func newWritevConn(fc *fakeConn) *writevConn {
@@ -95,6 +108,9 @@ func (c *writevConn) WriteBuffers(bufs *net.Buffers) (int64, error) {
 		<-*gp
 		c.gateWaiting.Add(-1)
 	}
+	c.bufMu.Lock()
+	c.bufCounts = append(c.bufCounts, len(*bufs))
+	c.bufMu.Unlock()
 	var all []byte
 	for _, b := range *bufs {
 		all = append(all, b...)
@@ -359,47 +375,84 @@ func TestWriter_Backpressure(t *testing.T) {
 	t.Logf("backpressure kicked in after %d pushes (HWM=%d, batch cap=%d)", pushed, HWM, maxBatchMessages)
 }
 
-// TestWriter_BatchCap: enqueue more than maxBatchMessages rapidly and
-// verify multiple batches are emitted, and each batch's bytes are under
-// the size cap. This also exercises the loop's re-arm path (after one
-// batch it goes back to blocking Recv).
+// runCapCase sends n messages of size bytes through a session whose writer
+// is parked in a gated first flush, so all but the first queue up and the
+// caps decide how they are split into flushes. wrap adapts A's fake mech
+// (identity framing, appending, or as is). It returns the byte and iovec
+// count of every traffic-phase WriteBuffers call (the one-message first
+// flush included) after checking that all n messages arrive in order.
+func runCapCase(t *testing.T, wrap func(*fakeMech) security.Mech, n, size int) (sizes, bufs []int) {
+	t.Helper()
+	connA, connB := newFakeConnPair()
+	wcA := newWritevConn(connA)
+	sA, sB := startPair(t,
+		Config{Conn: wcA, Mech: wrap(newFakeMech("NULL", false, nil)), SendHWM: n + 8, RecvHWM: n + 8},
+		Config{Conn: connB, Mech: newFakeMech("NULL", true, nil), SendHWM: n + 8, RecvHWM: n + 8},
+	)
+	time.Sleep(20 * time.Millisecond)
+	wcA.resetWriteCounters()
+	wcA.bufMu.Lock()
+	wcA.bufCounts = nil
+	wcA.bufMu.Unlock()
+	gate := make(chan struct{})
+	wcA.setGate(gate)
 
+	body := func(i int) []byte {
+		b := make([]byte, size)
+		if size >= 4 {
+			binary.BigEndian.PutUint32(b, uint32(i))
+		}
+		return b
+	}
+	ctx := testutil.Ctx(t, 10*time.Second)
+	require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes(body(0))), "Send[0]")
+	require.Eventually(t, func() bool { return wcA.gateWaiting.Load() == 1 },
+		2*time.Second, time.Millisecond, "writer did not park in the gated flush")
+	for i := 1; i < n; i++ {
+		require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes(body(i))), "Send[%d]", i)
+	}
+	wcA.setGate(nil)
+	close(gate)
+	for i := 0; i < n; i++ {
+		m, err := sB.Pipe().Recv(ctx)
+		require.NoError(t, err, "Recv[%d]", i)
+		require.Len(t, m.Bytes(), size, "message %d", i)
+		if size >= 4 {
+			require.EqualValues(t, i, binary.BigEndian.Uint32(m.Bytes()), "message %d out of order", i)
+		}
+	}
+	return wcA.Sizes(), wcA.BufCounts()
+}
+
+func asIs(m *fakeMech) security.Mech { return m }
+
+// TestWriter_BatchCap: the batch is bounded by iovec count and wire bytes
+// (and, for the coalescing paths, copied bytes and message count), not a
+// fixed 32 messages. Each cap is checked before a message is pulled, so a
+// flush may overshoot by that one message.
 func TestWriter_BatchCap(t *testing.T) {
 	t.Parallel()
-	// SendHWM large enough that we can enqueue well past maxBatchMessages
-	// before the writer drains them.
-	sA, sB, ccA := newWriterTestPair(t, maxBatchMessages*4, maxBatchMessages*4)
-	defer func() { _ = sA.Stop(); _ = sB.Stop() }()
-
-	time.Sleep(20 * time.Millisecond)
-	ccA.resetWriteCounters()
-
-	// Enqueue exactly 2.5× maxBatchMessages so we're guaranteed to
-	// exceed the cap in at least one batch boundary.
-	N := maxBatchMessages*5/2 + 1
-	ctx := testutil.Ctx(t, 5*time.Second)
-	for i := 0; i < N; i++ {
-		require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte(fmt.Sprintf("c-%d", i)))), "Send[%d]", i)
-	}
-
-	// Drain on B.
-	for i := 0; i < N; i++ {
-		_, err := sB.Pipe().Recv(ctx)
-		require.NoError(t, err, "Recv[%d]", i)
-	}
-
-	// Each Write call is one batch's worth of bytes. Verify no single
-	// Write exceeded maxBatchBytes by a wide margin (allow some slack
-	// for the last encoded frame pushing us slightly over the pre-
-	// append check; the implementation checks BEFORE appending the
-	// next message, so a message can push over by exactly its own
-	// size, bounded by whatever the message payload was — here <100 B).
-	sizes := ccA.Sizes()
-	assert.GreaterOrEqual(t, len(sizes), 2, "expected ≥2 Write calls (multiple batches)")
-	for i, sz := range sizes {
-		assert.LessOrEqual(t, sz, maxBatchBytes+4096, "batch %d size=%d exceeds maxBatchBytes=%d by more than slack", i, sz, maxBatchBytes)
-	}
-	t.Logf("N=%d messages emitted in %d batches, sizes=%v", N, len(sizes), sizes)
+	t.Run("iovecs", func(t *testing.T) {
+		t.Parallel()
+		// The default path costs two iovecs per message (header in
+		// scratch, body by reference): 1500 messages must split.
+		sizes, bufs := runCapCase(t, asIs, 1500, 16)
+		assert.GreaterOrEqual(t, len(sizes), 2, "expected multiple flushes")
+		for i, c := range bufs {
+			assert.LessOrEqual(t, c, maxBatchIovecs+2, "flush %d has %d iovecs", i, c)
+		}
+		t.Logf("flushes=%d iovecs=%v", len(sizes), bufs)
+	})
+	t.Run("bytes", func(t *testing.T) {
+		t.Parallel()
+		// 40 x 128 KiB = 5 MiB against the 2 MiB byte cap.
+		sizes, _ := runCapCase(t, asIs, 40, 128<<10)
+		assert.GreaterOrEqual(t, len(sizes), 2, "expected multiple flushes")
+		for i, sz := range sizes {
+			assert.LessOrEqual(t, sz, maxBatchBytes+(128<<10)+64, "flush %d size=%d", i, sz)
+		}
+		t.Logf("flushes=%d sizes=%v", len(sizes), sizes)
+	})
 }
 
 // TestWriter_BatchLingerDrain: cancel writerCtx while messages are
