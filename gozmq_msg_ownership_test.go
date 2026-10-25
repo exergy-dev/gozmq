@@ -18,19 +18,21 @@ import (
 
 // Message-ownership regressions. Received frames used to be backed by a
 // refcounted buffer pool with implicit ownership, which corrupted data
-// whenever the frames outlived the pool's idea of their lifetime. Frames are
-// now plain memory by default, and pooled only with WithRecvBufferPool,
+// whenever the frames outlived the pool's idea of their lifetime. Large
+// frames are now pooled by default (WithRecvBufferPool(false) opts out),
 // under an explicit Release contract. Every pattern that used to break runs
-// in both modes; run them with -race.
+// in all three modes; run them with -race.
 
-// recvModes are the two receive-buffer modes; the options go on every
-// socket of a test (pooling only affects receiving).
+// recvModes are the receive-buffer modes: explicitly plain, explicitly
+// pooled, and the default (pooled); the options go on every socket of a
+// test (pooling only affects receiving).
 var recvModes = []struct {
 	name string
 	opts []gozmq.Option
 }{
-	{"plain", nil},
+	{"plain", []gozmq.Option{gozmq.WithRecvBufferPool(false)}},
 	{"pooled", []gozmq.Option{gozmq.WithRecvBufferPool(true)}},
+	{"default", nil},
 }
 
 // forEachRecvMode runs fn as a subtest per receive-buffer mode, checking
@@ -383,7 +385,7 @@ func TestRecvBufferPool_LentOnlyForLargeFrames(t *testing.T) {
 				m, err := pull.RecvMsg(ctx)
 				require.NoError(t, err)
 				require.Equal(t, largePayload(size, size), m.Bytes())
-				require.Equalf(t, mode.opts != nil && size > 4<<10, m.Lent(), "Lent for %d bytes", size)
+				require.Equalf(t, mode.name != "plain" && size > 4<<10, m.Lent(), "Lent for %d bytes", size)
 				m.Release()
 			}
 		})
@@ -395,8 +397,11 @@ func TestRecvBufferPool_LentOnlyForLargeFrames(t *testing.T) {
 // meanwhile; after the final Release its buffer goes back to the pool and
 // is handed to a later receive.
 func TestRecvBufferPool_RetainedUntilRelease(t *testing.T) {
+	forEachPoolMode(t, runRetainedUntilRelease)
+}
+
+func runRetainedUntilRelease(t *testing.T, pool []gozmq.Option) {
 	verifyNoLeaks(t)
-	pool := []gozmq.Option{gozmq.WithRecvBufferPool(true)}
 	_, push, pull := newSocketPairTypes(t, gozmq.Push, gozmq.Pull, "tcp://127.0.0.1:0", nil, pool)
 	ctx := testutil.Ctx(t)
 
@@ -448,9 +453,10 @@ func TestRecvBufferPool_RetainedUntilRelease(t *testing.T) {
 // TestRecvBufferPool_OverRelease: releasing a received message more often
 // than it was retained panics, and cannot hand back the reference SendMsg
 // took for a forward still in flight.
-func TestRecvBufferPool_OverRelease(t *testing.T) {
+func TestRecvBufferPool_OverRelease(t *testing.T) { forEachPoolMode(t, runOverRelease) }
+
+func runOverRelease(t *testing.T, pool []gozmq.Option) {
 	verifyNoLeaks(t)
-	pool := []gozmq.Option{gozmq.WithRecvBufferPool(true)}
 	_, push, pull := newSocketPairTypes(t, gozmq.Push, gozmq.Pull, "tcp://127.0.0.1:0", nil, pool)
 	_, dst, out := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "tcp://127.0.0.1:0", pool, nil)
 	ctx := testutil.Ctx(t)
@@ -477,9 +483,10 @@ func TestRecvBufferPool_OverRelease(t *testing.T) {
 // subscribers — three over TCP, one inproc — and released by the publisher
 // right after SendMsg reaches every subscriber intact. Each subscriber's
 // copy carries its own reference.
-func TestRecvBufferPool_PubFanout(t *testing.T) {
+func TestRecvBufferPool_PubFanout(t *testing.T) { forEachPoolMode(t, runPubFanout) }
+
+func runPubFanout(t *testing.T, pool []gozmq.Option) {
 	verifyNoLeaks(t)
-	pool := []gozmq.Option{gozmq.WithRecvBufferPool(true)}
 	_, mid, src := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "tcp://127.0.0.1:0", pool, nil)
 	zctx, pub := newTestSocket(t, gozmq.Pub, gozmq.WithSendHWM(0))
 	require.NoError(t, pub.Bind("tcp://127.0.0.1:0"))
@@ -556,9 +563,10 @@ func TestRecvBufferPool_PubFanout(t *testing.T) {
 // holds a lent (>4 KiB) frame, the reply must still carry it intact even
 // though the application released the request before replying and other
 // receives recycled pool buffers meanwhile.
-func TestRecvBufferPool_RepLentEnvelope(t *testing.T) {
+func TestRecvBufferPool_RepLentEnvelope(t *testing.T) { forEachPoolMode(t, runRepLentEnvelope) }
+
+func runRepLentEnvelope(t *testing.T, pool []gozmq.Option) {
 	verifyNoLeaks(t)
-	pool := []gozmq.Option{gozmq.WithRecvBufferPool(true)}
 	_, rep, dealer := newSocketPairTypes(t, gozmq.Rep, gozmq.Dealer, "tcp://127.0.0.1:0", pool, pool)
 	_, churnIn, churnOut := newSocketPairTypes(t, gozmq.Pull, gozmq.Push, "tcp://127.0.0.1:0", pool, nil)
 	ctx := testutil.Ctx(t)
@@ -599,4 +607,26 @@ func TestRecvBufferPool_StreamRejected(t *testing.T) {
 	t.Cleanup(func() { _ = zctx.Close() })
 	_, err := zctx.NewSocket(gozmq.Stream, gozmq.WithRecvBufferPool(true))
 	require.ErrorContains(t, err, "WithRecvBufferPool")
+}
+
+// TestRecvBufferPool_StreamDefaultAndOptOut: without the option (pool on by
+// default elsewhere), and with an explicit false, a STREAM socket is fine.
+func TestRecvBufferPool_StreamDefaultAndOptOut(t *testing.T) {
+	zctx := gozmq.NewContext()
+	t.Cleanup(func() { _ = zctx.Close() })
+	s, err := zctx.NewSocket(gozmq.Stream)
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+	s, err = zctx.NewSocket(gozmq.Stream, gozmq.WithRecvBufferPool(false))
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+}
+
+// forEachPoolMode runs fn with the pool requested explicitly and with the
+// option left at its default (also pooled).
+func forEachPoolMode(t *testing.T, fn func(t *testing.T, pool []gozmq.Option)) {
+	t.Helper()
+	for _, mode := range recvModes[1:] {
+		t.Run(mode.name, func(t *testing.T) { fn(t, mode.opts) })
+	}
 }

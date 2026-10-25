@@ -56,7 +56,7 @@ func (s *Socket) sessionConfig(conn transport.Conn, role security.Role) (session
 		SendHWM:           s.cfg.sendHWM,
 		RecvHWM:           s.cfg.recvHWM,
 		MaxMessageSize:    s.cfg.maxMessageSize,
-		RecvBufferPool:    s.cfg.recvBufferPool,
+		RecvBufferPool:    s.cfg.recvBufferPool == nil || *s.cfg.recvBufferPool,
 		// Only a publisher consumes its peers' subscriptions.
 		SubscriptionCommands: s.socketType == Pub || s.socketType == XPub,
 		Logger:               s.cfg.logger,
