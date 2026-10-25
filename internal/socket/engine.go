@@ -92,20 +92,19 @@ import (
 
 // counters holds the standard per-engine metric counters. Engines embed it so
 // the promoted sent/recv/dropped fields work in place (e.counters.sent ==
-// e.sent), and snapshot builds the Metrics. dropped and queueDepth
-// are passed explicitly because they usually combine an engine-local counter
-// with a FairQueue gauge.
+// e.sent), and snapshot builds the Metrics around the queue-depth gauge the
+// engine passes (usually a FairQueue's).
 type counters struct {
 	sent    atomic.Uint64
 	recv    atomic.Uint64
 	dropped atomic.Uint64
 }
 
-func (c *counters) snapshot(dropped, queueDepth uint64) Metrics {
+func (c *counters) snapshot(queueDepth uint64) Metrics {
 	return Metrics{
 		Sent:       c.sent.Load(),
 		Recv:       c.recv.Load(),
-		Dropped:    dropped,
+		Dropped:    c.dropped.Load(),
 		QueueDepth: queueDepth,
 	}
 }

@@ -305,7 +305,7 @@ func (e *pubEngine) Send(ctx context.Context, m *msg.Msg) error {
 // Metrics reports the PUB engine's counters. PUB has no inbound queue,
 // so QueueDepth is always zero.
 func (e *pubEngine) Metrics() Metrics {
-	return e.snapshot(e.dropped.Load(), 0)
+	return e.snapshot(0)
 }
 
 // Recv: PUB is send-only → FSM violation. XPUB never delegates here.

@@ -369,7 +369,7 @@ func (e *reqEngine) Metrics() Metrics {
 		depth += p.Len()
 	}
 	e.mu.Unlock()
-	return e.snapshot(0, uint64(depth))
+	return e.snapshot(uint64(depth))
 }
 
 func (e *reqEngine) Close() error {

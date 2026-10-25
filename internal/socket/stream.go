@@ -3,11 +3,8 @@ package socket
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
-	"io"
 
-	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -69,16 +66,9 @@ func (e *streamEngine) Send(ctx context.Context, m *msg.Msg) error {
 	id := frames[0]
 	body := frames[1:]
 
-	e.mu.Lock()
-	if e.closed {
-		e.mu.Unlock()
-		return fmt.Errorf("stream send: %w", zmqerr.ErrSocketClosed)
-	}
-	p, ok := e.pipeOf[string(id)]
-	e.mu.Unlock()
-
-	if !ok {
-		return fmt.Errorf("stream send: identity %q: %w", id, zmqerr.ErrRouteUnknown)
+	p, err := e.lookup(id, "stream", true)
+	if err != nil {
+		return err
 	}
 
 	// Body frames go down as one byte run (matching libzmq's coalescing of
@@ -91,25 +81,11 @@ func (e *streamEngine) Send(ctx context.Context, m *msg.Msg) error {
 	} else {
 		out = msg.FromBytes(bytes.Join(body, nil))
 	}
-	if err := p.SendOr(ctx, out, e.closeCh); err != nil {
-		out.Release()
-		if errors.Is(err, pipe.ErrAborted) {
-			return fmt.Errorf("stream send: %w", zmqerr.ErrSocketClosed)
-		}
-		if errors.Is(err, io.ErrClosedPipe) {
-			return fmt.Errorf("stream send: identity %q: peer disconnected: %w", id, zmqerr.ErrRouteUnknown)
-		}
+	if err := e.deliver(ctx, p, out, id, "stream", true); err != nil {
 		return err
 	}
 	m.Release() // out holds its own reference
-	e.sent.Add(1)
 	return nil
-}
-
-// Metrics reports the STREAM counters. STREAM never drops on Send (unknown
-// identities surface as errors), so Dropped is zero.
-func (e *streamEngine) Metrics() Metrics {
-	return e.metrics(0)
 }
 
 var _ Engine = (*streamEngine)(nil)

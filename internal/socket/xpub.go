@@ -125,7 +125,7 @@ func (e *xpubEngine) Metrics() Metrics {
 	e.evMu.Lock()
 	depth := uint64(len(e.pending))
 	e.evMu.Unlock()
-	return e.snapshot(e.dropped.Load(), depth)
+	return e.snapshot(depth)
 }
 
 // CanRecvNow applies the queued commands and reports whether an event is

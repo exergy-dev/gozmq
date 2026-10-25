@@ -271,7 +271,7 @@ func (e *SubEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 // visible Recv returns (filter-matched messages). QueueDepth samples the
 // FairQueue.
 func (e *SubEngine) Metrics() Metrics {
-	return e.snapshot(0, e.fq.QueueDepth())
+	return e.snapshot(e.fq.QueueDepth())
 }
 
 func (e *SubEngine) Close() error {

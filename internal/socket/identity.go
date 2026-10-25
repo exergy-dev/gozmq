@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"sync"
 
@@ -127,6 +129,53 @@ func (e *identityRouter) DetachPipe(p *pipe.End) error {
 	return e.fq.Detach(p)
 }
 
+// lookup finds the pipe for routing identity id on behalf of a Send named
+// name ("router"/"stream"). It fails with ErrSocketClosed after Close. An
+// unknown identity is ErrRouteUnknown when mandatory; otherwise it is
+// counted as a drop and lookup returns a nil pipe and a nil error, which
+// leaves the caller to release its message.
+func (e *identityRouter) lookup(id []byte, name string, mandatory bool) (*pipe.End, error) {
+	e.mu.Lock()
+	closed := e.closed
+	p, ok := e.pipeOf[string(id)]
+	e.mu.Unlock()
+	switch {
+	case closed:
+		return nil, fmt.Errorf("%s send: %w", name, zmqerr.ErrSocketClosed)
+	case ok:
+		return p, nil
+	case mandatory:
+		return nil, fmt.Errorf("%s send: identity %q: %w", name, id, zmqerr.ErrRouteUnknown)
+	}
+	e.dropped.Add(1)
+	return nil, nil
+}
+
+// deliver hands out, the message derived for the peer behind p, to p. On
+// success it counts the send. It releases out on failure, and maps a
+// closed engine to ErrSocketClosed and a peer that vanished between lookup
+// and send to the same outcome as an unknown identity (ErrRouteUnknown
+// when mandatory, otherwise a counted drop and a nil error). The caller
+// releases its own message after a nil return.
+func (e *identityRouter) deliver(ctx context.Context, p *pipe.End, out *msg.Msg, id []byte, name string, mandatory bool) error {
+	err := p.SendOr(ctx, out, e.closeCh)
+	switch {
+	case err == nil:
+		e.sent.Add(1)
+		return nil
+	case errors.Is(err, pipe.ErrAborted):
+		err = fmt.Errorf("%s send: %w", name, zmqerr.ErrSocketClosed)
+	case !errors.Is(err, io.ErrClosedPipe):
+	case mandatory:
+		err = fmt.Errorf("%s send: identity %q: peer disconnected: %w", name, id, zmqerr.ErrRouteUnknown)
+	default:
+		e.dropped.Add(1)
+		err = nil
+	}
+	out.Release()
+	return err
+}
+
 // Recv fair-queues across attached pipes and prepends the source peer's
 // routing identity as the leading frame. The identity comes from the source
 // pipe (set by AttachPipe), so it is right even if the pipe has since been
@@ -162,10 +211,11 @@ func (e *identityRouter) Close() error {
 	return e.fq.Close()
 }
 
-// metrics builds the engine's counters with the given drop count (ROUTER
-// passes its route-miss drops; STREAM passes 0).
-func (e *identityRouter) metrics(dropped uint64) Metrics {
-	return e.snapshot(dropped, e.fq.QueueDepth())
+// Metrics reports the engine's counters. Dropped counts silent
+// non-mandatory ROUTER route misses, including vanished peers; it stays
+// zero for STREAM, whose sends fail instead.
+func (e *identityRouter) Metrics() Metrics {
+	return e.snapshot(e.fq.QueueDepth())
 }
 
 // synthesizeIdentityLocked returns a fresh 5-byte routing identity for an

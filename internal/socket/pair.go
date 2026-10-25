@@ -216,7 +216,7 @@ func (e *pairEngine) Metrics() Metrics {
 		depth += r.Len()
 	}
 	e.mu.Unlock()
-	return e.snapshot(0, uint64(depth))
+	return e.snapshot(uint64(depth))
 }
 
 func (e *pairEngine) Close() error {

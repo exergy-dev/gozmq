@@ -262,7 +262,7 @@ func splitRepEnvelope(m *msg.Msg) (envelope [][]byte, body *msg.Msg, ok bool) {
 // each user-visible Recv (after envelope split). QueueDepth samples the
 // FairQueue.
 func (e *repEngine) Metrics() Metrics {
-	return e.snapshot(0, e.fq.QueueDepth())
+	return e.snapshot(e.fq.QueueDepth())
 }
 
 func (e *repEngine) Close() error {
