@@ -18,7 +18,7 @@
 // # Lent frames
 //
 // A message can instead carry lent frames: memory that must go back to its
-// owner once nobody uses it. [NewWithRelease] builds one, and a socket
+// owner once nobody uses it. [NewLent] builds one, and a socket
 // receives its large frames into pooled buffers this way by default (see
 // gozmq.WithRecvBufferPool). [Msg.Lent] tells the two kinds apart. The
 // contract for a lent message is reference counting with explicit calls:
@@ -43,7 +43,10 @@
 //     drops the connection to their owner; use [Msg.Derive] instead.
 package msg
 
-import "sync/atomic"
+import (
+	"slices"
+	"sync/atomic"
+)
 
 // Msg is a ZMTP message: an ordered sequence of binary frames. The zero value
 // is an empty message.
@@ -66,26 +69,14 @@ type Msg struct {
 	refs atomic.Int32
 }
 
-// lease tracks the messages still holding a set of lent frames. The
-// frames go back through release, or, for NewLent, through put(buf). The
-// struct is sized so that a message plus its lease is one 112-byte
-// allocation (the same size class as a plain received message plus the
-// release closure it replaced); keep it at 48 bytes.
+// lease tracks the messages still holding a set of lent frames. The last
+// holder hands them back with put(buf). The struct is sized so that a
+// message plus its lease is one 112-byte allocation (a size class); keep it
+// at 40 bytes.
 type lease struct {
 	holders atomic.Int32
-	release func()
 	put     func([]byte)
 	buf     []byte
-}
-
-// giveBack hands the frames back to their owner; called once, by the
-// last holder.
-func (l *lease) giveBack() {
-	if l.put != nil {
-		l.put(l.buf)
-		return
-	}
-	l.release()
 }
 
 // FromBytes returns a single-frame Msg wrapping b without copying.
@@ -245,38 +236,16 @@ func (m *Msg) setFrames(frames [][]byte) {
 	}
 }
 
-// NewWithRelease returns a lent Msg holding frames (the list is copied as
-// in FromFrames) and one reference to them. release is called exactly
-// once, after the last reference is released: this message's own and
-// those of every message derived from it (see [Msg.Derive]), including
-// the ones sockets take while sending it. Until then the frames must stay
-// untouched. release may run on any goroutine, including a socket's
-// internal writer, so it must not block. A nil release makes a plain
-// message, like FromFrames.
-func NewWithRelease(release func(), frames ...[]byte) *Msg {
-	if release == nil {
-		return FromFrames(frames...)
-	}
-	// One allocation for the message and its lease.
-	ml := &struct {
-		Msg
-		lease lease
-	}{}
-	m := &ml.Msg
-	m.setFrames(frames)
-	ml.lease.release = release
-	ml.lease.holders.Store(1)
-	m.lease = &ml.lease
-	m.refs.Store(1)
-	return m
-}
-
-// NewLent returns a lent Msg holding frames, as NewWithRelease does, whose
-// storage is the buffers bufs: put is called once with each of them after
-// the last reference is released. For one buffer (the usual case) the
-// message and its lease are a single allocation with no closure, which is
-// why the session reader uses it rather than NewWithRelease; several
-// buffers cost one closure. put must not be nil; bufs is copied.
+// NewLent returns a lent Msg holding frames (the list is copied as in
+// FromFrames) and one reference to them. Their storage is the buffers bufs:
+// put is called once with each of them after the last reference is
+// released, namely this message's own and those of every message derived
+// from it (see [Msg.Derive]), including the ones sockets take while sending
+// it. Until then the frames must stay untouched. put may run on any
+// goroutine, including a socket's internal writer, so it must not block.
+// For one buffer (the usual case) the message and its lease are a single
+// allocation with no closure; several buffers cost one closure. put must
+// not be nil; bufs is copied.
 func NewLent(put func([]byte), bufs [][]byte, frames ...[]byte) *Msg {
 	if put == nil {
 		panic("gozmq: msg.NewLent with a nil put")
@@ -287,12 +256,11 @@ func NewLent(put func([]byte), bufs [][]byte, frames ...[]byte) *Msg {
 	}{}
 	m := &ml.Msg
 	m.setFrames(frames)
-	switch len(bufs) {
-	case 1:
+	if len(bufs) == 1 {
 		ml.lease.put, ml.lease.buf = put, bufs[0]
-	default:
-		owned := append([][]byte(nil), bufs...)
-		ml.lease.release = func() {
+	} else {
+		owned := slices.Clone(bufs)
+		ml.lease.put = func([]byte) {
 			for _, b := range owned {
 				put(b)
 			}
@@ -305,7 +273,7 @@ func NewLent(put func([]byte), bufs [][]byte, frames ...[]byte) *Msg {
 }
 
 // Lent reports whether m's frames are lent memory that Release gives back
-// (see the package doc): true for NewWithRelease messages, messages
+// (see the package doc): true for NewLent messages, messages
 // derived from them, and messages whose frames a socket received into
 // pooled buffers. For every other message Release and Retain do nothing.
 func (m *Msg) Lent() bool { return m.lease != nil }
@@ -394,7 +362,7 @@ func (m *Msg) Release() {
 	case n > 0:
 	case n == 0:
 		if l.holders.Add(-1) == 0 {
-			l.giveBack()
+			l.put(l.buf)
 		}
 	default:
 		panic("gozmq: Msg.Release called more times than the message was retained")

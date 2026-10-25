@@ -20,7 +20,7 @@ import (
 // newLent returns a lent message and a counter of its release calls.
 func newLent(frames ...[]byte) (*msg.Msg, *atomic.Int32) {
 	released := new(atomic.Int32)
-	return msg.NewWithRelease(func() { released.Add(1) }, frames...), released
+	return msg.NewLent(func([]byte) { released.Add(1) }, [][]byte{nil}, frames...), released
 }
 
 // drainPipe discards everything queued on p.
