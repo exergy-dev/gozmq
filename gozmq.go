@@ -100,13 +100,10 @@ func (t SocketType) String() string { return socketTypeName(t) }
 // memory owned by the caller, for which Release and Retain do nothing.
 //
 // Msg is an alias for [msg.Msg]; see that package for the full method
-// set. There is
-// no need to import it — the alias makes every method reachable as
-// gozmq.Msg, and the NewMsg* constructors below cover construction.
+// set. There is no need to import it: the alias makes every method reachable
+// as gozmq.Msg, and the NewMsg* constructors below cover construction (an
+// empty message is NewMsgFromFrames()).
 type Msg = msg.Msg
-
-// NewMsg returns an empty message.
-func NewMsg() *Msg { return msg.New() }
 
 // NewMsgFromBytes wraps b in a single-frame message (no copy).
 func NewMsgFromBytes(b []byte) *Msg { return msg.FromBytes(b) }

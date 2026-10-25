@@ -361,7 +361,7 @@ func TestSocketType_String(t *testing.T) {
 // contract for caller-constructed messages.
 func TestNewMsg(t *testing.T) {
 	t.Parallel()
-	m := gozmq.NewMsg()
+	m := gozmq.NewMsgFromFrames()
 	require.Equal(t, 0, m.NumFrames(), "NewMsg NumFrames")
 	m.AppendFrame([]byte("alpha"))
 	m.AppendFrame([]byte("beta"))
@@ -376,7 +376,7 @@ func TestNewMsg(t *testing.T) {
 	require.Equal(t, [][]byte{[]byte("alpha"), []byte("beta")}, got.Frames())
 
 	// Release on a caller-constructed message is documented as always safe.
-	empty := gozmq.NewMsg()
+	empty := gozmq.NewMsgFromFrames()
 	empty.Release()
 }
 

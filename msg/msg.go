@@ -88,13 +88,6 @@ func (l *lease) giveBack() {
 	l.release()
 }
 
-// New returns an empty Msg.
-func New() *Msg {
-	m := &Msg{}
-	m.frames = m.inlineFrames[:0]
-	return m
-}
-
 // FromBytes returns a single-frame Msg wrapping b without copying.
 func FromBytes(b []byte) *Msg {
 	m := &Msg{}

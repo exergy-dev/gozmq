@@ -11,7 +11,7 @@ import (
 )
 
 func TestMsgAppendFrame(t *testing.T) {
-	m := New()
+	m := FromFrames()
 	m.AppendFrame([]byte("a"))
 	m.AppendFrame([]byte("bb"))
 	require.Equal(t, 2, m.NumFrames())
