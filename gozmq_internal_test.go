@@ -2,7 +2,6 @@ package gozmq
 
 import (
 	"context"
-	"math"
 	"net"
 	"slices"
 	"strings"
@@ -151,9 +150,8 @@ func TestLinksReturnToBaselineAfterChurn(t *testing.T) {
 	})
 }
 
-func TestInprocHWMSaturates(t *testing.T) {
+func TestInprocHWM(t *testing.T) {
 	require.Equal(t, 0, inprocHWM(0, 5))
 	require.Equal(t, 0, inprocHWM(5, 0))
 	require.Equal(t, 2*MaxHWM, inprocHWM(MaxHWM, MaxHWM))
-	require.Equal(t, 2*MaxHWM, inprocHWM(math.MaxInt, 1), "overflow must saturate, not go negative")
 }

@@ -303,7 +303,7 @@ func TestRecvBytes(t *testing.T) {
 
 // TestPlainAuth_WrongPassword: a PLAIN client presenting bad credentials
 // must surface EventHandshakeFailedAuth on its monitor channel
-// (exercising classifyHandshakeEvent's ErrAuthFailed branch).
+// (the ErrAuthFailed branch of the handshake-failure classification).
 func TestPlainAuth_WrongPassword(t *testing.T) {
 	t.Parallel()
 	cliEvents := make(chan gozmq.Event, 64)

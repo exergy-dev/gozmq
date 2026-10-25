@@ -185,11 +185,10 @@ func (s *Socket) Bind(endpoint string) error {
 		return s.bindInproc(endpoint)
 	}
 	tr, err := s.ctx.lookupTransport(endpoint)
-	if err != nil {
-		s.emit(EventBindFailed, endpoint, err.Error())
-		return err
+	var l transport.Listener
+	if err == nil {
+		l, err = tr.Listen(s.runCtx, endpoint)
 	}
-	l, err := tr.Listen(s.runCtx, endpoint)
 	if err != nil {
 		s.emit(EventBindFailed, endpoint, err.Error())
 		return err
@@ -271,11 +270,11 @@ func (s *Socket) Connect(endpoint string) error {
 			// "retried". libzmq's monitor events use the same
 			// split to let consumers differentiate "first trouble"
 			// from "ongoing trouble".
+			ev := EventConnectRetried
 			if attempt <= 1 {
-				s.emit(EventConnectDelayed, endpoint, backoff.String())
-			} else {
-				s.emit(EventConnectRetried, endpoint, backoff.String())
+				ev = EventConnectDelayed
 			}
+			s.emit(ev, endpoint, backoff.String())
 		},
 		Logger: s.cfg.logger,
 	}
@@ -305,27 +304,25 @@ func (s *Socket) Unbind(endpoint string) error {
 		return ErrSocketClosed
 	}
 	if isInproc(endpoint) {
-		if !s.ctx.inproc.unbind(s, endpoint) {
-			return fmt.Errorf("gozmq: endpoint %q not bound: %w", endpoint, ErrEndpointUnknown)
+		if s.ctx.inproc.unbind(s, endpoint) {
+			return nil
 		}
-		return nil
-	}
-
-	s.mu.Lock()
-	var matched transport.Listener
-	for i, l := range s.listeners {
-		if l.Endpoint() == endpoint {
-			matched = l
-			s.listeners = slices.Delete(s.listeners, i, i+1)
-			break
+	} else {
+		s.mu.Lock()
+		var matched transport.Listener
+		for i, l := range s.listeners {
+			if l.Endpoint() == endpoint {
+				matched = l
+				s.listeners = slices.Delete(s.listeners, i, i+1)
+				break
+			}
+		}
+		s.mu.Unlock()
+		if matched != nil {
+			return matched.Close()
 		}
 	}
-	s.mu.Unlock()
-
-	if matched == nil {
-		return fmt.Errorf("gozmq: endpoint %q not bound: %w", endpoint, ErrEndpointUnknown)
-	}
-	return matched.Close()
+	return fmt.Errorf("gozmq: endpoint %q not bound: %w", endpoint, ErrEndpointUnknown)
 }
 
 // Disconnect tears down every connection made by a Connect to exactly
@@ -452,7 +449,13 @@ func (s *Socket) startSession(conn transport.Conn, role security.Role, endpoint 
 			// A handshake cut short by Close is not a failure to report.
 			s.logger().Debug("gozmq: handshake failed", "err", err, "role", role,
 				"socket-type", socketTypeName(s.socketType))
-			s.emit(classifyHandshakeEvent(err), endpoint, err.Error())
+			// Anything but an auth failure (malformed frame, version
+			// mismatch, a dial drop or timeout) is a protocol failure.
+			ev := EventHandshakeFailedProtocol
+			if errors.Is(err, zmqerr.ErrAuthFailed) {
+				ev = EventHandshakeFailedAuth
+			}
+			s.emit(ev, endpoint, err.Error())
 		}
 		s.removeLink(l)
 	}

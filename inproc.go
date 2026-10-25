@@ -159,12 +159,8 @@ func inprocHWM(send, recv int) int {
 	if send == 0 || recv == 0 {
 		return 0
 	}
-	// Both are at most MaxHWM, so the sum cannot overflow; saturate anyway
-	// so a future relaxation of the cap cannot produce a negative HWM.
-	if sum := send + recv; sum > 0 {
-		return sum
-	}
-	return 2 * MaxHWM
+	// Both are at most MaxHWM after validation, so the sum cannot overflow.
+	return send + recv
 }
 
 // wireInproc joins cl's socket (the connector) to bind with one pipe pair.

@@ -2,12 +2,10 @@ package gozmq
 
 import (
 	"cmp"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
-	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -157,20 +155,4 @@ func (s *Socket) emit(eventType EventType, endpoint, reason string) {
 // the fallback keeps the call sites terse.
 func (s *Socket) logger() *slog.Logger {
 	return cmp.Or(s.cfg.logger, slog.Default())
-}
-
-// classifyHandshakeEvent maps a handshake error to the appropriate
-// Event type. Errors wrapping ErrAuthFailed surface as
-// EventHandshakeFailedAuth; errors wrapping ErrMalformedFrame or
-// ErrProtocolVersion surface as EventHandshakeFailedProtocol. Any
-// other error (dial drop mid-handshake, timeout) also falls under
-// protocol failure by convention — the user's monitor consumer can
-// inspect Reason for finer classification.
-func classifyHandshakeEvent(err error) EventType {
-	if errors.Is(err, zmqerr.ErrAuthFailed) {
-		return EventHandshakeFailedAuth
-	}
-	// ErrMalformedFrame, ErrProtocolVersion, and any other error (dial drop
-	// mid-handshake, timeout) all classify as a protocol failure.
-	return EventHandshakeFailedProtocol
 }
