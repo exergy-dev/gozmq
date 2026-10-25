@@ -118,68 +118,24 @@ func FromFramesCopy(frames ...[]byte) *Msg {
 	case 1:
 		switch {
 		case total <= 32:
-			x := &struct {
-				Msg
-				buf [32]byte
-			}{}
-			x.carve1(x.buf[:], frames[0])
-			return &x.Msg
+			return copy1[buf32](frames[0])
 		case total <= 64:
-			x := &struct {
-				Msg
-				buf [64]byte
-			}{}
-			x.carve1(x.buf[:], frames[0])
-			return &x.Msg
+			return copy1[buf64](frames[0])
 		case total <= 128:
-			x := &struct {
-				Msg
-				buf [128]byte
-			}{}
-			x.carve1(x.buf[:], frames[0])
-			return &x.Msg
+			return copy1[buf128](frames[0])
 		case total <= 256:
-			x := &struct {
-				Msg
-				buf [256]byte
-			}{}
-			x.carve1(x.buf[:], frames[0])
-			return &x.Msg
+			return copy1[buf256](frames[0])
 		}
 	case 2:
 		switch {
 		case total <= 32:
-			x := &struct {
-				Msg
-				list [2][]byte
-				buf  [32]byte
-			}{}
-			x.carve2(&x.list, x.buf[:], frames)
-			return &x.Msg
+			return copy2[buf32](frames)
 		case total <= 48:
-			x := &struct {
-				Msg
-				list [2][]byte
-				buf  [48]byte
-			}{}
-			x.carve2(&x.list, x.buf[:], frames)
-			return &x.Msg
+			return copy2[buf48](frames)
 		case total <= 80:
-			x := &struct {
-				Msg
-				list [2][]byte
-				buf  [80]byte
-			}{}
-			x.carve2(&x.list, x.buf[:], frames)
-			return &x.Msg
+			return copy2[buf80](frames)
 		case total <= 144:
-			x := &struct {
-				Msg
-				list [2][]byte
-				buf  [144]byte
-			}{}
-			x.carve2(&x.list, x.buf[:], frames)
-			return &x.Msg
+			return copy2[buf144](frames)
 		}
 	}
 	// Larger messages: one buffer for the bytes, plus the Msg and, past
@@ -206,6 +162,53 @@ func FromFramesCopy(frames ...[]byte) *Msg {
 		m.frames[i] = buf[off-len(f) : off : off]
 	}
 	return m
+}
+
+// The co-allocation tiers: the byte array shares one object with the Msg,
+// sized so the whole is a Go allocator size class.
+type (
+	buf32  [32]byte
+	buf48  [48]byte
+	buf64  [64]byte
+	buf80  [80]byte
+	buf128 [128]byte
+	buf144 [144]byte
+	buf256 [256]byte
+)
+
+func (b *buf32) bytes() []byte  { return b[:] }
+func (b *buf48) bytes() []byte  { return b[:] }
+func (b *buf64) bytes() []byte  { return b[:] }
+func (b *buf80) bytes() []byte  { return b[:] }
+func (b *buf128) bytes() []byte { return b[:] }
+func (b *buf144) bytes() []byte { return b[:] }
+func (b *buf256) bytes() []byte { return b[:] }
+
+// tier is a pointer to a buffer type B.
+type tier[B any] interface {
+	*B
+	bytes() []byte
+}
+
+// copy1 is a one-frame Msg co-allocated with a buffer of type B.
+func copy1[B any, P tier[B]](f []byte) *Msg {
+	x := &struct {
+		Msg
+		buf B
+	}{}
+	x.carve1(P(&x.buf).bytes(), f)
+	return &x.Msg
+}
+
+// copy2 is a two-frame Msg co-allocated with its list and a buffer of type B.
+func copy2[B any, P tier[B]](frames [][]byte) *Msg {
+	x := &struct {
+		Msg
+		list [2][]byte
+		buf  B
+	}{}
+	x.carve2(&x.list, P(&x.buf).bytes(), frames)
+	return &x.Msg
 }
 
 // carve1 copies f into the front of buf and stores it as the only frame.
