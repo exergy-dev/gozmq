@@ -12,14 +12,14 @@
 //
 // Two kinds of pipe exist. NewPair builds the queue kind described above,
 // used for session pipes. NewChannelPair builds the channel kind, used for
-// inproc: each direction is a buffered channel of HWM capacity (HWM 0 is a
-// channel of unboundedChanCap plus a mutex-guarded overflow slice that the
-// receiver refills from). The queue wins when a producer batches wakeups
-// or producer and consumer contend, as on TCP streaming. The channel wins
-// for the uncontended one-hop-per-message inproc patterns (ping-pong,
-// wide fan-out), where the runtime's direct handoff to a parked receiver is
-// cheaper than the queue's park protocol and nothing ever batches. Both
-// kinds share End and every guarantee below.
+// inproc: each direction with a positive HWM is a buffered channel of HWM
+// capacity, and HWM 0 gets a queue-kind direction, so a channel pair never
+// has an overflow to maintain. The queue wins when a producer batches
+// wakeups or producer and consumer contend, as on TCP streaming. The
+// channel wins for the uncontended one-hop-per-message inproc patterns
+// (ping-pong, wide fan-out), where the runtime's direct handoff to a parked
+// receiver is cheaper than the queue's park protocol and nothing ever
+// batches. Both kinds share End and every guarantee below.
 //
 // Producers wake a parked consumer per message (TrySend, Send), except the
 // session reader, which publishes a read batch with TrySendDeferred and
@@ -52,11 +52,6 @@ var ErrAborted = errors.New("gozmq/pipe: aborted")
 type PeerInfo struct {
 	Identity []byte
 }
-
-// unboundedChanCap is the channel capacity of an HWM-0 channel-kind
-// direction. Messages beyond it wait in the overflow slice; a larger channel
-// only means fewer trips through the overflow lock under a burst.
-const unboundedChanCap = 1024
 
 // NewPair returns two Ends bound to one another. aToB is the maximum
 // number of messages buffered in the A→B direction; bToA is the B→A
@@ -129,27 +124,12 @@ type shared struct {
 // A direction is of one of two kinds. With q set it is the queue kind and
 // everything above applies. With q nil it is the channel kind: ch carries
 // the messages, the runtime parks and wakes the goroutines, and the
-// sleeper counters and wake channels are unused.
-//
-// Channel kind, unbounded (HWM 0) invariant: while overflow is non-empty
-// the channel is full or about to be refilled, so a receiver parked on an
-// empty channel is never stranded. Both sides keep it: a sender that
-// appends to overflow sets slowOverflow before trying to move messages
-// into the channel, and a receiver loads flags after taking from the
-// channel and refills if the bit is set. Under Go's sequentially consistent
-// synchronization one of the two always sees the other.
+// sleeper counters and wake channels are unused. The channel kind is always
+// bounded; an HWM-0 channel pair gets queue-kind directions.
 type direction struct {
 	q *queue
 
-	// Channel kind state.
-	ch        chan *msg.Msg
-	unbounded bool
-	// flags holds the slow* bits. It is written only under dmu but read
-	// without it, so the hot paths cost one atomic load when all are
-	// clear: the sender checks slowOverflow, the receiver checks all.
-	flags    atomic.Uint32
-	overflow []*msg.Msg // unbounded only; overflow[head:] is queued, FIFO after ch
-	head     int
+	ch chan *msg.Msg // channel kind only
 
 	rsleepers atomic.Int32 // consumers parked or about to park
 	wsleepers atomic.Int32 // producers parked or about to park at HWM
@@ -157,9 +137,9 @@ type direction struct {
 	wwake     chan struct{}
 
 	// SendDrained state. draining is set (under dmu) while SendDrained
-	// waits for the queue to empty; consume checks it after every pop.
+	// waits for the direction to empty; every receive checks it.
 	draining  atomic.Bool
-	dmu       sync.Mutex    // also guards overflow and flags (channel kind)
+	dmu       sync.Mutex
 	drainCh   chan struct{} // closed once empty after SendDrained, or on close
 	drainDone bool
 }
@@ -181,87 +161,19 @@ func newDirection(hwm int) *direction {
 	return d
 }
 
+// newChannelDirection makes a channel-kind direction. HWM 0 has no bounded
+// channel to use, so it gets a queue-kind direction.
 func newChannelDirection(hwm int) *direction {
-	d := &direction{}
-	if hwm > 0 {
-		d.ch = make(chan *msg.Msg, hwm)
-	} else {
-		d.ch = make(chan *msg.Msg, unboundedChanCap)
-		d.unbounded = true
+	if hwm == 0 {
+		return newDirection(0)
 	}
-	return d
+	return &direction{ch: make(chan *msg.Msg, hwm)}
 }
 
-// Bits of direction.flags (channel kind).
-const (
-	slowOverflow uint32 = 1 << iota // overflow holds messages
-	slowDraining                    // SendDrained is waiting for the direction to empty
-)
-
-// setFlagLocked sets or clears bit. Caller holds d.dmu, which serializes
-// every writer of flags.
-func (d *direction) setFlagLocked(bit uint32, on bool) {
-	f := d.flags.Load()
-	if on {
-		f |= bit
-	} else {
-		f &^= bit
-	}
-	d.flags.Store(f)
-}
-
-// refillLocked moves overflow into the channel, oldest first, until the
-// channel is full or overflow is empty. Caller holds d.dmu.
-func (d *direction) refillLocked() {
-	for d.head < len(d.overflow) {
-		select {
-		case d.ch <- d.overflow[d.head]:
-			d.overflow[d.head] = nil
-			d.head++
-			continue
-		default:
-		}
-		break
-	}
-	switch {
-	case d.head == len(d.overflow):
-		d.overflow, d.head = d.overflow[:0], 0
-	case d.head > len(d.overflow)/2:
-		// Compact so a long-lived backlog does not pin a growing prefix.
-		n := copy(d.overflow, d.overflow[d.head:])
-		clear(d.overflow[n:])
-		d.overflow, d.head = d.overflow[:n], 0
-	}
-	d.setFlagLocked(slowOverflow, len(d.overflow) > 0)
-}
-
-// received runs after every successful channel receive: it refills the
-// channel from overflow and fires the SendDrained signal once the direction
-// is empty. Both cost one atomic load when there is nothing to do.
-func (d *direction) received() {
-	if d.flags.Load() != 0 {
-		d.receivedSlow()
-	}
-}
-
-func (d *direction) receivedSlow() {
-	d.dmu.Lock()
-	defer d.dmu.Unlock()
-	f := d.flags.Load()
-	if f&slowOverflow != 0 {
-		d.refillLocked()
-	}
-	if f&slowDraining != 0 && len(d.ch) == 0 && d.flags.Load()&slowOverflow == 0 {
-		d.fireDrainLocked()
-	}
-}
-
-// pending reports whether a message is ready to receive. For the channel
-// kind flags is loaded first: that atomic load orders the plain len read
-// after whatever atomic the caller did before (see End.MarkIdle).
+// pending reports whether a message is ready to receive.
 func (d *direction) pending() bool {
 	if d.q == nil {
-		return d.flags.Load()&slowOverflow != 0 || len(d.ch) > 0
+		return len(d.ch) > 0
 	}
 	return d.q.pending()
 }
@@ -269,13 +181,7 @@ func (d *direction) pending() bool {
 // length reports how many messages are queued.
 func (d *direction) length() int {
 	if d.q == nil {
-		n := len(d.ch)
-		if d.flags.Load()&slowOverflow != 0 {
-			d.dmu.Lock()
-			n += len(d.overflow) - d.head
-			d.dmu.Unlock()
-		}
-		return n
+		return len(d.ch)
 	}
 	return d.q.length()
 }
@@ -291,26 +197,14 @@ func arm(ch chan struct{}) {
 // produce enqueues m if there is room and wakes a parked consumer.
 func (d *direction) produce(m *msg.Msg) bool {
 	if d.q == nil {
-		// Channel kind: send without blocking. Bounded directions fail when
-		// the channel is full; unbounded ones always succeed, spilling into
-		// overflow (and staying there while anything older is) to keep FIFO
-		// order. Inlined here, not a method, so TrySend is one call deep.
-		if d.flags.Load()&slowOverflow == 0 {
-			select {
-			case d.ch <- m:
-				return true
-			default:
-			}
-		}
-		if !d.unbounded {
+		// Channel kind: send without blocking (inlined, so TrySend is one
+		// call deep).
+		select {
+		case d.ch <- m:
+			return true
+		default:
 			return false
 		}
-		d.dmu.Lock()
-		d.overflow = append(d.overflow, m)
-		d.setFlagLocked(slowOverflow, true)
-		d.refillLocked()
-		d.dmu.Unlock()
-		return true
 	}
 	if !d.q.push(m) {
 		return false
@@ -322,25 +216,16 @@ func (d *direction) produce(m *msg.Msg) bool {
 }
 
 // consume takes the next queued message, wakes a parked producer and fires
-// the SendDrained signal if this emptied the queue.
+// the SendDrained signal if this emptied the direction.
 func (d *direction) consume() (*msg.Msg, bool) {
 	if d.q == nil {
 		// Channel kind: receive without blocking (inlined, see produce).
-		for {
-			select {
-			case m := <-d.ch:
-				d.received()
-				return m, true
-			default:
-			}
-			// The channel is empty. A sender may be between setting
-			// slowOverflow and moving its message in; do the move ourselves.
-			if d.flags.Load()&slowOverflow == 0 {
-				return nil, false
-			}
-			d.dmu.Lock()
-			d.refillLocked()
-			d.dmu.Unlock()
+		select {
+		case m := <-d.ch:
+			d.received()
+			return m, true
+		default:
+			return nil, false
 		}
 	}
 	m, ok := d.q.pop()
@@ -350,17 +235,24 @@ func (d *direction) consume() (*msg.Msg, bool) {
 	if d.wsleepers.Load() > 0 { // R1
 		arm(d.wwake)
 	}
-	if d.draining.Load() {
-		d.checkDrain()
-	}
+	d.received()
 	return m, true
 }
 
+// received runs after every successful receive: it fires the SendDrained
+// signal if SendDrained is waiting and this emptied the direction. It costs
+// one atomic load when nobody waits.
+func (d *direction) received() {
+	if d.draining.Load() {
+		d.checkDrain()
+	}
+}
+
 // checkDrain fires the drain signal if SendDrained is waiting and the
-// queue is empty.
+// direction is empty.
 func (d *direction) checkDrain() {
 	d.dmu.Lock()
-	if d.draining.Load() && !d.q.pending() {
+	if d.draining.Load() && !d.pending() {
 		d.fireDrainLocked()
 	}
 	d.dmu.Unlock()
@@ -373,11 +265,7 @@ func (d *direction) fireDrainLocked() {
 		return
 	}
 	d.drainDone = true
-	if d.q == nil {
-		d.setFlagLocked(slowDraining, false)
-	} else {
-		d.draining.Store(false)
-	}
+	d.draining.Store(false)
 	if d.drainCh != nil {
 		close(d.drainCh)
 	}
@@ -400,19 +288,24 @@ type End struct {
 	// clears it and runs notify on the sending goroutine. While idle is
 	// clear a send costs one extra atomic load.
 	//
-	// No wakeup is lost. The receiver sets idle with an atomic Swap and
-	// only then looks at the queue again; the sender publishes its message
-	// and only then loads idle. Both idle operations are sequentially
-	// consistent: the enqueue is published by the pubTail store, and the
-	// receiver's re-check (a pop, or the pubTail load in pending) reads it
-	// atomically. So as in Dekker's algorithm at least one side sees the other: the receiver finds the
+	// No wakeup is lost, for either kind, by Dekker's argument. The
+	// receiver sets idle with an atomic Swap and only then looks at the
+	// direction again; the sender publishes its message and only then loads
+	// idle. So at least one side sees the other: the receiver finds the
 	// message, or the sender finds idle set and notifies. When both happen
-	// the receiver clears idle again with a CAS and notify may run once
-	// for nothing. Close pairs a closed-flag store with the same idle
-	// load, and a receiver checks IsClosed after setting idle.
+	// the receiver clears idle again with a CAS and notify may run once for
+	// nothing. Close pairs a closed-flag store with the same idle load, and
+	// a receiver checks IsClosed after setting idle.
 	//
-	// The re-check must be an atomic load (pop's pubTail load, or
-	// queue.pending) so it cannot be satisfied before the Swap's store.
+	// The receiver's re-check must not be satisfied before the Swap's store.
+	// Queue kind: the re-check is an atomic load (pop's pubTail load, or
+	// queue.pending), and the enqueue is published by the pubTail store.
+	// Channel kind: the re-check is the plain read len(ch). idle.Swap is an
+	// atomic read-modify-write, which on every Go target is a full barrier,
+	// so that read cannot be satisfied before the Swap's store; and the
+	// sender's channel send publishes the message under the channel lock
+	// before its idle.Load, so a len(ch) that misses the message means the
+	// send, and therefore the sender's idle.Load, comes after the Swap.
 	idle   atomic.Bool
 	notify atomic.Pointer[func()]
 
@@ -714,13 +607,9 @@ func (e *End) RecvOr(ctx context.Context, abort <-chan struct{}) (*msg.Msg, erro
 }
 
 // recvSlowChan is RecvOr for the channel kind once the channel was found
-// empty: it refills from overflow if a sender left something there, then
-// blocks.
+// empty: it blocks.
 func (e *End) recvSlowChan(ctx context.Context, abort <-chan struct{}) (*msg.Msg, error) {
 	d := e.recv
-	if m, ok := d.consume(); ok {
-		return m, nil
-	}
 	select {
 	case m := <-d.ch:
 		d.received()
@@ -757,19 +646,12 @@ func (e *End) SendDrained() <-chan struct{} {
 	}
 	if !d.drainDone {
 		// draining is stored before the pending check: it pairs with
-		// consume's pubHead store followed by its draining load, so
-		// either this check sees the emptied queue or that pop sees
-		// draining and fires.
-		if d.q == nil {
-			d.setFlagLocked(slowDraining, true)
-			if len(d.ch) == 0 && d.flags.Load()&slowOverflow == 0 {
-				d.fireDrainLocked()
-			}
-		} else {
-			d.draining.Store(true)
-			if !d.q.pending() {
-				d.fireDrainLocked()
-			}
+		// the receive's removal of the message followed by its draining
+		// load, so either this check sees the emptied direction or that
+		// receive sees draining and fires.
+		d.draining.Store(true)
+		if !d.pending() {
+			d.fireDrainLocked()
 		}
 	}
 	return d.drainCh

@@ -11,97 +11,102 @@ import (
 	"github.com/exergy-dev/gozmq/msg"
 )
 
-// Tests for the channel kind's overflow slice (HWM 0): the
-// unboundedChanCap boundaries and the refill paths.
+// Tests for HWM-0 directions around the queue's chunk size, on both pair
+// constructors (HWM 0 on a channel pair is a queue-kind direction).
 
-// TestChannel_OverflowBoundaries sends n messages around the channel
-// capacity into an HWM-0 direction and checks FIFO order, Len and Pending
-// at every stage.
-func TestChannel_OverflowBoundaries(t *testing.T) {
+// TestHWMZero_ChunkBoundaries sends n messages around the chunk size into
+// an HWM-0 direction and checks FIFO order, Len and Pending at every stage.
+func TestHWMZero_ChunkBoundaries(t *testing.T) {
 	t.Parallel()
-	for _, n := range []int{1, unboundedChanCap - 1, unboundedChanCap, unboundedChanCap + 1, 2 * unboundedChanCap, 3*unboundedChanCap + 5} {
-		a, b := NewChannelPair(0, 0, PeerInfo{}, PeerInfo{})
-		for i := range n {
-			require.True(t, a.TrySend(seqMsg(i)), "n=%d send %d", n, i)
+	forEachKind(t, func(t *testing.T, k kind) {
+		for _, n := range []int{1, k.span - 1, k.span, k.span + 1, 2 * k.span, 3*k.span + 5} {
+			a, b := k.newPair(0, 0, PeerInfo{}, PeerInfo{})
+			for i := range n {
+				require.True(t, a.TrySend(seqMsg(i)), "n=%d send %d", n, i)
+			}
+			require.Equal(t, n, b.Len(), "n=%d", n)
+			require.True(t, b.Pending())
+			for i := range n {
+				m, ok := b.TryRecv()
+				require.True(t, ok, "n=%d recv %d", n, i)
+				require.Equal(t, i, seqOf(m), "n=%d recv %d", n, i)
+			}
+			_, ok := b.TryRecv()
+			require.False(t, ok)
+			require.Zero(t, b.Len())
+			require.False(t, b.Pending())
+			a.Close()
+			b.Close()
 		}
-		require.Equal(t, n, b.Len(), "n=%d", n)
-		require.True(t, b.Pending())
-		for i := range n {
-			m, ok := b.TryRecv()
-			require.True(t, ok, "n=%d recv %d", n, i)
-			require.Equal(t, i, seqOf(m), "n=%d recv %d", n, i)
-		}
-		_, ok := b.TryRecv()
-		require.False(t, ok)
-		require.Zero(t, b.Len())
-		require.False(t, b.Pending())
-		a.Close()
-		b.Close()
-	}
+	})
 }
 
-// TestChannel_OverflowInterleaved alternates bursts larger than the
-// channel with partial drains, so the overflow slice is refilled, compacted
-// and emptied repeatedly while FIFO order holds.
-func TestChannel_OverflowInterleaved(t *testing.T) {
+// TestHWMZero_Interleaved alternates bursts larger than a chunk with
+// partial drains, so chunks are allocated, recycled and emptied repeatedly
+// while FIFO order holds.
+func TestHWMZero_Interleaved(t *testing.T) {
 	t.Parallel()
-	a, b := NewChannelPair(0, 0, PeerInfo{}, PeerInfo{})
-	defer a.Close()
-	defer b.Close()
-	next, want := 0, 0
-	for round := range 20 {
-		burst := unboundedChanCap/2 + round*unboundedChanCap/3
-		for range burst {
-			require.True(t, a.TrySend(seqMsg(next)))
-			next++
+	forEachKind(t, func(t *testing.T, k kind) {
+		a, b := k.newPair(0, 0, PeerInfo{}, PeerInfo{})
+		defer a.Close()
+		defer b.Close()
+		next, want := 0, 0
+		for round := range 20 {
+			burst := k.span/2 + round*k.span/3
+			for range burst {
+				require.True(t, a.TrySend(seqMsg(next)))
+				next++
+			}
+			drain := burst * 2 / 3
+			for range drain {
+				m, ok := b.TryRecv()
+				require.True(t, ok)
+				require.Equal(t, want, seqOf(m))
+				want++
+			}
+			require.Equal(t, next-want, b.Len())
 		}
-		drain := burst * 2 / 3
-		for range drain {
+		for want < next {
 			m, ok := b.TryRecv()
 			require.True(t, ok)
 			require.Equal(t, want, seqOf(m))
 			want++
 		}
-		require.Equal(t, next-want, b.Len())
-	}
-	for want < next {
-		m, ok := b.TryRecv()
-		require.True(t, ok)
-		require.Equal(t, want, seqOf(m))
-		want++
-	}
-	require.False(t, b.Pending())
+		require.False(t, b.Pending())
+	})
 }
 
-// TestChannel_ParkedRecvSeesOverflow checks that a receiver blocked on an
-// empty channel is woken by a spill burst (the slowOverflow invariant).
-func TestChannel_ParkedRecvSeesOverflow(t *testing.T) {
+// TestHWMZero_ParkedRecvSeesBurst checks that a receiver blocked on an
+// empty direction is woken by a burst of sends.
+func TestHWMZero_ParkedRecvSeesBurst(t *testing.T) {
 	t.Parallel()
-	for range 50 {
-		a, b := NewChannelPair(0, 0, PeerInfo{}, PeerInfo{})
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		var wg sync.WaitGroup
-		wg.Add(1)
-		got := 0
-		const n = 2*unboundedChanCap + 3
-		go func() {
-			defer wg.Done()
-			for got < n {
-				if _, err := b.Recv(ctx); err != nil {
-					return
+	forEachKind(t, func(t *testing.T, k kind) {
+		for range 50 {
+			a, b := k.newPair(0, 0, PeerInfo{}, PeerInfo{})
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			var wg sync.WaitGroup
+			wg.Add(1)
+			got := 0
+			n := 2*k.span + 3
+			go func() {
+				defer wg.Done()
+				for got < n {
+					if _, err := b.Recv(ctx); err != nil {
+						return
+					}
+					got++
 				}
-				got++
+			}()
+			for i := range n {
+				require.True(t, a.TrySend(seqMsg(i)))
 			}
-		}()
-		for i := range n {
-			require.True(t, a.TrySend(seqMsg(i)))
+			wg.Wait()
+			require.Equal(t, n, got)
+			cancel()
+			a.Close()
+			b.Close()
 		}
-		wg.Wait()
-		require.Equal(t, n, got)
-		cancel()
-		a.Close()
-		b.Close()
-	}
+	})
 }
 
 // TestChannel_DeferredIsPlainSend: TrySendDeferred on a channel pair wakes

@@ -3,8 +3,8 @@ package pipe
 import "testing"
 
 // kind describes one pipe implementation under test. span is a message
-// count past which that kind changes storage (queue chunk, or channel into
-// overflow), so tests probe it.
+// count past which a queue-kind direction changes storage (a new chunk),
+// so tests probe it; HWM-0 channel pairs use that kind too.
 type kind struct {
 	name    string
 	newPair func(aToB, bToA int, aInfo, bInfo PeerInfo) (a, b *End)
@@ -13,7 +13,7 @@ type kind struct {
 
 var kinds = []kind{
 	{"queue", NewPair, chunkSize},
-	{"channel", NewChannelPair, unboundedChanCap},
+	{"channel", NewChannelPair, chunkSize},
 }
 
 // forEachKind runs fn as a subtest against every pipe kind.

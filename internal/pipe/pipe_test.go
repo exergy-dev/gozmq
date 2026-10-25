@@ -299,8 +299,8 @@ func TestProperty_Bounded_Unblock(t *testing.T) {
 }
 
 // TestHWMZero_CloseDrainsThenEOF is the HWM-0 counterpart of
-// TestClose_Drains_Then_EOF: messages spilled into the overflow slice (more
-// than the channel holds) are still delivered, in order, after the sender
+// TestClose_Drains_Then_EOF: messages queued across several chunks are still
+// delivered, in order, after the sender
 // closes, and EOF comes only after the last one.
 func TestHWMZero_CloseDrainsThenEOF(t *testing.T) {
 	forEachKind(t, func(t *testing.T, k kind) {
@@ -407,7 +407,7 @@ func TestNotify_OnlyWhenIdle(t *testing.T) {
 // idle whenever it finds the pipe empty and then waits for the
 // notification alone. A lost wakeup shows up as a timeout. It covers a
 // single message (and a close) per fresh pipe, the tightest race, and a
-// stream through blocking sends at HWM and the HWM-0 overflow.
+// stream through blocking sends at HWM and the deep HWM-0 queues.
 func TestIdleNotify_NoLostWakeup(t *testing.T) {
 	forEachKind(t, func(t *testing.T, k kind) {
 		t.Parallel()
@@ -467,7 +467,7 @@ func TestIdleNotify_NoLostWakeup(t *testing.T) {
 				defer a.Close()
 				gate := notifyGate(b)
 				go func() {
-					// Bursts of varying size push HWM 0 in and out of overflow.
+					// Bursts of varying size cross chunk boundaries at HWM 0.
 					for sent := 0; sent < iters; {
 						burst := min(1+sent%(3*k.span), iters-sent)
 						for range burst {
@@ -486,8 +486,8 @@ func TestIdleNotify_NoLostWakeup(t *testing.T) {
 }
 
 // TestTryRecv_DrainsWholeQueueAfterClose: TryRecv on either end of a
-// closed pipe hands out every queued message in order — including HWM-0
-// overflow — and only then reports empty. The session writer's linger
+// closed pipe hands out every queued message in order — including a deep
+// HWM-0 queue — and only then reports empty. The session writer's linger
 // drain and PAIR's retired-pipe drain rely on this.
 func TestTryRecv_DrainsWholeQueueAfterClose(t *testing.T) {
 	forEachKind(t, func(t *testing.T, k kind) {
@@ -545,12 +545,11 @@ func TestRecvOr_Abort(t *testing.T) {
 	})
 }
 
-// TestHWMZero_ConcurrentOverflow stresses chunk growth: several
-// senders race a receiver on an HWM-0 direction with far more messages than
-// the channel holds. Everything must arrive, in per-sender order, and a
-// blocking Recv must never be stranded on an empty channel while overflow
-// holds messages.
-func TestHWMZero_ConcurrentOverflow(t *testing.T) {
+// TestHWMZero_ConcurrentChunkGrowth stresses chunk growth: several senders
+// race a receiver on an HWM-0 direction with several chunks of messages.
+// Everything must arrive, in per-sender order, and a blocking Recv must
+// never be stranded on an empty direction while messages are queued.
+func TestHWMZero_ConcurrentChunkGrowth(t *testing.T) {
 	forEachKind(t, func(t *testing.T, k kind) {
 		t.Parallel()
 		a, b := k.newPair(0, 0, PeerInfo{}, PeerInfo{})
@@ -587,8 +586,8 @@ func TestHWMZero_ConcurrentOverflow(t *testing.T) {
 }
 
 // TestSendDrained_FiresWhenPeerConsumed: with both ends open, SendDrained
-// stays pending while anything we sent is unread (including HWM-0
-// overflow), fires once the peer has received it all, and fires when
+// stays pending while anything we sent is unread (including a deep
+// HWM-0 queue), fires once the peer has received it all, and fires when
 // either end closes.
 func TestSendDrained_FiresWhenPeerConsumed(t *testing.T) {
 	forEachKind(t, func(t *testing.T, k kind) {
