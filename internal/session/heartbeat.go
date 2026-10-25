@@ -12,9 +12,10 @@ import (
 // heartbeat goroutine. Skipped when the interval is 0 or the peer
 // negotiated ZMTP 3.0.
 //
-// The reader stamps lastInboundUnix on every inbound frame, so any
-// traffic — user data, PONG, or unsolicited PING from the peer — keeps
-// the link alive. We only consult that timestamp; we do not require an
+// The reader stamps lastInboundUnix on every command frame and once per
+// read batch of user messages (it can lag a batch, microseconds at speed,
+// nothing at the rates heartbeats care about), so any traffic — user
+// data, PONG, or unsolicited PING from the peer — keeps the link alive. We only consult that timestamp; we do not require an
 // explicit PONG-in-response since the spec lets either side initiate
 // PINGs on its own cadence.
 func (s *Session) startHeartbeat() {
