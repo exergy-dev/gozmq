@@ -66,8 +66,6 @@ type repEngine struct {
 	// empty delimiter) captured from the current request. Valid only in
 	// canSend. Stored as a fresh slice independent of any caller *Msg.
 	envelope [][]byte
-	// closeCh is closed by Close so a Send parked at HWM unblocks.
-	closeCh chan struct{}
 
 	// The FairQueue arms the in-gate as requests arrive; the FSM arms the
 	// in-gate on entering canRecv and the out-gate on entering canSend,
@@ -79,7 +77,7 @@ type repEngine struct {
 // NewRepEngine returns a new REP socket engine.
 func NewRepEngine() Engine {
 	g := newGates()
-	return &repEngine{fq: NewFairQueue(g.in), closeCh: make(chan struct{}), gates: g}
+	return &repEngine{fq: NewFairQueue(g.in), gates: g}
 }
 
 // CanRecvNow filters out the canSend state, so a request arriving
@@ -206,7 +204,7 @@ func (e *repEngine) Send(ctx context.Context, m *msg.Msg) error {
 	// Block at HWM, racing engine close and the caller's ctx. A requester
 	// that vanished before its detach landed gets the reply dropped
 	// silently, as for a detached peer above.
-	err := peer.SendOr(ctx, wire, e.closeCh)
+	err := peer.SendOr(ctx, wire, e.fq.closeCh) // Close closes it, unblocking a Send parked at HWM
 	if err != nil {
 		wire.Release()
 	}
@@ -272,7 +270,6 @@ func (e *repEngine) Close() error {
 		return nil
 	}
 	e.closed = true
-	close(e.closeCh)
 	e.currentPeer = nil
 	e.envelope = nil
 	e.mu.Unlock()

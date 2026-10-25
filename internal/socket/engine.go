@@ -109,6 +109,28 @@ func (c *counters) snapshot(queueDepth uint64) Metrics {
 	}
 }
 
+// lifecycle is the closed flag and close signal of an engine or primitive:
+// closeCh is closed by the first markClosed, so a call parked on it
+// unblocks. closed is guarded by the owner's mutex. init readies the zero
+// value.
+type lifecycle struct {
+	closed  bool
+	closeCh chan struct{}
+}
+
+func (l *lifecycle) init() { l.closeCh = make(chan struct{}) }
+
+// markClosed marks the owner closed and signals closeCh, reporting false
+// if it already was. The caller holds the owner's mutex.
+func (l *lifecycle) markClosed() bool {
+	if l.closed {
+		return false
+	}
+	l.closed = true
+	close(l.closeCh)
+	return true
+}
+
 // prependFrames returns a new Msg holding head followed by body's frames
 // (body may be nil), derived from body so it keeps body's lent frames
 // alive on its own reference; body is untouched and still needs its own

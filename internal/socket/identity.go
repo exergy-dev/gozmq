@@ -35,9 +35,8 @@ type identityRouter struct {
 	fq   *FairQueue
 	name string // engine name for error messages ("router"/"stream")
 
-	mu      sync.Mutex
-	closed  bool
-	closeCh chan struct{} // closed by Close; aborts a Send parked at HWM
+	mu     sync.Mutex
+	closed bool // fq.closeCh, closed by Close, aborts a Send parked at HWM
 	// idOf maps an attached pipe to its routing identity (peer-advertised
 	// PeerIdentity, or a synthesized 5-byte identity for anonymous peers).
 	idOf map[*pipe.End][]byte
@@ -66,13 +65,12 @@ type identityRouter struct {
 func newIdentityRouter(name string) identityRouter {
 	g := newGates()
 	return identityRouter{
-		fq:      NewFairQueue(g.in),
-		name:    name,
-		closeCh: make(chan struct{}),
-		idOf:    make(map[*pipe.End][]byte),
-		pipeOf:  make(map[string]*pipe.End),
-		nextID:  rand.Uint32(),
-		gates:   g,
+		fq:     NewFairQueue(g.in),
+		name:   name,
+		idOf:   make(map[*pipe.End][]byte),
+		pipeOf: make(map[string]*pipe.End),
+		nextID: rand.Uint32(),
+		gates:  g,
 	}
 }
 
@@ -158,7 +156,7 @@ func (e *identityRouter) lookup(id []byte, name string, mandatory bool) (*pipe.E
 // when mandatory, otherwise a counted drop and a nil error). The caller
 // releases its own message after a nil return.
 func (e *identityRouter) deliver(ctx context.Context, p *pipe.End, out *msg.Msg, id []byte, name string, mandatory bool) error {
-	err := p.SendOr(ctx, out, e.closeCh)
+	err := p.SendOr(ctx, out, e.fq.closeCh)
 	switch {
 	case err == nil:
 		e.sent.Add(1)
@@ -204,7 +202,6 @@ func (e *identityRouter) Close() error {
 		return nil
 	}
 	e.closed = true
-	close(e.closeCh)
 	e.idOf = nil
 	e.pipeOf = nil
 	e.mu.Unlock()
