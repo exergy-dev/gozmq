@@ -175,7 +175,7 @@ func wireInproc(cl *inprocLink, bind *Socket, waiting bool) error {
 	if ct, bt := socketTypeName(conn.socketType), socketTypeName(bind.socketType); !session.SocketTypesCompatible(ct, bt) {
 		return fmt.Errorf("gozmq: inproc %s socket cannot connect to %s: %w", ct, bt, ErrFSMViolation)
 	}
-	ce, be := pipe.NewPair(
+	ce, be := pipe.NewChannelPair(
 		inprocHWM(conn.cfg.sendHWM, bind.cfg.recvHWM),
 		inprocHWM(bind.cfg.sendHWM, conn.cfg.recvHWM),
 		pipe.PeerInfo{Identity: bind.cfg.identity},
