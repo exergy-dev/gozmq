@@ -27,13 +27,9 @@ import (
 )
 
 // Mechanism token transmitted in the greeting (ZMTP 3.1 §3.3.1).
-const plainMechName = "PLAIN"
-
-// PLAIN command names, per RFC 24 §4.
 const (
-	plainCmdHello    = "HELLO"
-	plainCmdWelcome  = "WELCOME"
-	plainCmdInitiate = "INITIATE"
+	plainMechName = "PLAIN"
+	plainName     = "plain" // in error text
 )
 
 // plainState names the state of the handshake state machine. States progress
@@ -115,8 +111,8 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 	switch m.state {
 	// ------------------------------------------------------------------ Client
 	case plainClientSendHello:
-		if in != nil {
-			return nil, false, fmt.Errorf("gozmq/security/plain: unexpected input on client seed: %w", zmqerr.ErrMalformedFrame)
+		if err := RequireNoInput(plainName, in, "client seed"); err != nil {
+			return nil, false, err
 		}
 		out, err := encodeHello(m.username, m.password)
 		if err != nil {
@@ -126,121 +122,93 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		return out, false, nil
 
 	case plainClientRecvWelcome:
-		if in == nil {
-			return nil, false, fmt.Errorf("gozmq/security/plain: nil peer input awaiting WELCOME: %w", zmqerr.ErrMalformedFrame)
+		if err := RequireInput(plainName, in, "WELCOME"); err != nil {
+			return nil, false, err
 		}
-		cmd, err := zmtp.DecodeCommand(in)
+		body, err := DecodeReply(in, zmtp.CmdWelcome)
 		if err != nil {
-			return nil, false, fmt.Errorf("gozmq/security/plain: parse WELCOME/ERROR body %x: %w", in, err)
+			return nil, false, err
 		}
-		switch cmd.Name {
-		case plainCmdWelcome:
-			// WELCOME has no cmd.Body per RFC 24 §4.
-			if len(cmd.Body) != 0 {
-				return nil, false, fmt.Errorf("gozmq/security/plain: WELCOME carries unexpected cmd.Body (%d bytes): %w", len(cmd.Body), zmqerr.ErrMalformedFrame)
-			}
-			m.state = plainClientSendInitiate
-			return m.NextHandshake(nil)
-		case zmtp.CmdError:
-			reason, perr := zmtp.DecodeErrorReason(cmd.Body)
-			if perr != nil {
-				return nil, false, perr
-			}
-			return nil, false, fmt.Errorf("gozmq/security/plain: server rejected credentials: %q: %w", reason, zmqerr.ErrAuthFailed)
-		default:
-			return nil, false, fmt.Errorf("gozmq/security/plain: expected WELCOME or ERROR, got %q: %w", cmd.Name, zmqerr.ErrMalformedFrame)
+		// WELCOME has no body per RFC 24 §4.
+		if len(body) != 0 {
+			return nil, false, Malformed(plainName, "WELCOME carries unexpected body (%d bytes)", len(body))
 		}
+		m.state = plainClientSendInitiate
+		return m.NextHandshake(nil)
 
 	case plainClientSendInitiate:
-		out := zmtp.EncodeCommand(zmtp.Command{Name: plainCmdInitiate, Body: zmtp.EncodeMetadata(m.localMeta)})
+		out := zmtp.EncodeCommand(zmtp.Command{Name: zmtp.CmdInitiate, Body: zmtp.EncodeMetadata(m.localMeta)})
 		m.state = plainClientRecvReady
 		return out, false, nil
 
 	case plainClientRecvReady:
-		if in == nil {
-			return nil, false, fmt.Errorf("gozmq/security/plain: nil peer input awaiting READY: %w", zmqerr.ErrMalformedFrame)
+		if err := RequireInput(plainName, in, "READY"); err != nil {
+			return nil, false, err
 		}
-		cmd, err := zmtp.DecodeCommand(in)
+		body, err := DecodeReply(in, zmtp.CmdReady)
 		if err != nil {
-			return nil, false, fmt.Errorf("gozmq/security/plain: parse READY body %x: %w", in, err)
+			return nil, false, err
 		}
-		switch cmd.Name {
-		case zmtp.CmdError:
-			reason, perr := zmtp.DecodeErrorReason(cmd.Body)
-			if perr != nil {
-				return nil, false, perr
-			}
-			return nil, false, fmt.Errorf("gozmq/security/plain: server rejected INITIATE: %q: %w", reason, zmqerr.ErrAuthFailed)
-		case zmtp.CmdReady:
-			props, err := zmtp.DecodeMetadata(cmd.Body)
-			if err != nil {
-				return nil, false, err
-			}
-			m.MergePeerMetadata(props)
-			m.state = plainDone
-			return nil, true, nil
-		default:
-			return nil, false, fmt.Errorf("gozmq/security/plain: expected READY or ERROR, got %q: %w", cmd.Name, zmqerr.ErrMalformedFrame)
+		props, err := zmtp.DecodeMetadata(body)
+		if err != nil {
+			return nil, false, err
 		}
+		m.MergePeerMetadata(props)
+		m.state = plainDone
+		return nil, true, nil
 
 	// ------------------------------------------------------------------ Server
 	case plainServerSeed:
 		// Passive seed — let the session driver loop read HELLO next.
-		if in != nil {
-			return nil, false, fmt.Errorf("gozmq/security/plain: unexpected input on server seed: %w", zmqerr.ErrMalformedFrame)
+		if err := RequireNoInput(plainName, in, "server seed"); err != nil {
+			return nil, false, err
 		}
 		m.state = plainServerRecvHello
 		return nil, false, nil
 
 	case plainServerRecvHello:
-		if in == nil {
-			return nil, false, fmt.Errorf("gozmq/security/plain: nil peer input awaiting HELLO: %w", zmqerr.ErrMalformedFrame)
+		if err := RequireInput(plainName, in, "HELLO"); err != nil {
+			return nil, false, err
 		}
-		cmd, err := zmtp.DecodeCommand(in)
+		body, err := zmtp.ExpectCommand(in, zmtp.CmdHello)
 		if err != nil {
 			return nil, false, err
 		}
-		if cmd.Name != plainCmdHello {
-			return nil, false, fmt.Errorf("gozmq/security/plain: expected HELLO, got %q: %w", cmd.Name, zmqerr.ErrMalformedFrame)
-		}
-		user, pass, err := parseHello(cmd.Body)
+		user, pass, err := parseHello(body)
 		if err != nil {
 			return nil, false, err
 		}
 		// The credentials stay in locals only and are dropped as soon as
 		// the auth decision below is made.
+		var authErr error
 		switch {
 		case m.zap != nil:
 			if err := m.AuthorizeZAP(plainMechName, [][]byte{[]byte(user), []byte(pass)}); err != nil {
-				out := zmtp.EncodeError("Invalid username or password")
-				m.state = plainDone
-				return out, false, fmt.Errorf("gozmq/security/plain: ZAP rejected user %q: %w", user, err)
+				authErr = fmt.Errorf("gozmq/security/plain: ZAP rejected user %q: %w", user, err)
 			}
 		case m.authFn == nil || !m.authFn(user, pass):
+			authErr = AuthFailed(plainName, "authentication failed for user %q", user)
+		}
+		if authErr != nil {
 			// Emit ERROR and tear down. The reason text is short and
 			// opaque per RFC 24's guidance not to leak authentication
 			// detail.
-			out := zmtp.EncodeError("Invalid username or password")
 			m.state = plainDone
-			return out, false, fmt.Errorf("gozmq/security/plain: authentication failed for user %q: %w", user, zmqerr.ErrAuthFailed)
+			return zmtp.EncodeError("Invalid username or password"), false, authErr
 		}
 		// Success: emit WELCOME, await INITIATE.
-		out := zmtp.EncodeCommand(zmtp.Command{Name: plainCmdWelcome, Body: nil})
 		m.state = plainServerRecvInitiate
-		return out, false, nil
+		return zmtp.EncodeCommand(zmtp.Command{Name: zmtp.CmdWelcome}), false, nil
 
 	case plainServerRecvInitiate:
-		if in == nil {
-			return nil, false, fmt.Errorf("gozmq/security/plain: nil peer input awaiting INITIATE: %w", zmqerr.ErrMalformedFrame)
+		if err := RequireInput(plainName, in, "INITIATE"); err != nil {
+			return nil, false, err
 		}
-		cmd, err := zmtp.DecodeCommand(in)
+		body, err := zmtp.ExpectCommand(in, zmtp.CmdInitiate)
 		if err != nil {
 			return nil, false, err
 		}
-		if cmd.Name != plainCmdInitiate {
-			return nil, false, fmt.Errorf("gozmq/security/plain: expected INITIATE, got %q: %w", cmd.Name, zmqerr.ErrMalformedFrame)
-		}
-		props, err := zmtp.DecodeMetadata(cmd.Body)
+		props, err := zmtp.DecodeMetadata(body)
 		if err != nil {
 			return nil, false, err
 		}
@@ -249,9 +217,8 @@ func (m *plainMech) NextHandshake(in []byte) ([]byte, bool, error) {
 		return m.NextHandshake(nil)
 
 	case plainServerSendReady:
-		out := zmtp.EncodeCommand(zmtp.Command{Name: zmtp.CmdReady, Body: zmtp.EncodeMetadata(m.localMeta)})
 		m.state = plainDone
-		return out, true, nil
+		return EncodeReady(m.localMeta), true, nil
 
 	case plainDone:
 		return nil, true, nil
@@ -295,7 +262,7 @@ func encodeHello(user, pass string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return zmtp.EncodeCommand(zmtp.Command{Name: plainCmdHello, Body: payload}), nil
+	return zmtp.EncodeCommand(zmtp.Command{Name: zmtp.CmdHello, Body: payload}), nil
 }
 
 // parseHello parses the HELLO payload (NOT the full command body — the

@@ -78,7 +78,7 @@ func TestCurve_ForgedVouchLowOrderClientKey(t *testing.T) {
 	require.NoError(t, err)
 	welcome, _, err := srv.NextHandshake(hello)
 	require.NoError(t, err)
-	cookie, err := cli.parseWelcome(welcome)
+	cookie, err := cli.parseWelcome(welcome[1+len(zmtp.CmdWelcome):])
 	require.NoError(t, err)
 
 	var C Key
@@ -92,7 +92,7 @@ func TestCurve_ForgedVouchLowOrderClientKey(t *testing.T) {
 	vouch := append(vouchR[:], box.SealAfterPrecomputation(nil, vplain, &vn, &k)...)
 	initPlain := append(append(append([]byte{}, C[:]...), vouch...),
 		security.EncodeMetadata(map[string]string{"Socket-Type": "DEALER"})...)
-	body := zmtp.AppendCommandName(nil, cmdInitiate)
+	body := zmtp.AppendCommandName(nil, zmtp.CmdInitiate)
 	body = append(body, cookie...)
 	body = cli.appendShortBox(body, prefixInitiate, initPlain, &cli.shared) // (S', c'), precomputed by parseWelcome
 
