@@ -3,31 +3,28 @@
 // mode) or, on inproc, to another socket's engine.
 //
 // Each direction has its own high-water mark, a message count: a positive
-// HWM bounds the direction and HWM 0 means unlimited. Storage is a chunked
-// FIFO (see queue) that grows with the actual depth, so a large or
-// unlimited HWM costs nothing until messages are queued. Producers and
-// consumers of a direction never share a lock. A goroutine is never
-// involved, so an End that is never closed leaks nothing but memory the GC
-// reclaims.
+// HWM bounds the direction and HWM 0 means unlimited.
 //
-// Two kinds of pipe exist. NewPair builds the queue kind described above,
-// used for session pipes. NewChannelPair builds the channel kind, used for
-// inproc: each direction with a positive HWM is a buffered channel of HWM
-// capacity, and HWM 0 gets a queue-kind direction, so a channel pair never
-// has an overflow to maintain. The queue wins when a producer batches
-// wakeups or producer and consumer contend, as on TCP streaming. The
-// channel wins for the uncontended one-hop-per-message inproc patterns
-// (ping-pong, wide fan-out), where the runtime's direct handoff to a parked
-// receiver is cheaper than the queue's park protocol and nothing ever
-// batches. Both kinds share End and every guarantee below.
+// Two kinds of pipe exist, differing in how a direction stores messages.
+// NewPair builds the queue kind, used for session pipes: a chunked FIFO
+// (see queue) that grows with the actual depth, so a large or unlimited HWM
+// costs nothing until messages are queued. Its producers and consumers
+// never share a lock, and no goroutine is involved, so an End that is never
+// closed leaks nothing but memory the GC reclaims. NewChannelPair builds
+// the channel kind, used for inproc: a buffered channel of HWM capacity,
+// except that HWM 0 has no capacity to size and gets a queue-kind direction.
+// The queue wins when a producer batches wakeups or producer and consumer
+// contend, as on TCP streaming. The channel wins for the uncontended
+// one-hop-per-message inproc patterns (ping-pong, wide fan-out), where the
+// runtime's direct handoff to a parked receiver is cheaper than the queue's
+// park protocol and nothing ever batches.
 //
-// Producers wake a parked consumer per message (TrySend, Send), except the
-// session reader, which publishes a read batch with TrySendDeferred and
-// wakes once with Flush, as libzmq's ypipe does.
-//
-// All I/O goes through End methods (there is no raw channel access). That is
-// what keeps the wakeups, the idle notification and the SendDrained signal
-// impossible to skip.
+// Both kinds share End and every guarantee below. Messages are reachable
+// only through End methods, which is what keeps the wakeups, the idle
+// notification and the SendDrained signal impossible to skip. Producers
+// wake a parked consumer per message (TrySend, SendOr), except the session
+// reader, which publishes a read batch with TrySendDeferred and wakes once
+// with Flush, as libzmq's ypipe does.
 package pipe
 
 import (
@@ -85,10 +82,10 @@ type shared struct {
 	once   sync.Once // runs the close sequence for whichever end closes first
 }
 
-// direction is one half of the pipe: a queue plus the parking protocol for
-// goroutines blocked on it.
+// direction is one half of the pipe, of the queue or the channel kind (see
+// the end of this comment).
 //
-// Parking. A consumer that finds the queue empty registers in rsleepers
+// Parking (queue kind). A consumer that finds the queue empty registers in rsleepers
 // (R2) and only then re-checks the queue (C1 inside pop); a producer
 // publishes its message (P2) and only then loads rsleepers (W1). All are
 // sequentially consistent, so either the consumer's re-check sees the
@@ -113,8 +110,7 @@ type shared struct {
 // decrements its counter; no queue or drain mutex is held while calling arm
 // or End.woken.
 //
-// A direction is of one of two kinds. With q set it is the queue kind and
-// everything above applies. With q nil it is the channel kind: ch carries
+// With q set a direction is the queue kind and everything above applies. With q nil it is the channel kind: ch carries
 // the messages, the runtime parks and wakes the goroutines, and the
 // sleeper counters and wake channels are unused. The channel kind is always
 // bounded; an HWM-0 channel pair gets queue-kind directions.
