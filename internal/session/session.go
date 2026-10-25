@@ -115,10 +115,11 @@ type Session struct {
 
 	// identityMech reports that the mechanism leaves frames unchanged
 	// (NULL, PLAIN): the writer hands user frames to writev by reference
-	// and the reader copies small frames out of its scratch. Otherwise
-	// encode and decode are the mechanism's frame transforms, and
-	// appendEncode its security.FrameAppender when it has one, which the
-	// writer prefers so the wire body lands in the batch's own buffer.
+	// and the reader copies small frames out of its scratch. Then encode
+	// and decode are nil and never called. Otherwise they are the
+	// mechanism's frame transforms, and appendEncode its
+	// security.FrameAppender when it has one, which the writer prefers so
+	// the wire body lands in the batch's own buffer.
 	identityMech bool
 	encode       frameFunc
 	decode       frameFunc
@@ -284,8 +285,6 @@ type identityFramer interface {
 	IdentityFraming() bool
 }
 
-func identityFrame(flags uint8, body []byte) (uint8, []byte, error) { return flags, body, nil }
-
 // New constructs a Session around cfg.Conn; Start runs it. New lets the
 // caller register the session (for Close) before any callback can fire.
 //
@@ -323,7 +322,6 @@ func New(cfg Config) *Session {
 	}
 	if f, ok := cfg.Mech.(identityFramer); ok && f.IdentityFraming() {
 		s.identityMech = true
-		s.encode, s.decode = identityFrame, identityFrame
 	} else {
 		s.encode, s.decode = cfg.Mech.EncodeFrame, cfg.Mech.DecodeFrame
 		if a, ok := cfg.Mech.(security.FrameAppender); ok {

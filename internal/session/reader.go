@@ -118,13 +118,15 @@ func (s *Session) readLoop() {
 			return
 		}
 
-		// Decode the body through the security mechanism. For NULL/PLAIN
-		// decoded is body itself; CURVE returns fresh plaintext, which the
-		// Mech contract lets the message adopt.
-		plainFlags, decoded, err := s.decode(flags, body)
-		if err != nil {
-			s.cfg.Logger.Warn("gozmq/session: decode frame failed", "err", err)
-			return
+		// Decode the body through the security mechanism. NULL/PLAIN have
+		// no decode step (decoded is body itself); CURVE returns fresh
+		// plaintext, which the Mech contract lets the message adopt.
+		plainFlags, decoded := flags, body
+		if s.decode != nil {
+			if plainFlags, decoded, err = s.decode(flags, body); err != nil {
+				s.cfg.Logger.Warn("gozmq/session: decode frame failed", "err", err)
+				return
+			}
 		}
 
 		if plainFlags&zmtp.FlagCommand != 0 {
