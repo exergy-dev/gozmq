@@ -32,7 +32,7 @@ func TestLoadBalancer_SentCounter(t *testing.T) {
 
 	// Drain so HWM doesn't block further sends.
 	for i := 0; i < n; i++ {
-		_, err := peerEnds[0].Recv(ctx)
+		_, err := peerEnds[0].RecvOr(ctx, nil)
 		require.NoError(t, err, "drain %d", i)
 	}
 }

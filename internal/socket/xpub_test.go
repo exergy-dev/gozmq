@@ -24,7 +24,7 @@ func TestXPub_SurfacesSubscribeToApplication(t *testing.T) {
 	eng := socket.NewXPubEngine(true)
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 	ctx := testutil.Ctx(t)
@@ -40,7 +40,7 @@ func TestXPub_SurfacesSubscribeToApplication(t *testing.T) {
 	// Subsequent publish to the "news" topic should reach the peer
 	// because XPUB updated its SubTree before surfacing.
 	require.NoError(t, eng.Send(ctx, msg.FromFrames([]byte("news"), []byte("hello"))), "xpub send")
-	got, err := b.Recv(ctx)
+	got, err := b.RecvOr(ctx, nil)
 	require.NoError(t, err, "peer recv data")
 	require.Equal(t, 2, got.NumFrames())
 	require.Equal(t, "news", string(got.Frames()[0]))
@@ -56,7 +56,7 @@ func TestXPub_SurfacesUnsubscribe(t *testing.T) {
 	eng := socket.NewXPubEngine(true)
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -83,7 +83,7 @@ func TestXPub_DedupDefault(t *testing.T) {
 	eng := socket.NewXPubEngine(false)
 	defer eng.Close()
 
-	a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(8, 8, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -115,7 +115,7 @@ func TestXPub_VerboseDisablesDedup(t *testing.T) {
 	eng := socket.NewXPubEngine(true)
 	defer eng.Close()
 
-	a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(8, 8, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -143,8 +143,8 @@ func TestXPub_DedupLastCancel(t *testing.T) {
 	eng := socket.NewXPubEngine(false)
 	defer eng.Close()
 
-	a1, b1 := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
-	a2, b2 := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a1, b1 := pipe.NewPair(8, 8, nil, nil)
+	a2, b2 := pipe.NewPair(8, 8, nil, nil)
 	defer closePipes(a1, b1, a2, b2)
 	mustAttach(t, eng, a1, a2)
 
@@ -193,7 +193,7 @@ func TestXPub_DetachEmitsCancel(t *testing.T) {
 			eng := socket.NewXPubEngine(verbose)
 			defer eng.Close()
 
-			a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+			a, b := pipe.NewPair(8, 8, nil, nil)
 			defer closePipes(a, b)
 			mustAttach(t, eng, a)
 			ctx := testutil.Ctx(t)
@@ -224,8 +224,8 @@ func TestXPub_DetachEmitsNoCancelWhileOtherSubscribersRemain(t *testing.T) {
 	eng := socket.NewXPubEngine(false)
 	defer eng.Close()
 
-	a1, b1 := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
-	a2, b2 := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a1, b1 := pipe.NewPair(8, 8, nil, nil)
+	a2, b2 := pipe.NewPair(8, 8, nil, nil)
 	defer closePipes(a1, b1, a2, b2)
 	mustAttach(t, eng, a1, a2)
 	ctx := testutil.Ctx(t)
@@ -285,7 +285,7 @@ func TestXPub_DetachBeforeRecvSettlesRefcounts(t *testing.T) {
 	defer eng.Close()
 	ctx := testutil.Ctx(t)
 
-	a1, b1 := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a1, b1 := pipe.NewPair(8, 8, nil, nil)
 	defer closePipes(a1, b1)
 	mustAttach(t, eng, a1)
 	require.NoError(t, b1.Send(ctx, subscribeMsg(true, []byte("A"))))
@@ -295,7 +295,7 @@ func TestXPub_DetachBeforeRecvSettlesRefcounts(t *testing.T) {
 	requireXPubEvent(ctx, t, eng, true, "A")
 	requireXPubEvent(ctx, t, eng, false, "A")
 
-	a2, b2 := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a2, b2 := pipe.NewPair(8, 8, nil, nil)
 	defer closePipes(a2, b2)
 	mustAttach(t, eng, a2)
 	require.NoError(t, b2.Send(ctx, subscribeMsg(true, []byte("A"))))
@@ -310,8 +310,8 @@ func TestXPub_ForeignCancelIgnored(t *testing.T) {
 	defer eng.Close()
 	ctx := testutil.Ctx(t)
 
-	good, goodPeer := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
-	evil, evilPeer := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	good, goodPeer := pipe.NewPair(8, 8, nil, nil)
+	evil, evilPeer := pipe.NewPair(8, 8, nil, nil)
 	defer closePipes(good, goodPeer, evil, evilPeer)
 	mustAttach(t, eng, good, evil)
 
@@ -341,8 +341,8 @@ func TestXPub_DetachAppliesQueuedCommandsFirst(t *testing.T) {
 	defer eng.Close()
 	ctx := testutil.Ctx(t)
 
-	a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
-	other, otherPeer := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(8, 8, nil, nil)
+	other, otherPeer := pipe.NewPair(8, 8, nil, nil)
 	defer closePipes(a, b, other, otherPeer)
 	mustAttach(t, eng, a, other)
 

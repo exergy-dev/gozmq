@@ -23,7 +23,7 @@ func TestDealer_DoesNotMangleIdentity(t *testing.T) {
 	eng := socket.NewDealerEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(1, 1, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -31,7 +31,7 @@ func TestDealer_DoesNotMangleIdentity(t *testing.T) {
 
 	sent := msg.FromFrames([]byte("hello"), []byte("world"))
 	require.NoError(t, eng.Send(ctx, sent), "send")
-	got, err := b.Recv(ctx)
+	got, err := b.RecvOr(ctx, nil)
 	require.NoError(t, err, "peer recv")
 	require.Equal(t, 2, got.NumFrames(), "outbound frames (no delimiter)")
 	require.Equal(t, "hello", string(got.Frames()[0]))

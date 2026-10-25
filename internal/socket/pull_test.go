@@ -20,7 +20,7 @@ func TestPull_RecvFromPeer(t *testing.T) {
 	eng := socket.NewPullEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(1, 1, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 

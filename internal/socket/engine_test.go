@@ -20,7 +20,7 @@ func makePairs(n, sendHWM, recvHWM int) (engineEnds, peerEnds []*pipe.End) {
 	engineEnds = make([]*pipe.End, n)
 	peerEnds = make([]*pipe.End, n)
 	for i := 0; i < n; i++ {
-		a, b := pipe.NewPair(sendHWM, recvHWM, pipe.PeerInfo{}, pipe.PeerInfo{})
+		a, b := pipe.NewPair(sendHWM, recvHWM, nil, nil)
 		engineEnds[i] = a
 		peerEnds[i] = b
 	}
@@ -60,7 +60,7 @@ func TestLoadBalancer_RoundRobin(t *testing.T) {
 	for i := 0; i < n; i++ {
 		drainCtx, c := context.WithTimeout(context.Background(), time.Second)
 		for {
-			m, err := peerEnds[i].Recv(drainCtx)
+			m, err := peerEnds[i].RecvOr(drainCtx, nil)
 			if err != nil {
 				break
 			}
@@ -84,7 +84,7 @@ func TestLoadBalancer_BlocksOnHWMUnblocksOnDrain(t *testing.T) {
 
 	// Single peer, HWM=1. First send fits in the channel; second send
 	// blocks until the peer drains.
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(1, 1, nil, nil)
 	defer closePipes(a, b)
 	require.NoError(t, lb.Attach(a), "attach")
 
@@ -97,11 +97,11 @@ func TestLoadBalancer_BlocksOnHWMUnblocksOnDrain(t *testing.T) {
 	err := testutil.RequireUnblocks(t,
 		func() error { return lb.Send(ctx, msg.FromBytes([]byte("two"))) },
 		func() {
-			_, err := b.Recv(drainCtx)
+			_, err := b.RecvOr(drainCtx, nil)
 			require.NoError(t, err, "drain one")
 		})
 	require.NoError(t, err, "second send")
-	_, err = b.Recv(drainCtx)
+	_, err = b.RecvOr(drainCtx, nil)
 	require.NoError(t, err, "drain two")
 }
 
@@ -110,7 +110,7 @@ func TestLoadBalancer_CtxCancelUnblocksSend(t *testing.T) {
 	lb := newLB()
 	defer lb.Close()
 
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(1, 1, nil, nil)
 	defer closePipes(a, b)
 	require.NoError(t, lb.Attach(a), "attach")
 	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("fill"))))
@@ -170,7 +170,7 @@ func TestFairQueue_RecvWakesOnAttach(t *testing.T) {
 		m   *msg.Msg
 		err error
 	}
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(1, 1, nil, nil)
 	defer closePipes(a, b)
 
 	// Recv must block until we attach a pipe with a message available.
@@ -190,7 +190,7 @@ func TestFairQueue_DetachThenClose(t *testing.T) {
 	t.Parallel()
 	fq := newFQ()
 
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(1, 1, nil, nil)
 	defer closePipes(a, b)
 
 	require.NoError(t, fq.Attach(a), "attach")
@@ -261,7 +261,7 @@ func TestFairQueue_DetachClosedDirectPipeDrains(t *testing.T) {
 	defer fq.Close()
 	ctx := testutil.Ctx(t)
 
-	a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(8, 8, nil, nil)
 	defer closePipes(a, b)
 	require.NoError(t, fq.Attach(a), "attach")
 	const n = 5
@@ -272,7 +272,7 @@ func TestFairQueue_DetachClosedDirectPipeDrains(t *testing.T) {
 	require.NoError(t, fq.Detach(a), "detach")
 	require.NoError(t, a.Close()) // the owner releases its end after detach
 
-	c, d := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	c, d := pipe.NewPair(8, 8, nil, nil)
 	defer closePipes(c, d)
 	require.NoError(t, fq.Attach(c), "attach replacement")
 	require.NoError(t, d.Send(ctx, msg.FromBytes([]byte{0xff})), "replacement send")
@@ -301,7 +301,7 @@ func TestFairQueue_SingleRecvWaitsOutClosedPipe(t *testing.T) {
 	defer fq.Close()
 	ctx := testutil.Ctx(t)
 
-	a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(8, 8, nil, nil)
 	defer closePipes(a, b)
 	require.NoError(t, fq.Attach(a), "attach")
 	require.NoError(t, b.Send(ctx, msg.FromBytes([]byte("last"))))
@@ -311,7 +311,7 @@ func TestFairQueue_SingleRecvWaitsOutClosedPipe(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "last", string(m.Bytes()), "backlog survives the close")
 
-	c, d := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	c, d := pipe.NewPair(8, 8, nil, nil)
 	defer closePipes(c, d)
 	// Recv stays parked on the closed, empty, still-attached pipe until a
 	// replacement is attached and delivers.
@@ -351,7 +351,7 @@ func TestLoadBalancer_DetachAdvancesCursor(t *testing.T) {
 	_ = lb.Detach(engineEnds[0])
 
 	// Drain the message peer 0 already received.
-	_, err := peerEnds[0].Recv(ctx)
+	_, err := peerEnds[0].RecvOr(ctx, nil)
 	require.NoError(t, err, "drain peer 0")
 
 	// Two more sends should land on the surviving peers, one each.
@@ -359,7 +359,7 @@ func TestLoadBalancer_DetachAdvancesCursor(t *testing.T) {
 		require.NoError(t, lb.Send(ctx, msg.FromBytes([]byte{byte(i + 1)})), "send %d", i)
 	}
 	for i := 1; i < n; i++ {
-		_, err := peerEnds[i].Recv(ctx)
+		_, err := peerEnds[i].RecvOr(ctx, nil)
 		require.NoError(t, err, "peer %d recv", i)
 	}
 }
@@ -368,7 +368,7 @@ func TestLoadBalancer_AttachAfterClose(t *testing.T) {
 	t.Parallel()
 	lb := newLB()
 	require.NoError(t, lb.Close(), "close")
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(1, 1, nil, nil)
 	defer closePipes(a, b)
 	assert.ErrorIs(t, lb.Attach(a), zmqerr.ErrSocketClosed)
 }
@@ -377,7 +377,7 @@ func TestFairQueue_AttachAfterClose(t *testing.T) {
 	t.Parallel()
 	fq := newFQ()
 	require.NoError(t, fq.Close(), "close")
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(1, 1, nil, nil)
 	defer closePipes(a, b)
 	assert.ErrorIs(t, fq.Attach(a), zmqerr.ErrSocketClosed)
 }
@@ -398,7 +398,7 @@ func TestLoadBalancer_TwoParkedSendersWakeOnAttach(t *testing.T) {
 	}
 	time.Sleep(50 * time.Millisecond) // both park on the no-peer wait
 
-	a, b := pipe.NewPair(2, 2, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(2, 2, nil, nil)
 	defer closePipes(a, b)
 	require.NoError(t, lb.Attach(a), "attach")
 
@@ -420,8 +420,8 @@ func TestLoadBalancer_RotatesPastFullPeer(t *testing.T) {
 	lb := newLB()
 	defer lb.Close()
 
-	full, fullPeer := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
-	free, freePeer := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	full, fullPeer := pipe.NewPair(1, 1, nil, nil)
+	free, freePeer := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(full, fullPeer, free, freePeer)
 	require.NoError(t, lb.Attach(full), "attach full")
 	require.NoError(t, lb.Attach(free), "attach free")
@@ -434,7 +434,7 @@ func TestLoadBalancer_RotatesPastFullPeer(t *testing.T) {
 	require.NoError(t, lb.Send(ctx, msg.FromBytes([]byte("x"))), "send")
 	require.Less(t, time.Since(start), 500*time.Millisecond, "send head-of-line blocked on the full peer")
 
-	got, err := freePeer.Recv(ctx)
+	got, err := freePeer.RecvOr(ctx, nil)
 	require.NoError(t, err, "free peer recv")
 	require.Equal(t, "x", string(got.Bytes()), "message must have rotated to the free peer")
 }
@@ -448,8 +448,8 @@ func TestFairQueue_PromotionPreservesPerPeerFIFO(t *testing.T) {
 	fq := newFQ()
 	defer fq.Close()
 
-	a, aPeer := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
-	c, cPeer := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, aPeer := pipe.NewPair(8, 8, nil, nil)
+	c, cPeer := pipe.NewPair(8, 8, nil, nil)
 	defer closePipes(a, aPeer, c, cPeer)
 	require.NoError(t, fq.Attach(a), "attach a (single)")
 

@@ -90,7 +90,7 @@ func TestRouter_LentSendDerives(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewRouterEngine(false)
 	defer eng.Close()
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{Identity: []byte("peer")}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, []byte("peer"), nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 	ctx := testutil.Ctx(t)

@@ -20,8 +20,8 @@ func TestPair_AttachExclusive(t *testing.T) {
 	eng := socket.NewPairEngine()
 	defer eng.Close()
 
-	a1, b1 := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
-	a2, b2 := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a1, b1 := pipe.NewPair(1, 1, nil, nil)
+	a2, b2 := pipe.NewPair(1, 1, nil, nil)
 	defer closePipes(a1, b1, a2, b2)
 
 	mustAttach(t, eng, a1)
@@ -33,7 +33,7 @@ func TestPair_RoundTrip(t *testing.T) {
 	eng := socket.NewPairEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(2, 2, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(2, 2, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -41,7 +41,7 @@ func TestPair_RoundTrip(t *testing.T) {
 	defer cancel()
 
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("ping"))), "send")
-	got, err := b.Recv(ctx)
+	got, err := b.RecvOr(ctx, nil)
 	require.NoError(t, err, "peer recv")
 	require.Equal(t, "ping", string(got.Bytes()))
 
@@ -103,7 +103,7 @@ func TestPair_PeerCloseDrainsThenWaitsForNextPeer(t *testing.T) {
 			defer eng.Close()
 			ctx := testutil.Ctx(t)
 
-			a, b := pipe.NewPair(tc.hwm, tc.hwm, pipe.PeerInfo{}, pipe.PeerInfo{})
+			a, b := pipe.NewPair(tc.hwm, tc.hwm, nil, nil)
 			defer closePipes(a, b)
 			mustAttach(t, eng, a)
 			require.NoError(t, b.Send(ctx, msg.FromBytes([]byte("one"))))
@@ -131,7 +131,7 @@ func TestPair_PeerCloseDrainsThenWaitsForNextPeer(t *testing.T) {
 				require.NoError(t, eng.DetachPipe(a))
 			}
 
-			a2, b2 := pipe.NewPair(tc.hwm, tc.hwm, pipe.PeerInfo{}, pipe.PeerInfo{})
+			a2, b2 := pipe.NewPair(tc.hwm, tc.hwm, nil, nil)
 			defer closePipes(a2, b2)
 			mustAttach(t, eng, a2)
 			require.NoError(t, b2.Send(ctx, msg.FromBytes([]byte("three"))))
@@ -157,14 +157,14 @@ func TestPair_DetachedPipeDrainedBeforeNextPeer(t *testing.T) {
 	defer eng.Close()
 	ctx := testutil.Ctx(t)
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 	require.NoError(t, b.Send(ctx, msg.FromBytes([]byte("old"))))
 	require.NoError(t, b.Close())
 	require.NoError(t, eng.DetachPipe(a))
 
-	a2, b2 := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a2, b2 := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a2, b2)
 	mustAttach(t, eng, a2)
 	require.NoError(t, b2.Send(ctx, msg.FromBytes([]byte("new"))))
@@ -185,13 +185,13 @@ func TestPair_AttachReplacesClosedPipe(t *testing.T) {
 	defer eng.Close()
 	ctx := testutil.Ctx(t)
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 	require.NoError(t, b.Send(ctx, msg.FromBytes([]byte("old"))))
 	require.NoError(t, b.Close())
 
-	a2, b2 := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a2, b2 := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a2, b2)
 	mustAttach(t, eng, a2)
 	require.NoError(t, eng.DetachPipe(a), "late detach of the old pipe")
@@ -203,7 +203,7 @@ func TestPair_AttachReplacesClosedPipe(t *testing.T) {
 		require.Equal(t, want, string(got.Bytes()))
 	}
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("to-new"))))
-	got, err := b2.Recv(ctx)
+	got, err := b2.RecvOr(ctx, nil)
 	require.NoError(t, err)
 	require.Equal(t, "to-new", string(got.Bytes()))
 }
@@ -216,7 +216,7 @@ func TestPair_SendWaitsAcrossPeerClose(t *testing.T) {
 	defer eng.Close()
 	ctx := testutil.Ctx(t)
 
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(1, 1, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("fill"))))
@@ -232,7 +232,7 @@ func TestPair_SendWaitsAcrossPeerClose(t *testing.T) {
 	}
 	require.NoError(t, eng.DetachPipe(a))
 
-	a2, b2 := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a2, b2 := pipe.NewPair(1, 1, nil, nil)
 	defer closePipes(a2, b2)
 	mustAttach(t, eng, a2)
 	select {
@@ -241,7 +241,7 @@ func TestPair_SendWaitsAcrossPeerClose(t *testing.T) {
 	case <-ctx.Done():
 		require.Fail(t, "send did not reach the next peer")
 	}
-	got, err := b2.Recv(ctx)
+	got, err := b2.RecvOr(ctx, nil)
 	require.NoError(t, err)
 	require.Equal(t, "next", string(got.Bytes()))
 }

@@ -261,7 +261,7 @@ func TestFairQueue_TryRecvWithSourceAndPending(t *testing.T) {
 	t.Parallel()
 	fq := newFQ()
 	defer fq.Close()
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	require.NoError(t, fq.Attach(a))
 	_, _, ok := fq.TryRecvWithSource()

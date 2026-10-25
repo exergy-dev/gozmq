@@ -28,7 +28,7 @@ func lentTo(id []byte, body ...[]byte) (*msg.Msg, *atomic.Int32) {
 // vanishedPeer attaches a peer named id whose end is already closed.
 func vanishedPeer(t *testing.T, eng socket.Engine, id []byte) {
 	t.Helper()
-	engP, peer := pipe.NewPair(4, 4, pipe.PeerInfo{Identity: id}, pipe.PeerInfo{})
+	engP, peer := pipe.NewPair(4, 4, id, nil)
 	t.Cleanup(func() { closePipes(engP, peer) })
 	mustAttach(t, eng, engP)
 	require.NoError(t, peer.Close())

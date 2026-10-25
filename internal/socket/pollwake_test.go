@@ -62,7 +62,7 @@ func TestFairQueue_GateWakesOnSinglePipeDelivery(t *testing.T) {
 	fq := socket.NewFairQueue(gate)
 	defer fq.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	require.NoError(t, fq.Attach(a), "attach") // single pipe → single-pipe path
 
@@ -80,7 +80,7 @@ func TestPair_InGateWakesOnDelivery(t *testing.T) {
 	eng := socket.NewPairEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -97,13 +97,13 @@ func TestReq_InGateWakesOnReply(t *testing.T) {
 	eng := socket.NewReqEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
 	ctx := testutil.Ctx(t)
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))), "send")
-	_, err := b.Recv(ctx)
+	_, err := b.RecvOr(ctx, nil)
 	require.NoError(t, err, "drain request")
 
 	woke := parkOnIn(t, eng)
@@ -121,8 +121,8 @@ func TestXPub_InGateWakesOnSubscription(t *testing.T) {
 	eng := socket.NewXPubEngine(false)
 	defer eng.Close()
 
-	a1, b1 := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
-	a2, b2 := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a1, b1 := pipe.NewPair(4, 4, nil, nil)
+	a2, b2 := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a1, b1, a2, b2)
 	mustAttach(t, eng, a1, a2)
 
@@ -144,7 +144,7 @@ func TestRep_InGateWakesAfterSend(t *testing.T) {
 	eng := socket.NewRepEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 

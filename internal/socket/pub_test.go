@@ -28,7 +28,7 @@ func drainPeer(ctx context.Context, p *pipe.End) []*msg.Msg {
 	var out []*msg.Msg
 	for {
 		recvCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
-		m, err := p.Recv(recvCtx)
+		m, err := p.RecvOr(recvCtx, nil)
 		cancel()
 		if err != nil {
 			return out
@@ -66,7 +66,7 @@ func TestPub_FanoutByPrefix(t *testing.T) {
 		for i := 0; i < n; i++ {
 			for {
 				rc, c := context.WithTimeout(ctx, 30*time.Millisecond)
-				_, err := peerEnds[i].Recv(rc)
+				_, err := peerEnds[i].RecvOr(rc, nil)
 				c()
 				if err != nil {
 					break
@@ -81,7 +81,7 @@ func TestPub_FanoutByPrefix(t *testing.T) {
 				require.NoError(t, err, "pub probe")
 			}
 			rc, c := context.WithTimeout(ctx, 50*time.Millisecond)
-			m, err := peerEnds[peerIdx].Recv(rc)
+			m, err := peerEnds[peerIdx].RecvOr(rc, nil)
 			c()
 			if err == nil && m.NumFrames() == 2 && string(m.Frames()[0]) == topic {
 				drainAll()
@@ -142,7 +142,7 @@ func TestPub_UnsubscribeStopsDelivery(t *testing.T) {
 	eng := socket.NewPubEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -157,7 +157,7 @@ func TestPub_UnsubscribeStopsDelivery(t *testing.T) {
 			require.NoError(t, err, "pub send")
 		}
 		rc, c := context.WithTimeout(ctx, 50*time.Millisecond)
-		_, err := b.Recv(rc)
+		_, err := b.RecvOr(rc, nil)
 		c()
 		if err == nil {
 			got = true
@@ -168,7 +168,7 @@ func TestPub_UnsubscribeStopsDelivery(t *testing.T) {
 	// Drain any extras from the polling loop.
 	for {
 		rc, c := context.WithTimeout(ctx, 50*time.Millisecond)
-		_, err := b.Recv(rc)
+		_, err := b.RecvOr(rc, nil)
 		c()
 		if err != nil {
 			break
@@ -181,7 +181,7 @@ func TestPub_UnsubscribeStopsDelivery(t *testing.T) {
 	require.NoError(t, eng.Send(ctx, msg.FromFrames([]byte("A"), []byte("p"))), "pub send post-unsub")
 	rc, c := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer c()
-	_, err := b.Recv(rc)
+	_, err := b.RecvOr(rc, nil)
 	require.ErrorIs(t, err, context.DeadlineExceeded, "peer received after unsubscribe")
 }
 
@@ -193,7 +193,7 @@ func TestPub_HWMDropsRatherThanBlocks(t *testing.T) {
 	defer eng.Close()
 
 	// HWM=1 on peer -> second send drops for that peer.
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(1, 1, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -212,7 +212,7 @@ func TestPub_HWMDropsRatherThanBlocks(t *testing.T) {
 	// one), but not necessarily all ten.
 	drainCtx, dc := context.WithTimeout(ctx, time.Second)
 	defer dc()
-	_, err := b.Recv(drainCtx)
+	_, err := b.RecvOr(drainCtx, nil)
 	require.NoError(t, err, "drain one")
 }
 
@@ -271,8 +271,8 @@ func TestPub_SubscriptionAppliesAtNextSend(t *testing.T) {
 			eng := tc.eng()
 			defer eng.Close()
 			// Two peers, so the FairQueue is off its single-pipe path.
-			a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
-			other, otherPeer := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+			a, b := pipe.NewPair(4, 4, nil, nil)
+			other, otherPeer := pipe.NewPair(4, 4, nil, nil)
 			defer closePipes(a, b, other, otherPeer)
 			mustAttach(t, eng, a, other)
 			ctx := testutil.Ctx(t)
@@ -302,8 +302,8 @@ func TestPub_SlowSubscriberDoesNotDelayOthers(t *testing.T) {
 	eng := socket.NewPubEngine()
 	defer eng.Close()
 
-	slow, slowPeer := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
-	fast, fastPeer := pipe.NewPair(64, 64, pipe.PeerInfo{}, pipe.PeerInfo{})
+	slow, slowPeer := pipe.NewPair(1, 1, nil, nil)
+	fast, fastPeer := pipe.NewPair(64, 64, nil, nil)
 	defer closePipes(slow, slowPeer, fast, fastPeer)
 	mustAttach(t, eng, slow, fast)
 
@@ -323,7 +323,7 @@ func TestPub_SlowSubscriberDoesNotDelayOthers(t *testing.T) {
 
 	// The fast peer must have received the full burst.
 	for i := 0; i < burst; i++ {
-		got, err := fastPeer.Recv(ctx)
+		got, err := fastPeer.RecvOr(ctx, nil)
 		require.NoError(t, err, "fast recv %d", i)
 		require.Equal(t, byte(i), got.Frames()[1][0], "fast recv %d", i)
 	}
@@ -336,8 +336,8 @@ func TestPub_FanoutSharesOneMessage(t *testing.T) {
 	eng := socket.NewPubEngine()
 	defer eng.Close()
 
-	a1, b1 := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
-	a2, b2 := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a1, b1 := pipe.NewPair(4, 4, nil, nil)
+	a2, b2 := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a1, b1, a2, b2)
 	mustAttach(t, eng, a1, a2)
 
@@ -353,7 +353,7 @@ func TestPub_FanoutSharesOneMessage(t *testing.T) {
 	require.NoError(t, eng.Send(ctx, m), "fanout send")
 
 	for i, peer := range []*pipe.End{b1, b2} {
-		got, err := peer.Recv(ctx)
+		got, err := peer.RecvOr(ctx, nil)
 		require.NoError(t, err, "peer%d recv", i+1)
 		require.Same(t, m, got, "peer%d must receive the fanned-out message", i+1)
 		require.Equal(t, payload, got.Frames()[1], "peer%d payload", i+1)

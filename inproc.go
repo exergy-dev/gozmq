@@ -174,8 +174,8 @@ func wireInproc(cl *inprocLink, bind *Socket, waiting bool) error {
 	ce, be := pipe.NewChannelPair(
 		inprocHWM(conn.cfg.sendHWM, bind.cfg.recvHWM),
 		inprocHWM(bind.cfg.sendHWM, conn.cfg.recvHWM),
-		pipe.PeerInfo{Identity: bind.cfg.identity},
-		pipe.PeerInfo{Identity: conn.cfg.identity},
+		bind.cfg.identity,
+		conn.cfg.identity,
 	)
 	if err := conn.engine.AttachPipe(ce); err != nil {
 		_ = ce.Close()

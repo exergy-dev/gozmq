@@ -21,7 +21,7 @@ func TestSub_FilterDropsNonMatching(t *testing.T) {
 	eng := socket.Engine(sub)
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -31,7 +31,7 @@ func TestSub_FilterDropsNonMatching(t *testing.T) {
 	// Drain the forwarded subscription that Subscribe pushed onto the
 	// peer pipe so it doesn't interfere with the test.
 	drainCtx, dc := context.WithTimeout(ctx, 100*time.Millisecond)
-	_, _ = b.Recv(drainCtx)
+	_, _ = b.RecvOr(drainCtx, nil)
 	dc()
 
 	// Peer sends three messages: one matches, two don't.
@@ -58,7 +58,7 @@ func TestSub_EmptySubscriptionAcceptsEverything(t *testing.T) {
 	eng := socket.Engine(sub)
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -67,7 +67,7 @@ func TestSub_EmptySubscriptionAcceptsEverything(t *testing.T) {
 
 	// Drain forwarded subscribe.
 	drainCtx, dc := context.WithTimeout(ctx, 100*time.Millisecond)
-	_, _ = b.Recv(drainCtx)
+	_, _ = b.RecvOr(drainCtx, nil)
 	dc()
 
 	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte("anything"), []byte("payload"))), "peer send")
@@ -84,7 +84,7 @@ func TestSub_ForwardsSubscriptionToAttachedPeer(t *testing.T) {
 	eng := socket.Engine(sub)
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -92,7 +92,7 @@ func TestSub_ForwardsSubscriptionToAttachedPeer(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	m, err := b.Recv(ctx)
+	m, err := b.RecvOr(ctx, nil)
 	require.NoError(t, err, "peer recv subscribe")
 	require.Equal(t, 1, m.NumFrames(), "single-frame subscription msg")
 	body := m.Frames()[0]
@@ -113,7 +113,7 @@ func TestSub_ReplaysSubscriptionsOnAttach(t *testing.T) {
 	require.NoError(t, sub.Subscribe([]byte("foo")), "subscribe foo")
 	require.NoError(t, sub.Subscribe([]byte("bar")), "subscribe bar")
 
-	a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(8, 8, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -121,7 +121,7 @@ func TestSub_ReplaysSubscriptionsOnAttach(t *testing.T) {
 
 	got := map[string]bool{}
 	for i := 0; i < 2; i++ {
-		m, err := b.Recv(ctx)
+		m, err := b.RecvOr(ctx, nil)
 		require.NoError(t, err, "peer recv %d", i)
 		body := m.Frames()[0]
 		require.Equal(t, byte(0x01), body[0], "expected subscribe byte")
@@ -138,7 +138,7 @@ func TestSub_RefcountedSubscribe(t *testing.T) {
 	eng := socket.Engine(sub)
 	defer eng.Close()
 
-	a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(8, 8, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 	ctx := testutil.Ctx(t)
@@ -146,26 +146,26 @@ func TestSub_RefcountedSubscribe(t *testing.T) {
 	require.NoError(t, sub.Subscribe([]byte("x")), "sub1")
 	require.NoError(t, sub.Subscribe([]byte("x")), "sub2")
 	// Exactly one SUBSCRIBE should surface.
-	m, err := b.Recv(ctx)
+	m, err := b.RecvOr(ctx, nil)
 	require.NoError(t, err, "recv sub")
 	require.Equal(t, byte(0x01), m.Frames()[0][0])
 	require.Equal(t, "x", string(m.Frames()[0][1:]))
 	// No second subscribe should be pending.
 	shortCtx, sc := context.WithTimeout(ctx, 100*time.Millisecond)
-	_, err = b.Recv(shortCtx)
+	_, err = b.RecvOr(shortCtx, nil)
 	require.ErrorIs(t, err, context.DeadlineExceeded, "expected no second SUBSCRIBE")
 	sc()
 
 	// One Unsubscribe: still nothing (refcount still >0).
 	require.NoError(t, sub.Unsubscribe([]byte("x")), "unsub1")
 	shortCtx, sc = context.WithTimeout(ctx, 100*time.Millisecond)
-	_, err = b.Recv(shortCtx)
+	_, err = b.RecvOr(shortCtx, nil)
 	require.ErrorIs(t, err, context.DeadlineExceeded, "unexpected CANCEL after first unsubscribe")
 	sc()
 
 	// Second Unsubscribe: CANCEL should surface.
 	require.NoError(t, sub.Unsubscribe([]byte("x")), "unsub2")
-	m, err = b.Recv(ctx)
+	m, err = b.RecvOr(ctx, nil)
 	require.NoError(t, err, "recv cancel")
 	require.Equal(t, byte(0x00), m.Frames()[0][0])
 	require.Equal(t, "x", string(m.Frames()[0][1:]))
