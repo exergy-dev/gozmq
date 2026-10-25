@@ -212,8 +212,9 @@ sends therefore leaves subscriptions queued up to the receive HWM.
 ### 3.6 Public API over engines
 
 `SendMsg`/`RecvMsg` take a `*msg.Msg` of frames. By default received frames
-are ordinary Go memory the caller owns. With `WithRecvBufferPool(true)` large
-frames on NULL/PLAIN sessions arrive in pooled buffers and the message is
+are ordinary Go memory the caller owns, except that by default (opt out with
+`WithRecvBufferPool(false)`; always off for STREAM) large frames (> 4 KiB) on
+NULL/PLAIN sessions arrive in pooled buffers and the message is
 *lent*: valid until `Release`, reference-counted through `Retain` and
 `Derive`, with `SendMsg` holding its own reference until the write completes.
 The contract, including why there is no finalizer, is in package `msg` and
@@ -373,8 +374,9 @@ closed; every other error is treated as per-connection and retried.
 
 ## 9. Performance
 
-- Plain memory by default; `WithRecvBufferPool` trades the per-frame
-  allocation for the explicit `Release` contract.
+- Large received frames are pooled by default (`WithRecvBufferPool`, opt out
+  with `false`): the per-frame allocation and its GC pacing are traded for
+  the explicit `Release` contract, which is safe to ignore (no finalizer).
 - Reads go through a 16 KiB `bufio.Reader`; the writer coalesces queued
   messages into one write, appending frame headers and bodies up to 1 KiB
   into a reusable scratch buffer so a run of small frames is one iovec,

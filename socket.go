@@ -525,10 +525,12 @@ func (s *Socket) SendBytes(ctx context.Context, b []byte) error {
 	return s.SendMsg(ctx, msg.FromBytes(b))
 }
 
-// RecvMsg blocks until a message arrives or ctx cancels. The returned
-// frames are ordinary memory owned by the caller, except on a socket
-// created with [WithRecvBufferPool]: there large frames are lent, valid
-// until the message's final [Msg.Release] (see that option).
+// RecvMsg blocks until a message arrives or ctx cancels. By default frames
+// larger than 4 KiB are lent from a buffer pool, valid until the message's
+// final [Msg.Release]: call Release when done (forgetting it is safe), and
+// copy any frame that must outlive it. Other frames, and all frames under
+// WithRecvBufferPool(false), are ordinary memory owned by the caller. See
+// [WithRecvBufferPool].
 func (s *Socket) RecvMsg(ctx context.Context) (*Msg, error) {
 	if s.closed.Load() {
 		return nil, ErrSocketClosed

@@ -7,18 +7,20 @@
 //
 // # Frame ownership
 //
-// By default frames are ordinary Go memory. A *Msg returned by
-// Socket.RecvMsg owns freshly allocated frames that belong to the caller:
-// they may be kept, sliced or re-sent for as long as the caller likes, and
-// the garbage collector reclaims them. For such a plain message
-// [Msg.Release] and [Msg.Retain] do nothing.
+// Frames are ordinary Go memory unless the message is lent (below). A plain
+// message owns frames that belong to its holder: they may be kept, sliced or
+// re-sent for as long as the holder likes, and the garbage collector
+// reclaims them; [Msg.Release] and [Msg.Retain] do nothing for it. A *Msg
+// returned by Socket.RecvMsg is plain only for frames of up to 4 KiB, on
+// CURVE or custom-mechanism sessions, on STREAM sockets, and when the
+// socket was created with gozmq.WithRecvBufferPool(false).
 //
 // # Lent frames
 //
 // A message can instead carry lent frames: memory that must go back to its
 // owner once nobody uses it. [NewWithRelease] builds one, and a socket
-// created with gozmq.WithRecvBufferPool(true) receives its large frames
-// into pooled buffers this way. [Msg.Lent] tells the two kinds apart. The
+// receives its large frames into pooled buffers this way by default (see
+// gozmq.WithRecvBufferPool). [Msg.Lent] tells the two kinds apart. The
 // contract for a lent message is reference counting with explicit calls:
 //
 //   - Whoever creates or receives a lent message holds one reference to it.

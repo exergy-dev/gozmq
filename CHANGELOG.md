@@ -26,6 +26,18 @@ tables and the trade-off on inproc request/reply latency.
 
 ### Changed
 
+- **The receive buffer pool is now the default** (`WithRecvBufferPool`).
+  Received frames larger than 4 KiB on NULL/PLAIN sessions (tcp/ipc) are
+  lent from the pool, and `Release` really recycles them; at 64 KB this
+  removes the garbage-collector pacing that held the receiver to about 60%
+  of libzmq. Forgetting `Release` stays safe (there is no finalizer; the
+  buffer is simply collected). STREAM sockets are unaffected (the option is
+  silently off; an explicit `WithRecvBufferPool(true)` there is still an
+  error). Migration: code that calls `Release` and then keeps using the
+  message's frames (or a slice from `Bytes`/`Frames`) must copy them first,
+  or create the socket with `WithRecvBufferPool(false)`; a `typed.Codec`
+  whose `Unmarshal` retains its input must not be used at the default.
+  `Socket.RecvBytes` and the `typed` wrappers already copy.
 - The session writer copies frame bodies up to 1 KiB behind their headers
   so a run of small frames is one iovec, bounds a batch by bytes and iovecs
   (64 KiB copied, 1000 iovecs, 2 MiB total) instead of 32 messages, and
