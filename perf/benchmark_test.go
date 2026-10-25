@@ -66,6 +66,11 @@ var (
 	// where the fixed nonce/MAC overhead dominates, and one large frame,
 	// where the stream cipher does.
 	curveSizes = []sizeSpec{{"64B", 64}, {"64KB", 64 << 10}}
+
+	// smallSizes is the ladder for the small-message receive path (one
+	// allocation per message). Above 1 KiB the per-frame clone is not the
+	// cost, so the PUB/SUB rows stop at 64B.
+	smallSizes = []sizeSpec{{"32B", 32}, {"64B", 64}}
 )
 
 const (
@@ -314,6 +319,25 @@ func benchStream(b *testing.B, sender *gozmq.Socket, receivers []*gozmq.Socket, 
 // benchmark can publish under a topic.
 func benchStreamPayload(b *testing.B, sender *gozmq.Socket, receivers []*gozmq.Socket, payload []byte, wait time.Duration) int64 {
 	b.Helper()
+	return benchStreamMsgs(b, sender, receivers, len(payload), func() *gozmq.Msg { return gozmq.NewMsgFromBytes(payload) }, wait)
+}
+
+// benchStreamFrames is benchStreamPayload for a multipart message, e.g. a
+// PUB topic frame followed by the payload frame. Every iteration sends one
+// message of the given frames; SetBytes covers all of them.
+func benchStreamFrames(b *testing.B, sender *gozmq.Socket, receivers []*gozmq.Socket, frames [][]byte, wait time.Duration) int64 {
+	b.Helper()
+	total := 0
+	for _, f := range frames {
+		total += len(f)
+	}
+	return benchStreamMsgs(b, sender, receivers, total, func() *gozmq.Msg { return gozmq.NewMsgFromFrames(frames...) }, wait)
+}
+
+// benchStreamMsgs is the shared body: newMsg builds each iteration's
+// message and size is the bytes it carries (for SetBytes).
+func benchStreamMsgs(b *testing.B, sender *gozmq.Socket, receivers []*gozmq.Socket, size int, newMsg func() *gozmq.Msg, wait time.Duration) int64 {
+	b.Helper()
 	b.StopTimer()
 
 	recvCtx, recvCancel := context.WithCancel(context.Background())
@@ -344,11 +368,11 @@ func benchStreamPayload(b *testing.B, sender *gozmq.Socket, receivers []*gozmq.S
 
 	sendCtx := testutil.Ctx(b, benchTimeout)
 
-	b.SetBytes(int64(len(payload)))
+	b.SetBytes(int64(size))
 	b.ResetTimer()
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {
-		if err := sender.SendMsg(sendCtx, gozmq.NewMsgFromBytes(payload)); err != nil {
+		if err := sender.SendMsg(sendCtx, newMsg()); err != nil {
 			b.Fatalf("send[%d]: %v", i, err)
 		}
 	}
@@ -465,6 +489,32 @@ func BenchmarkPushPullCurve_TCP(b *testing.B) {
 		benchPushPullThroughput(b, endpoint, size,
 			[]gozmq.Option{gozmq.WithCurveServer(serverSec[:])},
 			[]gozmq.Option{gozmq.WithCurveClient(serverPub[:], clientPub[:], clientSec[:])})
+	})
+}
+
+// BenchmarkPubSubThroughput_TCP streams single-frame messages from one PUB
+// to one SUB (subscribe-to-all) over TCP loopback: the small-message
+// receive path of a SUB socket.
+func BenchmarkPubSubThroughput_TCP(b *testing.B) {
+	forEachSize(b, smallSizes, tcpEndpoint, func(b *testing.B, endpoint string, size int) {
+		benchPubSubFanout(b, endpoint, size, 1)
+	})
+}
+
+// BenchmarkPubSubTopicThroughput_TCP is BenchmarkPubSubThroughput_TCP with
+// the realistic two-frame shape: an 8-byte topic frame, then a size-byte
+// payload frame. The SUB subscribes to the topic (and to the sync probe).
+func BenchmarkPubSubTopicThroughput_TCP(b *testing.B) {
+	forEachSize(b, smallSizes, tcpEndpoint, func(b *testing.B, endpoint string, size int) {
+		b.StopTimer()
+		pub := bind(b, gozmq.Pub, endpoint, gozmq.WithSendHWM(benchHWM), gozmq.WithRecvHWM(benchHWM))
+		sub := pub.connect(gozmq.Sub, gozmq.WithSendHWM(benchHWM), gozmq.WithRecvHWM(benchHWM),
+			// syncSubs' probes must pass the filter too.
+			gozmq.WithSubscribe([]byte("gozmq-bench-sync-probe")), gozmq.WithSubscribe([]byte("topic-03")))
+		syncSubs(b, pub.sock, sub)
+		frames := [][]byte{[]byte("topic-03"), newPayload(size)}
+		delivered := benchStreamFrames(b, pub.sock, []*gozmq.Socket{sub}, frames, 3*time.Second)
+		b.ReportMetric(float64(delivered), "msgs-delivered")
 	})
 }
 
