@@ -31,7 +31,16 @@
 # bottleneck (libzmq still wins at 32B), but over IPC they appear to inflate
 # gozmq's relative throughput. Treat the TCP table as the trustworthy
 # cross-implementation comparison; read the IPC libzmq column as "stock libzmq
-# perf-tool settings," not a tuned ceiling.
+# perf-tool settings," not a tuned ceiling. The mixed gozmq PUSH -> libzmq
+# PULL cell over IPC reads FAIL at 32 B: libzmq stops polling the socket once
+# its receive pipe is at the stock RCVHWM (1000), a unix socket reports
+# EPOLLHUP as soon as the peer closes, and libzmq's engine takes that as an
+# I/O error in the stopped state and never drains the kernel queue, so the
+# tail of the burst is lost and local_thr waits forever (verified: the same
+# run with ZMQ_RCVHWM raised to the message count delivers every message;
+# over TCP there is no HUP until both directions close, so it does not
+# happen there). It is a libzmq receiver behaviour, not something the gozmq
+# sender can change.
 #
 # GOZMQ_LOCAL_FLAGS passes extra flags to gozmq's receiver. zmqperf already
 # receives into the buffer pool and releases every message (-pool, the

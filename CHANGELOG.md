@@ -8,21 +8,29 @@ migration hint.
 
 ## [Unreleased]
 
-A throughput release: small-message PUSH/PULL over TCP now matches native
-libzmq at Go's default settings (32 B: 1.04–1.10× in the two-process
-comparison, from 0.6×), with no wire or API change. One additive export. See `perf/REPORT.md` for the
-tables and the trade-off on inproc request/reply latency.
+A throughput release: PUSH/PULL over TCP is at or above native libzmq at
+every size in the two-process comparison at Go's default runtime settings
+(32 B 1.4–1.6× from 0.6×, 64 KB 1.3–1.4× from 0.6×), inproc and ipc are
+compared as well, and the one behavioural change is that large received
+frames are pooled by default. No wire change. See `perf/REPORT.md`.
 
 ### Added
 
 - `msg.FromFramesCopy` / `NewMsgFromFramesCopy`: a message whose frames are
   copied into one message-owned allocation (what the reader now builds for
   small received messages).
+- `msg.NewLent`: a lent message whose lease stores the buffers it gives
+  back (one allocation with the message), used by the session reader for
+  pooled frames instead of a release closure.
 - `perf/libzmq_thr/compare_lat.sh` and the C `local_lat`/`remote_lat` tools:
   REQ/REP round-trip comparison against libzmq in all four pairings;
   `compare_all.sh` prints the two mixed PUSH/PULL pairings and takes
-  `COUNT_SCALE` and `GOZMQ_GOGC`. New benchmarks `PubSubThroughput_TCP` and
-  `PubSubTopicThroughput_TCP`.
+  `COUNT_SCALE` and `GOZMQ_GOGC`. `compare_inproc.sh` with the C
+  `inproc_thr`/`inproc_lat` tools and the `zmqperf inproc_thr`/`inproc_lat`
+  subcommands compare inproc (one process, peer on a thread/goroutine).
+  New benchmarks `PubSubThroughput_{TCP,Inproc}`,
+  `PubSubTopicThroughput_{TCP,Inproc}`, `PushPullLarge_Inproc`,
+  `PushPullThroughput_IPC`, `ReqRepRoundTrip_IPC`, `ReqRepThroughput_IPC`.
 
 ### Changed
 
@@ -60,10 +68,11 @@ tables and the trade-off on inproc request/reply latency.
 - The reader stamps the heartbeat's inbound clock once per read batch
   instead of once per message.
 - `zmqperf local_thr` divides by the messages it actually timed (`count-1`),
-  and `zmqperf` runs at GC percent 400 by default (`-gogc` overrides it):
-  with the HWM-sized channel buffers gone, a 64 KB receiver's live heap is a
-  few MB and Go's default pacer collects every ~60 messages; the report
-  shows the default-pacing figures alongside.
+  releases every received message as libzmq's tool does with
+  `zmq_msg_close` (`-pool=false` opts out to plain memory), formats its
+  failure labels only on error (a `Sprintf` per message was 28% of the
+  inproc profile and taxed the TCP figures of earlier reports), and runs at
+  the runtime's GC setting (`-gogc` is an option, not a default).
 
 ## [0.3.0] - 2026-10-23
 

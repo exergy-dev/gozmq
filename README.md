@@ -22,13 +22,13 @@ aspiration. CI runs the [`interop/`](interop) suite against libzmq 4.3.x in
 both directions; the matrix is in [`interop/README.md`](interop/README.md).
 
 **It is fast enough that the tradeoff is gone.** Measured two-process over
-TCP loopback against native libzmq 4.3.4 (PUSH/PULL, October 2026), gozmq
-at Go's default settings is at or ahead of libzmq from 32 B (1.04–1.10×)
-through 8 KB (1.0×; 1.8× at 256 B), and at 0.6–0.7× on 64 KB frames, where
-a receiver allocating fresh 64 KiB bodies at 4 GB/s is paced by the
-collector, which is why large received frames come from a recycling buffer
-pool by default (`WithRecvBufferPool(false)` opts out). REQ/REP round trips over TCP are 20% shorter
-than libzmq's. The numbers, the method
+TCP loopback against native libzmq 4.3.4 (PUSH/PULL, October 2026) at Go's
+default runtime settings, gozmq is at or ahead of libzmq at every size:
+1.4–1.6× at 32 B, 1.0–1.05× at 1 KB, 1.3–1.4× at 64 KB, where large
+received frames come from a recycling buffer pool by default
+(`Release` gives them back; `WithRecvBufferPool(false)` opts out). REQ/REP
+round trips over TCP are 20% shorter than libzmq's, and inproc delivery is
+1.5× libzmq's at 32 B. The numbers, the method
 and the tools to reproduce them are in [`perf/REPORT.md`](perf/REPORT.md).
 
 ## Install
