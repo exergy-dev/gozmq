@@ -132,10 +132,7 @@ type monitorState struct {
 // counted as drops — they were never intended for delivery).
 func (s *Socket) emit(eventType EventType, endpoint, reason string) {
 	ms := s.monitorCfg.Load()
-	if ms == nil || ms.ch == nil {
-		return
-	}
-	if ms.mask&eventType == 0 {
+	if ms == nil || ms.ch == nil || ms.mask&eventType == 0 {
 		return
 	}
 	ev := Event{

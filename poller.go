@@ -3,6 +3,7 @@ package gozmq
 import (
 	"context"
 	"reflect"
+	"slices"
 	"sync"
 
 	"github.com/exergy-dev/gozmq/internal/socket"
@@ -169,9 +170,14 @@ func (p *Poller) Poll(ctx context.Context) ([]PollEvent, error) {
 			return ready, nil
 		}
 
-		// Block on any of the registered gates (or ctx).
-		if err := waitForWake(ctx, snap); err != nil {
-			return nil, err
+		// Block on any of the registered gates (or ctx). reflect.Select
+		// because the channel set is dynamic and the gates come from
+		// different engine types; refresh prepared the cases, only the
+		// trailing ctx slot is per call.
+		last := len(snap.cases) - 1
+		snap.cases[last].Chan = reflect.ValueOf(ctx.Done())
+		if chosen, _, _ := reflect.Select(snap.cases); chosen == last {
+			return nil, ctx.Err()
 		}
 		// A wake fired; re-scan and either return non-empty or loop
 		// (level signals + churn race).
@@ -185,15 +191,8 @@ func (p *Poller) Poll(ctx context.Context) ([]PollEvent, error) {
 // one mutex hop plus an atomic closed-flag load per cached entry.
 func (p *Poller) refresh(snap *pollSnapshot) {
 	p.mu.Lock()
-	stale := !snap.valid || snap.gen != p.gen
-	if !stale {
-		for _, r := range snap.regs {
-			if r.sock.closed.Load() {
-				stale = true
-				break
-			}
-		}
-	}
+	stale := !snap.valid || snap.gen != p.gen ||
+		slices.ContainsFunc(snap.regs, func(r pollerReg) bool { return r.sock.closed.Load() })
 	if !stale {
 		p.mu.Unlock()
 		return
@@ -214,23 +213,26 @@ func (p *Poller) refresh(snap *pollSnapshot) {
 	// registration change or socket close.
 	snap.cases = snap.cases[:0]
 	for _, r := range snap.regs {
-		in, out := r.sock.engine.Gates()
-		if r.mask&PollIn != 0 {
-			snap.cases = append(snap.cases, reflect.SelectCase{
-				Dir:  reflect.SelectRecv,
-				Chan: reflect.ValueOf(in),
-			})
-		}
-		if r.mask&PollOut != 0 {
-			snap.cases = append(snap.cases, reflect.SelectCase{
-				Dir:  reflect.SelectRecv,
-				Chan: reflect.ValueOf(out),
-			})
+		for _, d := range gateDirs(r.sock.engine) {
+			if r.mask&d.bit != 0 {
+				snap.cases = append(snap.cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(d.gate)})
+			}
 		}
 	}
-	// Trailing slot for ctx.Done, filled in per Poll call by waitForWake
+	// Trailing slot for ctx.Done, filled in per Poll call by Poll
 	// so Poll honours cancellation even with an empty interest set.
 	snap.cases = append(snap.cases, reflect.SelectCase{Dir: reflect.SelectRecv})
+}
+
+// pollDir is one direction of a socket: its PollEvents bit and its gate.
+type pollDir struct {
+	bit  PollEvents
+	gate chan struct{}
+}
+
+func gateDirs(eng socket.Engine) [2]pollDir {
+	in, out := eng.Gates()
+	return [2]pollDir{{PollIn, in}, {PollOut, out}}
 }
 
 // pollerReg pairs a registered Socket with its interest mask.
@@ -270,30 +272,10 @@ func scanReady(regs []pollerReg) []PollEvent {
 // token left behind costs a later waiter one spurious wakeup.
 func rearm(ready []PollEvent) {
 	for _, ev := range ready {
-		in, out := ev.Socket.engine.Gates()
-		if ev.Events&PollIn != 0 {
-			socket.Arm(in)
-		}
-		if ev.Events&PollOut != 0 {
-			socket.Arm(out)
+		for _, d := range gateDirs(ev.Socket.engine) {
+			if ev.Events&d.bit != 0 {
+				socket.Arm(d.gate)
+			}
 		}
 	}
-}
-
-// waitForWake parks until at least one registered gate fires
-// or ctx cancels. Returns nil on a successful wake and ctx.Err() on
-// cancellation.
-//
-// We use reflect.Select because the channel set is dynamic in size
-// and the per-direction channels come from different engine types.
-// The cases were prepared by refresh; only the trailing ctx slot is
-// per-call.
-func waitForWake(ctx context.Context, snap *pollSnapshot) error {
-	cases := snap.cases
-	cases[len(cases)-1].Chan = reflect.ValueOf(ctx.Done())
-	chosen, _, _ := reflect.Select(cases)
-	if chosen == len(cases)-1 {
-		return ctx.Err()
-	}
-	return nil
 }
