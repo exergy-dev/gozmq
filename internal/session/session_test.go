@@ -883,6 +883,7 @@ func TestReader_SmallFrameBurstIndependentPayloads(t *testing.T) {
 		m, err := sB.Pipe().Recv(ctx)
 		require.NoError(t, err, "Recv[%d]", i)
 		require.Equal(t, fmt.Sprintf("payload-%03d", i), string(m.Bytes()), "payload[%d]", i)
+		require.Equal(t, len(m.Bytes()), cap(m.Bytes()), "cap[%d]: an append must not reach a neighbour", i)
 	}
 	mp, err := sB.Pipe().Recv(ctx)
 	require.NoError(t, err, "Recv(multipart)")
@@ -890,7 +891,139 @@ func TestReader_SmallFrameBurstIndependentPayloads(t *testing.T) {
 	want := []string{"frame-a", "frame-b", "frame-c"}
 	for j, f := range mp.Frames() {
 		require.Equal(t, want[j], string(f), "multipart frame[%d]", j)
+		require.Equal(t, len(f), cap(f), "multipart cap[%d]", j)
 	}
+	// Appending through one frame must not clobber the next.
+	_ = append(mp.Frames()[0], "CLOBBER"...)
+	require.Equal(t, "frame-b", string(mp.Frames()[1]), "append leaked into the next frame")
+}
+
+// requireIndependentFrames checks the frames of a delivered message match
+// want, each has cap == len (an append cannot reach scratch or a
+// neighbouring frame) and none is nil.
+func requireIndependentFrames(t *testing.T, m *msg.Msg, want [][]byte, label string) {
+	t.Helper()
+	require.Equal(t, len(want), m.NumFrames(), "%s: frame count", label)
+	for i, f := range m.Frames() {
+		require.Equal(t, want[i], f, "%s: frame[%d]", label, i)
+		require.NotNil(t, f, "%s: frame[%d] nil", label, i)
+		require.Equal(t, len(f), cap(f), "%s: frame[%d] cap", label, i)
+	}
+}
+
+// TestReader_ManyFrameMessageFlushesScratch: one message of 20 x 300 B
+// frames outgrows the reader's scratch, so its pending frames are copied
+// out mid-message and the rest accumulate from the front again (the mixed
+// path); the next, small message must still arrive intact.
+func TestReader_ManyFrameMessageFlushesScratch(t *testing.T) {
+	t.Parallel()
+	sA, sB := startZmtpPair(t, 8)
+	ctx := testutil.Ctx(t, 5*time.Second)
+
+	big := make([][]byte, 20)
+	for i := range big {
+		big[i] = bytes.Repeat([]byte{byte(0x30 + i)}, 300)
+	}
+	small := [][]byte{[]byte("topic-03"), []byte("payload")}
+	require.NoError(t, sA.Pipe().Send(ctx, msg.FromFrames(big...)))
+	require.NoError(t, sA.Pipe().Send(ctx, msg.FromFrames(small...)))
+
+	got, err := sB.Pipe().Recv(ctx)
+	require.NoError(t, err)
+	requireIndependentFrames(t, got, big, "20x300")
+	got, err = sB.Pipe().Recv(ctx)
+	require.NoError(t, err)
+	requireIndependentFrames(t, got, small, "after flush")
+}
+
+// TestReader_EmptyDelimiterFrame: [empty, body] (the REQ/REP envelope
+// shape) and all-empty messages are delivered with non-nil empty frames.
+func TestReader_EmptyDelimiterFrame(t *testing.T) {
+	t.Parallel()
+	sA, sB := startZmtpPair(t, 8)
+	ctx := testutil.Ctx(t, 5*time.Second)
+
+	msgs := [][][]byte{
+		{{}, []byte("request body")},
+		{{}},
+		{{}, {}},
+		{[]byte("id"), {}, []byte("body")},
+	}
+	for _, fr := range msgs {
+		require.NoError(t, sA.Pipe().Send(ctx, msg.FromFrames(fr...)))
+	}
+	for i, fr := range msgs {
+		got, err := sB.Pipe().Recv(ctx)
+		require.NoError(t, err)
+		requireIndependentFrames(t, got, fr, fmt.Sprintf("msg[%d]", i))
+	}
+}
+
+// TestReader_PooledMidSizeFrames: with RecvBufferPool, a message of
+// [3000 B, 3000 B] has a second frame that fits scratch but not what is
+// left of it, so it comes from the pool; both frames must arrive intact
+// and, being <= 4 KiB, not lent.
+func TestReader_PooledMidSizeFrames(t *testing.T) {
+	t.Parallel()
+	connA, connB := newFakeConnPair()
+	sA, sB := startPair(t,
+		Config{Conn: connA, Mech: identityFramingMech{newFakeMech("NULL", false, nil)},
+			Codec: zmtp.NewFrameCodec(zmtp.MaxBodyUnlimited), SendHWM: 8, RecvHWM: 8},
+		Config{Conn: connB, Mech: identityFramingMech{newFakeMech("NULL", true, nil)},
+			Codec: zmtp.NewFrameCodec(zmtp.MaxBodyUnlimited), SendHWM: 8, RecvHWM: 8,
+			RecvBufferPool: true},
+	)
+	ctx := testutil.Ctx(t, 5*time.Second)
+
+	for round := 0; round < 3; round++ {
+		fr := [][]byte{bytes.Repeat([]byte{0xA1}, 3000), bytes.Repeat([]byte{0xB2}, 3000)}
+		require.NoError(t, sA.Pipe().Send(ctx, msg.FromFrames(fr...)))
+		got, err := sB.Pipe().Recv(ctx)
+		require.NoError(t, err)
+		require.False(t, got.Lent(), "round %d: frames <= 4 KiB are never lent", round)
+		requireIndependentFrames(t, got, fr, fmt.Sprintf("round %d", round))
+	}
+	// A frame above scratch is still lent.
+	huge := bytes.Repeat([]byte{0xC3}, readScratchSize+1)
+	require.NoError(t, sA.Pipe().Send(ctx, msg.FromFrames([]byte("hdr"), huge)))
+	got, err := sB.Pipe().Recv(ctx)
+	require.NoError(t, err)
+	require.True(t, got.Lent(), "large frame must be lent")
+	require.Equal(t, "hdr", string(got.Frames()[0]))
+	require.Equal(t, huge, got.Frames()[1])
+	got.Release()
+}
+
+// TestReader_CommandBetweenMoreFrames: a PING arriving between the frames
+// of a message is read into scratch's tail without disturbing the frames
+// already held there; the message arrives intact and the PONG goes out.
+func TestReader_CommandBetweenMoreFrames(t *testing.T) {
+	t.Parallel()
+	connA, connB := newFakeConnPair()
+	s := startTestSession(Config{
+		Conn:    connA,
+		Mech:    identityFramingMech{newFakeMech("NULL", false, nil)},
+		Codec:   zmtp.NewFrameCodec(zmtp.MaxBodyUnlimited),
+		SendHWM: 8,
+		RecvHWM: 8,
+	})
+	t.Cleanup(func() { _ = s.Stop() })
+	peer := newManualPeer(t, connB, nil)
+	waitHandshake(t, s, "A")
+	frames := peer.startReadLoop()
+	ctx := testutil.Ctx(t, 5*time.Second)
+
+	// Frames under 128 B encode identically under fakeCodec (the peer
+	// helpers') and ZMTP.
+	first, second := bytes.Repeat([]byte{'x'}, 100), bytes.Repeat([]byte{'y'}, 100)
+	require.NoError(t, fakeCodec{}.WriteFrame(peer.conn, zmtp.FlagMore, first))
+	peer.sendPing(10, []byte("ctx"))
+	require.NoError(t, fakeCodec{}.WriteFrame(peer.conn, 0, second))
+
+	got, err := s.Pipe().Recv(ctx)
+	require.NoError(t, err)
+	requireIndependentFrames(t, got, [][]byte{first, second}, "message around PING")
+	require.Equal(t, []byte("ctx"), waitCommand(t, frames, "PONG", 2*time.Second))
 }
 
 // TestReader_SubscriptionCommands: inbound SUBSCRIBE/CANCEL commands reach
