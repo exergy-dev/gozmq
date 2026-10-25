@@ -213,6 +213,11 @@ type End struct {
 	// engine detached the pipe is still stamped with the right identity
 	// without the engine retaining anything per departed peer.
 	routingID atomic.Pointer[[]byte]
+
+	// owed records that TrySendDeferred pushed messages whose wakeup
+	// Flush has not published yet. Only the goroutine that calls
+	// TrySendDeferred and Flush touches it.
+	owed bool
 }
 
 // SetNotify registers fn as this end's idle notification (see the idle
@@ -290,6 +295,57 @@ func (e *End) TrySend(m *msg.Msg) bool {
 		e.peer.woken()
 	}
 	return true
+}
+
+// pushDeferred enqueues m exactly like produce but leaves the consumer
+// wakeup to Flush.
+func (d *direction) pushDeferred(m *msg.Msg) bool { return d.q.push(m) }
+
+// TrySendDeferred is TrySend for a producer that publishes messages in
+// batches: it enqueues m (visible to TryRecv and Pending at once) but wakes
+// no parked receiver and runs no idle notification. The caller must call
+// Flush before it blocks, goes idle or exits; Flush publishes the wakeups
+// for the whole batch at once, which is what saves the park/unpark pair per
+// message a fast consumer would otherwise cost.
+//
+// TrySendDeferred and Flush on one End must be called from one goroutine or
+// under one external serialization (the session reader is the only user);
+// the deferred state is not synchronized. Other send methods may be mixed
+// in from other goroutines, they do not touch it.
+//
+// Why a late wakeup is safe. A consumer parks only after finding the queue
+// empty (it registers in rsleepers and re-checks, the protocol of Recv is
+// unchanged). Messages pushed after it parked are visible but it stays
+// asleep until Flush, so the delay is bounded by the producer's flush
+// discipline, one batch. The Dekker argument still holds at Flush time:
+// Flush loads rsleepers after the pushes' pubTail stores (all sequentially
+// consistent), so either the consumer's re-check saw the data or Flush sees
+// the sleeper and arms rwake. The same argument covers the idle flag.
+func (e *End) TrySendDeferred(m *msg.Msg) bool {
+	if m == nil || e.shared.closed.Load() {
+		return false
+	}
+	if !e.send.pushDeferred(m) {
+		return false
+	}
+	e.owed = true
+	return true
+}
+
+// Flush publishes the wakeups owed by TrySendDeferred: it arms a parked
+// receiver and runs the peer's idle notification. It is a no-op when
+// nothing is owed. Call it from the goroutine that calls TrySendDeferred.
+func (e *End) Flush() {
+	if !e.owed {
+		return
+	}
+	e.owed = false
+	if e.send.rsleepers.Load() > 0 { // W1
+		arm(e.send.rwake)
+	}
+	if e.peer.idle.Load() {
+		e.peer.woken()
+	}
 }
 
 // Send enqueues m for the peer, blocking while a bounded direction is full.

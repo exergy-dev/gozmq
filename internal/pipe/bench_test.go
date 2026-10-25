@@ -2,6 +2,7 @@ package pipe
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -56,6 +57,41 @@ func BenchmarkPipe_SPSC_Stream(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+	<-done
+}
+
+// BenchmarkPipe_SPSC_Deferred: like SPSC_Stream but the producer pushes in
+// batches of 64 with TrySendDeferred and one Flush, as the session reader
+// does. It spins (Gosched) while the bounded direction is full.
+func BenchmarkPipe_SPSC_Deferred(b *testing.B) {
+	const batch = 64
+	x, y := NewPair(1000, 1000, PeerInfo{}, PeerInfo{})
+	defer x.Close()
+	defer y.Close()
+	ctx := context.Background()
+	m := msg.FromBytes([]byte("x"))
+	b.ReportAllocs()
+	b.ResetTimer()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < b.N; i++ {
+			if _, err := y.Recv(ctx); err != nil {
+				b.Error(err)
+				return
+			}
+		}
+	}()
+	for i := 0; i < b.N; i++ {
+		for !x.TrySendDeferred(m) {
+			x.Flush()
+			runtime.Gosched()
+		}
+		if i%batch == batch-1 {
+			x.Flush()
+		}
+	}
+	x.Flush()
 	<-done
 }
 
