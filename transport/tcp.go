@@ -188,7 +188,16 @@ func (c *conn) RemoteEndpoint() string { return c.remote }
 const maxRetainedWriteBuf = 1 << 20
 
 func (c *conn) WriteBuffers(buffers *net.Buffers) (int64, error) {
-	if c.vectored || len(*buffers) == 1 {
+	if len(*buffers) == 1 {
+		// One buffer (a fully coalesced batch) is a plain write(2): no
+		// iovec setup for a vectored conn, no wbuf copy for TLS. Consume
+		// the slice header as WriteTo would.
+		b := (*buffers)[0]
+		*buffers = (*buffers)[1:]
+		n, err := c.Write(b)
+		return int64(n), err
+	}
+	if c.vectored {
 		return buffers.WriteTo(c.Conn)
 	}
 	c.wbuf = c.wbuf[:0]

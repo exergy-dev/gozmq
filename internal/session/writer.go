@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"unsafe"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
@@ -14,18 +15,34 @@ import (
 
 // Batch caps for write coalescing. The writer pulls additional messages
 // from the session pipe non-blocking after the first one and emits all
-// accumulated frames in one writev-backed syscall via net.Buffers. These
-// caps prevent unbounded memory growth and keep latency predictable under
-// sustained sender bursts.
+// accumulated frames in one flush. The caps are checked BEFORE each pull,
+// so one message may overshoot a cap by its own size. They prevent
+// unbounded memory growth and keep latency predictable under sustained
+// sender bursts.
 const (
-	// maxBatchMessages caps the number of messages coalesced into one
-	// writev. Picked to balance syscall amortization against worst-case
-	// latency if a single syscall stalls.
-	maxBatchMessages = 32
+	// coalesceBodyMax is the largest body (bytes) an identity-mechanism
+	// frame copies into scratch right after its header, so that header,
+	// body and the following small frames form one contiguous run (one
+	// iovec, one write). Larger bodies go to the wire by reference: the
+	// copy would cost more than the extra iovec saves.
+	coalesceBodyMax = 1024
 
-	// maxBatchBytes caps the total encoded bytes coalesced into one
-	// writev. Primary guard against pathological large-payload bursts
-	// pinning megabytes in the writer's buffer list.
+	// maxBatchCopied caps the bytes the batch copies into scratch (headers
+	// and small bodies). Large sealed CURVE bodies are not counted: they
+	// are one memmove each and bounded by maxBatchBytes.
+	maxBatchCopied = 64 << 10
+
+	// maxBatchIovecs stops pulling once the batch holds this many buffers,
+	// below IOV_MAX (1024) so one writev takes the whole batch.
+	maxBatchIovecs = 1000
+
+	// maxBatchMessages is a sanity cap for pathological tiny or empty
+	// messages; it also bounds the lent slice.
+	maxBatchMessages = 4096
+
+	// maxBatchBytes caps the total wire bytes in one batch, including
+	// bodies sent by reference. Primary guard against pathological
+	// large-payload bursts pinning megabytes in the writer.
 	maxBatchBytes = 2 << 20 // 2 MiB
 )
 
@@ -121,7 +138,7 @@ func (s *Session) writerNext() (*msg.Msg, error) {
 
 // writeBatchFrom encodes the commands queued on cmdCh, then first (when
 // not nil) plus any immediately-queued messages (bounded by
-// maxBatchMessages/maxBatchBytes) into batch and flushes them in one
+// the maxBatch* caps) into batch and flushes them in one
 // writev. Commands go first so a PONG never waits behind a data burst and
 // a command queued before a message precedes it on the wire. Shared by the
 // runWriter hot loop and the linger drain. On error it releases the batch,
@@ -143,7 +160,8 @@ func (s *Session) writeBatchFrom(batch *writerBatch, first *msg.Msg) error {
 		batchBytes, err = batch.appendMessage(s, first, batchBytes)
 	}
 	if err == nil {
-		for msgCount := 1; msgCount < maxBatchMessages && batchBytes < maxBatchBytes; msgCount++ {
+		for n := 1; n < maxBatchMessages && batchBytes < maxBatchBytes &&
+			batch.copied < maxBatchCopied && len(batch.buffers) < maxBatchIovecs; n++ {
 			next, ok := s.sessionPipe.TryRecv()
 			if !ok {
 				break
@@ -197,6 +215,20 @@ type writerBatch struct {
 	// after the flush, because frame bodies go to writev by reference.
 	// (Release on a plain message does nothing, so those are not tracked.)
 	lent []*msg.Msg
+
+	// copied counts the bytes this batch copied into scratch (headers and
+	// small bodies); it bounds the batch together with maxBatchCopied.
+	copied int
+
+	// tailRun is set when buffers[len-1] is exactly
+	// scratch[tailOff:len(scratch)] of the CURRENT backing array, so the
+	// next frame's scratch bytes can be folded into that entry instead of
+	// opening a new iovec. Invariants (see pushRun): wire order is buffers
+	// order; only the LAST entry is ever extended, and only beyond its
+	// current end; a scratch array that append relocated is never written
+	// again, which keeps entries pointing into it valid.
+	tailRun bool
+	tailOff int
 }
 
 // maxRetainedScratch bounds the scratch capacity a batch keeps between
@@ -215,6 +247,8 @@ func (b *writerBatch) release() {
 	} else {
 		b.scratch = b.scratch[:0]
 	}
+	b.copied = 0
+	b.tailRun, b.tailOff = false, 0
 	clear(b.buffers) // drop body references so sent frames can be collected
 	b.buffers = b.buffers[:0]
 	b.flush = nil
@@ -243,47 +277,125 @@ func (b *writerBatch) appendMessage(s *Session, m *msg.Msg, sizeSoFar int) (int,
 	return sizeSoFar, nil
 }
 
-// appendFrame adds one frame to the batch: its wire body first (when the
-// mechanism writes into scratch), then its header, then both to buffers in
-// wire order. It returns sizeSoFar plus the frame's wire size.
+// hdrTmp holds a frame header while appendSealed rotates it ahead of its
+// body. Codec headers are at most 11 bytes (ZMTP: 2 or 9; the test fake
+// 11); a longer one takes the two-entry path.
+type hdrTmp [16]byte
+
+// pushRun publishes scratch[off:len(scratch)], the bytes this frame
+// appended. base is unsafe.SliceData(b.scratch) captured by the caller
+// BEFORE any append for this frame. The last buffers entry is extended
+// only if it is the tail run (it ends at off) AND scratch was not
+// relocated (base unchanged); otherwise a new entry starts here. Every
+// path that appends a non-scratch entry (a body by reference) or a
+// non-contiguous pair clears tailRun right after.
+func (b *writerBatch) pushRun(off int, base *byte) {
+	end := len(b.scratch)
+	if end == off {
+		return
+	}
+	if b.tailRun && len(b.buffers) > 0 && unsafe.SliceData(b.scratch) == base {
+		b.buffers[len(b.buffers)-1] = b.scratch[b.tailOff:end:end]
+		return
+	}
+	b.tailRun, b.tailOff = true, off
+	b.buffers = append(b.buffers, b.scratch[off:end:end])
+}
+
+// appendFrame adds one frame to the batch and returns sizeSoFar plus the
+// frame's wire size. Small identity bodies are copied behind their header
+// so consecutive small frames collapse into one iovec (the wire bytes are
+// the same, only the iovec layout differs); large bodies and bodies from a
+// mechanism that returns fresh memory go to the wire by reference.
 func (b *writerBatch) appendFrame(s *Session, flags uint8, body []byte, sizeSoFar int) (int, error) {
-	wire, wireFlags := body, flags
 	off := len(b.scratch)
+	base := unsafe.SliceData(b.scratch)
 	var err error
 	switch {
 	case s.identityMech:
+		if b.scratch, err = s.cfg.Codec.AppendFrameHeader(b.scratch, flags, len(body)); err != nil {
+			return sizeSoFar, fmt.Errorf("gozmq/session: serialize frame: %w", err)
+		}
+		hdrLen := len(b.scratch) - off
+		if len(body) <= coalesceBodyMax {
+			b.scratch = append(b.scratch, body...)
+			b.copied += len(b.scratch) - off
+			b.pushRun(off, base)
+		} else {
+			b.copied += hdrLen
+			b.pushRun(off, base)
+			b.buffers = append(b.buffers, body)
+			b.tailRun = false
+		}
+		return sizeSoFar + hdrLen + len(body), nil
 	case s.appendEncode != nil:
-		b.scratch, wireFlags, err = s.appendEncode(b.scratch, flags, body)
-		wire = nil // b.scratch[off:bodyEnd], sliced once the header is in
-	default:
-		wireFlags, wire, err = s.encode(flags, body)
+		return b.appendSealed(s, flags, body, sizeSoFar)
 	}
+	wireFlags, wire, err := s.encode(flags, body)
 	if err != nil {
 		return sizeSoFar, fmt.Errorf("gozmq/session: encode frame: %w", err)
 	}
-	bodyEnd := len(b.scratch)
-	n := len(wire)
-	if wire == nil {
-		n = bodyEnd - off
-	}
-	if b.scratch, err = s.cfg.Codec.AppendFrameHeader(b.scratch, wireFlags, n); err != nil {
+	if b.scratch, err = s.cfg.Codec.AppendFrameHeader(b.scratch, wireFlags, len(wire)); err != nil {
 		return sizeSoFar, fmt.Errorf("gozmq/session: serialize frame: %w", err)
 	}
-	hdr := b.scratch[bodyEnd:len(b.scratch):len(b.scratch)]
-	if wire == nil {
-		wire = b.scratch[off:bodyEnd:bodyEnd]
-	}
-	b.buffers = append(b.buffers, hdr)
-	if n > 0 {
+	hdrLen := len(b.scratch) - off
+	b.copied += hdrLen
+	b.pushRun(off, base)
+	if len(wire) > 0 {
 		// Empty bodies are left out to keep writev's iovec count minimal;
 		// the header already says length 0.
 		b.buffers = append(b.buffers, wire)
+		b.tailRun = false
 	}
-	return sizeSoFar + len(hdr) + n, nil
+	return sizeSoFar + hdrLen + len(wire), nil
+}
+
+// appendSealed adds a frame whose mechanism seals the body into scratch
+// (security.FrameAppender): the body lands at scratch[off:bodyEnd) and the
+// header is appended after it. A small frame is then rotated in place into
+// wire order (header, body) so it joins the tail run like an identity
+// frame; a large one goes to buffers as two entries, header first, to
+// avoid a big memmove.
+func (b *writerBatch) appendSealed(s *Session, flags uint8, body []byte, sizeSoFar int) (int, error) {
+	off := len(b.scratch)
+	base := unsafe.SliceData(b.scratch)
+	var err error
+	var wireFlags uint8
+	if b.scratch, wireFlags, err = s.appendEncode(b.scratch, flags, body); err != nil {
+		return sizeSoFar, fmt.Errorf("gozmq/session: encode frame: %w", err)
+	}
+	bodyEnd := len(b.scratch)
+	n := bodyEnd - off
+	if b.scratch, err = s.cfg.Codec.AppendFrameHeader(b.scratch, wireFlags, n); err != nil {
+		return sizeSoFar, fmt.Errorf("gozmq/session: serialize frame: %w", err)
+	}
+	end := len(b.scratch)
+	hdrLen := end - bodyEnd
+	if n <= coalesceBodyMax && hdrLen <= len(hdrTmp{}) {
+		// Rotate [body|hdr] to [hdr|body] within [off:end). No published
+		// entry covers that range, and it happens before pushRun does.
+		var tmp hdrTmp
+		copy(tmp[:], b.scratch[bodyEnd:end])
+		copy(b.scratch[off+hdrLen:end], b.scratch[off:bodyEnd])
+		copy(b.scratch[off:], tmp[:hdrLen])
+		b.copied += hdrLen + n
+		b.pushRun(off, base)
+		return sizeSoFar + hdrLen + n, nil
+	}
+	b.copied += hdrLen
+	b.buffers = append(b.buffers, b.scratch[bodyEnd:end:end])
+	if n > 0 {
+		b.buffers = append(b.buffers, b.scratch[off:bodyEnd:bodyEnd])
+	}
+	b.tailRun = false
+	return sizeSoFar + hdrLen + n, nil
 }
 
 // flushBatch writes the accumulated frame blobs to the conn in a
-// single writev syscall (where supported by the underlying net.Conn).
+// single syscall (where supported by the underlying net.Conn). It always
+// goes through WriteBuffers when the conn has one, even for a single
+// buffer: the transport turns a one-buffer batch (a fully coalesced one)
+// into a plain write(2) and several into writev(2). Otherwise
 // net.Buffers.WriteTo preserves order and detects io.Writer shortcuts
 // for *net.TCPConn / *net.UnixConn to use writev(2); for other writers
 // it falls back to a Write loop. Either way, ordering is preserved.
