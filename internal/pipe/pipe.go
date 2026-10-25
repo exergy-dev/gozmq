@@ -2,16 +2,17 @@
 // queue that connects a socket engine to a session (ZMTP or STREAM raw
 // mode) or, on inproc, to another socket's engine.
 //
-// Each direction has its own high-water mark. A positive HWM is the capacity
-// of a plain buffered channel. HWM 0 means unlimited: the direction is a
-// channel of unboundedChanCap plus a mutex-guarded overflow slice that the
-// receiving End refills the channel from after every receive. No goroutine
-// is involved either way, so an End that is never closed leaks nothing but
-// memory the GC reclaims.
+// Each direction has its own high-water mark, a message count: a positive
+// HWM bounds the direction and HWM 0 means unlimited. Storage is a chunked
+// FIFO (see queue) that grows with the actual depth, so a large or
+// unlimited HWM costs nothing until messages are queued. Producers and
+// consumers of a direction never share a lock. A goroutine is never
+// involved, so an End that is never closed leaks nothing but memory the GC
+// reclaims.
 //
 // All I/O goes through End methods (there is no raw channel access). That is
-// what keeps the overflow refill, the idle notification and the SendDrained
-// signal impossible to skip.
+// what keeps the wakeups, the idle notification and the SendDrained signal
+// impossible to skip.
 package pipe
 
 import (
@@ -36,11 +37,6 @@ var ErrAborted = errors.New("gozmq/pipe: aborted")
 type PeerInfo struct {
 	Identity []byte
 }
-
-// unboundedChanCap is the channel capacity of an HWM-0 direction. Messages
-// beyond it wait in the overflow slice; a larger channel only means fewer
-// trips through the overflow lock under a burst.
-const unboundedChanCap = 1024
 
 // NewPair returns two Ends bound to one another. aToB is the maximum
 // number of messages buffered in the A→B direction; bToA is the B→A
@@ -70,160 +66,110 @@ type shared struct {
 	eitherOnce sync.Once
 }
 
-// direction is one half of the pipe.
+// direction is one half of the pipe: a queue plus the parking protocol for
+// goroutines blocked on it.
 //
-// Unbounded (HWM 0) invariant: while overflow is non-empty the channel is
-// full or about to be refilled, so a receiver parked on an empty channel is
-// never stranded. Both sides keep it: a sender that appends to overflow
-// sets slowOverflow before trying to move messages into the channel, and a
-// receiver loads flags after taking from the channel and refills if the bit
-// is set. Under Go's sequentially consistent synchronization one of the two
-// always sees the other.
+// Parking. A consumer that finds the queue empty registers in rsleepers
+// (R2) and only then re-checks the queue (C1 inside pop); a producer
+// publishes its message (P2) and only then loads rsleepers (W1). All are
+// sequentially consistent, so either the consumer's re-check sees the
+// message (no park) or the producer sees the registration and arms rwake.
+// The mirror pair guards blocked producers: wsleepers is registered (S1)
+// before the producer's retry reloads pubHead (P1), and a consumer stores
+// pubHead (C2) before loading wsleepers (R1).
+//
+// The sleeper counts are counters, not flags. With a flag, consumer A could
+// wake, take message 1 and clear the flag while message 2 is queued and a
+// second parked consumer B holds no token: a lost wakeup. With counters a
+// waker that succeeds passes a baton: while sleepers remain and work (or
+// room) is still available it arms the wake channel again. Invariant:
+// whenever pending() and rsleepers > 0, a token is in rwake or a woken
+// consumer holds it and has not re-checked yet. Stale tokens are harmless,
+// a token only ever makes someone re-check. The same holds for room and
+// wsleepers. With HWM 0 producers never park, so the producer baton is
+// unreachable but stays well defined.
+//
+// Traps: arm never blocks and the wake channels are never closed (a close
+// would wake every future sleeper too); every exit from a park path
+// decrements its counter; no queue or drain mutex is held while calling arm
+// or End.woken.
 type direction struct {
-	ch        chan *msg.Msg
-	unbounded bool
+	q *queue
 
-	// flags holds the slow* bits. It is written only under mu but read
-	// without it, so the hot paths cost one atomic load when all are
-	// clear: the sender checks slowOverflow, the receiver checks all.
-	flags atomic.Uint32
+	rsleepers atomic.Int32 // consumers parked or about to park
+	wsleepers atomic.Int32 // producers parked or about to park at HWM
+	rwake     chan struct{}
+	wwake     chan struct{}
 
-	mu       sync.Mutex
-	overflow []*msg.Msg // unbounded only; overflow[head:] is queued, FIFO after ch
-	head     int
-
+	// SendDrained state. draining is set (under dmu) while SendDrained
+	// waits for the queue to empty; consume checks it after every pop.
+	draining  atomic.Bool
+	dmu       sync.Mutex
 	drainCh   chan struct{} // closed once empty after SendDrained, or on close
 	drainDone bool
 }
 
-// Bits of direction.flags.
-const (
-	slowOverflow uint32 = 1 << iota // overflow holds messages
-	slowDraining                    // SendDrained is waiting for the direction to empty
-)
-
 func newDirection(hwm int) *direction {
-	if hwm > 0 {
-		return &direction{ch: make(chan *msg.Msg, hwm)}
+	return &direction{
+		q:     newQueue(hwm),
+		rwake: make(chan struct{}, 1),
+		wwake: make(chan struct{}, 1),
 	}
-	return &direction{ch: make(chan *msg.Msg, unboundedChanCap), unbounded: true}
 }
 
-// setFlagLocked sets or clears bit. Caller holds d.mu, which serializes
-// every writer of flags.
-func (d *direction) setFlagLocked(bit uint32, on bool) {
-	f := d.flags.Load()
-	if on {
-		f |= bit
-	} else {
-		f &^= bit
+// arm leaves a token in ch unless one is already there. Never blocks.
+func arm(ch chan struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
 	}
-	d.flags.Store(f)
 }
 
-// trySend enqueues m without blocking. Bounded directions fail when the
-// channel is full; unbounded ones always succeed, spilling into overflow
-// (and staying there while anything older is) to keep FIFO order.
-func (d *direction) trySend(m *msg.Msg) bool {
-	if d.flags.Load()&slowOverflow == 0 {
-		select {
-		case d.ch <- m:
-			return true
-		default:
-		}
-	}
-	if !d.unbounded {
+// produce enqueues m if there is room and wakes a parked consumer.
+func (d *direction) produce(m *msg.Msg) bool {
+	if !d.q.push(m) {
 		return false
 	}
-	d.mu.Lock()
-	d.overflow = append(d.overflow, m)
-	d.setFlagLocked(slowOverflow, true)
-	d.refillLocked()
-	d.mu.Unlock()
+	if d.rsleepers.Load() > 0 { // W1
+		arm(d.rwake)
+	}
 	return true
 }
 
-// refillLocked moves overflow into the channel, oldest first, until the
-// channel is full or overflow is empty. Caller holds d.mu.
-func (d *direction) refillLocked() {
-	for d.head < len(d.overflow) {
-		select {
-		case d.ch <- d.overflow[d.head]:
-			d.overflow[d.head] = nil
-			d.head++
-			continue
-		default:
-		}
-		break
+// consume takes the next queued message, wakes a parked producer and fires
+// the SendDrained signal if this emptied the queue.
+func (d *direction) consume() (*msg.Msg, bool) {
+	m, ok := d.q.pop()
+	if !ok {
+		return nil, false
 	}
-	switch {
-	case d.head == len(d.overflow):
-		d.overflow, d.head = d.overflow[:0], 0
-	case d.head > len(d.overflow)/2:
-		// Compact so a long-lived backlog does not pin a growing prefix.
-		n := copy(d.overflow, d.overflow[d.head:])
-		clear(d.overflow[n:])
-		d.overflow, d.head = d.overflow[:n], 0
+	if d.wsleepers.Load() > 0 { // R1
+		arm(d.wwake)
 	}
-	d.setFlagLocked(slowOverflow, len(d.overflow) > 0)
+	if d.draining.Load() {
+		d.checkDrain()
+	}
+	return m, true
 }
 
-// received runs after every successful receive: it refills the channel
-// from overflow and fires the SendDrained signal once the direction is
-// empty. Both cost one atomic load when there is nothing to do.
-func (d *direction) received() {
-	if d.flags.Load() != 0 {
-		d.receivedSlow()
-	}
-}
-
-func (d *direction) receivedSlow() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	f := d.flags.Load()
-	if f&slowOverflow != 0 {
-		d.refillLocked()
-	}
-	if f&slowDraining != 0 && len(d.ch) == 0 && d.flags.Load()&slowOverflow == 0 {
+// checkDrain fires the drain signal if SendDrained is waiting and the
+// queue is empty.
+func (d *direction) checkDrain() {
+	d.dmu.Lock()
+	if d.draining.Load() && !d.q.pending() {
 		d.fireDrainLocked()
 	}
-}
-
-// tryRecv takes the next queued message without blocking.
-func (d *direction) tryRecv() (*msg.Msg, bool) {
-	for {
-		select {
-		case m := <-d.ch:
-			d.received()
-			return m, true
-		default:
-		}
-		// The channel is empty. A sender may be between setting
-		// slowOverflow and moving its message in; do the move ourselves.
-		if d.flags.Load()&slowOverflow == 0 {
-			return nil, false
-		}
-		d.mu.Lock()
-		d.refillLocked()
-		d.mu.Unlock()
-	}
-}
-
-// pending reports whether a message is ready to receive. flags is loaded
-// first: that atomic load orders the plain len read after whatever atomic
-// the caller did before (see End.MarkIdle).
-func (d *direction) pending() bool {
-	return d.flags.Load()&slowOverflow != 0 || len(d.ch) > 0
+	d.dmu.Unlock()
 }
 
 // fireDrainLocked closes drainCh (creating it pre-closed if SendDrained has
-// not asked yet) exactly once. Caller holds d.mu.
+// not asked yet) exactly once. Caller holds d.dmu.
 func (d *direction) fireDrainLocked() {
 	if d.drainDone {
 		return
 	}
 	d.drainDone = true
-	d.setFlagLocked(slowDraining, false)
+	d.draining.Store(false)
 	if d.drainCh != nil {
 		close(d.drainCh)
 	}
@@ -249,20 +195,16 @@ type End struct {
 	// No wakeup is lost. The receiver sets idle with an atomic Swap and
 	// only then looks at the queue again; the sender publishes its message
 	// and only then loads idle. Both idle operations are sequentially
-	// consistent, the enqueue is published by the channel lock release (a
-	// full barrier in the runtime) or, for an HWM-0 spill, by the
-	// slowOverflow flag store, and the receiver's re-check reads the
-	// channel count and flags with atomic loads. So as in Dekker's
-	// algorithm at least one side sees the other: the receiver finds the
+	// consistent: the enqueue is published by the pubTail store, and the
+	// receiver's re-check (a pop, or the pubTail load in pending) reads it
+	// atomically. So as in Dekker's algorithm at least one side sees the other: the receiver finds the
 	// message, or the sender finds idle set and notifies. When both happen
 	// the receiver clears idle again with a CAS and notify may run once
 	// for nothing. Close pairs a closed-flag store with the same idle
 	// load, and a receiver checks IsClosed after setting idle.
 	//
-	// The re-check must not be a bare len(ch): that plain load could be
-	// satisfied before the Swap's store on weakly ordered CPUs. RecvOrIdle
-	// re-checks with a channel receive; MarkIdle, which must not consume,
-	// loads flags atomically before len (direction.pending).
+	// The re-check must be an atomic load (pop's pubTail load, or
+	// queue.pending) so it cannot be satisfied before the Swap's store.
 	idle   atomic.Bool
 	notify atomic.Pointer[func()]
 
@@ -302,11 +244,11 @@ func (e *End) woken() {
 // runs the notification, and reports false.
 func (e *End) RecvOrIdle() (*msg.Msg, bool) {
 	d := e.recv
-	if m, ok := d.tryRecv(); ok {
+	if m, ok := d.consume(); ok {
 		return m, true
 	}
 	e.idle.Swap(true)
-	if m, ok := d.tryRecv(); ok {
+	if m, ok := d.consume(); ok {
 		// Raced a sender. If it already cleared idle its notification is
 		// merely early; otherwise nothing will notify for m.
 		e.idle.CompareAndSwap(true, false)
@@ -319,11 +261,11 @@ func (e *End) RecvOrIdle() (*msg.Msg, bool) {
 // reports whether a message is queued and, if not, marks this end idle.
 func (e *End) MarkIdle() bool {
 	d := e.recv
-	if d.pending() {
+	if d.q.pending() {
 		return true
 	}
 	e.idle.Swap(true)
-	if d.pending() {
+	if d.q.pending() {
 		e.idle.CompareAndSwap(true, false)
 		return true
 	}
@@ -332,16 +274,7 @@ func (e *End) MarkIdle() bool {
 
 // Len reports how many messages are queued for this end. It is a gauge for
 // metrics, not a readiness signal.
-func (e *End) Len() int {
-	d := e.recv
-	n := len(d.ch)
-	if d.flags.Load()&slowOverflow != 0 {
-		d.mu.Lock()
-		n += len(d.overflow) - d.head
-		d.mu.Unlock()
-	}
-	return n
-}
+func (e *End) Len() int { return e.recv.q.length() }
 
 // TrySend enqueues m for the peer without blocking. It returns false when
 // m is nil, either end is closed, or a bounded direction is full. An
@@ -350,7 +283,7 @@ func (e *End) TrySend(m *msg.Msg) bool {
 	if m == nil || e.shared.closed.Load() {
 		return false
 	}
-	if !e.send.trySend(m) {
+	if !e.send.produce(m) {
 		return false
 	}
 	if e.peer.idle.Load() {
@@ -380,24 +313,43 @@ func (e *End) enqueue(ctx context.Context, m *msg.Msg, abort <-chan struct{}) er
 	if e.shared.closed.Load() {
 		return io.ErrClosedPipe
 	}
-	if e.send.trySend(m) {
+	d := e.send
+	if d.produce(m) {
 		if e.peer.idle.Load() {
 			e.peer.woken()
 		}
 		return nil
 	}
-	select {
-	case e.send.ch <- m:
-		if e.peer.idle.Load() {
-			e.peer.woken()
+	for {
+		d.wsleepers.Add(1) // S1
+		if d.produce(m) {  // retry reloads pubHead (P1)
+			d.wsleepers.Add(-1)
+			// Baton: another parked producer may fit too.
+			if d.wsleepers.Load() > 0 && d.q.hasRoom() {
+				arm(d.wwake)
+			}
+			if e.peer.idle.Load() {
+				e.peer.woken()
+			}
+			return nil
 		}
-		return nil
-	case <-abort:
-		return ErrAborted
-	case <-e.shared.either:
-		return io.ErrClosedPipe
-	case <-ctx.Done():
-		return ctx.Err()
+		if e.shared.closed.Load() {
+			d.wsleepers.Add(-1)
+			return io.ErrClosedPipe
+		}
+		select {
+		case <-d.wwake:
+			d.wsleepers.Add(-1)
+		case <-abort:
+			d.wsleepers.Add(-1)
+			return ErrAborted
+		case <-e.shared.either:
+			d.wsleepers.Add(-1)
+			return io.ErrClosedPipe
+		case <-ctx.Done():
+			d.wsleepers.Add(-1)
+			return ctx.Err()
+		}
 	}
 }
 
@@ -405,7 +357,7 @@ func (e *End) enqueue(ctx context.Context, m *msg.Msg, abort <-chan struct{}) er
 // before a close stay receivable, so on a closed pipe a false result means
 // the queue is exhausted.
 func (e *End) TryRecv() (*msg.Msg, bool) {
-	return e.recv.tryRecv()
+	return e.recv.consume()
 }
 
 // Recv returns the next message from the peer, blocking until one arrives.
@@ -418,40 +370,49 @@ func (e *End) Recv(ctx context.Context) (*msg.Msg, error) {
 // RecvOr is Recv that also gives up with ErrAborted when abort fires.
 func (e *End) RecvOr(ctx context.Context, abort <-chan struct{}) (*msg.Msg, error) {
 	d := e.recv
-	select {
-	case m := <-d.ch:
-		d.received()
-		return m, nil
-	default:
-	}
-	return e.recvSlow(ctx, abort)
-}
-
-// recvSlow is RecvOr once the channel was found empty: it refills from
-// overflow if a sender left something there, then blocks.
-func (e *End) recvSlow(ctx context.Context, abort <-chan struct{}) (*msg.Msg, error) {
-	d := e.recv
-	if m, ok := d.tryRecv(); ok {
+	// A queued message beats a fired abort or ctx.
+	if m, ok := d.consume(); ok {
 		return m, nil
 	}
-	select {
-	case m := <-d.ch:
-		d.received()
-		return m, nil
-	case <-abort:
-		return nil, ErrAborted
-	case <-e.shared.either:
-		if m, ok := d.tryRecv(); ok {
+	for {
+		d.rsleepers.Add(1)            // R2
+		if m, ok := d.consume(); ok { // C1 inside
+			d.rsleepers.Add(-1)
+			// Baton: another parked consumer may have work too.
+			if d.rsleepers.Load() > 0 && d.q.pending() {
+				arm(d.rwake)
+			}
 			return m, nil
 		}
-		return nil, io.EOF
-	case <-ctx.Done():
-		return nil, ctx.Err()
+		if e.shared.closed.Load() {
+			d.rsleepers.Add(-1)
+			// Close may have raced a final push.
+			if m, ok := d.consume(); ok {
+				return m, nil
+			}
+			return nil, io.EOF
+		}
+		select {
+		case <-d.rwake:
+			d.rsleepers.Add(-1)
+		case <-abort:
+			d.rsleepers.Add(-1)
+			return nil, ErrAborted
+		case <-e.shared.either:
+			d.rsleepers.Add(-1)
+			if m, ok := d.consume(); ok {
+				return m, nil
+			}
+			return nil, io.EOF
+		case <-ctx.Done():
+			d.rsleepers.Add(-1)
+			return nil, ctx.Err()
+		}
 	}
 }
 
 // Pending reports whether a message is queued for this end right now.
-func (e *End) Pending() bool { return e.recv.pending() }
+func (e *End) Pending() bool { return e.recv.q.pending() }
 
 // SendDrained returns a channel closed once the peer has received every
 // message this end sent, or either end closed. It is the linger-drain
@@ -460,8 +421,8 @@ func (e *End) Pending() bool { return e.recv.pending() }
 // more (after engine.Close).
 func (e *End) SendDrained() <-chan struct{} {
 	d := e.send
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	d.dmu.Lock()
+	defer d.dmu.Unlock()
 	if d.drainCh == nil {
 		d.drainCh = make(chan struct{})
 		if d.drainDone {
@@ -469,8 +430,12 @@ func (e *End) SendDrained() <-chan struct{} {
 		}
 	}
 	if !d.drainDone {
-		d.setFlagLocked(slowDraining, true)
-		if len(d.ch) == 0 && d.flags.Load()&slowOverflow == 0 {
+		// draining is stored before the pending check: it pairs with
+		// consume's pubHead store followed by its draining load, so
+		// either this check sees the emptied queue or that pop sees
+		// draining and fires.
+		d.draining.Store(true)
+		if !d.q.pending() {
 			d.fireDrainLocked()
 		}
 	}
@@ -485,9 +450,9 @@ func (e *End) Close() error {
 		e.shared.closed.Store(true)
 		e.shared.eitherOnce.Do(func() { close(e.shared.either) })
 		for _, d := range [...]*direction{e.send, e.recv} {
-			d.mu.Lock()
+			d.dmu.Lock()
 			d.fireDrainLocked()
-			d.mu.Unlock()
+			d.dmu.Unlock()
 		}
 		// Notify idle receivers on either end so they observe the close.
 		e.woken()
