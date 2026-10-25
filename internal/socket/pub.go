@@ -14,7 +14,7 @@ import (
 )
 
 // Synthetic subscription message format: a single-frame message whose
-// first byte is SubscribeByte (0x01) or UnsubscribeByte (0x00), followed
+// first byte is subscribeByte (0x01) or unsubscribeByte (0x00), followed
 // by the subscription prefix bytes. This is the same on-wire shape
 // libzmq XPUB surfaces to its application and the same shape XSUB
 // accepts from its application; we reuse it internally to carry
@@ -25,8 +25,8 @@ import (
 // SUBSCRIBE/CANCEL commands are converted to synthetic messages on the
 // inbound pipe.
 const (
-	SubscribeByte   byte = 0x01
-	UnsubscribeByte byte = 0x00
+	subscribeByte   byte = 0x01
+	unsubscribeByte byte = 0x00
 )
 
 // isSubscriptionMsg reports whether m looks like a synthetic subscription
@@ -46,9 +46,9 @@ func isSubscriptionMsg(m *msg.Msg) (bool, bool, []byte) {
 		return false, false, nil
 	}
 	switch f[0] {
-	case SubscribeByte:
+	case subscribeByte:
 		return true, true, f[1:]
-	case UnsubscribeByte:
+	case unsubscribeByte:
 		return true, false, f[1:]
 	}
 	return false, false, nil

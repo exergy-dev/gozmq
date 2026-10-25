@@ -97,7 +97,7 @@ func TestSub_ForwardsSubscriptionToAttachedPeer(t *testing.T) {
 	require.Equal(t, 1, m.NumFrames(), "single-frame subscription msg")
 	body := m.Frames()[0]
 	require.Len(t, body, 1+len("topic"))
-	require.Equal(t, socket.SubscribeByte, body[0])
+	require.Equal(t, byte(0x01), body[0])
 	require.Equal(t, "topic", string(body[1:]))
 }
 
@@ -124,7 +124,7 @@ func TestSub_ReplaysSubscriptionsOnAttach(t *testing.T) {
 		m, err := b.Recv(ctx)
 		require.NoError(t, err, "peer recv %d", i)
 		body := m.Frames()[0]
-		require.Equal(t, socket.SubscribeByte, body[0], "expected subscribe byte")
+		require.Equal(t, byte(0x01), body[0], "expected subscribe byte")
 		got[string(body[1:])] = true
 	}
 	require.True(t, got["foo"] && got["bar"], "replayed subs = %v, want foo+bar", got)
@@ -148,7 +148,7 @@ func TestSub_RefcountedSubscribe(t *testing.T) {
 	// Exactly one SUBSCRIBE should surface.
 	m, err := b.Recv(ctx)
 	require.NoError(t, err, "recv sub")
-	require.Equal(t, socket.SubscribeByte, m.Frames()[0][0])
+	require.Equal(t, byte(0x01), m.Frames()[0][0])
 	require.Equal(t, "x", string(m.Frames()[0][1:]))
 	// No second subscribe should be pending.
 	shortCtx, sc := context.WithTimeout(ctx, 100*time.Millisecond)
@@ -167,6 +167,6 @@ func TestSub_RefcountedSubscribe(t *testing.T) {
 	require.NoError(t, sub.Unsubscribe([]byte("x")), "unsub2")
 	m, err = b.Recv(ctx)
 	require.NoError(t, err, "recv cancel")
-	require.Equal(t, socket.UnsubscribeByte, m.Frames()[0][0])
+	require.Equal(t, byte(0x00), m.Frames()[0][0])
 	require.Equal(t, "x", string(m.Frames()[0][1:]))
 }

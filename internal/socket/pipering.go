@@ -14,9 +14,7 @@ import (
 //
 // The cursor always points at the peer to try next. remove keeps it pointing
 // at the same logical "next" peer across deletions, and advancePast steps it
-// forward only when the peer it just used is still where it was — the two
-// rules that were previously duplicated, and easy to get subtly wrong,
-// across the load-balancing engines.
+// forward only when the peer it just used is still where it was.
 type pipeRing struct {
 	pipes  []*pipe.End
 	cursor int
