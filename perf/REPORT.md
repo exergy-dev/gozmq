@@ -70,26 +70,33 @@ message and makes no collection at all in the timed window.
 
 ### ipc
 
-One run (`TRANSPORTS=ipc`), stock libzmq tool settings on the libzmq side:
+One run (`TRANSPORTS=ipc`), stock libzmq tool settings on the libzmq side
+except where noted:
 
 | size | gozmq | libzmq | ratio |
 | :--- | ---: | ---: | ---: |
-| 32 B | 12.4M | 9.3M | 1.33× |
-| 256 B | 6.1M | 2.6M | 2.40× |
-| 1 KB | 2.2M | 0.6M | 3.66× |
-| 8 KB | 0.52M | 0.07M | 6.9× |
-| 64 KB | 0.08M | 0.05M | 1.85× |
+| 32 B | 12.5M | 9.6M | 1.31× |
+| 256 B | 6.1M | 2.6M | 2.35× |
+| 1 KB | 2.3M | 0.6M | 3.8× |
+| 8 KB | 0.54M | 0.07M | 7.5× |
+| 64 KB | 0.09M | 0.05M | 1.83× |
 
-Read the libzmq column as "stock perf-tool settings" (HWM 1000, allocation
-per message), as the script's header says; ipc ratios overstate gozmq.
-The mixed gozmq PUSH → libzmq PULL cell at 32 B reads FAIL: libzmq stops
-polling once its receive pipe is at the stock RCVHWM, a unix socket reports
-EPOLLHUP as soon as the peer closes, and libzmq's engine takes that as an
-I/O error in the stopped state, so it never drains the kernel queue and its
-tool waits forever for the lost tail (verified: 96,548 of 100,000 messages
-arrive at RCVHWM 1000, all 1,000,000 at RCVHWM 1,000,000, and gozmq's sender
-writes every byte either way). It does not happen over TCP, where there is
-no HUP until both directions close.
+Mixed pairings: gozmq PUSH → libzmq PULL 8.9M at 32 B and 0.07M at 64 KB;
+libzmq PUSH → gozmq PULL 10.1M and 0.04M. Read the libzmq column as "stock
+perf-tool settings" (HWM 1000, allocation per message), as the script's
+header says; ipc ratios overstate gozmq.
+
+The gozmq PUSH → libzmq PULL pairing over ipc needs the C receiver's
+RCVHWM raised to the message count (the script does this for that cell
+only), and the reason is a libzmq receiver behaviour: it stops polling the
+socket once its receive pipe is at HWM, a unix socket reports EPOLLHUP as
+soon as the peer closes, and libzmq's engine takes that as an I/O error in
+the stopped state and never drains the kernel queue, so the tail of a
+burst is lost and its tool waits forever (96,548 of 100,000 messages arrive
+at RCVHWM 1000, all 1,000,000 with it raised; gozmq's sender writes every
+byte either way, verified with strace). It does not happen over TCP, where
+there is no HUP until both directions close, nor with libzmq's own sender,
+whose SNDHWM of 1000 keeps the receiver's pipe from filling.
 
 ### REQ/REP round trip over TCP
 

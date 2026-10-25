@@ -31,16 +31,17 @@
 # bottleneck (libzmq still wins at 32B), but over IPC they appear to inflate
 # gozmq's relative throughput. Treat the TCP table as the trustworthy
 # cross-implementation comparison; read the IPC libzmq column as "stock libzmq
-# perf-tool settings," not a tuned ceiling. The mixed gozmq PUSH -> libzmq
-# PULL cell over IPC reads FAIL at 32 B: libzmq stops polling the socket once
-# its receive pipe is at the stock RCVHWM (1000), a unix socket reports
+# perf-tool settings," not a tuned ceiling. One exception to "stock": the
+# mixed gozmq PUSH -> libzmq PULL pairing over IPC runs the C receiver with
+# ZMQ_RCVHWM set to the message count. With the stock 1000, libzmq stops
+# polling the socket once its receive pipe is full, a unix socket reports
 # EPOLLHUP as soon as the peer closes, and libzmq's engine takes that as an
-# I/O error in the stopped state and never drains the kernel queue, so the
-# tail of the burst is lost and local_thr waits forever (verified: the same
-# run with ZMQ_RCVHWM raised to the message count delivers every message;
-# over TCP there is no HUP until both directions close, so it does not
-# happen there). It is a libzmq receiver behaviour, not something the gozmq
-# sender can change.
+# I/O error in the stopped state and never drains the kernel queue: the tail
+# of the burst is lost and local_thr waits forever (96,548 of 100,000
+# messages arrive at RCVHWM 1000, all of them with RCVHWM raised; gozmq's
+# sender writes every byte either way; over TCP there is no HUP until both
+# directions close, so it does not happen there). A libzmq receiver
+# behaviour, not something the gozmq sender can change.
 #
 # GOZMQ_LOCAL_FLAGS passes extra flags to gozmq's receiver. zmqperf already
 # receives into the buffer pool and releases every message (-pool, the
@@ -76,7 +77,10 @@ one_run() { # recv_kind send_kind transport size count -> echoes msg/s (0 on fai
   fi
   : > "$srv"
   if [ "$rk" = c ]; then
-    timeout "$PER_RUN_TIMEOUT" "$tmp/c_local_thr"  "$ep" "$size" "$count" > "$srv" 2>/dev/null & local p=$!
+    # libzmq PULL from a gozmq PUSH over ipc: RCVHWM = count, see the header.
+    local hwm_env=
+    [ "$tr" = ipc ] && [ "$sk" != c ] && hwm_env="ZMQ_RCVHWM=$count"
+    env $hwm_env timeout "$PER_RUN_TIMEOUT" "$tmp/c_local_thr"  "$ep" "$size" "$count" > "$srv" 2>/dev/null & local p=$!
   else
     # shellcheck disable=SC2086 # GOZMQ_LOCAL_FLAGS is a flag list
     timeout "$PER_RUN_TIMEOUT" "$tmp/zmqperf" local_thr  -endpoint "$ep" -size "$size" -count "$count" ${GOZMQ_GOGC+-gogc $GOZMQ_GOGC} ${GOZMQ_LOCAL_FLAGS-} > "$srv" 2>/dev/null & local p=$!
