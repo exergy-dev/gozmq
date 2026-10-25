@@ -77,6 +77,7 @@ package socket
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
@@ -88,26 +89,47 @@ import (
 // metric counters struct, the readiness gates and the broadcast helper. The
 // two large reusable primitives live in sibling files in this package:
 // LoadBalancer in loadbalancer.go, FairQueue in fairqueue.go. The simple
-// combinator engines (PUSH/PULL/DEALER) are in combinators.go.
+// PUSH/PULL/DEALER engine is in queues.go.
 
 // counters holds the standard per-engine metric counters. Engines embed it so
 // the promoted sent/recv/dropped fields work in place (e.counters.sent ==
-// e.sent), and snapshot builds the Metrics. dropped and queueDepth
-// are passed explicitly because they usually combine an engine-local counter
-// with a FairQueue gauge.
+// e.sent), and snapshot builds the Metrics around the queue-depth gauge the
+// engine passes (usually a FairQueue's).
 type counters struct {
 	sent    atomic.Uint64
 	recv    atomic.Uint64
 	dropped atomic.Uint64
 }
 
-func (c *counters) snapshot(dropped, queueDepth uint64) Metrics {
+func (c *counters) snapshot(queueDepth uint64) Metrics {
 	return Metrics{
 		Sent:       c.sent.Load(),
 		Recv:       c.recv.Load(),
-		Dropped:    dropped,
+		Dropped:    c.dropped.Load(),
 		QueueDepth: queueDepth,
 	}
+}
+
+// lifecycle is the closed flag and close signal of an engine or primitive:
+// closeCh is closed by the first markClosed, so a call parked on it
+// unblocks. closed is guarded by the owner's mutex. init readies the zero
+// value.
+type lifecycle struct {
+	closed  bool
+	closeCh chan struct{}
+}
+
+func (l *lifecycle) init() { l.closeCh = make(chan struct{}) }
+
+// markClosed marks the owner closed and signals closeCh, reporting false
+// if it already was. The caller holds the owner's mutex.
+func (l *lifecycle) markClosed() bool {
+	if l.closed {
+		return false
+	}
+	l.closed = true
+	close(l.closeCh)
+	return true
 }
 
 // prependFrames returns a new Msg holding head followed by body's frames
@@ -151,6 +173,19 @@ func Arm(gate chan struct{}) {
 	case gate <- struct{}{}:
 	default:
 	}
+}
+
+// errClosed is the error of operation op ("pair send") that found its
+// engine closed or was aborted by it closing: it wraps zmqerr.ErrSocketClosed.
+func errClosed(op string) error { return fmt.Errorf("%s: %w", op, zmqerr.ErrSocketClosed) }
+
+// sumLen is the number of messages queued in ps.
+func sumLen(ps ...*pipe.End) int {
+	n := 0
+	for _, p := range ps {
+		n += p.Len()
+	}
+	return n
 }
 
 // awaitPeer parks until notify fires (nil: re-check the peer set), the

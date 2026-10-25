@@ -17,7 +17,7 @@ import (
 
 // subscribeMsg builds the single-frame synthetic subscribe/unsubscribe
 // message that peers use to surface SUBSCRIBE/CANCEL to a PUB/XPUB
-// engine. Mirrors socket.SubscribeByte / socket.UnsubscribeByte.
+// engine (leading byte 0x01 / 0x00).
 func subscribeMsg(subscribe bool, prefix []byte) *msg.Msg {
 	return msg.FromBytes(testutil.SubscribeFrame(subscribe, prefix))
 }

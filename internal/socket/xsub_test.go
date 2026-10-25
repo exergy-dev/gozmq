@@ -32,7 +32,7 @@ func TestXSub_SendSubscribeViaMessage(t *testing.T) {
 	m, err := b.Recv(ctx)
 	require.NoError(t, err, "peer recv")
 	body := m.Frames()[0]
-	require.Equal(t, socket.SubscribeByte, body[0])
+	require.Equal(t, byte(0x01), body[0])
 	require.Equal(t, "topic", string(body[1:]))
 
 	// Now peer sends a matching data message; Recv surfaces it.
@@ -64,7 +64,7 @@ func TestXSub_SendDuplicateSubscribeForwardsTwice(t *testing.T) {
 		m, err := b.Recv(ctx)
 		require.NoError(t, err, "peer recv #%d", i+1)
 		body := m.Frames()[0]
-		require.Equal(t, socket.SubscribeByte, body[0])
+		require.Equal(t, byte(0x01), body[0])
 		require.Equal(t, "topic", string(body[1:]))
 	}
 }

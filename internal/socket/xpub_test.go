@@ -34,7 +34,7 @@ func TestXPub_SurfacesSubscribeToApplication(t *testing.T) {
 	require.NoError(t, err, "xpub recv")
 	require.Equal(t, 1, m.NumFrames(), "xpub recv frames")
 	body := m.Frames()[0]
-	require.Equal(t, socket.SubscribeByte, body[0])
+	require.Equal(t, byte(0x01), body[0])
 	require.Equal(t, "news", string(body[1:]))
 
 	// Subsequent publish to the "news" topic should reach the peer
@@ -69,7 +69,7 @@ func TestXPub_SurfacesUnsubscribe(t *testing.T) {
 	m, err := eng.Recv(ctx)
 	require.NoError(t, err, "recv cancel")
 	body := m.Frames()[0]
-	require.Equal(t, socket.UnsubscribeByte, body[0])
+	require.Equal(t, byte(0x00), body[0])
 	require.Equal(t, "t", string(body[1:]))
 }
 
@@ -97,7 +97,7 @@ func TestXPub_DedupDefault(t *testing.T) {
 	m, err := eng.Recv(ctx)
 	require.NoError(t, err, "recv1")
 	body := m.Frames()[0]
-	require.Equal(t, socket.SubscribeByte, body[0])
+	require.Equal(t, byte(0x01), body[0])
 	require.Equal(t, "news", string(body[1:]))
 
 	// Second recv must NOT produce a duplicate SUBSCRIBE -- block and
@@ -129,7 +129,7 @@ func TestXPub_VerboseDisablesDedup(t *testing.T) {
 		m, err := eng.Recv(ctx)
 		require.NoError(t, err, "recv[%d]", i)
 		body := m.Frames()[0]
-		require.Equal(t, socket.SubscribeByte, body[0], "event[%d]", i)
+		require.Equal(t, byte(0x01), body[0], "event[%d]", i)
 		require.Equal(t, "news", string(body[1:]), "event[%d]", i)
 	}
 }
@@ -176,7 +176,7 @@ func TestXPub_DedupLastCancel(t *testing.T) {
 	m, err := eng.Recv(ctx)
 	require.NoError(t, err, "final cancel recv")
 	body := m.Frames()[0]
-	require.Equal(t, socket.UnsubscribeByte, body[0])
+	require.Equal(t, byte(0x00), body[0])
 	require.Equal(t, "news", string(body[1:]))
 }
 
@@ -203,14 +203,14 @@ func TestXPub_DetachEmitsCancel(t *testing.T) {
 			require.NoError(t, b.Send(ctx, subscribeMsg(true, []byte("topic"))), "peer subscribe")
 			m, err := eng.Recv(ctx)
 			require.NoError(t, err, "recv subscribe")
-			require.Equal(t, socket.SubscribeByte, m.Frames()[0][0])
+			require.Equal(t, byte(0x01), m.Frames()[0][0])
 
 			// Peer goes away: the engine must synthesize the CANCEL.
 			require.NoError(t, eng.DetachPipe(a), "detach")
 			m, err = eng.Recv(ctx)
 			require.NoError(t, err, "recv synthesized cancel")
 			body := m.Frames()[0]
-			require.Equal(t, socket.UnsubscribeByte, body[0], "expected CANCEL")
+			require.Equal(t, byte(0x00), body[0], "expected CANCEL")
 			require.Equal(t, "topic", string(body[1:]), "cancel prefix")
 		})
 	}
@@ -233,7 +233,7 @@ func TestXPub_DetachEmitsNoCancelWhileOtherSubscribersRemain(t *testing.T) {
 	require.NoError(t, b1.Send(ctx, subscribeMsg(true, []byte("topic"))), "peer1 subscribe")
 	m, err := eng.Recv(ctx)
 	require.NoError(t, err, "recv first subscribe")
-	require.Equal(t, socket.SubscribeByte, m.Frames()[0][0])
+	require.Equal(t, byte(0x01), m.Frames()[0][0])
 
 	// Second subscriber for the same prefix: dedup-suppressed, but we
 	// must wait for the engine to process it before detaching. Poll the
@@ -255,7 +255,7 @@ func TestXPub_DetachEmitsNoCancelWhileOtherSubscribersRemain(t *testing.T) {
 	require.NoError(t, eng.DetachPipe(a2), "detach peer2")
 	m, err = eng.Recv(ctx)
 	require.NoError(t, err, "recv cancel")
-	require.Equal(t, socket.UnsubscribeByte, m.Frames()[0][0])
+	require.Equal(t, byte(0x00), m.Frames()[0][0])
 }
 
 // requireXPubEvent receives the next subscription event from eng and checks
@@ -267,9 +267,9 @@ func requireXPubEvent(ctx context.Context, t *testing.T, eng interface {
 	m, err := eng.Recv(ctx)
 	require.NoError(t, err)
 	body := m.Frames()[0]
-	want := socket.UnsubscribeByte
+	want := byte(0x00)
 	if subscribe {
-		want = socket.SubscribeByte
+		want = byte(0x01)
 	}
 	require.Equal(t, want, body[0], "event kind for %q", body[1:])
 	require.Equal(t, prefix, string(body[1:]))

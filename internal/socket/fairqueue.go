@@ -3,13 +3,11 @@ package socket
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
-	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -31,9 +29,8 @@ import (
 // was published with: that aborts receivers blocked in the old pipe and wakes
 // receivers parked on gate, and both re-evaluate.
 type FairQueue struct {
-	mu      sync.Mutex
-	closed  bool
-	closeCh chan struct{}
+	mu sync.Mutex
+	lifecycle
 	entries []*fqEntry
 	byPipe  map[*pipe.End]*fqEntry
 	nActive int
@@ -78,7 +75,7 @@ func NewFairQueue(gate chan struct{}) *FairQueue {
 
 // init readies a zero FairQueue, for owners that embed one by value.
 func (fq *FairQueue) init(gate chan struct{}) {
-	fq.closeCh = make(chan struct{})
+	fq.lifecycle.init()
 	fq.byPipe = make(map[*pipe.End]*fqEntry)
 	fq.gate = gate
 }
@@ -126,7 +123,7 @@ func (fq *FairQueue) Attach(p *pipe.End) error {
 	fq.mu.Lock()
 	defer fq.mu.Unlock()
 	if fq.closed {
-		return fmt.Errorf("fairqueue attach: %w", zmqerr.ErrSocketClosed)
+		return errClosed("fairqueue attach")
 	}
 	if _, ok := fq.byPipe[p]; ok {
 		return nil
@@ -205,7 +202,7 @@ func (fq *FairQueue) RecvWithSource(ctx context.Context) (*msg.Msg, *pipe.End, e
 		fq.mu.Lock()
 		if fq.closed {
 			fq.mu.Unlock()
-			return nil, nil, fmt.Errorf("fairqueue recv: %w", zmqerr.ErrSocketClosed)
+			return nil, nil, errClosed("fairqueue recv")
 		}
 		if fq.single.Load() != nil {
 			fq.mu.Unlock()
@@ -342,11 +339,9 @@ func (fq *FairQueue) updateSingleLocked() {
 func (fq *FairQueue) Close() error {
 	fq.mu.Lock()
 	defer fq.mu.Unlock()
-	if fq.closed {
+	if !fq.markClosed() {
 		return nil
 	}
-	fq.closed = true
-	close(fq.closeCh)
 	for _, e := range fq.entries {
 		e.p.SetNotify(nil)
 		e.pos = -1

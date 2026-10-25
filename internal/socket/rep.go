@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
@@ -66,8 +67,6 @@ type repEngine struct {
 	// empty delimiter) captured from the current request. Valid only in
 	// canSend. Stored as a fresh slice independent of any caller *Msg.
 	envelope [][]byte
-	// closeCh is closed by Close so a Send parked at HWM unblocks.
-	closeCh chan struct{}
 
 	// The FairQueue arms the in-gate as requests arrive; the FSM arms the
 	// in-gate on entering canRecv and the out-gate on entering canSend,
@@ -79,7 +78,7 @@ type repEngine struct {
 // NewRepEngine returns a new REP socket engine.
 func NewRepEngine() Engine {
 	g := newGates()
-	return &repEngine{fq: NewFairQueue(g.in), closeCh: make(chan struct{}), gates: g}
+	return &repEngine{fq: NewFairQueue(g.in), gates: g}
 }
 
 // CanRecvNow filters out the canSend state, so a request arriving
@@ -103,7 +102,7 @@ func (e *repEngine) AttachPipe(p *pipe.End) error {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
-		return fmt.Errorf("rep attach: %w", zmqerr.ErrSocketClosed)
+		return errClosed("rep attach")
 	}
 	e.mu.Unlock()
 	return e.fq.Attach(p)
@@ -125,7 +124,7 @@ func (e *repEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
-		return nil, fmt.Errorf("rep recv: %w", zmqerr.ErrSocketClosed)
+		return nil, errClosed("rep recv")
 	}
 	switch e.state {
 	case repStateCanRecv:
@@ -162,7 +161,7 @@ func (e *repEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		if e.closed {
 			e.mu.Unlock()
 			body.Release()
-			return nil, fmt.Errorf("rep recv: %w", zmqerr.ErrSocketClosed)
+			return nil, errClosed("rep recv")
 		}
 		e.currentPeer = src
 		e.envelope = envelope
@@ -178,7 +177,7 @@ func (e *repEngine) Send(ctx context.Context, m *msg.Msg) error {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
-		return fmt.Errorf("rep send: %w", zmqerr.ErrSocketClosed)
+		return errClosed("rep send")
 	}
 	if e.state != repStateCanSend {
 		e.mu.Unlock()
@@ -206,7 +205,7 @@ func (e *repEngine) Send(ctx context.Context, m *msg.Msg) error {
 	// Block at HWM, racing engine close and the caller's ctx. A requester
 	// that vanished before its detach landed gets the reply dropped
 	// silently, as for a detached peer above.
-	err := peer.SendOr(ctx, wire, e.closeCh)
+	err := peer.SendOr(ctx, wire, e.fq.closeCh) // Close closes it, unblocking a Send parked at HWM
 	if err != nil {
 		wire.Release()
 	}
@@ -219,7 +218,7 @@ func (e *repEngine) Send(ctx context.Context, m *msg.Msg) error {
 		m.Release()
 		return nil
 	case errors.Is(err, pipe.ErrAborted):
-		return fmt.Errorf("rep send: %w", zmqerr.ErrSocketClosed)
+		return errClosed("rep send")
 	default:
 		return err
 	}
@@ -236,33 +235,31 @@ func (e *repEngine) Send(ctx context.Context, m *msg.Msg) error {
 // the Send path prepends it verbatim to produce a reply.
 func splitRepEnvelope(m *msg.Msg) (envelope [][]byte, body *msg.Msg, ok bool) {
 	frames := m.Frames()
-	for i, f := range frames {
-		if len(f) == 0 {
-			// The envelope (including the delimiter) outlives m in
-			// e.envelope. Frames are never modified once queued, so a plain
-			// message's prefix is kept as is (capped, so a reply's prepend
-			// cannot write into m's list). A lent message's bytes are
-			// copied: the reply joins them to a different message's
-			// frames, and a message holds only one lease. Routing frames
-			// are small, so that copy is cheap.
-			envelope = frames[: i+1 : i+1]
-			if m.Lent() {
-				envelope = make([][]byte, i+1)
-				for j, f := range frames[:i+1] {
-					envelope[j] = bytes.Clone(f)
-				}
-			}
-			return envelope, m.Derive(frames[i+1:]...), true
+	i := slices.IndexFunc(frames, func(f []byte) bool { return len(f) == 0 })
+	if i < 0 {
+		return nil, nil, false
+	}
+	// The envelope (including the delimiter) outlives m in e.envelope.
+	// Frames are never modified once queued, so a plain message's prefix is
+	// kept as is (capped, so a reply's prepend cannot write into m's list).
+	// A lent message's bytes are copied: the reply joins them to a
+	// different message's frames, and a message holds only one lease.
+	// Routing frames are small, so that copy is cheap.
+	envelope = frames[: i+1 : i+1]
+	if m.Lent() {
+		envelope = make([][]byte, i+1)
+		for j, f := range frames[:i+1] {
+			envelope[j] = bytes.Clone(f)
 		}
 	}
-	return nil, nil, false
+	return envelope, m.Derive(frames[i+1:]...), true
 }
 
 // Metrics reports the REP engine's counters. recv is incremented on
 // each user-visible Recv (after envelope split). QueueDepth samples the
 // FairQueue.
 func (e *repEngine) Metrics() Metrics {
-	return e.snapshot(0, e.fq.QueueDepth())
+	return e.snapshot(e.fq.QueueDepth())
 }
 
 func (e *repEngine) Close() error {
@@ -272,7 +269,6 @@ func (e *repEngine) Close() error {
 		return nil
 	}
 	e.closed = true
-	close(e.closeCh)
 	e.currentPeer = nil
 	e.envelope = nil
 	e.mu.Unlock()

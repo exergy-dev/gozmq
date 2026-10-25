@@ -14,9 +14,7 @@ import (
 //
 // The cursor always points at the peer to try next. remove keeps it pointing
 // at the same logical "next" peer across deletions, and advancePast steps it
-// forward only when the peer it just used is still where it was — the two
-// rules that were previously duplicated, and easy to get subtly wrong,
-// across the load-balancing engines.
+// forward only when the peer it just used is still where it was.
 type pipeRing struct {
 	pipes  []*pipe.End
 	cursor int
@@ -40,21 +38,20 @@ func (r *pipeRing) add(p *pipe.End) bool {
 // left, and it is wrapped back into range (or reset to 0 when the ring
 // empties). Returns true if p was present.
 func (r *pipeRing) remove(p *pipe.End) bool {
-	for i, existing := range r.pipes {
-		if existing == p {
-			r.pipes = slices.Delete(r.pipes, i, i+1)
-			if len(r.pipes) == 0 {
-				r.cursor = 0
-			} else {
-				if i < r.cursor {
-					r.cursor--
-				}
-				r.cursor %= len(r.pipes)
-			}
-			return true
-		}
+	i := slices.Index(r.pipes, p)
+	if i < 0 {
+		return false
 	}
-	return false
+	r.pipes = slices.Delete(r.pipes, i, i+1)
+	if len(r.pipes) == 0 {
+		r.cursor = 0
+	} else {
+		if i < r.cursor {
+			r.cursor--
+		}
+		r.cursor %= len(r.pipes)
+	}
+	return true
 }
 
 // current returns the index and pipe the cursor points at. Callers must

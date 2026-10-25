@@ -3,13 +3,11 @@ package socket
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
 
 	"github.com/exergy-dev/gozmq/internal/pipe"
-	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -73,7 +71,7 @@ func (lb *LoadBalancer) Attach(p *pipe.End) error {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
 	if lb.closed {
-		return fmt.Errorf("loadbalancer attach: %w", zmqerr.ErrSocketClosed)
+		return errClosed("loadbalancer attach")
 	}
 	if !lb.ring.add(p) {
 		return nil
@@ -106,7 +104,7 @@ func (lb *LoadBalancer) Send(ctx context.Context, m *msg.Msg) error {
 		lb.mu.Lock()
 		if lb.closed {
 			lb.mu.Unlock()
-			return fmt.Errorf("loadbalancer send: %w", zmqerr.ErrSocketClosed)
+			return errClosed("loadbalancer send")
 		}
 		if lb.ring.len() == 0 {
 			notify := lb.changed.wait()
