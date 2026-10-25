@@ -29,38 +29,44 @@ and within-run columns, not tables from different dates.
 ## gozmq vs native libzmq 4.3.4, PUSH/PULL over TCP loopback
 
 Go's default settings (plain-memory receive, GOGC 100), three consecutive
-runs, ratio = gozmq/libzmq:
+runs on the final branch, ratio = gozmq/libzmq:
 
 | size | gozmq | libzmq | ratio (3 runs) |
 | :--- | ---: | ---: | ---: |
-| 32 B | 9.27–9.71M msg/s (2.4 Gb/s) | 8.61–8.91M msg/s (2.2 Gb/s) | **1.04–1.10×** |
-| 256 B | 6.73M (13.8 Gb/s) | 3.70M (7.6 Gb/s) | 1.82× |
-| 1 KB | 2.45–2.50M (20 Gb/s) | 2.25–2.32M (19 Gb/s) | 1.05–1.11× |
-| 8 KB | 0.39M (25.8 Gb/s) | 0.38–0.40M (25.7 Gb/s) | 0.99–1.01× |
-| 64 KB | 0.07M (37 Gb/s) | 0.10–0.12M (50–62 Gb/s) | 0.60–0.73× |
+| 32 B | 9.13–9.34M msg/s (2.4 Gb/s) | 8.56–8.81M msg/s (2.2 Gb/s) | **1.04–1.09×** |
+| 256 B | 6.14–6.68M (13 Gb/s) | 3.61–3.72M (7.5 Gb/s) | 1.70–1.81× |
+| 1 KB | 2.40–2.49M (20 Gb/s) | 2.25–2.34M (18.7 Gb/s) | 1.05–1.09× |
+| 8 KB | 0.38–0.39M (25 Gb/s) | 0.36–0.39M (24 Gb/s) | 1.00–1.08× |
+| 64 KB | 0.07M (35 Gb/s) | 0.11–0.12M (56–61 Gb/s) | 0.57–0.64× |
 
-Options for the large-frame case (not defaults). Receiver with
-`WithRecvBufferPool` (`GOZMQ_LOCAL_FLAGS=-pool`, GOGC 100, one run):
+Options for the large-frame case (not defaults), one run each. Receiver
+with `WithRecvBufferPool` (`GOZMQ_LOCAL_FLAGS=-pool`, GOGC 100):
 
 | size | gozmq | libzmq | ratio |
 | :--- | ---: | ---: | ---: |
-| 32 B | 9.60M | 8.86M | 1.08× |
-| 256 B | 6.98M | 3.71M | 1.88× |
-| 1 KB | 2.49M | 2.27M | 1.10× |
-| 8 KB | 0.76M (50 Gb/s) | 0.41M (27 Gb/s) | 1.85× |
-| 64 KB | 0.15M (78 Gb/s) | 0.11M (57 Gb/s) | 1.38× |
+| 32 B | 8.90M | 9.04M | 0.98× |
+| 256 B | 6.35M | 3.65M | 1.74× |
+| 1 KB | 2.47M | 2.21M | 1.12× |
+| 8 KB | 0.76M (50 Gb/s) | 0.37M (24 Gb/s) | 2.04× |
+| 64 KB | 0.12M (63 Gb/s) | 0.11M (58 Gb/s) | 1.08× |
 
-Plain memory with the collector at GOGC 400 (`GOZMQ_GOGC=400`), three runs:
+Plain memory with the collector at GOGC 400 (`GOZMQ_GOGC=400`):
 
-| size | gozmq | libzmq | ratio (3 runs) |
+| size | gozmq | libzmq | ratio |
 | :--- | ---: | ---: | ---: |
-| 32 B | 9.17–9.69M | 8.35–8.94M | 1.08–1.10× |
-| 256 B | 8.07–8.44M | 3.59–3.77M | 2.14–2.35× |
-| 1 KB | 3.12–3.32M | 2.24–2.30M | 1.36–1.48× |
-| 8 KB | 0.51–0.54M | 0.40–0.41M | 1.27–1.33× |
-| 64 KB | 0.10M (53 Gb/s) | 0.10–0.11M (55–59 Gb/s) | 0.89–0.98× |
+| 32 B | 8.98M | 9.05M | 0.99× |
+| 256 B | 8.02M | 3.64M | 2.20× |
+| 1 KB | 3.33M | 2.38M | 1.40× |
+| 8 KB | 0.50M | 0.37M | 1.33× |
+| 64 KB | 0.10M (51 Gb/s) | 0.11M (59 Gb/s) | 0.87× |
 
-The 64 KB row at GOGC 400 is parity within libzmq's own variance: in
+(Earlier three-run tables of the options, before the inproc pipe change,
+which does not touch TCP: pool 32 B 1.08×, 64 KB 1.38×; GOGC 400 32 B
+1.08–1.10×, 64 KB 0.89–0.98×. The 32 B row sits at 1.0–1.1× in every
+configuration; single runs wobble ±5%.)
+
+The 64 KB row with plain memory at Go's defaults is GC-paced (next
+section); with GOGC 400 it is parity within libzmq's own variance: in
 interleaved two-process rounds gozmq is stable at 97–102k msg/s while libzmq
 alternates between ~65k and ~100k+ (GOMAXPROCS 2, 4, 8 and 32 make no
 difference on the gozmq side), and best-of-N picks libzmq's good mode. The
@@ -80,8 +86,8 @@ REQ/REP round trip over TCP, 50,000 round trips, full round trip in µs
 
 | size | gozmq↔gozmq | libzmq↔libzmq | gozmq REQ → libzmq REP | libzmq REQ → gozmq REP |
 | :--- | ---: | ---: | ---: | ---: |
-| 32 B | 61.0 | 76.6 | 69.8 | 70.2 |
-| 1 KB | 62.6 | 77.6 | 70.1 | 70.4 |
+| 32 B | 63.4 | 80.2 | 71.7 | 71.6 |
+| 1 KB | 63.8 | 80.4 | 72.3 | 74.9 |
 
 ### The 64 KB row and GC pacing
 
@@ -144,43 +150,54 @@ was the queue without deferred wakes, superseded by the commits after it.)
 
 ## In-repo benchmarks, perf-parity vs v0.3.0 (count 10, idle machine)
 
-sec/op, base → candidate; every row with p < 0.05 is listed, plus the rows
-the report has always tracked:
+sec/op, base → candidate; every row with p < 0.05 and a change above 2%
+is listed, plus the rows the report has always tracked. Rows the gate
+flagged were re-run at count 16 and 20 (noted):
 
 | benchmark | v0.3.0 | perf-parity | change |
 | :--- | ---: | ---: | ---: |
-| PushPullThroughput_TCP/32B | 165.9 ns | 101.1 ns | −39.0% |
-| PushPullThroughput_TCP/64B | 171.5 ns | 112.3 ns | −34.5% |
-| PushPullThroughput_TCP/1KB | 496.7 ns | 456.3 ns | −8.1% |
-| PushPullThroughput_TCP/64KB | 14.94 µs | 16.04 µs | ~ (p=0.12) |
-| PushPullThroughput_Inproc/32B | 68.7 ns | 55.9 ns | −18.7% |
-| PushPullThroughput_TLS/32B | 162.5 ns | 116.3 ns | −28.4% |
-| PushPullThroughput_TLS/64KB | 107.4 µs | 102.2 µs | −4.9% |
-| PushPullCurve_TCP/64B | 459.3 ns | 403.4 ns | −12.2% |
-| PushPullFanIn_TCP/pushers=2 | 125.5 ns | 85.9 ns | −31.6% |
-| PushPullFanIn_TCP/pushers=16 | 92.0 ns | 73.7 ns | −19.8% |
-| PushPullFanIn_Inproc/pushers=2 | 73.3 ns | 43.2 ns | −41.0% |
-| XPubXSubThroughput_Inproc/32B | 79.3 ns | 42.1 ns | −47.0% |
-| XPubXSubLatency_Inproc/32B | 59.6 ns | 61.2 ns | +2.7% |
-| ReqRepRoundTrip_TCP/32B | 29.8 µs | 29.4 µs | ~ |
-| ReqRepRoundTrip_Inproc/32B | 1.040 µs | 1.123 µs | **+7.9%** |
-| RouterDealerLatency_Inproc/32B | 868.9 ns | 947.6 ns | **+9.1%** |
-| RouterDealerLatency_TCP/1KB | 30.6 µs | 31.6 µs | +3.2% |
-| RouterIdlePeers_Inproc/idle=0 | 881 ns | 970 ns | **+10.0%** |
-| PubSubFanout_Inproc/32B | 174.9 ns | 198.4 ns | ~ (p=1.0) |
-| PubSubFanoutWide_Inproc/subs=64 | 5.17 µs | 6.49 µs | **+25.6%** |
-| PubSubFanoutSelective_Inproc/subs=64 | 26.2 µs | 27.3 µs | +4.1% |
-| PushPullLarge_TCP/pool=true/8KB | 1.23 µs | 1.42 µs | +15% (p=0.04; 6-run re-check ~, p=0.39) |
-| ConnectHandshake_TCP | 162.5 µs | 154.4 µs | −5.0% |
-| Poller_PollReady (root) | 125.5 ns | 124.2 ns | ~ |
-| PubSubThroughput_TCP/32B (new) | | 287.7 ns, 1 alloc | |
-| PubSubTopicThroughput_TCP/32B (new) | | 176.6 ns, 3 allocs | |
+| PushPullThroughput_TCP/32B | 170.5 ns | 103.8 ns | −39.1% |
+| PushPullThroughput_TCP/64B | 176.0 ns | 114.5 ns | −35.0% |
+| PushPullThroughput_TCP/1KB | 501.3 ns | 461.6 ns | −7.9% |
+| PushPullThroughput_TCP/64KB | 14.9 µs | 16.0 µs | ~ |
+| PushPullThroughput_Inproc/32B | 69.9 ns | 79.4 ns | +13.6% at count 10; ~ at count 16 (76.2 → 79.7, p=0.055) |
+| PushPullThroughput_TLS/32B | 165.5 ns | 117.7 ns | −28.9% |
+| PushPullThroughput_TLS/64B | 182.8 ns | 132.4 ns | −27.5% |
+| PushPullCurve_TCP/64B | 469.4 ns | 408.2 ns | −13.1% |
+| PushPullFanIn_TCP/pushers=2 | 127.1 ns | 88.2 ns | −30.6% |
+| PushPullFanIn_TCP/pushers=16 | 91.6 ns | 72.0 ns | −21.4% |
+| PushPullFanIn_Inproc/pushers=2 | 74.5 ns | 78.4 ns | +5.2% at count 10; ~ at count 16 (p=0.80) |
+| PushPullLarge_TCP/pool=false/1MB | 223 µs | 251 µs | +12% at count 10; +2.9% at count 16 |
+| PushPullLarge_TCP/pool=true/8KB | 1.27 µs | 1.44 µs | +13% at count 10; +6.4% at count 16; +10% at count 20 (see below) |
+| ReqRepRoundTrip_TCP/32B | 31.4 µs | 30.3 µs | −3.6% |
+| ReqRepRoundTrip_Inproc/32B | 1.062 µs | 1.067 µs | +0.5% |
+| RouterDealerLatency_Inproc/32B | 888 ns | 897 ns | +1.0% |
+| RouterIdlePeers_Inproc/idle=0 | 899 ns | 908 ns | ~ |
+| PubSubFanoutWide_Inproc/subs=64 | 5.39 µs | 5.47 µs | ~ (count 16) |
+| XPubXSubThroughput_Inproc/32B | 78 ns | 72 ns | ~ |
+| XPubXSubLatency_Inproc/32B | 60.8 ns | 61.3 ns | +0.9% |
+| ConnectHandshake_TCP | 169 µs | 163 µs | −4.0% |
+| Poller_PollReady (root) | 125 ns | 124 ns | ~ |
+| PubSubThroughput_TCP/32B (new) | | 305 ns, 1 alloc | |
+| PubSubTopicThroughput_TCP/32B (new) | | 179 ns, 3 allocs | |
+
+**The one open row.** `PushPullLarge_TCP/pool=true/8KB` (8 KiB frames into
+the opt-in receive pool, ~1.3 µs per message) reads 6–13% slower than
+v0.3.0 across count 10, 16 and 20 runs, with ±11–24% run-to-run spread.
+Bisecting it interleaved (ten rounds, five binaries) gives a gradual drift
+with no significant step: v0.3.0 1.26 µs, writer+alloc 1.34 (p=0.18), pipe
+1.38 (p=0.05), current 1.40 (p=0.06). Two targeted fixes were tried and
+reverted: flushing the wake immediately for lent messages (no change) and
+capping by-reference bodies at 32 per batch, the old granularity (+20%,
+worse). The pooled 64 KB and 1 MB rows and the plain 8 KB row are
+unchanged, and the two-process 8 KB comparison with the pool is 2.0× of
+libzmq, so this is left as measured.
 
 allocs/op fell on every TCP path (PUSH/PULL 3 → 2, REQ/REP 14 → 10,
-ROUTER/DEALER 10 → 8, fan-in 3 → 2, TLS 3 → 2) and rose nowhere. B/op is
-within 5% on every row except the PUB fan-out inproc rows (64 → 69 B,
-+7.8%: the queue's chunk turnover under 3 subscribers), and fell 20% on the
-handshake rows (no HWM-sized channel buffer per peer).
+ROUTER/DEALER 10 → 8, fan-in 3 → 2, TLS 3 → 2) and rose nowhere; inproc
+allocs/op and B/op are identical to v0.3.0. B/op is within 5% on every row
+and fell 20% on the handshake rows (no HWM-sized channel buffer per TCP
+peer).
 
 **Why inproc pipes stayed on channels.** The two-lock queue costs about
 20 ns more than a channel per uncontended hop with a parked receiver (lock,
