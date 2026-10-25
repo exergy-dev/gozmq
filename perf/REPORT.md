@@ -182,23 +182,22 @@ within 5% on every row except the PUB fan-out inproc rows (64 → 69 B,
 +7.8%: the queue's chunk turnover under 3 subscribers), and fell 20% on the
 handshake rows (no HWM-sized channel buffer per peer).
 
-**The trade-off, stated plainly.** The two-lock queue costs about 20 ns more
-than a channel per uncontended hop with a parked receiver (lock, counter
-atomics, wake token, then a locked pop instead of the channel's direct
-handoff into the waiting goroutine). Paths that are one such hop per message
-pay it: inproc REQ/REP and ROUTER/DEALER round trips (+8–9% on ~1 µs), the
-wide PUB fan-out (64 parked subscribers, +26%). Paths with any contention or
-batching gain 20–50%. Bounded spinning before parking (8, 64 and 512 polls)
-made the latency rows worse and was dropped. A direct-handoff fast path
-(the message travels through the wake channel when the queue is empty and
-a consumer is parked, branch `pp-pipe3`, not merged) was built and
-measured: it recovers about 2 of those points on the round-trip rows
-(+5.7–7.0% vs main) and 8 on the wide fan-out (+18%), needs a FIFO guard on
-every receive path and an HWM+1 slack, so it was left out. The rest is the
-two per-side locks and the published counters themselves, i.e. the price
-of the lock-free streaming path. Reverting the single merge commit of the
-pipe branch gives the previous pipe with the writer and allocation changes
-kept (32 B then at ~0.75×).
+**Why inproc pipes stayed on channels.** The two-lock queue costs about
+20 ns more than a channel per uncontended hop with a parked receiver (lock,
+counter atomics, wake token, then a locked pop instead of the channel's
+direct handoff into the waiting goroutine). With the queue on every pipe,
+paths that are one such hop per message paid it: inproc REQ/REP and
+ROUTER/DEALER round trips +8–9% on ~1 µs, the 64-subscriber inproc fan-out
++26%. Bounded spinning before parking (8, 64, 512 polls) made those rows
+worse; a direct-handoff fast path (branch `pp-pipe3`, not merged) recovered
+only ~2 of the 8 points and needed a FIFO guard on every receive path. The
+inproc patterns have no batching producer to amortise wakeups, so inproc
+pairs (`pipe.NewChannelPair`) now keep the previous channel implementation
+and session pairs use the queue: the inproc round-trip and fan-out rows are
+back at main's numbers, the inproc streaming rows return to main's level
+instead of the queue's (XPUB/XSUB inproc throughput 78 → 72 ns rather than
+42 ns), and every TCP row keeps its gain. Both kinds run the same pipe test
+suite.
 
 ## Decisions these numbers rest on
 
@@ -220,11 +219,11 @@ kept (32 B then at ~0.75×).
   64 KiB copied, 1000 iovecs, 2 MiB total and 4096 messages; PING/PONG
   commands open it. Over TLS a batch is one `Write`, which crypto/tls splits
   into records.
-- **Pipes are chunked queues, HWM is a count.** The engines' `End` API is
-  unchanged; `TrySendDeferred`/`Flush` exist for the one single-producer
-  caller that can batch its wakeups (the session reader). Concurrent
-  `SendMsg`/`RecvMsg` on one socket stay supported through the per-side
-  mutexes.
+- **Session pipes are chunked queues, inproc pipes are channels.** The
+  engines' `End` API is unchanged; `TrySendDeferred`/`Flush` exist for the
+  one single-producer caller that can batch its wakeups (the session
+  reader). Concurrent `SendMsg`/`RecvMsg` on one socket stay supported
+  through the per-side mutexes (queue kind) or the channel itself.
 - **Subscription matching**: a PUB answers the subscribe-to-all case from an
   atomic flag per peer and walks a selective tree under that peer's read
   lock. A copy-on-write trie was tried and dropped (+68% allocs per

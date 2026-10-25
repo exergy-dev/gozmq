@@ -35,17 +35,16 @@ tables and the trade-off on inproc request/reply latency.
 - One allocation per small received message: PUSH/PULL over TCP 3 → 2
   allocations per delivery, REQ/REP 14 → 10 per round trip, ROUTER/DEALER
   10 → 8, two-frame topic+payload 6 → 3.
-- Pipes are chunked two-lock queues (256-slot chunks, libzmq's `yqueue`
-  shape) instead of HWM-sized channels: producers and consumers no longer
-  share a lock, the session reader wakes a receiver once per read batch
-  instead of once per message, and a HWM no longer allocates its full
-  capacity up front (a peer at HWM 1000 used 8 KiB per direction before any
-  message; the zmqperf tool's 1,000,000 HWM used 8 MiB). Throughput rows
-  gain 20–50% (TCP 32 B −39%, XPUB/XSUB inproc −47%, PUB fan-out 2 peers
-  −41%); inproc REQ/REP and ROUTER/DEALER round trips cost 8–9% more
-  (about 80 ns on 1 µs) and a 64-subscriber inproc fan-out 26% more,
-  because an uncontended hop to a parked receiver is ~20 ns dearer than a
-  channel handoff.
+- Session pipes are chunked two-lock queues (256-slot chunks, libzmq's
+  `yqueue` shape) instead of HWM-sized channels: producers and consumers no
+  longer share a lock, the session reader wakes a receiver once per read
+  batch instead of once per message, and a TCP peer's HWM no longer
+  allocates its full capacity up front (a peer at HWM 1000 used 8 KiB per
+  direction before any message; the zmqperf tool's 1,000,000 HWM used
+  8 MiB). TCP rows gain 20–40% (PUSH/PULL 32 B −39%, fan-in −20…−31%, TLS
+  32 B −28%). Inproc pipes keep the channel implementation, because their
+  one-hop-per-message patterns are ~20 ns per hop cheaper on a channel;
+  inproc rows are unchanged.
 - The reader stamps the heartbeat's inbound clock once per read batch
   instead of once per message.
 - `zmqperf local_thr` divides by the messages it actually timed (`count-1`),

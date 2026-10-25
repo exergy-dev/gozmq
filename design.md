@@ -129,15 +129,21 @@ may only be tightened.
 - **Engines and pipes run no goroutines.** Receivers read the pipes
   themselves (§3.4), PUB/XPUB apply subscriptions on the application's own
   calls, and readiness is signalled by arming channels (§3.5). A pipe
-  direction is a chunked FIFO (256-slot chunks, a ring of spare chunks) with
-  a producer-side and a consumer-side mutex, so concurrent callers on one
-  side are safe while producer and consumer never share a lock; the HWM is a
-  count checked against published head/tail counters, and HWM 0 just never
-  refuses, so an unbounded direction costs memory, not a relay goroutine. A
-  parked receiver waits on a cap-1 token channel that the producer arms when
-  a sleeper is registered; the session reader publishes with
-  `TrySendDeferred` and `Flush`es once per read batch, so a receiver is woken
-  once per batch rather than once per message.
+  direction comes in two kinds behind one `End` API. Session pipes use a
+  chunked FIFO (256-slot chunks, a ring of spare chunks) with a
+  producer-side and a consumer-side mutex, so concurrent callers on one side
+  are safe while producer and consumer never share a lock; the HWM is a
+  count checked against published head/tail counters, HWM 0 just never
+  refuses, a parked receiver waits on a cap-1 token channel that the
+  producer arms when a sleeper is registered, and the session reader
+  publishes with `TrySendDeferred` and `Flush`es once per read batch, so a
+  receiver is woken once per batch rather than once per message. Inproc
+  pipes (`NewChannelPair`) use a buffered channel of HWM capacity (HWM 0: a
+  1024-slot channel plus an overflow slice): there is no batching producer
+  to amortise wakeups, the patterns are one uncontended hop per message,
+  and a channel's direct handoff to a parked receiver is ~20 ns cheaper
+  than the queue's lock, counters and token. Either way an unbounded
+  direction costs memory, not a relay goroutine.
 - **Public calls** are safe for concurrent use; each engine serialises what
   its pattern requires (REQ/REP reject a concurrent call that would break
   lock-step with `ErrFSMViolation`). One goroutine per socket is still the
