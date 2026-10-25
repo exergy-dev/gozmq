@@ -164,12 +164,21 @@ type direction struct {
 	drainDone bool
 }
 
+// newDirection makes a queue-kind direction. The direction, its queue and
+// the queue's first chunk are one allocation: a TCP peer costs a pair of
+// these, and the gate counts allocations per connection.
 func newDirection(hwm int) *direction {
-	return &direction{
-		q:     newQueue(hwm),
-		rwake: make(chan struct{}, 1),
-		wwake: make(chan struct{}, 1),
-	}
+	dq := &struct {
+		direction
+		queue
+		first chunk
+	}{}
+	d := &dq.direction
+	d.q = &dq.queue
+	initQueue(d.q, hwm, &dq.first)
+	d.rwake = make(chan struct{}, 1)
+	d.wwake = make(chan struct{}, 1)
+	return d
 }
 
 func newChannelDirection(hwm int) *direction {

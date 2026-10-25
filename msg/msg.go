@@ -67,22 +67,22 @@ type Msg struct {
 }
 
 // lease tracks the messages still holding a set of lent frames. The
-// frames go back through release, or, for NewLent, through put once per
-// buffer in bufs.
+// frames go back through release, or, for NewLent, through put(buf). The
+// struct is sized so that a message plus its lease is one 112-byte
+// allocation (the same size class as a plain received message plus the
+// release closure it replaced); keep it at 48 bytes.
 type lease struct {
 	holders atomic.Int32
 	release func()
 	put     func([]byte)
-	bufs    [][]byte
+	buf     []byte
 }
 
 // giveBack hands the frames back to their owner; called once, by the
 // last holder.
 func (l *lease) giveBack() {
 	if l.put != nil {
-		for _, b := range l.bufs {
-			l.put(b)
-		}
+		l.put(l.buf)
 		return
 	}
 	l.release()
@@ -283,10 +283,10 @@ func NewWithRelease(release func(), frames ...[]byte) *Msg {
 
 // NewLent returns a lent Msg holding frames, as NewWithRelease does, whose
 // storage is the buffers bufs: put is called once with each of them after
-// the last reference is released. For one buffer the message, its lease
-// and the buffer list are a single allocation, which is why the session
-// reader uses it rather than a closure over NewWithRelease. put must not
-// be nil; bufs is copied.
+// the last reference is released. For one buffer (the usual case) the
+// message and its lease are a single allocation with no closure, which is
+// why the session reader uses it rather than NewWithRelease; several
+// buffers cost one closure. put must not be nil; bufs is copied.
 func NewLent(put func([]byte), bufs [][]byte, frames ...[]byte) *Msg {
 	if put == nil {
 		panic("gozmq: msg.NewLent with a nil put")
@@ -294,16 +294,19 @@ func NewLent(put func([]byte), bufs [][]byte, frames ...[]byte) *Msg {
 	ml := &struct {
 		Msg
 		lease lease
-		one   [1][]byte
 	}{}
 	m := &ml.Msg
 	m.setFrames(frames)
-	ml.lease.put = put
-	if len(bufs) == 1 {
-		ml.one[0] = bufs[0]
-		ml.lease.bufs = ml.one[:]
-	} else {
-		ml.lease.bufs = append([][]byte(nil), bufs...)
+	switch len(bufs) {
+	case 1:
+		ml.lease.put, ml.lease.buf = put, bufs[0]
+	default:
+		owned := append([][]byte(nil), bufs...)
+		ml.lease.release = func() {
+			for _, b := range owned {
+				put(b)
+			}
+		}
 	}
 	ml.lease.holders.Store(1)
 	m.lease = &ml.lease

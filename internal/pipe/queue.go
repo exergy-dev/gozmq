@@ -101,10 +101,18 @@ type queue struct {
 // newQueue returns an empty queue holding at most hwm messages (0 for no
 // limit). Head and tail start in the same chunk.
 func newQueue(hwm int) *queue {
-	q := &queue{hwm: uint64(hwm)}
-	c := new(chunk)
-	q.tailChunk, q.headChunk = c, c
+	q := &queue{}
+	initQueue(q, hwm, new(chunk))
 	return q
+}
+
+// initQueue sets q up empty with first as its only chunk. first may live
+// inside a larger allocation (newDirection); once drained it enters the
+// spare ring like any other chunk, which is fine because the queue never
+// outlives it.
+func initQueue(q *queue, hwm int, first *chunk) {
+	q.hwm = uint64(hwm)
+	q.tailChunk, q.headChunk = first, first
 }
 
 // push appends m and reports whether there was room. Safe for concurrent

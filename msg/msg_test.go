@@ -244,3 +244,12 @@ func TestMsgNewLent(t *testing.T) {
 	})
 	require.LessOrEqual(t, allocs, 1.0, "one-buffer lent message is one allocation")
 }
+
+// TestMsgLeaseSize pins the size class the one-buffer lent message lands
+// in (see the lease comment): message plus lease must stay within 112 bytes.
+func TestMsgLeaseSize(t *testing.T) {
+	require.LessOrEqual(t, unsafe.Sizeof(struct {
+		Msg
+		lease lease
+	}{}), uintptr(112))
+}
