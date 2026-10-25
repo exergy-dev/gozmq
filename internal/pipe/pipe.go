@@ -88,9 +88,9 @@ func newPair(mk func(int) *direction, aToB, bToA int, aInfo, bInfo PeerInfo) (a,
 // shared is the close state common to both ends: closing either end closes
 // the pair for sending, and wakes everything parked on it.
 type shared struct {
-	closed     atomic.Bool
-	either     chan struct{}
-	eitherOnce sync.Once
+	closed atomic.Bool
+	either chan struct{}
+	once   sync.Once // runs the close sequence for whichever end closes first
 }
 
 // direction is one half of the pipe: a queue plus the parking protocol for
@@ -278,8 +278,6 @@ type End struct {
 	recv     *direction // the peer writes, this end reads
 	peer     *End
 	peerInfo PeerInfo
-
-	closeOnce sync.Once
 
 	// idle and notify let a receiver that multiplexes many pipes (or a
 	// Poller) stop looking at this end until something arrives, with no
@@ -488,9 +486,26 @@ func (e *End) enqueue(ctx context.Context, m *msg.Msg, abort <-chan struct{}) er
 		return e.enqueueChan(ctx, m, abort)
 	}
 	for {
-		d.wsleepers.Add(1) // S1
-		if d.produce(m) {  // retry reloads pubHead (P1)
-			d.wsleepers.Add(-1)
+		d.wsleepers.Add(1)   // S1
+		sent := d.produce(m) // retry reloads pubHead (P1)
+		var err error
+		if !sent {
+			if e.shared.closed.Load() {
+				err = io.ErrClosedPipe
+			} else {
+				select {
+				case <-d.wwake:
+				case <-abort:
+					err = ErrAborted
+				case <-e.shared.either:
+					err = io.ErrClosedPipe
+				case <-ctx.Done():
+					err = ctx.Err()
+				}
+			}
+		}
+		d.wsleepers.Add(-1)
+		if sent {
 			// Baton: another parked producer may fit too.
 			if d.wsleepers.Load() > 0 && d.q.hasRoom() {
 				arm(d.wwake)
@@ -498,22 +513,8 @@ func (e *End) enqueue(ctx context.Context, m *msg.Msg, abort <-chan struct{}) er
 			e.wakePeer()
 			return nil
 		}
-		if e.shared.closed.Load() {
-			d.wsleepers.Add(-1)
-			return io.ErrClosedPipe
-		}
-		select {
-		case <-d.wwake:
-			d.wsleepers.Add(-1)
-		case <-abort:
-			d.wsleepers.Add(-1)
-			return ErrAborted
-		case <-e.shared.either:
-			d.wsleepers.Add(-1)
-			return io.ErrClosedPipe
-		case <-ctx.Done():
-			d.wsleepers.Add(-1)
-			return ctx.Err()
+		if err != nil {
+			return err
 		}
 	}
 }
@@ -581,11 +582,7 @@ func (e *End) RecvOr(ctx context.Context, abort <-chan struct{}) (*msg.Msg, erro
 		}
 		if e.shared.closed.Load() {
 			d.rsleepers.Add(-1)
-			// Close may have raced a final push.
-			if m, ok := d.consume(); ok {
-				return m, nil
-			}
-			return nil, io.EOF
+			return d.recvAfterClose() // close may have raced a final push
 		}
 		select {
 		case <-d.rwake:
@@ -594,10 +591,7 @@ func (e *End) RecvOr(ctx context.Context, abort <-chan struct{}) (*msg.Msg, erro
 			return nil, ErrAborted
 		case <-e.shared.either:
 			d.rsleepers.Add(-1)
-			if m, ok := d.consume(); ok {
-				return m, nil
-			}
-			return nil, io.EOF
+			return d.recvAfterClose()
 		case <-ctx.Done():
 			d.rsleepers.Add(-1)
 			return nil, ctx.Err()
@@ -616,13 +610,19 @@ func (e *End) recvSlowChan(ctx context.Context, abort <-chan struct{}) (*msg.Msg
 	case <-abort:
 		return nil, ErrAborted
 	case <-e.shared.either:
-		if m, ok := d.consume(); ok {
-			return m, nil
-		}
-		return nil, io.EOF
+		return d.recvAfterClose()
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+// recvAfterClose is a receive on a closed pipe: one last queued message if
+// there is one, else io.EOF.
+func (d *direction) recvAfterClose() (*msg.Msg, error) {
+	if m, ok := d.consume(); ok {
+		return m, nil
+	}
+	return nil, io.EOF
 }
 
 // Pending reports whether a message is queued for this end right now.
@@ -660,15 +660,18 @@ func (e *End) SendDrained() <-chan struct{} {
 // blocked Send and Recv. Messages already queued stay receivable from
 // either end. Idempotent.
 func (e *End) Close() error {
-	e.closeOnce.Do(func() {
+	e.shared.once.Do(func() {
 		e.shared.closed.Store(true)
-		e.shared.eitherOnce.Do(func() { close(e.shared.either) })
+		close(e.shared.either)
 		for _, d := range [...]*direction{e.send, e.recv} {
 			d.dmu.Lock()
 			d.fireDrainLocked()
 			d.dmu.Unlock()
 		}
 		// Notify idle receivers on either end so they observe the close.
+		// A later Close from the other end skips this: a receiver marks
+		// itself idle and then re-checks IsClosed, so it cannot sleep
+		// through a close that was already published.
 		e.woken()
 		e.peer.woken()
 	})
