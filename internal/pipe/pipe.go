@@ -345,6 +345,15 @@ func (e *End) woken() {
 	}
 }
 
+// wakePeer is the sender's half of the idle protocol: it runs the peer's
+// notification if the peer went idle. One inlined atomic load when it did
+// not.
+func (e *End) wakePeer() {
+	if e.peer.idle.Load() {
+		e.peer.woken()
+	}
+}
+
 // RecvOrIdle takes the next queued message without blocking. When there is
 // none it marks this end idle, so the next message sent here (or a close)
 // runs the notification, and reports false.
@@ -392,9 +401,7 @@ func (e *End) TrySend(m *msg.Msg) bool {
 	if !e.send.produce(m) {
 		return false
 	}
-	if e.peer.idle.Load() {
-		e.peer.woken()
-	}
+	e.wakePeer()
 	return true
 }
 
@@ -448,9 +455,7 @@ func (e *End) Flush() {
 	if e.send.rsleepers.Load() > 0 { // W1
 		arm(e.send.rwake)
 	}
-	if e.peer.idle.Load() {
-		e.peer.woken()
-	}
+	e.wakePeer()
 }
 
 // Send enqueues m for the peer, blocking while a bounded direction is full.
@@ -476,9 +481,7 @@ func (e *End) enqueue(ctx context.Context, m *msg.Msg, abort <-chan struct{}) er
 	}
 	d := e.send
 	if d.produce(m) {
-		if e.peer.idle.Load() {
-			e.peer.woken()
-		}
+		e.wakePeer()
 		return nil
 	}
 	if d.q == nil {
@@ -492,9 +495,7 @@ func (e *End) enqueue(ctx context.Context, m *msg.Msg, abort <-chan struct{}) er
 			if d.wsleepers.Load() > 0 && d.q.hasRoom() {
 				arm(d.wwake)
 			}
-			if e.peer.idle.Load() {
-				e.peer.woken()
-			}
+			e.wakePeer()
 			return nil
 		}
 		if e.shared.closed.Load() {
@@ -522,9 +523,7 @@ func (e *End) enqueue(ctx context.Context, m *msg.Msg, abort <-chan struct{}) er
 func (e *End) enqueueChan(ctx context.Context, m *msg.Msg, abort <-chan struct{}) error {
 	select {
 	case e.send.ch <- m:
-		if e.peer.idle.Load() {
-			e.peer.woken()
-		}
+		e.wakePeer()
 		return nil
 	case <-abort:
 		return ErrAborted
