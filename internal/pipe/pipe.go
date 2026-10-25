@@ -201,29 +201,6 @@ func (d *direction) setFlagLocked(bit uint32, on bool) {
 	d.flags.Store(f)
 }
 
-// trySend enqueues m without blocking (channel kind). Bounded directions
-// fail when the channel is full; unbounded ones always succeed, spilling
-// into overflow (and staying there while anything older is) to keep FIFO
-// order.
-func (d *direction) trySend(m *msg.Msg) bool {
-	if d.flags.Load()&slowOverflow == 0 {
-		select {
-		case d.ch <- m:
-			return true
-		default:
-		}
-	}
-	if !d.unbounded {
-		return false
-	}
-	d.dmu.Lock()
-	d.overflow = append(d.overflow, m)
-	d.setFlagLocked(slowOverflow, true)
-	d.refillLocked()
-	d.dmu.Unlock()
-	return true
-}
-
 // refillLocked moves overflow into the channel, oldest first, until the
 // channel is full or overflow is empty. Caller holds d.dmu.
 func (d *direction) refillLocked() {
@@ -270,26 +247,6 @@ func (d *direction) receivedSlow() {
 	}
 }
 
-// tryRecv takes the next queued message without blocking (channel kind).
-func (d *direction) tryRecv() (*msg.Msg, bool) {
-	for {
-		select {
-		case m := <-d.ch:
-			d.received()
-			return m, true
-		default:
-		}
-		// The channel is empty. A sender may be between setting
-		// slowOverflow and moving its message in; do the move ourselves.
-		if d.flags.Load()&slowOverflow == 0 {
-			return nil, false
-		}
-		d.dmu.Lock()
-		d.refillLocked()
-		d.dmu.Unlock()
-	}
-}
-
 // pending reports whether a message is ready to receive. For the channel
 // kind flags is loaded first: that atomic load orders the plain len read
 // after whatever atomic the caller did before (see End.MarkIdle).
@@ -325,7 +282,26 @@ func arm(ch chan struct{}) {
 // produce enqueues m if there is room and wakes a parked consumer.
 func (d *direction) produce(m *msg.Msg) bool {
 	if d.q == nil {
-		return d.trySend(m)
+		// Channel kind: send without blocking. Bounded directions fail when
+		// the channel is full; unbounded ones always succeed, spilling into
+		// overflow (and staying there while anything older is) to keep FIFO
+		// order. Inlined here, not a method, so TrySend is one call deep.
+		if d.flags.Load()&slowOverflow == 0 {
+			select {
+			case d.ch <- m:
+				return true
+			default:
+			}
+		}
+		if !d.unbounded {
+			return false
+		}
+		d.dmu.Lock()
+		d.overflow = append(d.overflow, m)
+		d.setFlagLocked(slowOverflow, true)
+		d.refillLocked()
+		d.dmu.Unlock()
+		return true
 	}
 	if !d.q.push(m) {
 		return false
@@ -340,7 +316,23 @@ func (d *direction) produce(m *msg.Msg) bool {
 // the SendDrained signal if this emptied the queue.
 func (d *direction) consume() (*msg.Msg, bool) {
 	if d.q == nil {
-		return d.tryRecv()
+		// Channel kind: receive without blocking (inlined, see produce).
+		for {
+			select {
+			case m := <-d.ch:
+				d.received()
+				return m, true
+			default:
+			}
+			// The channel is empty. A sender may be between setting
+			// slowOverflow and moving its message in; do the move ourselves.
+			if d.flags.Load()&slowOverflow == 0 {
+				return nil, false
+			}
+			d.dmu.Lock()
+			d.refillLocked()
+			d.dmu.Unlock()
+		}
 	}
 	m, ok := d.q.pop()
 	if !ok {
@@ -717,7 +709,7 @@ func (e *End) RecvOr(ctx context.Context, abort <-chan struct{}) (*msg.Msg, erro
 // blocks.
 func (e *End) recvSlowChan(ctx context.Context, abort <-chan struct{}) (*msg.Msg, error) {
 	d := e.recv
-	if m, ok := d.tryRecv(); ok {
+	if m, ok := d.consume(); ok {
 		return m, nil
 	}
 	select {
@@ -727,7 +719,7 @@ func (e *End) recvSlowChan(ctx context.Context, abort <-chan struct{}) (*msg.Msg
 	case <-abort:
 		return nil, ErrAborted
 	case <-e.shared.either:
-		if m, ok := d.tryRecv(); ok {
+		if m, ok := d.consume(); ok {
 			return m, nil
 		}
 		return nil, io.EOF
