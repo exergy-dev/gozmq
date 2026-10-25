@@ -78,8 +78,10 @@ func main() {
 		}
 		elapsed := max(time.Since(start), time.Nanosecond)
 		stop()
-		fmt.Printf("mean throughput: %.0f [msg/s]\n", float64(*count)/elapsed.Seconds())
-		fmt.Printf("mean throughput: %.3f [Mb/s]\n", float64(*count)*float64(*size)*8/1e6/elapsed.Seconds())
+		// The first message is outside the timed window, so count-1 were timed.
+		timed := float64(*count - 1)
+		fmt.Printf("mean throughput: %.0f [msg/s]\n", timed/elapsed.Seconds())
+		fmt.Printf("mean throughput: %.3f [Mb/s]\n", timed*float64(*size)*8/1e6/elapsed.Seconds())
 	case "remote_thr":
 		// Infinite linger, as libzmq's remote_thr relies on, so Close waits
 		// until every queued message has reached the peer.
