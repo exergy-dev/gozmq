@@ -55,12 +55,10 @@ const (
 // cgo-resolved zmq.h to stay in sync with whatever libzmq is installed.
 var (
 	ZMQ_SUBSCRIBE         = int(C.ZMQ_SUBSCRIBE)
-	ZMQ_UNSUBSCRIBE       = int(C.ZMQ_UNSUBSCRIBE)
 	ZMQ_LINGER            = int(C.ZMQ_LINGER)
 	ZMQ_SNDHWM            = int(C.ZMQ_SNDHWM)
 	ZMQ_RCVHWM            = int(C.ZMQ_RCVHWM)
-	ZMQ_IDENTITY          = int(C.ZMQ_IDENTITY)
-	ZMQ_ROUTING_ID        = int(C.ZMQ_IDENTITY) // alias used by newer libzmq
+	ZMQ_ROUTING_ID        = int(C.ZMQ_IDENTITY) // libzmq 4.3 name for IDENTITY
 	ZMQ_PLAIN_SERVER      = int(C.ZMQ_PLAIN_SERVER)
 	ZMQ_PLAIN_USERNAME    = int(C.ZMQ_PLAIN_USERNAME)
 	ZMQ_PLAIN_PASSWORD    = int(C.ZMQ_PLAIN_PASSWORD)
@@ -77,12 +75,9 @@ var (
 	ZMQ_IPV6              = int(C.ZMQ_IPV6)
 	ZMQ_RCVTIMEO          = int(C.ZMQ_RCVTIMEO)
 	ZMQ_SNDTIMEO          = int(C.ZMQ_SNDTIMEO)
-	ZMQ_CONNECT_TIMEOUT   = int(C.ZMQ_CONNECT_TIMEOUT)
 	ZMQ_RECONNECT_IVL     = int(C.ZMQ_RECONNECT_IVL)
 	ZMQ_MAXMSGSIZE        = int(C.ZMQ_MAXMSGSIZE)
-	ZMQ_RCVMORE           = int(C.ZMQ_RCVMORE)
 	ZMQ_LAST_ENDPOINT     = int(C.ZMQ_LAST_ENDPOINT)
-	ZMQ_SNDMORE           = int(C.ZMQ_SNDMORE)
 
 	ZMQ_EVENT_ACCEPTED     = int(C.ZMQ_EVENT_ACCEPTED)
 	ZMQ_EVENT_CONNECTED    = int(C.ZMQ_EVENT_CONNECTED)
@@ -193,34 +188,31 @@ func (s *Sock) Close() error {
 	return nil
 }
 
-// Bind listens on the given endpoint (e.g. "tcp://127.0.0.1:0").
-func (s *Sock) Bind(endpoint string) error {
+// endpointOp runs fn, one of the zmq_bind/connect/disconnect/... calls that
+// take an endpoint string, under the socket lock. op names the call in
+// errors.
+func (s *Sock) endpointOp(op, endpoint string, fn func(*C.char) C.int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return errors.New("libzmq: Bind on closed socket")
+		return fmt.Errorf("libzmq: %s on closed socket", op)
 	}
 	cep := C.CString(endpoint)
 	defer C.free(unsafe.Pointer(cep))
-	if rc := C.zmq_bind(s.ptr, cep); rc != 0 {
-		return lastError("zmq_bind " + endpoint)
+	if fn(cep) != 0 {
+		return lastError("zmq_" + op + " " + endpoint)
 	}
 	return nil
 }
 
+// Bind listens on the given endpoint (e.g. "tcp://127.0.0.1:0").
+func (s *Sock) Bind(endpoint string) error {
+	return s.endpointOp("bind", endpoint, func(c *C.char) C.int { return C.zmq_bind(s.ptr, c) })
+}
+
 // Connect dials the given endpoint.
 func (s *Sock) Connect(endpoint string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return errors.New("libzmq: Connect on closed socket")
-	}
-	cep := C.CString(endpoint)
-	defer C.free(unsafe.Pointer(cep))
-	if rc := C.zmq_connect(s.ptr, cep); rc != 0 {
-		return lastError("zmq_connect " + endpoint)
-	}
-	return nil
+	return s.endpointOp("connect", endpoint, func(c *C.char) C.int { return C.zmq_connect(s.ptr, c) })
 }
 
 // Send transmits frames as a single multipart message. All but the final
@@ -248,11 +240,7 @@ func (s *Sock) Send(frames [][]byte) error {
 		if i < len(frames)-1 {
 			flags = C.int(C.ZMQ_SNDMORE)
 		}
-		var ptr unsafe.Pointer
-		if len(f) > 0 {
-			ptr = unsafe.Pointer(&f[0])
-		}
-		rc := C.zmq_send(s.ptr, ptr, C.size_t(len(f)), flags)
+		rc := C.zmq_send(s.ptr, unsafe.Pointer(unsafe.SliceData(f)), C.size_t(len(f)), flags)
 		if rc < 0 {
 			return lastError(fmt.Sprintf("zmq_send frame %d", i))
 		}
@@ -303,27 +291,22 @@ func (s *Sock) Recv() ([][]byte, error) {
 //   - string / []byte → a byte-array option (SUBSCRIBE, IDENTITY, …)
 //
 // Unsupported types return an error rather than panicking.
-func (s *Sock) SetOption(opt int, val interface{}) error {
+func (s *Sock) SetOption(opt int, val any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return errors.New("libzmq: SetOption on closed socket")
 	}
 
+	var err error
 	switch v := val.(type) {
 	case int:
-		cv := C.int(v)
-		if rc := C.zmq_setsockopt(s.ptr, C.int(opt), unsafe.Pointer(&cv), C.size_t(unsafe.Sizeof(cv))); rc != 0 {
-			return lastError(fmt.Sprintf("zmq_setsockopt %d", opt))
-		}
-		if opt == ZMQ_LINGER {
+		err = setScalar(s.ptr, opt, C.int(v))
+		if err == nil && opt == ZMQ_LINGER {
 			s.lingerExplicit = true
 		}
 	case int64:
-		cv := C.int64_t(v)
-		if rc := C.zmq_setsockopt(s.ptr, C.int(opt), unsafe.Pointer(&cv), C.size_t(unsafe.Sizeof(cv))); rc != 0 {
-			return lastError(fmt.Sprintf("zmq_setsockopt %d", opt))
-		}
+		err = setScalar(s.ptr, opt, C.int64_t(v))
 	case string:
 		return s.setBytesLocked(opt, []byte(v))
 	case []byte:
@@ -331,83 +314,40 @@ func (s *Sock) SetOption(opt int, val interface{}) error {
 	default:
 		return fmt.Errorf("libzmq: SetOption %d: unsupported value type %T", opt, val)
 	}
-	return nil
+	return err
 }
 
-// GetOptionInt reads a C-int-sized option from the socket (e.g. ZMQ_RCVMORE,
-// ZMQ_EVENTS). Byte-array options should use a dedicated getter (see
-// LastEndpoint).
-func (s *Sock) GetOptionInt(opt int) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return 0, errors.New("libzmq: GetOptionInt on closed socket")
+// setScalar is zmq_setsockopt for an option whose value is the C integer v.
+func setScalar[T C.int | C.int64_t](ptr unsafe.Pointer, opt int, v T) error {
+	if rc := C.zmq_setsockopt(ptr, C.int(opt), unsafe.Pointer(&v), C.size_t(unsafe.Sizeof(v))); rc != 0 {
+		return lastError(fmt.Sprintf("zmq_setsockopt %d", opt))
 	}
-	var v C.int
-	sz := C.size_t(unsafe.Sizeof(v))
-	if rc := C.zmq_getsockopt(s.ptr, C.int(opt), unsafe.Pointer(&v), &sz); rc != 0 {
-		return 0, lastError(fmt.Sprintf("zmq_getsockopt %d", opt))
-	}
-	return int(v), nil
+	return nil
 }
 
 // Disconnect tears down a previously-established outbound connection. libzmq
 // applies the active LINGER to any queued messages for that endpoint.
 func (s *Sock) Disconnect(endpoint string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return errors.New("libzmq: Disconnect on closed socket")
-	}
-	cep := C.CString(endpoint)
-	defer C.free(unsafe.Pointer(cep))
-	if rc := C.zmq_disconnect(s.ptr, cep); rc != 0 {
-		return lastError("zmq_disconnect " + endpoint)
-	}
-	return nil
-}
-
-// Unbind removes a previously-bound listener endpoint. Existing peer
-// connections remain until they drop.
-func (s *Sock) Unbind(endpoint string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return errors.New("libzmq: Unbind on closed socket")
-	}
-	cep := C.CString(endpoint)
-	defer C.free(unsafe.Pointer(cep))
-	if rc := C.zmq_unbind(s.ptr, cep); rc != 0 {
-		return lastError("zmq_unbind " + endpoint)
-	}
-	return nil
+	return s.endpointOp("disconnect", endpoint, func(c *C.char) C.int { return C.zmq_disconnect(s.ptr, c) })
 }
 
 // Monitor wires the socket's event stream to the given inproc endpoint. A
 // subsequent ZMQ_PAIR socket bound to that endpoint in this Ctx receives
 // ZMQ_EVENT_* frames. Passing 0 for events subscribes to all events.
 func (s *Sock) Monitor(endpoint string, events int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return errors.New("libzmq: Monitor on closed socket")
-	}
 	if events == 0 {
 		events = int(C.ZMQ_EVENT_ALL)
 	}
-	cep := C.CString(endpoint)
-	defer C.free(unsafe.Pointer(cep))
-	if rc := C.zmq_socket_monitor(s.ptr, cep, C.int(events)); rc != 0 {
-		return lastError("zmq_socket_monitor " + endpoint)
-	}
-	return nil
+	return s.endpointOp("socket_monitor", endpoint, func(c *C.char) C.int { return C.zmq_socket_monitor(s.ptr, c, C.int(events)) })
 }
 
 // setBytesLocked assumes s.mu is held.
 func (s *Sock) setBytesLocked(opt int, b []byte) error {
+	// libzmq rejects an empty value behind a non-nil pointer (PLAIN_USERNAME
+	// ""), which SliceData of an empty non-nil slice would be.
 	var ptr unsafe.Pointer
 	if len(b) > 0 {
-		ptr = unsafe.Pointer(&b[0])
+		ptr = unsafe.Pointer(unsafe.SliceData(b))
 	}
 	if rc := C.zmq_setsockopt(s.ptr, C.int(opt), ptr, C.size_t(len(b))); rc != 0 {
 		return lastError(fmt.Sprintf("zmq_setsockopt %d (bytes)", opt))

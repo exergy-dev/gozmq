@@ -109,11 +109,7 @@ func (b *MechBase) MergePeerMetadata(props map[string]string) {
 		}
 	}
 	if b.zapUserID != "" {
-		for name := range peer {
-			if strings.EqualFold(name, userIDProperty) {
-				delete(peer, name)
-			}
-		}
+		maps.DeleteFunc(peer, func(name, _ string) bool { return strings.EqualFold(name, userIDProperty) })
 		peer[userIDProperty] = b.zapUserID
 	}
 	b.peerMeta = peer

@@ -9,8 +9,12 @@ import (
 
 // Canonical ZMTP 3.1 command names used by more than one package.
 const (
-	CmdReady = "READY"
-	CmdError = "ERROR"
+	CmdReady    = "READY"
+	CmdError    = "ERROR"
+	CmdHello    = "HELLO"    // PLAIN and CURVE
+	CmdWelcome  = "WELCOME"  // PLAIN and CURVE
+	CmdInitiate = "INITIATE" // PLAIN and CURVE
+	CmdMessage  = "MESSAGE"  // CURVE traffic envelope
 )
 
 // MaxCommandNameLen is the inclusive upper bound on a command name length:

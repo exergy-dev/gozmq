@@ -50,6 +50,21 @@ func EncodeMetadata(props map[string]string) []byte {
 	return out
 }
 
+// ValidateMetadata reports whether props fits a property list: the limits
+// whose violation makes EncodeMetadata panic. Callers whose properties come
+// from outside (a ZAP handler's reply) check with it first.
+func ValidateMetadata(props map[string]string) error {
+	for name, value := range props {
+		if len(name) > 255 {
+			return fmt.Errorf("gozmq/zmtp: metadata name length %d exceeds 255", len(name))
+		}
+		if uint64(len(value)) > 0xFFFFFFFF {
+			return fmt.Errorf("gozmq/zmtp: metadata %q value length %d exceeds 2^32-1", name, len(value))
+		}
+	}
+	return nil
+}
+
 // DecodeMetadata parses a ZMTP 3.1 READY property list into a map. Names are kept
 // in their on-wire case, but duplicate names (compared case-insensitively per
 // ZMTP 3.1 §2.3.1) are rejected with an error wrapping zmqerr.ErrMalformedFrame.

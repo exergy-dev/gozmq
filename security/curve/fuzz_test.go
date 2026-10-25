@@ -58,7 +58,7 @@ func FuzzCurveClientHandshake(f *testing.F) {
 	}
 	f.Add(zmtp.EncodeError("no"))
 	f.Add([]byte{0x5E, 'R', 'R', 'O', 'R', 0x03, '4', '0', '0'})
-	f.Add(append([]byte{7}, cmdWelcome...))
+	f.Add(append([]byte{7}, zmtp.CmdWelcome...))
 	f.Fuzz(func(t *testing.T, a []byte) {
 		c, err := newMech(security.RoleClient, cSec, cPub, sPub, nil, nil)
 		if err != nil {

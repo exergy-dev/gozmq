@@ -31,12 +31,14 @@ package security
 import (
 	"fmt"
 
-	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
 )
 
 // nullMechName is the greeting mechanism token for NULL (ZMTP 3.1 §3.2.1).
-const nullMechName = "NULL"
+const (
+	nullMechName = "NULL"
+	nullName     = "null" // in error text
+)
 
 // nullMech implements Mech for the NULL mechanism. The
 // handshake is a strict lock-step exchange of a single READY command in
@@ -85,8 +87,8 @@ func (m *nullMech) NextHandshake(in []byte) ([]byte, bool, error) {
 	}
 	// First direction: emit our READY command body.
 	if !m.sentReady {
-		if in != nil {
-			return nil, false, fmt.Errorf("gozmq/security/null: unexpected input on seed step: %w", zmqerr.ErrMalformedFrame)
+		if err := RequireNoInput(nullName, in, "seed step"); err != nil {
+			return nil, false, err
 		}
 		m.sentReady = true
 		return EncodeReady(m.localMeta), false, nil
@@ -94,16 +96,14 @@ func (m *nullMech) NextHandshake(in []byte) ([]byte, bool, error) {
 
 	// Second direction: parse the peer's READY command body.
 	if !m.peerReady {
-		if in == nil {
-			return nil, false, fmt.Errorf("gozmq/security/null: nil peer input on handshake step 2: %w", zmqerr.ErrMalformedFrame)
+		if err := RequireInput(nullName, in, "READY"); err != nil {
+			return nil, false, err
 		}
-		if reason, isErr, err := DecodeError(in); isErr {
-			if err != nil {
-				return nil, false, err
-			}
-			return nil, false, fmt.Errorf("gozmq/security/null: server rejected handshake: %q: %w", reason, zmqerr.ErrAuthFailed)
+		body, err := DecodeReply(in, zmtp.CmdReady)
+		if err != nil {
+			return nil, false, err
 		}
-		props, err := DecodeReady(in)
+		props, err := zmtp.DecodeMetadata(body)
 		if err != nil {
 			return nil, false, err
 		}
@@ -123,8 +123,8 @@ func (m *nullMech) nextServer(in []byte) ([]byte, bool, error) {
 			// happen before the server emits its READY.
 			return nil, false, nil
 		}
-		if in == nil {
-			return nil, false, fmt.Errorf("gozmq/security/null: nil peer input on server handshake step: %w", zmqerr.ErrMalformedFrame)
+		if err := RequireInput(nullName, in, "READY"); err != nil {
+			return nil, false, err
 		}
 		props, err := DecodeReady(in)
 		if err != nil {
