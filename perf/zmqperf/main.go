@@ -196,13 +196,19 @@ func socket(zctx *gozmq.Context, typ gozmq.SocketType, endpoint string, bind boo
 	return s
 }
 
+// send and recv format their failure label only on error: a Sprintf per
+// message was a quarter of the inproc profile.
 func send(ctx context.Context, s *gozmq.Socket, body []byte, i int) {
-	check(s.SendMsg(ctx, gozmq.NewMsgFromBytes(body)), fmt.Sprintf("send[%d]", i))
+	if err := s.SendMsg(ctx, gozmq.NewMsgFromBytes(body)); err != nil {
+		log.Fatalf("send[%d]: %v", i, err)
+	}
 }
 
 func recv(ctx context.Context, s *gozmq.Socket, size, i int) *gozmq.Msg {
 	m, err := s.RecvMsg(ctx)
-	check(err, fmt.Sprintf("recv[%d]", i))
+	if err != nil {
+		log.Fatalf("recv[%d]: %v", i, err)
+	}
 	if size > 0 && m.NumFrames() == 1 && len(m.Bytes()) != size {
 		log.Fatalf("message of incorrect size %d (expected %d)", len(m.Bytes()), size)
 	}
