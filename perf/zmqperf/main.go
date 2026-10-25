@@ -33,7 +33,6 @@ import (
 // use their default of 1000, which is why the comparison scripts note it.
 const benchHWM = 1_000_000
 
-
 func main() {
 	log.SetFlags(0)
 	if len(os.Args) < 2 {

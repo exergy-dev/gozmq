@@ -23,11 +23,12 @@ both directions; the matrix is in [`interop/README.md`](interop/README.md).
 
 **It is fast enough that the tradeoff is gone.** Measured two-process over
 TCP loopback against native libzmq 4.3.4 (PUSH/PULL, October 2026), gozmq
-is ahead of libzmq from 32 B (1.1×) through 8 KB (1.3×, 2.2× at 256 B) and
-within 2–11% at 64 KB frames with plain memory (1.4× with the opt-in receive
-buffer pool); those figures run the Go collector at GOGC 400, as a receiver
-at that allocation rate would, and the report also shows Go's default
-pacing. REQ/REP round trips over TCP are 20% shorter than libzmq's. The numbers, the method
+at Go's default settings is at or ahead of libzmq from 32 B (1.04–1.10×)
+through 8 KB (1.0×; 1.8× at 256 B), and at 0.6–0.7× on 64 KB frames, where
+a receiver allocating fresh 64 KiB bodies at 4 GB/s is paced by the
+collector: the opt-in receive buffer pool makes that row 1.4×, GOGC=400
+alone brings it to parity. REQ/REP round trips over TCP are 20% shorter
+than libzmq's. The numbers, the method
 and the tools to reproduce them are in [`perf/REPORT.md`](perf/REPORT.md).
 
 ## Install

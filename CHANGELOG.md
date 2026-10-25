@@ -9,8 +9,8 @@ migration hint.
 ## [Unreleased]
 
 A throughput release: small-message PUSH/PULL over TCP now matches native
-libzmq (32 B: 1.04–1.10× in the two-process comparison, from 0.6×), with no
-wire or API change. One additive export. See `perf/REPORT.md` for the
+libzmq at Go's default settings (32 B: 1.04–1.10× in the two-process
+comparison, from 0.6×), with no wire or API change. One additive export. See `perf/REPORT.md` for the
 tables and the trade-off on inproc request/reply latency.
 
 ### Added

@@ -21,36 +21,26 @@ and within-run columns, not tables from different dates.
   the two mixed pairings (gozmq PUSH → libzmq PULL and the reverse).
   `compare_lat.sh` does the same for REQ/REP round trips. gozmq's tool uses a
   1,000,000 message HWM and reuses one payload; libzmq's uses its default
-  HWM of 1000 and allocates per message. `zmqperf` runs at GC percent 400
-  unless `-gogc` says otherwise (`GOZMQ_GOGC` in the scripts; see the 64 KB
-  note); `GOZMQ_LOCAL_FLAGS=-pool` runs the receiver with
-  `WithRecvBufferPool`.
+  HWM of 1000 and allocates per message. Both run at Go's defaults;
+  `GOZMQ_GOGC=400` passes `-gogc 400` to the gozmq processes and
+  `GOZMQ_LOCAL_FLAGS=-pool` runs the receiver with `WithRecvBufferPool`
+  (see the 64 KB note).
 
 ## gozmq vs native libzmq 4.3.4, PUSH/PULL over TCP loopback
 
-`zmqperf` defaults (GC percent 400, see below), three consecutive runs,
-ratio = gozmq/libzmq:
+Go's default settings (plain-memory receive, GOGC 100), three consecutive
+runs, ratio = gozmq/libzmq:
 
 | size | gozmq | libzmq | ratio (3 runs) |
 | :--- | ---: | ---: | ---: |
-| 32 B | 9.17–9.69M msg/s (2.4 Gb/s) | 8.35–8.94M msg/s (2.2 Gb/s) | **1.08–1.10×** |
-| 256 B | 8.07–8.44M (17 Gb/s) | 3.59–3.77M (7.6 Gb/s) | 2.14–2.35× |
-| 1 KB | 3.12–3.32M (26 Gb/s) | 2.24–2.30M (18.5 Gb/s) | 1.36–1.48× |
-| 8 KB | 0.51–0.54M (34 Gb/s) | 0.40–0.41M (26.5 Gb/s) | 1.27–1.33× |
-| 64 KB | 0.10M (53 Gb/s) | 0.10–0.11M (55–59 Gb/s) | 0.89–0.98× |
-
-Go's default pacing (`GOZMQ_GOGC=100`), three runs:
-
-| size | gozmq | libzmq | ratio (3 runs) |
-| :--- | ---: | ---: | ---: |
-| 32 B | 9.27–9.71M | 8.61–8.91M | 1.04–1.10× |
-| 256 B | 6.73M | 3.70M | 1.82× |
-| 1 KB | 2.45–2.50M | 2.25–2.32M | 1.05–1.11× |
-| 8 KB | 0.39M | 0.38–0.40M | 0.99–1.01× |
+| 32 B | 9.27–9.71M msg/s (2.4 Gb/s) | 8.61–8.91M msg/s (2.2 Gb/s) | **1.04–1.10×** |
+| 256 B | 6.73M (13.8 Gb/s) | 3.70M (7.6 Gb/s) | 1.82× |
+| 1 KB | 2.45–2.50M (20 Gb/s) | 2.25–2.32M (19 Gb/s) | 1.05–1.11× |
+| 8 KB | 0.39M (25.8 Gb/s) | 0.38–0.40M (25.7 Gb/s) | 0.99–1.01× |
 | 64 KB | 0.07M (37 Gb/s) | 0.10–0.12M (50–62 Gb/s) | 0.60–0.73× |
 
-Receiver with `WithRecvBufferPool` (`GOZMQ_LOCAL_FLAGS=-pool`, Go's default
-pacing, one run):
+Options for the large-frame case (not defaults). Receiver with
+`WithRecvBufferPool` (`GOZMQ_LOCAL_FLAGS=-pool`, GOGC 100, one run):
 
 | size | gozmq | libzmq | ratio |
 | :--- | ---: | ---: | ---: |
@@ -60,14 +50,25 @@ pacing, one run):
 | 8 KB | 0.76M (50 Gb/s) | 0.41M (27 Gb/s) | 1.85× |
 | 64 KB | 0.15M (78 Gb/s) | 0.11M (57 Gb/s) | 1.38× |
 
-The 64 KB row is parity within libzmq's own variance: in interleaved
-two-process rounds gozmq is stable at 97–102k msg/s while libzmq alternates
-between ~65k and ~100k+ (GOMAXPROCS 2, 4, 8 and 32 make no difference on
-the gozmq side), and best-of-N picks libzmq's good mode. The default-path
-remainder is the zeroing of each fresh 64 KiB body (`memclrNoHeapPointers`,
-12% of the receiver's profile; `make` zeroes, malloc does not) and the
-netpoll park/wake per read that returns EAGAIN, both runtime-level; the
-pool removes the first and is what a receiver at that rate uses.
+Plain memory with the collector at GOGC 400 (`GOZMQ_GOGC=400`), three runs:
+
+| size | gozmq | libzmq | ratio (3 runs) |
+| :--- | ---: | ---: | ---: |
+| 32 B | 9.17–9.69M | 8.35–8.94M | 1.08–1.10× |
+| 256 B | 8.07–8.44M | 3.59–3.77M | 2.14–2.35× |
+| 1 KB | 3.12–3.32M | 2.24–2.30M | 1.36–1.48× |
+| 8 KB | 0.51–0.54M | 0.40–0.41M | 1.27–1.33× |
+| 64 KB | 0.10M (53 Gb/s) | 0.10–0.11M (55–59 Gb/s) | 0.89–0.98× |
+
+The 64 KB row at GOGC 400 is parity within libzmq's own variance: in
+interleaved two-process rounds gozmq is stable at 97–102k msg/s while libzmq
+alternates between ~65k and ~100k+ (GOMAXPROCS 2, 4, 8 and 32 make no
+difference on the gozmq side), and best-of-N picks libzmq's good mode. The
+default-path remainder is the zeroing of each fresh 64 KiB body
+(`memclrNoHeapPointers`, 12% of the receiver's profile; `make` zeroes, malloc
+does not) and the netpoll park/wake per read that returns EAGAIN, both
+runtime-level; the pool removes the first and is what a receiver at that
+rate uses.
 
 Before this branch (`main`, same session, interleaved with the branch's
 binary): 32 B ran at 3.4–5.3M msg/s, 0.6× of libzmq. The mixed pairings at
@@ -96,10 +97,8 @@ The old build at the default HWM of 1000 never had the ballast and runs the
 getting that benefit either. A receiver at 64 KB × 70k msg/s either tunes
 the collector (GOGC=200 already puts this branch ahead of the old one at
 88k vs 82k msg/s; GOGC=400 is within 2–11% of libzmq) or uses
-`WithRecvBufferPool`, which removes the allocation entirely. `zmqperf`
-therefore runs at GC percent 400 by default (`-gogc` overrides it; the
-scripts take `GOZMQ_GOGC`), and the Go-default table above is kept so the
-pacing effect stays visible.
+`WithRecvBufferPool`, which removes the allocation entirely. Both are options (`-pool`, `-gogc`); the headline table runs Go's
+defaults.
 
 ## What changed, and where the 32 B time went
 
