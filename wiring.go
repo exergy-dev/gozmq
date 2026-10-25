@@ -6,7 +6,6 @@ import (
 	"github.com/exergy-dev/gozmq/internal/session"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
 	"github.com/exergy-dev/gozmq/security"
-	"github.com/exergy-dev/gozmq/security/curve"
 	"github.com/exergy-dev/gozmq/transport"
 )
 
@@ -93,39 +92,12 @@ func (s *Socket) newMechanism(role security.Role) (security.Mech, error) {
 	if len(s.cfg.identity) > 0 {
 		meta["Identity"] = string(s.cfg.identity)
 	}
-	if s.cfg.newSecurityMech != nil {
-		m, err := s.cfg.newSecurityMech(role, meta)
-		if err != nil {
-			return nil, fmt.Errorf("gozmq: WithSecurityMech constructor: %w", err)
-		}
-		if m == nil {
-			return nil, fmt.Errorf("gozmq: WithSecurityMech constructor returned a nil mechanism")
-		}
-		return m, nil
+	if s.cfg.mech == nil {
+		return security.NewNull(role, meta), nil
 	}
-	switch {
-	case len(s.cfg.curveSecretKey) == 32 && s.cfg.curveServer:
-		m, err := curve.NewCurveServer(curve.Key(s.cfg.curveSecretKey), meta)
-		if err != nil {
-			return nil, fmt.Errorf("gozmq: CURVE server mechanism: %w", err)
-		}
-		return m, nil
-	case len(s.cfg.curveSecretKey) == 32 && !s.cfg.curveServer && len(s.cfg.curveServerKey) == 32 && len(s.cfg.curvePublicKey) == 32:
-		m, err := curve.NewCurveClient(curve.Key(s.cfg.curveServerKey), curve.Key(s.cfg.curvePublicKey), curve.Key(s.cfg.curveSecretKey), meta)
-		if err != nil {
-			return nil, fmt.Errorf("gozmq: CURVE client mechanism: %w", err)
-		}
-		return m, nil
-	case s.cfg.plainAuth != nil:
-		return security.NewPlainServer(s.cfg.plainAuth, meta), nil
-	case s.cfg.plainClient:
-		return security.NewPlainClient(s.cfg.plainClientUser, s.cfg.plainClientPass, meta), nil
+	m, err := s.cfg.mech.build(role, meta)
+	if err != nil {
+		return nil, fmt.Errorf("gozmq: %s: %w", s.cfg.mech.name, err)
 	}
-	if s.cfg.securityConfigured() {
-		// validateSocketConfig rejects every incomplete mechanism option, so
-		// this is unreachable; it guards against a future option that is
-		// configured but not constructible falling back to NULL.
-		return nil, fmt.Errorf("gozmq: security mechanism configured but not constructible; refusing to downgrade to NULL")
-	}
-	return security.NewNull(role, meta), nil
+	return m, nil
 }

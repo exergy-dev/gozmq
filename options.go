@@ -3,11 +3,13 @@ package gozmq
 import (
 	"bytes"
 	"cmp"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/exergy-dev/gozmq/security"
+	"github.com/exergy-dev/gozmq/security/curve"
 )
 
 // Option configures a Socket at construction time. The option type is opaque;
@@ -44,19 +46,10 @@ type socketConfig struct {
 	heartbeatSet        bool
 	handshakeTimeoutSet bool
 
-	plainAuth       func(user, pass string) bool
-	plainAuthSet    bool // WithPlainAuth was applied (even with a nil func)
-	plainClientUser string
-	plainClientPass string
-	plainClient     bool
-
-	newSecurityMech func(role security.Role, meta map[string]string) (security.Mech, error)
-
-	curveServer    bool
-	curveClientSet bool // WithCurveClient was applied
-	curveServerKey []byte
-	curvePublicKey []byte
-	curveSecretKey []byte
+	// mech is the security mechanism set by the last mechanism option;
+	// mechConflict records a second, different one for validateSocketConfig.
+	mech         *mechSpec
+	mechConflict error
 
 	monitor     chan<- Event
 	monitorMask EventType
@@ -66,6 +59,24 @@ type socketConfig struct {
 	// pick slog.Default; set via WithLogger for reproducible test
 	// logs and structured context.
 	logger *slog.Logger
+}
+
+// mechSpec is a configured security mechanism: the option's name (for
+// errors) and how to build one mechanism per session. Each option checks its
+// own arguments, so a spec that is set can always be built.
+type mechSpec struct {
+	name  string
+	build func(role security.Role, meta map[string]string) (security.Mech, error)
+}
+
+// setMech records spec as the socket's mechanism. Applying a different
+// mechanism option as well is a conflict that validateSocketConfig reports;
+// repeating the same option replaces it.
+func (c *socketConfig) setMech(spec *mechSpec) {
+	if c.mech != nil && c.mech.name != spec.name && c.mechConflict == nil {
+		c.mechConflict = fmt.Errorf("gozmq: %s and %s are mutually exclusive", c.mech.name, spec.name)
+	}
+	c.mech = spec
 }
 
 func newSocketConfig() *socketConfig {
@@ -290,7 +301,15 @@ func WithSubscribe(prefix []byte) Option {
 // runs no mechanism: Bind or Connect on inproc:// fails with
 // [ErrEndpointInvalid] for a socket with any PLAIN or CURVE option.
 func WithPlainAuth(fn func(user, pass string) bool) Option {
-	return func(c *socketConfig) error { c.plainAuth = fn; c.plainAuthSet = true; return nil }
+	return func(c *socketConfig) error {
+		if fn == nil {
+			return fmt.Errorf("gozmq: WithPlainAuth requires a non-nil authenticate function")
+		}
+		c.setMech(&mechSpec{"WithPlainAuth", func(_ security.Role, meta map[string]string) (security.Mech, error) {
+			return security.NewPlainServer(fn, meta), nil
+		}})
+		return nil
+	}
 }
 
 // WithPlainClient makes the socket the PLAIN client, presenting (username,
@@ -302,9 +321,12 @@ func WithPlainAuth(fn func(user, pass string) bool) Option {
 // it rules out inproc:// (see [WithPlainAuth]).
 func WithPlainClient(username, password string) Option {
 	return func(c *socketConfig) error {
-		c.plainClient = true
-		c.plainClientUser = username
-		c.plainClientPass = password
+		if len(username) > 255 || len(password) > 255 {
+			return fmt.Errorf("gozmq: WithPlainClient username and password must each be at most 255 bytes")
+		}
+		c.setMech(&mechSpec{"WithPlainClient", func(_ security.Role, meta map[string]string) (security.Mech, error) {
+			return security.NewPlainClient(username, password, meta), nil
+		}})
 		return nil
 	}
 }
@@ -337,8 +359,13 @@ func WithZAPDomain(domain string) Option {
 // inproc:// (the call fails with [ErrEndpointInvalid]).
 func WithCurveServer(secretKey []byte) Option {
 	return func(c *socketConfig) error {
-		c.curveServer = true
-		c.curveSecretKey = bytes.Clone(secretKey)
+		if len(secretKey) != 32 {
+			return fmt.Errorf("gozmq: WithCurveServer requires a 32-byte secret key, got %d bytes", len(secretKey))
+		}
+		key := curve.Key(secretKey)
+		c.setMech(&mechSpec{"WithCurveServer", func(_ security.Role, meta map[string]string) (security.Mech, error) {
+			return curve.NewCurveServer(key, meta)
+		}})
 		return nil
 	}
 }
@@ -353,11 +380,14 @@ func WithCurveServer(secretKey []byte) Option {
 // mutually authenticated. As with [WithCurveServer], inproc:// is ruled out.
 func WithCurveClient(serverKey, publicKey, secretKey []byte) Option {
 	return func(c *socketConfig) error {
-		c.curveServer = false
-		c.curveClientSet = true
-		c.curveServerKey = bytes.Clone(serverKey)
-		c.curvePublicKey = bytes.Clone(publicKey)
-		c.curveSecretKey = bytes.Clone(secretKey)
+		if len(serverKey) != 32 || len(publicKey) != 32 || len(secretKey) != 32 {
+			return fmt.Errorf("gozmq: WithCurveClient requires three 32-byte keys, got server=%d public=%d secret=%d bytes",
+				len(serverKey), len(publicKey), len(secretKey))
+		}
+		server, public, secret := curve.Key(serverKey), curve.Key(publicKey), curve.Key(secretKey)
+		c.setMech(&mechSpec{"WithCurveClient", func(_ security.Role, meta map[string]string) (security.Mech, error) {
+			return curve.NewCurveClient(server, public, secret, meta)
+		}})
 		return nil
 	}
 }
@@ -395,7 +425,13 @@ func WithSecurityMech(newMech func(role security.Role, meta map[string]string) (
 		if newMech == nil {
 			return fmt.Errorf("gozmq: WithSecurityMech requires a non-nil constructor")
 		}
-		c.newSecurityMech = newMech
+		c.setMech(&mechSpec{"WithSecurityMech", func(role security.Role, meta map[string]string) (security.Mech, error) {
+			m, err := newMech(role, meta)
+			if err == nil && m == nil {
+				err = errors.New("constructor returned a nil mechanism")
+			}
+			return m, err
+		}})
 		return nil
 	}
 }
@@ -463,17 +499,6 @@ func hwmInRange(name string, v int) error {
 	return nil
 }
 
-// securityConfigured reports whether any security mechanism option is set:
-// PLAIN, CURVE or WithSecurityMech. Validation keeps to at most one, STREAM
-// takes none, and inproc refuses a socket that has one.
-func (c *socketConfig) securityConfigured() bool {
-	return c.newSecurityMech != nil || c.plainConfigured() || c.curveConfigured()
-}
-
-func (c *socketConfig) plainConfigured() bool { return c.plainAuthSet || c.plainClient }
-
-func (c *socketConfig) curveConfigured() bool { return c.curveServer || c.curveClientSet }
-
 func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 	if err := cmp.Or(
 		hwmInRange("WithSendHWM", cfg.sendHWM),
@@ -496,32 +521,10 @@ func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 		}
 	}
 	// At most one mechanism per socket: otherwise newMechanism would silently
-	// pick one (CURVE over PLAIN), or fail every session rather than NewSocket
-	// (PLAIN server plus client).
-	plainSet, curveSet := cfg.plainConfigured(), cfg.curveConfigured()
-	// A mechanism option whose arguments cannot build the mechanism must
-	// fail here. newMechanism falls back to NULL only when no mechanism is
-	// configured; an incomplete one must never reach that fallback.
-	switch {
-	case cfg.plainAuthSet && cfg.plainAuth == nil:
-		return fmt.Errorf("gozmq: WithPlainAuth requires a non-nil authenticate function")
-	case cfg.plainClient && (len(cfg.plainClientUser) > 255 || len(cfg.plainClientPass) > 255):
-		return fmt.Errorf("gozmq: WithPlainClient username and password must each be at most 255 bytes")
-	case cfg.curveServer && len(cfg.curveSecretKey) != 32:
-		return fmt.Errorf("gozmq: WithCurveServer requires a 32-byte secret key, got %d bytes", len(cfg.curveSecretKey))
-	case cfg.curveClientSet && (len(cfg.curveServerKey) != 32 || len(cfg.curvePublicKey) != 32 || len(cfg.curveSecretKey) != 32):
-		return fmt.Errorf("gozmq: WithCurveClient requires three 32-byte keys, got server=%d public=%d secret=%d bytes",
-			len(cfg.curveServerKey), len(cfg.curvePublicKey), len(cfg.curveSecretKey))
-	}
-	switch {
-	case cfg.newSecurityMech != nil && plainSet:
-		return fmt.Errorf("gozmq: WithSecurityMech is mutually exclusive with the PLAIN options")
-	case cfg.newSecurityMech != nil && curveSet:
-		return fmt.Errorf("gozmq: WithSecurityMech is mutually exclusive with the CURVE options")
-	case cfg.plainAuth != nil && cfg.plainClient:
-		return fmt.Errorf("gozmq: WithPlainAuth and WithPlainClient are mutually exclusive")
-	case plainSet && curveSet:
-		return fmt.Errorf("gozmq: the PLAIN and CURVE options are mutually exclusive")
+	// pick one. The options check their own arguments, so a mechanism that
+	// is set can always be built and never falls back to NULL.
+	if cfg.mechConflict != nil {
+		return cfg.mechConflict
 	}
 	if cfg.routerMandatory && t != Router {
 		return fmt.Errorf("gozmq: WithRouterMandatory only valid on ROUTER sockets")
@@ -538,7 +541,7 @@ func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 		// options would be a security hazard (e.g. WithPlainAuth on a
 		// raw-TCP listener that authenticates nobody).
 		switch {
-		case cfg.securityConfigured():
+		case cfg.mech != nil:
 			return fmt.Errorf("gozmq: security options (PLAIN, CURVE, WithSecurityMech) are not applicable to STREAM sockets (no ZMTP handshake)")
 		case len(cfg.identity) > 0:
 			return fmt.Errorf("gozmq: WithIdentity is not applicable to STREAM sockets (no ZMTP handshake)")

@@ -75,7 +75,7 @@ func (s *Socket) checkInproc(endpoint string) error {
 		return fmt.Errorf("%w: inproc endpoint requires a non-empty name", ErrEndpointInvalid)
 	case s.socketType == Stream:
 		return fmt.Errorf("%w: %q: STREAM sockets carry raw bytes and do not support inproc", ErrEndpointInvalid, endpoint)
-	case s.cfg.securityConfigured():
+	case s.cfg.mech != nil:
 		return fmt.Errorf("%w: %q: inproc runs no security handshake, so a socket with PLAIN, CURVE or WithSecurityMech cannot use it",
 			ErrEndpointInvalid, endpoint)
 	}
