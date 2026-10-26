@@ -41,11 +41,13 @@ func (s *Session) runRawReader() {
 	}
 }
 
-// runRawWriter is the writer in raw mode: each pipe message is one body
-// frame written verbatim. Like the ZMTP writer it coalesces: after the
-// message it blocked for, it takes whatever is already queued (under the
-// writer's batch caps) and writes the lot in one write or writev, so a
-// lone message still goes out at once and only a backlog is batched.
+// runRawWriter is the writer in raw mode: each pipe message is a STREAM
+// send, [identity, body...], whose body frames are written verbatim, back
+// to back (see appendRawMessage). Like the ZMTP writer it coalesces:
+// after the message it blocked for, it takes whatever is already queued
+// (under the writer's batch caps) and writes the lot in one write or
+// writev, so a lone message still goes out at once and only a backlog is
+// batched.
 // Drain (writerCtx cancelled) writes what is still queued and exits
 // leaving the conn open, as in ZMTP mode.
 func (s *Session) runRawWriter() {
@@ -100,17 +102,24 @@ func (s *Session) writeRawBatchFrom(batch *writerBatch, first *msg.Msg) bool {
 }
 
 // appendRawMessage adds m's body to the batch and reports whether m is
-// the half-close (an empty body, which adds nothing). The batch owns m's
-// reference from here on (see writerBatch.release).
+// the half-close, which adds nothing. m is a STREAM send as the engine
+// routed it, [identity, body...]: the body is the concatenation of the
+// frames after the identity, and a body of zero bytes (or a message with
+// no frames at all) is the half-close. The batch owns m's reference from
+// here on (see writerBatch.release).
 func (b *writerBatch) appendRawMessage(m *msg.Msg) (halfClose bool) {
 	if m.Lent() {
 		b.lent = append(b.lent, m)
 	}
-	body, _ := m.SingleFrame()
-	if len(body) == 0 {
+	frames := m.Frames()
+	if len(frames) == 0 || m.TotalSize() == len(frames[0]) {
 		return true
 	}
-	b.appendRaw(body)
+	for _, f := range frames[1:] {
+		if len(f) > 0 {
+			b.appendRaw(f)
+		}
+	}
 	return false
 }
 

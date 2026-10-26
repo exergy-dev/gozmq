@@ -51,9 +51,30 @@ func TestStream_FailedSendReleasesLease(t *testing.T) {
 			require.ErrorIs(t, err, zmqerr.ErrRouteUnknown)
 			require.Zero(t, puts.Load(), "caller still holds m")
 			m.Release()
-			require.Equal(t, int32(1), puts.Load(), "the derived message's reference leaked")
+			require.Equal(t, int32(1), puts.Load(), "a reference leaked")
 		})
 	}
+}
+
+// A successful STREAM Send hands m itself, and its reference, to the peer
+// pipe: the buffer goes back once the pipe's reader releases it.
+func TestStream_SendHandsReferenceToPipe(t *testing.T) {
+	t.Parallel()
+	id := []byte("peer")
+	eng := socket.NewStreamEngine()
+	defer eng.Close()
+	engP, peer := pipe.NewPair(4, 4, id, nil)
+	defer closePipes(engP, peer)
+	mustAttach(t, eng, engP)
+
+	m, puts := lentTo(id, []byte("a"), []byte("b"))
+	require.NoError(t, eng.Send(testutil.Ctx(t), m))
+	got, err := peer.RecvOr(testutil.Ctx(t), nil)
+	require.NoError(t, err)
+	require.Same(t, m, got)
+	require.Zero(t, puts.Load(), "released before the writer was done")
+	got.Release()
+	require.Equal(t, int32(1), puts.Load())
 }
 
 func TestRouter_FailedSendReleasesLease(t *testing.T) {

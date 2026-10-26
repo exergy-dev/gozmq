@@ -149,18 +149,29 @@ func (e *identityRouter) lookup(id []byte, name string, mandatory bool) (*pipe.E
 	return nil, nil
 }
 
-// deliver hands out, the message derived for the peer behind p, to p. On
-// success it counts the send. It releases out on failure, and maps a
-// closed engine to ErrSocketClosed and a peer that vanished between lookup
-// and send to the same outcome as an unknown identity (ErrRouteUnknown
-// when mandatory, otherwise a counted drop and a nil error). The caller
-// releases its own message after a nil return.
+// deliver hands out, the message derived for the peer behind p, to p (see
+// sendTo) and releases out if p did not take it. The caller releases its
+// own message after a nil return.
 func (e *identityRouter) deliver(ctx context.Context, p *pipe.End, out *msg.Msg, id []byte, name string, mandatory bool) error {
-	err := p.SendOr(ctx, out, e.fq.closeCh)
+	sent, err := e.sendTo(ctx, p, out, id, name, mandatory)
+	if !sent {
+		out.Release()
+	}
+	return err
+}
+
+// sendTo hands m to p, the pipe of the peer named id, and reports whether
+// p took it, together with m's reference; otherwise m is still the
+// caller's. It counts the send, and maps a closed engine to
+// ErrSocketClosed and a peer that vanished between lookup and send to the
+// same outcome as an unknown identity: ErrRouteUnknown when mandatory,
+// otherwise a counted drop and a nil error.
+func (e *identityRouter) sendTo(ctx context.Context, p *pipe.End, m *msg.Msg, id []byte, name string, mandatory bool) (sent bool, err error) {
+	err = p.SendOr(ctx, m, e.fq.closeCh)
 	switch {
 	case err == nil:
 		e.sent.Add(1)
-		return nil
+		return true, nil
 	case errors.Is(err, pipe.ErrAborted):
 		err = errClosed(name + " send")
 	case !errors.Is(err, io.ErrClosedPipe):
@@ -170,8 +181,7 @@ func (e *identityRouter) deliver(ctx context.Context, p *pipe.End, out *msg.Msg,
 		e.dropped.Add(1)
 		err = nil
 	}
-	out.Release()
-	return err
+	return false, err
 }
 
 // Recv fair-queues across attached pipes and prepends the source peer's

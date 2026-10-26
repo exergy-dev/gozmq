@@ -1,7 +1,6 @@
 package socket
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 
@@ -20,12 +19,14 @@ import (
 // peer gets a routing identity (synthesized when the peer is anonymous, which
 // is the norm for raw TCP), inbound messages are fair-queued and stamped with
 // the source identity, and outbound messages route by their leading identity
-// frame. STREAM differs from ROUTER only in its Send framing (it concatenates
-// the body frames into one raw byte run) and that it is always mandatory.
+// frame. STREAM differs from ROUTER only in its Send framing (the peer's
+// writer puts the body frames on the wire as one byte run) and that it is
+// always mandatory.
 //
 // Zero-length-body half-close: libzmq treats an outbound Msg whose body
-// concatenates to zero bytes as "close this peer." The engine forwards an empty
-// Msg down the target pipe; the session translates that into conn.Close.
+// concatenates to zero bytes as "close this peer." The engine forwards such
+// a Msg down the target pipe like any other; the session translates it into
+// conn.Close.
 //
 // STREAM peers run internal/session in raw mode (no ZMTP framing), which
 // pumps conn.Read bytes into the pipe and drains outbound Msgs to conn.Write.
@@ -47,45 +48,35 @@ type streamEngine struct {
 // Pipe boundary contract:
 //   - Each inbound pipe Msg carries one body frame: the raw chunk read from
 //     the wire.
-//   - Each outbound pipe Msg carries one body frame: the bytes to write
-//     verbatim. An empty body means "close the conn" (STREAM half-close).
+//   - Each outbound pipe Msg is the message as sent, [identity, body...]:
+//     the writer puts the concatenation of the frames after the first on
+//     the wire verbatim. If they hold no bytes at all (an identity-only
+//     message, or empty body frames), the Msg means "close the conn"
+//     (STREAM half-close).
 //   - The pipe's PeerIdentity may be empty; the engine synthesizes one.
 func NewStreamEngine() Engine {
 	return &streamEngine{identityRouter: newIdentityRouter("stream")}
 }
 
-// Send routes by the leading identity frame and writes the concatenation of the
-// remaining frames as a single raw-bytes frame to the peer pipe. STREAM is
-// always mandatory: an empty or unknown identity, or a peer whose pipe closed
-// before it was detached, returns ErrRouteUnknown.
+// Send routes by the leading identity frame and hands m itself, identity
+// frame included, to the peer pipe, whose writer sends the concatenation
+// of the remaining frames as raw bytes: no per-message copy or derived
+// message. On success the pipe takes m's reference; on failure it stays
+// with the caller. STREAM is always mandatory: an empty or unknown
+// identity, or a peer whose pipe closed before it was detached, returns
+// ErrRouteUnknown.
 func (e *streamEngine) Send(ctx context.Context, m *msg.Msg) error {
 	if m == nil || m.NumFrames() == 0 {
 		return fmt.Errorf("stream send: missing identity frame: %w", zmqerr.ErrRouteUnknown)
 	}
-	frames := m.Frames()
-	id := frames[0]
-	body := frames[1:]
-
+	id := m.Frames()[0]
 	p, err := e.lookup(id, "stream", true)
 	if err != nil {
 		return err
 	}
-
-	// Body frames go down as one byte run (matching libzmq's coalescing of
-	// multipart STREAM sends); the usual single frame is passed on without
-	// a copy. An empty result is the half-close sentinel, still handed down
-	// as a well-formed Msg for the writer to act on.
-	var out *msg.Msg
-	if len(body) == 1 {
-		out = m.Derive(body[0])
-	} else {
-		out = msg.FromBytes(bytes.Join(body, nil))
-	}
-	if err := e.deliver(ctx, p, out, id, "stream", true); err != nil {
-		return err
-	}
-	m.Release() // out holds its own reference
-	return nil
+	// Mandatory, so sendTo's sent flag adds nothing to its error.
+	_, err = e.sendTo(ctx, p, m, id, "stream", true)
+	return err
 }
 
 var _ Engine = (*streamEngine)(nil)

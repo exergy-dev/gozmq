@@ -91,19 +91,28 @@ func TestStream_OutboundRoutesByIdentity(t *testing.T) {
 
 	ctx := testutil.Ctx(t)
 
-	// Send a multi-frame body to peer-a; concatenation should land on peerA.
-	require.NoError(t, eng.Send(ctx, msg.FromFrames(idA, []byte("HTTP/1.1 "), []byte("200 OK\r\n"))), "send to A")
+	// Send a multi-frame body to peer-a; it lands on peerA as sent, for the
+	// raw writer to concatenate on the wire.
+	sentA := msg.FromFrames(idA, []byte("HTTP/1.1 "), []byte("200 OK\r\n"))
+	require.NoError(t, eng.Send(ctx, sentA), "send to A")
 	// Send a single-frame body to peer-b.
 	require.NoError(t, eng.Send(ctx, msg.FromFrames(idB, []byte("250 OK\r\n"))), "send to B")
 
 	mA, err := peerA.RecvOr(ctx, nil)
 	require.NoError(t, err, "peerA recv")
-	require.Equal(t, 1, mA.NumFrames(), "peerA frames (concatenated)")
-	require.Equal(t, []byte("HTTP/1.1 200 OK\r\n"), mA.Bytes())
+	require.Same(t, sentA, mA, "the pipe carries the message as sent")
+	require.Equal(t, [][]byte{idA, []byte("HTTP/1.1 "), []byte("200 OK\r\n")}, mA.Frames())
+	require.Equal(t, []byte("HTTP/1.1 200 OK\r\n"), streamBody(mA))
 
 	mB, err := peerB.RecvOr(ctx, nil)
 	require.NoError(t, err, "peerB recv")
-	require.Equal(t, []byte("250 OK\r\n"), mB.Bytes())
+	require.Equal(t, []byte("250 OK\r\n"), streamBody(mB))
+}
+
+// streamBody is what the raw writer puts on the wire for an outbound pipe
+// message: its frames after the identity, back to back.
+func streamBody(m *msg.Msg) []byte {
+	return bytes.Join(m.Frames()[1:], nil)
 }
 
 // TestStream_UnknownIdentity asserts that Send to an unrecognized
@@ -184,7 +193,7 @@ func TestStream_AnonymousPeerGetsSynthesizedIdentity(t *testing.T) {
 	require.NoError(t, eng.Send(ctx, msg.FromFrames(id, []byte("reply"))), "send back")
 	got, err := peer.RecvOr(ctx, nil)
 	require.NoError(t, err, "peer recv")
-	require.Equal(t, []byte("reply"), got.Bytes())
+	require.Equal(t, []byte("reply"), streamBody(got))
 
 	// A second anonymous peer gets its own identity, and Send to it does
 	// not leak into the first peer.
@@ -200,7 +209,7 @@ func TestStream_AnonymousPeerGetsSynthesizedIdentity(t *testing.T) {
 	require.NoError(t, eng.Send(ctx, msg.FromFrames(id2, []byte("reply2"))), "send to peer2")
 	got, err = peer2.RecvOr(ctx, nil)
 	require.NoError(t, err, "peer2 recv")
-	require.Equal(t, []byte("reply2"), got.Bytes())
+	require.Equal(t, []byte("reply2"), streamBody(got))
 	_, ok := peer.TryRecv()
 	require.False(t, ok, "peer2's reply reached the first peer")
 }
@@ -259,7 +268,7 @@ func (p *streamPeer) recv(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	b := m.Bytes()
+	b := streamBody(m)
 	p.received.Write(b)
 	return b, nil
 }
@@ -433,10 +442,11 @@ func TestStream_PeerDisconnect(t *testing.T) {
 // TestStream_HalfCloseZeroLengthBody asserts the libzmq half-close
 // convention: the server Sends a message whose body is empty to signal
 // "close this peer." The raw-session contract (documented on
-// NewStreamEngine) is that it translates that empty-body frame into
-// conn.Close. Here we assert the engine's half of that contract: an
-// empty body surfaces on the target pipe as a zero-byte single-frame
-// message, without dropping or reordering the data queued ahead of it.
+// NewStreamEngine) is that it translates a message whose body frames hold
+// no bytes into conn.Close. Here we assert the engine's half of that
+// contract: an empty body surfaces on the target pipe as a message with a
+// zero-byte body, without dropping or reordering the data queued ahead of
+// it.
 func TestStream_HalfCloseZeroLengthBody(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewStreamEngine()
@@ -456,8 +466,8 @@ func TestStream_HalfCloseZeroLengthBody(t *testing.T) {
 	require.NoError(t, eng.Send(ctx, msg.FromFrames(id, nil)), "empty-body send")
 
 	// 2. Client sees data, then the zero-length sentinel(s). The engine
-	//    forwards a single-frame Msg per Send; the body is the concatenation
-	//    of the input body frames (which is "" for the sentinel cases).
+	//    forwards each Send's Msg as sent; the body is the concatenation of
+	//    its frames after the identity (which is "" for the sentinel cases).
 	first, err := p.recv(ctx)
 	require.NoError(t, err, "recv data")
 	require.Equal(t, []byte("final payload\n"), first)

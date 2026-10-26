@@ -65,15 +65,20 @@ func (rs *rawSession) queue(t *testing.T, ms ...*msg.Msg) {
 	}
 }
 
-// rawOut is the outbound pipe message the STREAM engine hands down for body.
-func rawOut(body string) *msg.Msg { return msg.FromBytes([]byte(body)) }
+// rawID is the routing identity on the test's outbound messages; the
+// writer never looks at it.
+var rawID = []byte{0, 0, 0, 0, 1}
 
-// rawHalfClose is the outbound STREAM half-close.
-func rawHalfClose() *msg.Msg { return msg.FromBytes(nil) }
+// rawOut is the outbound pipe message the STREAM engine hands down for a
+// send of body: the message as sent, [identity, body].
+func rawOut(body string) *msg.Msg { return msg.FromFrames(rawID, []byte(body)) }
+
+// rawHalfClose is the outbound STREAM half-close: an identity-only send.
+func rawHalfClose() *msg.Msg { return msg.FromFrames(rawID) }
 
 // rawLentOut is rawOut for a lent body, given back through put.
 func rawLentOut(put func([]byte), body []byte) *msg.Msg {
-	return msg.NewLent(put, [][]byte{body}, body)
+	return msg.NewLent(put, [][]byte{body}, rawID, body)
 }
 
 // readAll collects everything the peer end receives until EOF.
@@ -375,6 +380,53 @@ func TestRaw_HalfCloseEndsBatch(t *testing.T) {
 	waitClosed(t, connA.Closed(), time.Second, "conn not closed")
 	require.True(t, rs.attached)
 	require.Equal(t, []int{1}, wc.BufCounts(), "the two bodies in one write")
+}
+
+// TestRaw_WriterConcatenatesBodyFrames: a multipart send's body frames
+// (every frame after the identity) go on the wire back to back, empty ones
+// contributing nothing, and the identity never does.
+func TestRaw_WriterConcatenatesBodyFrames(t *testing.T) {
+	t.Parallel()
+	connA, connB := newFakeConnPair()
+	defer connB.Close()
+	wc := newWritevConn(connA)
+	rs := newRaw(wc, 0)
+	large := bytes.Repeat([]byte("L"), coalesceBodyMax+1)
+	rs.queue(t,
+		msg.FromFrames(rawID, []byte("HTTP/1.1 "), nil, []byte("200 OK\r\n")),
+		msg.FromFrames(rawID, []byte("a"), large, []byte("b")),
+	)
+	rs.start(t)
+
+	want := "HTTP/1.1 200 OK\r\n" + "a" + string(large) + "b"
+	got := make([]byte, len(want))
+	_, err := io.ReadFull(connB, got)
+	require.NoError(t, err)
+	require.Equal(t, want, string(got))
+	require.Len(t, wc.BufCounts(), 1, "one writev")
+}
+
+// TestRaw_EmptyBodyFramesHalfClose: a send whose body frames hold no bytes
+// at all is a half-close too, and so is a message with no frames.
+func TestRaw_EmptyBodyFramesHalfClose(t *testing.T) {
+	t.Parallel()
+	for name, m := range map[string]*msg.Msg{
+		"empty frames": msg.FromFrames(rawID, nil, []byte{}),
+		"single empty": msg.FromFrames(rawID, nil),
+		"no frames":    msg.FromFrames(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			connA, connB := newFakeConnPair()
+			rs := newRaw(connA, 0)
+			rs.queue(t, rawOut("data"), m)
+			read := readAll(connB)
+			rs.start(t)
+			got := testutil.RequireRecv(t, read, 2*time.Second, "peer never saw EOF")
+			require.Equal(t, "data", string(got))
+			waitClosed(t, rs.Done(), 2*time.Second, "session did not end")
+		})
+	}
 }
 
 // TestRaw_HalfCloseFirstInBatch: a half-close at the head of the queue

@@ -199,6 +199,25 @@ func TestSocketStream_BurstThenHalfClose(t *testing.T) {
 	require.Equal(t, want.Bytes(), got)
 }
 
+// TestSocketStream_MultipartConcatenates: the body frames of a multipart
+// send go on the wire back to back, empty ones adding nothing, and a send
+// whose body frames are all empty is a half-close.
+func TestSocketStream_MultipartConcatenates(t *testing.T) {
+	t.Parallel()
+	srv, cli, id := streamServerPeer(t)
+	ctx := testutil.Ctx(t)
+	large := bytes.Repeat([]byte("L"), 4096)
+	read := testutil.Async(func() []byte {
+		b, _ := io.ReadAll(cli)
+		return b
+	})
+	require.NoError(t, srv.SendMsg(ctx, gozmq.NewMsgFromFrames(id, []byte("HTTP/1.1 "), nil, []byte("200 OK\r\n"))))
+	require.NoError(t, srv.SendMsg(ctx, gozmq.NewMsgFromFrames(id, []byte("<"), large, []byte(">"))))
+	require.NoError(t, srv.SendMsg(ctx, gozmq.NewMsgFromFrames(id, nil, []byte{})), "half-close")
+	got := testutil.RequireRecv(t, read, 10*time.Second, "peer never saw the half-close")
+	require.Equal(t, "HTTP/1.1 200 OK\r\n<"+string(large)+">", string(got))
+}
+
 // TestSocketStream_LargeAfterSmall: a 2 MiB send behind small ones (a
 // body the writer sends by reference, past its batch byte cap) arrives
 // intact and in order.
