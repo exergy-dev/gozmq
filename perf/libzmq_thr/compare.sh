@@ -46,6 +46,8 @@
 #   LAT_SIZES     default "32 1024 65536"
 #   MIXED         1 (default) runs the mixed pairings, 0 skips them
 #   COUNT_SCALE   multiplier on every count (0.02 for a smoke run)
+#   STREAM_RUN_TIMEOUT  per-run timeout for stream_in/stream_out (default
+#                 300 s): their runs move at least 1 GiB (see stream_count)
 #   MAX_TRIES     default 3
 #   HWM           both libraries' HWM (default 1000000); C_HWM overrides the
 #                 libzmq side alone (C_HWM=1000 is libzmq's stock setting)
@@ -84,6 +86,7 @@ HWM=${HWM:-1000000}
 C_HWM=${C_HWM:-$HWM}
 PUB_HWM=${PUB_HWM:-0}
 PER_RUN_TIMEOUT=90
+STREAM_RUN_TIMEOUT=${STREAM_RUN_TIMEOUT:-300}
 results="$out/results.tsv"
 log="$out/runs.log"
 : > "$results"
@@ -92,6 +95,10 @@ echo 6000 > "$tmp/port"
 
 scaled() { awk -v c="$1" -v k="${COUNT_SCALE:-1}" 'BEGIN{n=int(c*k); print (n<2)?2:n}'; }
 thr_count() { case $1 in 32|256) scaled 1500000 ;; 1024) scaled 800000 ;; 8192) scaled 300000 ;; *) scaled 80000 ;; esac; }
+# stream_count: stream_in and stream_out move at least 1 GiB per run at every
+# size (both libraries), so a fast cell is not a few-millisecond run timed
+# from its first read.
+stream_count() { case $1 in 32) scaled 33554432 ;; 256) scaled 4194304 ;; 1024) scaled 1048576 ;; *) thr_count "$1" ;; esac; }
 lat_count() { case $1 in 65536) scaled 5000 ;; *) scaled 20000 ;; esac; }
 label() { awk -v s="$1" 'BEGIN{ if (s>=1024) printf "%dKB", s/1024; else printf "%dB", s }'; }
 
@@ -145,7 +152,8 @@ one_thr() {
   [ "$extra" = - ] && extra=
   [ "$sec" = curve ] && sflags+=(-curve)
   # The last -hwm wins in both tools, so this follows $(flags ...).
-  local hwm_over=""
+  local hwm_over="" to=$PER_RUN_TIMEOUT
+  case $base in stream_*) to=$STREAM_RUN_TIMEOUT ;; esac
   case $base in pub_sub|xpub_xsub) hwm_over="-hwm $PUB_HWM" ;; esac
   if [ "$tr" = inproc ]; then
     so="$tmp/o.inproc"
@@ -178,10 +186,10 @@ one_thr() {
     [ "$base" = stream_in ] && si=go
     [ "$base" = stream_out ] && ri=go
     # shellcheck disable=SC2046
-    timeout "$PER_RUN_TIMEOUT" "$(bin "$ri")" local_thr -endpoint "$bep" "${remote_flags[@]}" $(flags "$ri" local) $hwm_over > "${outs[0]}" 2>&1 & pids+=($!)
+    timeout "$to" "$(bin "$ri")" local_thr -endpoint "$bep" "${remote_flags[@]}" $(flags "$ri" local) $hwm_over > "${outs[0]}" 2>&1 & pids+=($!)
     sleep 0.3
     # shellcheck disable=SC2046
-    timeout "$PER_RUN_TIMEOUT" "$(bin "$si")" remote_thr -endpoint "$cep" "${remote_flags[@]}" $(flags "$si" remote) $hwm_over > "$so" 2>&1 || true
+    timeout "$to" "$(bin "$si")" remote_thr -endpoint "$cep" "${remote_flags[@]}" $(flags "$si" remote) $hwm_over > "$so" 2>&1 || true
     wait "${pids[@]}" 2>/dev/null || true
   fi
   [ "$tr" = ipc ] && rm -f "${bep#ipc://}"
@@ -266,6 +274,7 @@ for tr in $TRANSPORTS; do
       pattern_ok "$pat" "$tr" "$sec" || continue
       for size in $THR_SIZES; do
         count=$(thr_count "$size")
+        case $pat in stream_*) count=$(stream_count "$size") ;; esac
         gg=$(best thr go go "$tr" "$sec" "$pat" "$size" "$count")
         record thr "$tr" "$sec_label" "$pat" "$size" go "$gg"
         cc=""; [ "$golib_only" = 0 ] && { cc=$(best thr c c "$tr" "$sec" "$pat" "$size" "$count"); record thr "$tr" "$sec_label" "$pat" "$size" zmq "$cc"; }
