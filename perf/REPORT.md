@@ -37,6 +37,181 @@ are pooled (`WithRecvBufferPool`, "Decisions" below).
   libzmq's stock HWM of 1000 and allocated a message per send, against
   gozmq's 1,000,000.
 
+## The full matrix (2026-10-26)
+
+`perf/run_all.sh` at 5f3f295's tree (perf-matrix), first complete run, idle
+machine: 1,160 cells, none failed. Ratio = gozmq/libzmq with each library on
+both sides; throughput higher is better, round trip lower is better. Raw
+msg/s, the mixed pairings and every process's output are in
+`perf/results/run-full-20261025/` on the measuring machine (gitignored);
+`compare.sh` reprints any slice of it.
+
+**Read the 256 B–8 KB throughput ratios with care.** In this matrix libzmq's
+PUSH/PULL at 1 KB runs at 1.0M msg/s, against 2.3M in the pre-matrix
+comparison the same day; the main difference is the libzmq sender's HWM
+(1,000,000 here, its stock 1000 there). The mixed pairings put the cost on
+the libzmq sender (gozmq PUSH to libzmq PULL 2.35M, libzmq PUSH to gozmq
+PULL 0.88M at 1 KB). The cause is not yet verified; until a `C_HWM=1000`
+rerun settles it, treat those ratios as "same settings on both sides", not
+"libzmq at its best". The 32 B, 64 KB and latency rows match the pre-matrix
+figures. The PUB/XPUB cells run at HWM 0 on both sides (`PUB_HWM`), because
+a 1.5M-message run otherwise drops at a 1M HWM.
+
+#### tcp, NULL: throughput
+
+| pattern | 32 B | 256 B | 1 KB | 8 KB | 64 KB |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| push_pull | 1.48× | 2.25× | 2.53× | 3.76× | 2.12× |
+| pub_sub | 1.53× | 2.86× | 2.68× | 3.54× | 1.63× |
+| pub_sub_prefix | 1.13× | 2.79× | 2.86× | 3.67× | 1.42× |
+| pub_sub_fan4 | 1.43× | 7.57× | 10.83× | 22.67× | 10.24× |
+| xpub_xsub | 1.67× | 2.69× | 2.78× | 3.47× | 1.47× |
+| xpub_xsub_fan4 | 1.24× | 6.91× | 9.69× | 23.32× | 10.60× |
+| pair | 1.45× | 2.33× | 2.64× | 3.53× | 1.63× |
+| dealer_router | 1.02× | 2.13× | 2.54× | 3.52× | 1.40× |
+| router_dealer | 1.09× | 2.32× | 2.42× | 3.62× | 1.52× |
+| stream_in | 0.91× | 1.10× | 1.03× | 1.13× | 1.07× |
+| stream_out | 0.03× | 0.16× | 0.48× | 1.91× | 1.71× |
+
+#### tcp, NULL: round trip
+
+| pattern | 32 B | 1 KB | 64 KB |
+| :--- | ---: | ---: | ---: |
+| req_rep | 0.78× | 0.80× | 0.68× |
+| req_router | 0.79× | 0.80× | 0.68× |
+| dealer_rep | 0.79× | 0.80× | 0.72× |
+| dealer_router | 0.80× | 0.80× | 0.67× |
+| pair | 0.80× | 0.80× | 0.67× |
+
+#### ipc, NULL: throughput
+
+| pattern | 32 B | 256 B | 1 KB | 8 KB | 64 KB |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| push_pull | 1.34× | 3.85× | 5.20× | 7.45× | 1.86× |
+| pub_sub | 1.49× | 3.92× | 4.97× | 7.29× | 1.89× |
+| pub_sub_prefix | 1.31× | 4.13× | 5.24× | 7.84× | 1.88× |
+| pub_sub_fan4 | 1.58× | 5.26× | 6.73× | 10.83× | 4.39× |
+| xpub_xsub | 1.38× | 4.09× | 5.42× | 7.37× | 1.84× |
+| xpub_xsub_fan4 | 1.92× | 5.24× | 7.03× | 11.11× | 4.39× |
+| pair | 1.41× | 4.03× | 5.22× | 7.66× | 1.86× |
+| dealer_router | 1.19× | 3.72× | 5.12× | 7.61× | 1.89× |
+| router_dealer | 1.16× | 3.55× | 4.69× | 7.46× | 1.83× |
+
+#### ipc, NULL: round trip
+
+| pattern | 32 B | 1 KB | 64 KB |
+| :--- | ---: | ---: | ---: |
+| req_rep | 0.92× | 0.88× | 0.82× |
+| req_router | 0.91× | 0.90× | 0.82× |
+| dealer_rep | 0.90× | 0.89× | 0.82× |
+| dealer_router | 0.92× | 0.91× | 0.80× |
+| pair | 0.91× | 0.90× | 0.80× |
+
+#### inproc, NULL: throughput
+
+| pattern | 32 B | 256 B | 1 KB | 8 KB | 64 KB |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| push_pull | 1.33× | 3.72× | 4.82× | 10.43× | 39.27× |
+| pub_sub | 2.78× | 8.93× | 10.04× | 12.78× | 44.55× |
+| pub_sub_prefix | 1.43× | 4.40× | 5.80× | 7.69× | 22.18× |
+| pub_sub_fan4 | 129.78× | 178.52× | 177.31× | 234.78× | 241.86× |
+| xpub_xsub | 2.82× | 8.19× | 9.72× | 18.12× | 75.19× |
+| xpub_xsub_fan4 | 134.69× | 151.21× | 168.56× | 208.64× | 212.38× |
+| pair | 1.16× | 3.46× | 4.48× | 5.71× | 35.73× |
+| dealer_router | 0.70× | 3.23× | 4.98× | 5.91× | 22.87× |
+| router_dealer | 1.00× | 3.00× | 3.23× | 5.14× | 20.94× |
+
+#### inproc, NULL: round trip
+
+| pattern | 32 B | 1 KB | 64 KB |
+| :--- | ---: | ---: | ---: |
+| req_rep | 0.05× | 0.05× | 0.05× |
+| req_router | 0.05× | 0.05× | 0.07× |
+| dealer_rep | 0.04× | 0.04× | 0.05× |
+| dealer_router | 0.04× | 0.04× | 0.04× |
+| pair | 0.04× | 0.03× | 0.03× |
+
+#### tcp, CURVE: throughput
+
+| pattern | 32 B | 256 B | 1 KB | 8 KB | 64 KB |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| push_pull | 1.27× | 1.67× | 1.78× | 1.42× | 0.63× |
+| pub_sub | 1.27× | 1.81× | 1.79× | 1.39× | 0.64× |
+| pub_sub_prefix | 1.29× | 1.87× | 1.75× | 1.38× | 0.65× |
+| pub_sub_fan4 | 3.85× | 5.00× | 5.59× | 5.39× | 2.68× |
+| xpub_xsub | 1.26× | 1.80× | 1.77× | 1.35× | 0.64× |
+| xpub_xsub_fan4 | 3.81× | 5.02× | 5.55× | 5.45× | 2.69× |
+| pair | 1.28× | 1.66× | 1.77× | 1.39× | 0.65× |
+| dealer_router | 1.24× | 1.65× | 1.72× | 1.36× | 0.64× |
+| router_dealer | 1.25× | 1.68× | 1.73× | 1.39× | 0.64× |
+
+#### tcp, CURVE: round trip
+
+| pattern | 32 B | 1 KB | 64 KB |
+| :--- | ---: | ---: | ---: |
+| req_rep | 0.79× | 0.78× | 1.37× |
+| req_router | 0.79× | 0.79× | 1.40× |
+| dealer_rep | 0.78× | 0.79× | 1.39× |
+| dealer_router | 0.79× | 0.80× | 1.36× |
+| pair | 0.79× | 0.78× | 1.30× |
+
+#### ipc, CURVE: throughput
+
+| pattern | 32 B | 256 B | 1 KB | 8 KB | 64 KB |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| push_pull | 1.39× | 2.02× | 1.50× | 1.17× | 0.45× |
+| pub_sub | 1.38× | 2.16× | 1.54× | 1.17× | 0.44× |
+| pub_sub_prefix | 1.40× | 2.21× | 1.48× | 1.17× | 0.44× |
+| pub_sub_fan4 | 3.38× | 4.18× | 3.22× | 2.30× | 1.25× |
+| xpub_xsub | 1.39× | 2.16× | 1.53× | 1.18× | 0.44× |
+| xpub_xsub_fan4 | 3.31× | 4.14× | 3.16× | 2.35× | 1.25× |
+| pair | 1.39× | 2.00× | 1.49× | 1.17× | 0.44× |
+| dealer_router | 1.37× | 1.96× | 1.49× | 1.16× | 0.44× |
+| router_dealer | 1.35× | 2.02× | 1.45× | 1.15× | 0.44× |
+
+#### ipc, CURVE: round trip
+
+| pattern | 32 B | 1 KB | 64 KB |
+| :--- | ---: | ---: | ---: |
+| req_rep | 0.87× | 0.91× | 1.35× |
+| req_router | 0.91× | 0.91× | 1.36× |
+| dealer_rep | 0.90× | 0.91× | 1.38× |
+| dealer_router | 0.91× | 0.92× | 1.35× |
+| pair | 0.90× | 0.92× | 1.35× |
+
+#### tls (gozmq only)
+
+libzmq has no TLS transport. gozmq over TLS against gozmq over TCP, same
+run: PUSH/PULL 13.8M vs 14.0M at 32 B, 1.9M vs 2.6M at 1 KB, 0.08M vs 0.75M
+at 8 KB and 0.01M vs 0.15M at 64 KB; the other patterns follow the same
+shape; round trips 62–64 µs at 32 B–1 KB and 108–110 µs at 64 KB (TCP 60–62
+and 72–75 µs).
+
+### What the matrix shows
+
+- **gozmq is ahead on every ZMTP pattern over tcp, ipc and inproc with NULL**
+  except two inproc cells: DEALER to ROUTER at 32 B (0.70×) and ROUTER to
+  DEALER at 32 B (1.00×). Over TCP the same two patterns are the narrowest
+  wins at 32 B (1.02× and 1.09×).
+- **STREAM sending is the one large gap**: gozmq writes each STREAM message
+  with its own `write(2)` (`internal/session/raw.go`), flat at about 0.44M
+  msg/s up to 1 KB (0.03× at 32 B, 0.48× at 1 KB). STREAM receiving is near
+  parity (0.91–1.13×); its 32 B run moves only 48 MB, too short to trust.
+  Being fixed on branch `stream-perf`.
+- **CURVE at 64 KB is slower than libzmq**: 0.63–0.65× throughput over tcp,
+  0.44–0.45× over ipc, and 1.30–1.40× the round-trip time; below 64 KB CURVE
+  is 1.15–2.2× ahead.
+- **TLS large frames** are the slowest transport (8 KB at a tenth of TCP),
+  the cost of crypto/tls records, not of the session.
+- **libzmq fan-out collapses**: four subscribers over inproc run at
+  0.03–0.07M msg/s (130–240× behind gozmq), about two context switches per
+  message, with each reader draining faster than the publisher fills its
+  pipe; from 256 B up libzmq's four-subscriber rows fall 7–23× behind over
+  tcp and 4–11× over ipc, subject to the HWM caveat above.
+- **Round trips**: gozmq is 20–33% faster over tcp, 8–20% over ipc, and
+  about 20 times faster over inproc (about 1 µs against about 24 µs, a
+  goroutine handoff against libzmq's eventfd wake).
+
 ## gozmq vs native libzmq 4.3.4, PUSH/PULL over TCP loopback
 
 Three consecutive runs at 3605aa8 (every library change except the two
