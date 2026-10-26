@@ -175,6 +175,59 @@ func TestSocketStream_SendHWMZeroUnlimited(t *testing.T) {
 	require.EqualValues(t, n*size, got)
 }
 
+// TestSocketStream_BurstThenHalfClose: a burst of small sends, which the
+// writer coalesces, then an identity-only half-close: the peer reads
+// exactly the burst's bytes, in order, then EOF.
+func TestSocketStream_BurstThenHalfClose(t *testing.T) {
+	t.Parallel()
+	srv, cli, id := streamServerPeer(t)
+	const n = 10000
+	var want bytes.Buffer
+	ctx := testutil.Ctx(t)
+	read := testutil.Async(func() []byte {
+		b, _ := io.ReadAll(cli) // until the half-close
+		return b
+	})
+	for i := 0; i < n; i++ {
+		body := []byte{byte('a' + i%26), byte('0' + i%10), '\n'}
+		want.Write(body)
+		require.NoError(t, srv.SendMsg(ctx, gozmq.NewMsgFromFrames(id, body)), "send %d", i)
+	}
+	require.NoError(t, srv.SendMsg(ctx, gozmq.NewMsgFromFrames(id)), "half-close")
+	got := testutil.RequireRecv(t, read, 10*time.Second, "peer never saw the half-close")
+	require.Equal(t, want.Len(), len(got))
+	require.Equal(t, want.Bytes(), got)
+}
+
+// TestSocketStream_LargeAfterSmall: a 2 MiB send behind small ones (a
+// body the writer sends by reference, past its batch byte cap) arrives
+// intact and in order.
+func TestSocketStream_LargeAfterSmall(t *testing.T) {
+	t.Parallel()
+	srv, cli, id := streamServerPeer(t)
+	ctx := testutil.Ctx(t)
+	var want bytes.Buffer
+	for i := 0; i < 100; i++ {
+		body := []byte{byte('a' + i%26)}
+		want.Write(body)
+		require.NoError(t, srv.SendMsg(ctx, gozmq.NewMsgFromFrames(id, body)))
+	}
+	large := make([]byte, 2<<20)
+	for i := range large {
+		large[i] = byte(i * 7)
+	}
+	want.Write(large)
+	require.NoError(t, srv.SendMsg(ctx, gozmq.NewMsgFromFrames(id, large)))
+	require.NoError(t, srv.SendMsg(ctx, gozmq.NewMsgFromFrames(id, []byte("end"))))
+	want.WriteString("end")
+
+	got := make([]byte, want.Len())
+	require.NoError(t, cli.SetReadDeadline(time.Now().Add(10*time.Second)))
+	_, err := io.ReadFull(cli, got)
+	require.NoError(t, err)
+	require.True(t, bytes.Equal(want.Bytes(), got), "wire bytes differ")
+}
+
 // TestSocketStream_LingerFlushes: Close drains what STREAM still has queued
 // before closing the connection (the old adapter dropped it).
 func TestSocketStream_LingerFlushes(t *testing.T) {

@@ -410,9 +410,9 @@ func (s *Session) flushBatch(buffers *net.Buffers) error {
 }
 
 // drainSessionPipe hands every remaining queued message to write, which
-// reports whether to go on (it fails when a write does; writeBatchFrom and
-// writeRaw log and shut the session down on genuine errors, and Stop
-// closing the conn when the linger expires is one). Called after writerCtx
+// reports whether to go on (it fails when a write does; writeBatchFrom
+// and writeRawBatchFrom log and shut the session down on genuine errors,
+// and Stop closing the conn when the linger expires is one). Called after writerCtx
 // cancellation, which follows engine.Close, so nothing more is queued and
 // an empty TryRecv is the true end of the queue.
 func (s *Session) drainSessionPipe(write func(*msg.Msg) bool) {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"unsafe"
 
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -41,38 +42,54 @@ func (s *Session) runRawReader() {
 }
 
 // runRawWriter is the writer in raw mode: each pipe message is one body
-// frame written verbatim. Drain (writerCtx cancelled) writes what is still
-// queued and exits leaving the conn open, as in ZMTP mode.
+// frame written verbatim. Like the ZMTP writer it coalesces: after the
+// message it blocked for, it takes whatever is already queued (under the
+// writer's batch caps) and writes the lot in one write or writev, so a
+// lone message still goes out at once and only a backlog is batched.
+// Drain (writerCtx cancelled) writes what is still queued and exits
+// leaving the conn open, as in ZMTP mode.
 func (s *Session) runRawWriter() {
 	defer s.exit()
 	defer close(s.writerDone)
+	var batch writerBatch // reused by every flush, as in runWriter
 	for {
 		m, err := s.sessionPipe.RecvOr(s.writerCtx, nil)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
-				s.drainSessionPipe(s.writeRaw)
+				s.drainSessionPipe(func(m *msg.Msg) bool { return s.writeRawBatchFrom(&batch, m) })
 			} else {
 				s.shutdown()
 			}
 			return
 		}
-		if !s.writeRaw(m) {
+		if !s.writeRawBatchFrom(&batch, m) {
 			return
 		}
 	}
 }
 
-// writeRaw writes m's body and reports whether the writer should go on.
-// An empty body is the STREAM half-close: every earlier write has already
-// returned, so closing the conn now loses nothing.
-func (s *Session) writeRaw(m *msg.Msg) bool {
-	body, _ := m.SingleFrame()
-	var err error
-	if len(body) > 0 {
-		_, err = s.cfg.Conn.Write(body)
+// writeRawBatchFrom writes first and the messages already queued behind
+// it, bounded by the maxBatch* caps, in one flush, and reports whether the
+// writer should go on. An empty body is the STREAM half-close: it ends the
+// batch, the bodies ahead of it are flushed, then the session shuts down
+// (closing the conn) and anything queued after it is dropped. A lent
+// message is released only after the flush, since its body may go to the
+// wire by reference. A write error shuts the session down too.
+func (s *Session) writeRawBatchFrom(batch *writerBatch, first *msg.Msg) bool {
+	halfClose := batch.appendRawMessage(first)
+	for n := 1; !halfClose && n < maxBatchMessages && batch.wireBytes < maxBatchBytes &&
+		batch.copied < maxBatchCopied && len(batch.buffers) < maxBatchIovecs; n++ {
+		next, ok := s.sessionPipe.TryRecv()
+		if !ok {
+			break
+		}
+		halfClose = batch.appendRawMessage(next)
 	}
-	m.Release()
-	if len(body) > 0 && err == nil {
+	// flushBatch consumes the header it is handed; see writeBatchFrom.
+	batch.flush = batch.buffers
+	err := s.flushBatch(&batch.flush)
+	batch.release()
+	if err == nil && !halfClose {
 		return true
 	}
 	if err != nil {
@@ -80,4 +97,38 @@ func (s *Session) writeRaw(m *msg.Msg) bool {
 	}
 	s.shutdown()
 	return false
+}
+
+// appendRawMessage adds m's body to the batch and reports whether m is
+// the half-close (an empty body, which adds nothing). The batch owns m's
+// reference from here on (see writerBatch.release).
+func (b *writerBatch) appendRawMessage(m *msg.Msg) (halfClose bool) {
+	if m.Lent() {
+		b.lent = append(b.lent, m)
+	}
+	body, _ := m.SingleFrame()
+	if len(body) == 0 {
+		return true
+	}
+	b.appendRaw(body)
+	return false
+}
+
+// appendRaw adds body to the batch with no framing: the identity-mechanism
+// branch of appendFrame without the header. A body of up to
+// coalesceBodyMax bytes is copied into scratch, where consecutive small
+// bodies form one iovec; a larger one goes to the wire by reference. (Raw
+// sessions set neither identityMech nor a codec, so this stands alone.)
+func (b *writerBatch) appendRaw(body []byte) {
+	off := len(b.scratch)
+	base := unsafe.SliceData(b.scratch)
+	if len(body) <= coalesceBodyMax {
+		b.scratch = append(b.scratch, body...)
+		b.copied += len(body)
+		b.pushRun(off, base)
+	} else {
+		b.buffers = append(b.buffers, body)
+		b.tailRun = false
+	}
+	b.wireBytes += len(body)
 }
