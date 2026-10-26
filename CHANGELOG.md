@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html); while
 it is 0.x, a minor release may include breaking changes, each listed with a
 migration hint.
 
-## [Unreleased]
+## [0.4.0] - 2026-10-25
 
 A throughput release: PUSH/PULL over TCP is at or above native libzmq at
 every size in the two-process comparison at Go's default runtime settings
@@ -316,7 +316,7 @@ pushed to GitHub or a module proxy. It has the memory-exhaustion, CURVE
 and crash issues listed under 0.1.1, so it is not available and should not
 be used; the first published version is 0.1.1.
 
-[Unreleased]: https://github.com/exergy-dev/gozmq/compare/v0.3.0...HEAD
+[0.4.0]: https://github.com/exergy-dev/gozmq/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/exergy-dev/gozmq/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/exergy-dev/gozmq/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/exergy-dev/gozmq/releases/tag/v0.1.1
