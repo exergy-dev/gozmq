@@ -297,6 +297,59 @@ instead of the queue's (XPUB/XSUB inproc throughput 78 → 72 ns rather than
 42 ns), and every TCP row keeps its gain. Both kinds run the same pipe test
 suite.
 
+## Simplification pass (branch `simplify`, on top of perf-parity)
+
+A pass over the whole tree after parity: 538 fewer non-test lines
+(15,617 → 15,079), hand-rolled helpers replaced by the standard library,
+the ROUTER/STREAM send skeleton, the PUSH/PULL/DEALER engine, the engines'
+close state, the mechanisms' handshake reply decoding and the pipe's drain
+state each written once, and the HWM-0 inproc pipe moved from a channel
+plus overflow slice to the chunked queue. It also fixed a STREAM send that
+leaked a pooled buffer's lease reference when its peer vanished mid-send.
+
+Gate against the branch base (count 10, idle machine; base adds the two
+HWM-0 rows so they have numbers): sec/op geomean −2.4%, allocs/op identical
+on every row, B/op within 5% except `PubSubThroughput_TCP/64B` (+6% with
++16% more messages delivered per op, its `msgs-delivered` metric; see the
+recheck note below). Rows that moved, all p<0.05:
+
+| benchmark | perf-parity | simplify | change |
+| :--- | ---: | ---: | ---: |
+| ReqRepRoundTrip_InprocHWM0/32B | 1.066 µs | 1.132 µs | +6.1% (queue kind, accepted) |
+| PushPullThroughput_InprocHWM0/32B | 104.3 ns | 49.7 ns | −52% |
+| ReqRepRoundTrip_Inproc/32B–64KB | 1.063–1.070 µs | 1.045–1.048 µs | −1.7…−2.3% |
+| RouterDealerLatency_Inproc/* | 908–910 ns | 888–890 ns | −2.2% |
+| PushPullThroughput_TCP/64B | 118.1 ns | 112.6 ns | −4.7% |
+| PushPullThroughput_IPC/32B | 103.5 ns | 100.6 ns | −2.9% |
+| PushPullThroughput_TLS/32B, 64B | 120.2, 135.0 ns | 117.2, 129.8 ns | −2.5%, −3.9% |
+| PushPullThroughput_TLS/1KB | 663.8 ns | 672.0 ns | +1.2% |
+| PubSubTopicThroughput_Inproc/32B, 64B | 209.6, 208.7 ns | 192.9, 184.8 ns | −8%, −11% |
+| PubSubFanoutWide_Inproc/subs=64 | 5.89 µs | 5.50 µs | −6.7% |
+| PushPullFanIn_Inproc/pushers=2 | 78.7 ns | 74.9 ns | −4.8% |
+
+Every other row is within noise (TCP 32 B 104.3 → 102.9 ns, p=0.085;
+Poller_PollReady 127.6 → 128.8 ns, p=0.10; CURVE 64 B 416 → 412 ns). The
+CURVE frame transform itself got faster from the branchless flag
+translation and precomputed nonce templates (interleaved count 12 in the
+curve package: encode 1 KiB −10%, 16 KiB −17%, decode 64 B −14%).
+
+Two-process TCP against libzmq at head, one run: 32 B 11.5M vs 9.0M
+(1.28×), 256 B 1.76×, 1 KB 1.10×, 8 KB 1.85×, 64 KB 2.12×; mixed pairings
+9.0M and 10.5M at 32 B. Every row stays above parity; the 32 B ratio sits
+at the low end of the parity runs' spread because this libzmq sample was
+at its high end (9.0M).
+
+Verification at head: `go test -race ./...`, 20× the pipe package and the
+idle/wake tests, fuzz (14 targets, 10 s each), interop against libzmq,
+lint 0 issues, deadcode empty, CGO-off build.
+
+Rechecks: `PubSubThroughput_TCP/{32B,64B}` at count 16 are within noise on
+every column (64 B 321 → 312 ns p=0.34, B/op 138.5 → 137.0 p=0.82, allocs
+1 → 1), so the count-10 B/op reading was the delivered-count swing of a
+PUB that drops at HWM. The handshake rows after the last consolidation
+commit (count 6): `ConnectHandshake_TCP` 251 → 242 allocs and
+`ConnectHandshake_Curve_TCP` 400 → 387 allocs per connect, time flat.
+
 ## Decisions these numbers rest on
 
 - **Pooled large frames by default, explicit Release, no finalizer.**
