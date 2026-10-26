@@ -6,6 +6,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html); while
 it is 0.x, a minor release may include breaking changes, each listed with a
 migration hint.
 
+## [Unreleased]
+
+### Added
+
+- `perf/run_all.sh`: the whole performance suite in one run (environment,
+  every in-repo benchmark, the libzmq matrix) into
+  `perf/results/run-<timestamp>/` (gitignored).
+- `perf/libzmq_thr/compare.sh` and `perf/libzmq_thr/zmqperf.c`: gozmq
+  against native libzmq for every socket pattern (PUSH/PULL, PUB/SUB with
+  prefix and four-subscriber fan-out, XPUB/XSUB, PAIR, DEALER/ROUTER both
+  ways, STREAM both ways, REQ/REP, REQ/ROUTER, DEALER/REP, DEALER/ROUTER
+  and PAIR round trips) over tcp, ipc, inproc and tls (gozmq only), with
+  NULL and CURVE, including the mixed pairings. Both tools set the same HWM
+  on every socket; a lossy run is retried, never reported.
+- `zmqperf` flags `-pattern`, `-mode`, `-hwm`, `-prefix`, `-subs`,
+  `-curve`, `-wait` and `-idle`; the existing commands and defaults are
+  unchanged (`push_pull` and `req_rep`), and throughput receivers now print
+  `received: N` and exit non-zero on a short count.
+- `perf/matrix_bench_test.go`: the in-repo benchmarks that complete the
+  pattern-by-transport table in `perf/README.md` (PAIR, DEALER/ROUTER
+  streaming both ways, XPUB/XSUB over TCP, IPC and TLS, PUB/SUB over IPC
+  and TLS and fanned out over TCP and IPC, REQ/REP and ROUTER/DEALER over
+  TLS and IPC, REQ/REP and PUB/SUB with CURVE, STREAM send and receive).
+
+### Removed
+
+- `perf/libzmq_thr/compare_all.sh`, `compare_lat.sh`, `compare_inproc.sh`
+  and their six C tools, superseded by `compare.sh` and `zmqperf.c`
+  (`TRANSPORTS=tcp THR_PATTERNS=push_pull LAT_PATTERNS=req_rep` is the old
+  pair of tables; `C_HWM=1000` restores the stock libzmq HWM they used).
+
 ## [0.4.0] - 2026-10-25
 
 A throughput release: PUSH/PULL over TCP is at or above native libzmq at
@@ -316,6 +347,7 @@ pushed to GitHub or a module proxy. It has the memory-exhaustion, CURVE
 and crash issues listed under 0.1.1, so it is not available and should not
 be used; the first published version is 0.1.1.
 
+[Unreleased]: https://github.com/exergy-dev/gozmq/compare/v0.4.0...HEAD
 [0.4.0]: https://github.com/exergy-dev/gozmq/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/exergy-dev/gozmq/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/exergy-dev/gozmq/compare/v0.1.1...v0.2.0

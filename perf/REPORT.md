@@ -19,22 +19,23 @@ are pooled (`WithRecvBufferPool`, "Decisions" below).
   interleaved ten times each with `-benchmem -benchtime 1s`, and compares with
   benchstat. The pass rule is in the script's header: no significant (p < 0.05)
   sec/op regression above 5%, allocs/op never higher, B/op within 5%. The
-  suite covers every pattern over inproc and TCP (and PUSH/PULL, REQ/REP over
-  ipc), small and large frames, TLS and CURVE, fan-in and fan-out, and the
-  pipe microbenchmarks run both pipe kinds.
-- **Against native libzmq**: `perf/libzmq_thr/compare_all.sh` builds the
-  repo's minimal C `local_thr`/`remote_thr` against the system libzmq and
-  runs them against `perf/zmqperf` as two processes over TCP (or ipc)
-  loopback, no cgo on either side, best valid run of up to five per cell; it
-  also prints the two mixed pairings (gozmq PUSH → libzmq PULL and the
-  reverse). `compare_lat.sh` does the same for REQ/REP round trips, and
-  `compare_inproc.sh` runs each library's one-process inproc tools
-  (`inproc_thr`/`inproc_lat`, peer on a thread or goroutine). gozmq's tool
-  uses a 1,000,000 message HWM and reuses one payload; libzmq's uses its
-  default HWM of 1000 and allocates per message. Both receivers release
-  every message (`zmq_msg_close`, `Msg.Release`). `GOZMQ_LOCAL_FLAGS=-pool=false`
-  runs gozmq's receiver with plain memory and `GOZMQ_GOGC=N` passes `-gogc`;
-  neither is used for the tables here.
+  suite covers every pattern over every transport it supports (the table in
+  `perf/README.md`), small and large frames, CURVE, fan-in and fan-out, and
+  the pipe microbenchmarks run both pipe kinds.
+- **Against native libzmq**: `perf/libzmq_thr/compare.sh` runs `perf/zmqperf`
+  and its libzmq twin `perf/libzmq_thr/zmqperf.c` (same commands, flags,
+  patterns and output) as two processes over tcp and ipc, as one process
+  each over inproc, and gozmq alone over tls, for every socket pattern, with
+  NULL and CURVE, plus the mixed pairings; no cgo on either side. Both tools
+  set the same HWM (1,000,000) on every socket, send one reused payload and
+  release every message; a run that lost messages is retried, each cell is
+  the best valid run of up to three. `perf/run_all.sh` runs it after the
+  in-repo benchmarks; "The full matrix" below is its first complete run.
+  The PUSH/PULL and REQ/REP sections after it were measured earlier the
+  same day with the pre-matrix scripts (`compare_all.sh`, `compare_lat.sh`,
+  `compare_inproc.sh`, in git history up to 996df67), whose C tools kept
+  libzmq's stock HWM of 1000 and allocated a message per send, against
+  gozmq's 1,000,000.
 
 ## gozmq vs native libzmq 4.3.4, PUSH/PULL over TCP loopback
 

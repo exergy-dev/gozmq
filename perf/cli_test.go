@@ -73,6 +73,82 @@ func TestCLI(t *testing.T) {
 	}
 }
 
+// TestCLIPatterns runs every -pattern of zmqperf once with gozmq on both
+// sides: each throughput pattern two-process over tcp and in one process
+// over inproc where it exists, and each latency pattern the same way, plus
+// one CURVE and one fan-out run. compare.sh drives the same commands with
+// zmqperf.c on either side; this keeps the Go half of that contract tested.
+func TestCLIPatterns(t *testing.T) {
+	bin := buildZmqperf(t)
+	type run struct {
+		kind, pattern string
+		extra         []string
+		inproc        bool
+	}
+	runs := []run{
+		{"thr", "push_pull", nil, true},
+		{"thr", "pub_sub", []string{"-wait", "200ms"}, true},
+		{"thr", "pub_sub", []string{"-wait", "200ms", "-prefix", "aaaa"}, false},
+		{"thr", "xpub_xsub", nil, true},
+		{"thr", "pair", nil, true},
+		{"thr", "dealer_router", nil, true},
+		{"thr", "router_dealer", nil, true},
+		{"thr", "stream_in", nil, false},
+		{"thr", "stream_out", nil, false},
+		{"thr", "push_pull", []string{"-curve"}, false},
+		{"lat", "req_rep", nil, true},
+		{"lat", "req_router", nil, true},
+		{"lat", "dealer_rep", nil, true},
+		{"lat", "dealer_router", nil, true},
+		{"lat", "pair", nil, true},
+		{"lat", "req_rep", []string{"-curve"}, false},
+	}
+	for _, r := range runs {
+		name := r.kind + "/" + r.pattern
+		if len(r.extra) > 0 {
+			name += "/" + r.extra[len(r.extra)-1]
+		}
+		t.Run(name, func(t *testing.T) {
+			port := freeTCPPort(t)
+			common := append([]string{"-pattern", r.pattern, "-size", "64", "-count", "200"}, r.extra...)
+			local, remote := exec.Command(bin, append([]string{"local_" + r.kind, "-endpoint", fmt.Sprintf("tcp://127.0.0.1:%d", port)}, common...)...),
+				exec.Command(bin, append([]string{"remote_" + r.kind, "-endpoint", fmt.Sprintf("tcp://127.0.0.1:%d", port)}, common...)...)
+			localOut, remoteOut := &bytes.Buffer{}, &bytes.Buffer{}
+			local.Stdout, local.Stderr = localOut, localOut
+			remote.Stdout, remote.Stderr = remoteOut, remoteOut
+			require.NoError(t, local.Start())
+			localDone := testutil.Async(local.Wait)
+			time.Sleep(100 * time.Millisecond)
+			require.NoError(t, remote.Run(), "remote: %s", remoteOut)
+			select {
+			case err := <-localDone:
+				require.NoError(t, err, "local: %s", localOut)
+			case <-time.After(30 * time.Second):
+				_ = local.Process.Kill()
+				t.Fatalf("local did not exit:\n%s", localOut)
+			}
+			want, out := "mean throughput:", localOut
+			if r.kind == "lat" {
+				want, out = "average latency:", remoteOut
+			}
+			require.Contains(t, out.String(), want)
+			if r.kind == "thr" {
+				require.Contains(t, out.String(), "received: 200\n")
+			}
+			if r.inproc {
+				inOut, err := exec.Command(bin, append([]string{"inproc_" + r.kind}, common...)...).CombinedOutput()
+				require.NoError(t, err, "inproc: %s", inOut)
+				require.Contains(t, string(inOut), want)
+			}
+		})
+	}
+	t.Run("thr/pub_sub/fanout", func(t *testing.T) {
+		out, err := exec.Command(bin, "inproc_thr", "-pattern", "pub_sub", "-subs", "3", "-size", "64", "-count", "200").CombinedOutput()
+		require.NoError(t, err, "%s", out)
+		require.Contains(t, string(out), "received: 200\n")
+	})
+}
+
 // buildZmqperf builds perf/zmqperf into a temp dir with CGO off and returns
 // the binary's path.
 func buildZmqperf(t *testing.T) string {
