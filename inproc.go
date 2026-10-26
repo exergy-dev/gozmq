@@ -36,11 +36,7 @@ func (r *inprocRegistry) unbind(s *Socket, endpoint string) bool {
 		return false
 	}
 	delete(r.bound, endpoint)
-	if names := slices.DeleteFunc(r.names[s], func(n string) bool { return n == endpoint }); len(names) > 0 {
-		r.names[s] = names
-	} else {
-		delete(r.names, s)
-	}
+	deleteFromSliceMap(r.names, s, endpoint)
 	return true
 }
 
@@ -58,11 +54,7 @@ func (r *inprocRegistry) unbindAll(s *Socket) {
 func (r *inprocRegistry) cancel(l *inprocLink) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if w := slices.DeleteFunc(r.pending[l.endpoint], func(p *inprocLink) bool { return p == l }); len(w) > 0 {
-		r.pending[l.endpoint] = w
-	} else {
-		delete(r.pending, l.endpoint)
-	}
+	deleteFromSliceMap(r.pending, l.endpoint, l)
 }
 
 // isInproc reports whether endpoint uses the inproc:// scheme.
@@ -299,4 +291,13 @@ func (l *inprocLink) detach() {
 		l.s.emit(EventDisconnected, l.endpoint, "")
 		l.s.removeLink(&l.link)
 	})
+}
+
+// deleteFromSliceMap removes v from m[k], dropping the key once the slice is empty.
+func deleteFromSliceMap[K, V comparable](m map[K][]V, k K, v V) {
+	if s := slices.DeleteFunc(m[k], func(x V) bool { return x == v }); len(s) > 0 {
+		m[k] = s
+	} else {
+		delete(m, k)
+	}
 }

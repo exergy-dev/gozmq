@@ -207,17 +207,9 @@ func TestClosed_Channel(t *testing.T) {
 		defer a.Close()
 		defer b.Close()
 
-		select {
-		case <-a.Closed():
-			require.Fail(t, "Closed() fired before Close call")
-		default:
-		}
+		testutil.RequireNoRecv(t, a.Closed(), 0, "Closed() fired before Close call")
 		_ = b.Close()
-		select {
-		case <-a.Closed():
-		case <-time.After(time.Second):
-			require.Fail(t, "Closed() did not fire after peer Close")
-		}
+		testutil.RequireRecv(t, a.Closed(), time.Second, "Closed() did not fire after peer Close")
 	})
 }
 
@@ -340,20 +332,12 @@ func notifyGate(e *End) chan struct{} {
 
 func requireArmed(t *testing.T, gate chan struct{}, what string) {
 	t.Helper()
-	select {
-	case <-gate:
-	case <-time.After(time.Second):
-		require.Fail(t, "notification did not run", what)
-	}
+	testutil.RequireRecv(t, gate, time.Second, "notification did not run: %s", what)
 }
 
 func requireNotArmed(t *testing.T, gate chan struct{}, what string) {
 	t.Helper()
-	select {
-	case <-gate:
-		require.Fail(t, "unexpected notification", what)
-	default:
-	}
+	testutil.RequireNoRecv(t, gate, 0, "unexpected notification: %s", what)
 }
 
 // TestNotify_OnlyWhenIdle pins the idle protocol: a send notifies only
@@ -604,20 +588,12 @@ func TestSendDrained_FiresWhenPeerConsumed(t *testing.T) {
 			}
 			drained := a.SendDrained()
 			for i := 0; i < n; i++ {
-				select {
-				case <-drained:
-					require.FailNow(t, "SendDrained fired with messages unread", "hwm=%d read=%d", hwm, i)
-				default:
-				}
+				testutil.RequireNoRecv(t, drained, 0, "SendDrained fired with messages unread, hwm=%d read=%d", hwm, i)
 				m, err := b.RecvOr(ctx, nil)
 				require.NoError(t, err)
 				require.Equal(t, byte(i), m.Bytes()[0], "hwm=%d Recv[%d]", hwm, i)
 			}
-			select {
-			case <-drained:
-			case <-time.After(time.Second):
-				require.FailNow(t, "SendDrained did not fire after the peer read everything", "hwm=%d", hwm)
-			}
+			testutil.RequireRecv(t, drained, time.Second, "SendDrained did not fire after the peer read everything, hwm=%d", hwm)
 			_ = a.Close()
 			_ = b.Close()
 
@@ -626,11 +602,7 @@ func TestSendDrained_FiresWhenPeerConsumed(t *testing.T) {
 			require.NoError(t, a.Send(ctx, msg.FromBytes([]byte("x"))))
 			drained = a.SendDrained()
 			_ = b.Close()
-			select {
-			case <-drained:
-			case <-time.After(time.Second):
-				require.FailNow(t, "SendDrained did not fire on peer close", "hwm=%d", hwm)
-			}
+			testutil.RequireRecv(t, drained, time.Second, "SendDrained did not fire on peer close, hwm=%d", hwm)
 			_ = a.Close()
 		}
 	})

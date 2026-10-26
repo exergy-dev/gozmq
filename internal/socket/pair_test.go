@@ -65,22 +65,6 @@ func TestPair_SendBeforeAttachWaits(t *testing.T) {
 		"send err = %v, want ctx err", err)
 }
 
-// recvAsync starts eng.Recv in a goroutine and returns channels for its
-// result.
-func recvAsync(ctx context.Context, eng socket.Engine) (<-chan *msg.Msg, <-chan error) {
-	mc := make(chan *msg.Msg, 1)
-	ec := make(chan error, 1)
-	go func() {
-		m, err := eng.Recv(ctx)
-		if err != nil {
-			ec <- err
-			return
-		}
-		mc <- m
-	}()
-	return mc, ec
-}
-
 // TestPair_PeerCloseDrainsThenWaitsForNextPeer: when the attached peer goes
 // away, Recv delivers what it left buffered and then parks for the next
 // peer instead of surfacing io.EOF (libzmq just blocks). Covers both the
@@ -119,14 +103,8 @@ func TestPair_PeerCloseDrainsThenWaitsForNextPeer(t *testing.T) {
 				require.Equal(t, want, string(got.Bytes()))
 			}
 
-			mc, ec := recvAsync(ctx, eng)
-			select {
-			case m := <-mc:
-				require.Failf(t, "recv returned without a peer", "got %q", m.Bytes())
-			case err := <-ec:
-				require.Failf(t, "recv failed without a peer", "err = %v", err)
-			case <-time.After(50 * time.Millisecond):
-			}
+			rc := testutil.AsyncErr(func() (*msg.Msg, error) { return eng.Recv(ctx) })
+			testutil.RequireNoRecv(t, rc, 50*time.Millisecond, "recv returned without a peer")
 			if !tc.detach {
 				require.NoError(t, eng.DetachPipe(a))
 			}
@@ -135,14 +113,9 @@ func TestPair_PeerCloseDrainsThenWaitsForNextPeer(t *testing.T) {
 			defer closePipes(a2, b2)
 			mustAttach(t, eng, a2)
 			require.NoError(t, b2.Send(ctx, msg.FromBytes([]byte("three"))))
-			select {
-			case m := <-mc:
-				require.Equal(t, "three", string(m.Bytes()))
-			case err := <-ec:
-				require.Failf(t, "recv failed", "err = %v", err)
-			case <-ctx.Done():
-				require.Fail(t, "recv did not see the next peer")
-			}
+			r := testutil.RequireRecv(t, rc, 5*time.Second, "recv did not see the next peer")
+			require.NoError(t, r.Err, "recv failed")
+			require.Equal(t, "three", string(r.V.Bytes()))
 		})
 	}
 }
@@ -221,26 +194,16 @@ func TestPair_SendWaitsAcrossPeerClose(t *testing.T) {
 	mustAttach(t, eng, a)
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("fill"))))
 
-	done := make(chan error, 1)
-	go func() { done <- eng.Send(ctx, msg.FromBytes([]byte("next"))) }()
+	done := testutil.Async(func() error { return eng.Send(ctx, msg.FromBytes([]byte("next"))) })
 	time.Sleep(20 * time.Millisecond)
 	require.NoError(t, b.Close())
-	select {
-	case err := <-done:
-		require.Failf(t, "send returned after peer close", "err = %v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
+	testutil.RequireNoRecv(t, done, 50*time.Millisecond, "send returned after peer close")
 	require.NoError(t, eng.DetachPipe(a))
 
 	a2, b2 := pipe.NewPair(1, 1, nil, nil)
 	defer closePipes(a2, b2)
 	mustAttach(t, eng, a2)
-	select {
-	case err := <-done:
-		require.NoError(t, err)
-	case <-ctx.Done():
-		require.Fail(t, "send did not reach the next peer")
-	}
+	require.NoError(t, testutil.RequireRecv(t, done, 5*time.Second, "send did not reach the next peer"))
 	got, err := b2.RecvOr(ctx, nil)
 	require.NoError(t, err)
 	require.Equal(t, "next", string(got.Bytes()))

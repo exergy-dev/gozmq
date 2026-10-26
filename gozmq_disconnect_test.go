@@ -39,12 +39,12 @@ func TestSocketDisconnect_StopsReconnectAndDetachesPeer(t *testing.T) {
 	_, err = srv.RecvMsg(callCtx)
 	require.NoError(t, err, "recv")
 
-	srvCollected := waitForEvents(t, srvEvents, 3*time.Second, func(evts []gozmq.Event) bool {
+	srvCollected := testutil.CollectUntil(srvEvents, 3*time.Second, func(evts []gozmq.Event) bool {
 		return hasType(evts, gozmq.EventAccepted) && hasType(evts, gozmq.EventHandshakeSucceeded)
 	})
 	require.True(t, hasType(srvCollected, gozmq.EventAccepted) && hasType(srvCollected, gozmq.EventHandshakeSucceeded),
 		"initial server events = %v", eventTypes(srvCollected))
-	cliCollected := waitForEvents(t, cliEvents, 3*time.Second, func(evts []gozmq.Event) bool {
+	cliCollected := testutil.CollectUntil(cliEvents, 3*time.Second, func(evts []gozmq.Event) bool {
 		return hasType(evts, gozmq.EventConnected) && hasType(evts, gozmq.EventHandshakeSucceeded)
 	})
 	require.True(t, hasType(cliCollected, gozmq.EventConnected) && hasType(cliCollected, gozmq.EventHandshakeSucceeded),
@@ -52,7 +52,7 @@ func TestSocketDisconnect_StopsReconnectAndDetachesPeer(t *testing.T) {
 
 	require.NoError(t, cli.Disconnect(ep), "Disconnect")
 
-	postDisconnect := waitForEvents(t, srvEvents, 2*time.Second, func(evts []gozmq.Event) bool {
+	postDisconnect := testutil.CollectUntil(srvEvents, 2*time.Second, func(evts []gozmq.Event) bool {
 		return hasType(evts, gozmq.EventDisconnected)
 	})
 	require.True(t, hasType(postDisconnect, gozmq.EventDisconnected),

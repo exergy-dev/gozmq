@@ -158,11 +158,7 @@ func TestRaw_DrainFlushesThenKeepsConn(t *testing.T) {
 	require.Equal(t, want.Bytes(), got)
 	waitClosed(t, drained, 2*time.Second, "Drain did not finish")
 
-	select {
-	case <-connA.Closed():
-		t.Fatal("Drain closed the conn")
-	default:
-	}
+	testutil.RequireNoRecv(t, connA.Closed(), 0, "Drain closed the conn")
 	require.NoError(t, rs.Stop())
 	waitClosed(t, connA.Closed(), time.Second, "Stop did not close the conn")
 }

@@ -196,15 +196,8 @@ func TestFairQueue_DetachThenClose(t *testing.T) {
 	require.NoError(t, fq.Attach(a), "attach")
 	require.NoError(t, fq.Detach(a), "detach")
 
-	done := make(chan error, 1)
-	go func() { done <- fq.Close() }()
-
-	select {
-	case err := <-done:
-		require.NoError(t, err, "close")
-	case <-time.After(time.Second):
-		require.Fail(t, "Close did not return after Detach")
-	}
+	done := testutil.Async(fq.Close)
+	require.NoError(t, testutil.RequireRecv(t, done, time.Second, "Close did not return after Detach"), "close")
 }
 
 // TestFairQueue_CloseWithAttachedPipes: Close with pipes still attached
@@ -403,12 +396,8 @@ func TestLoadBalancer_TwoParkedSendersWakeOnAttach(t *testing.T) {
 	require.NoError(t, lb.Attach(a), "attach")
 
 	for i := 0; i < 2; i++ {
-		select {
-		case err := <-done:
-			require.NoError(t, err, "parked send %d", i)
-		case <-time.After(time.Second):
-			require.Fail(t, "a parked sender never woke after Attach", "sender %d", i)
-		}
+		err := testutil.RequireRecv(t, done, time.Second, "a parked sender never woke after Attach, sender %d", i)
+		require.NoError(t, err, "parked send %d", i)
 	}
 }
 

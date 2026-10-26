@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/msg"
 )
 
@@ -36,27 +37,17 @@ func TestDeferred_FlushWakesParkedRecv(t *testing.T) {
 	defer b.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	got := make(chan error, 1)
-	go func() {
+	got := testutil.Async(func() error {
 		_, err := b.RecvOr(ctx, nil)
-		got <- err
-	}()
+		return err
+	})
 	for b.recv.rsleepers.Load() == 0 { // wait until parked
 		time.Sleep(time.Millisecond)
 	}
 	require.True(t, a.TrySendDeferred(msg.FromBytes([]byte("x"))))
-	select {
-	case err := <-got:
-		require.Fail(t, "receiver woke before Flush", "%v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
+	testutil.RequireNoRecv(t, got, 50*time.Millisecond, "receiver woke before Flush")
 	a.Flush()
-	select {
-	case err := <-got:
-		require.NoError(t, err)
-	case <-time.After(5 * time.Second):
-		require.Fail(t, "Flush did not wake the receiver")
-	}
+	require.NoError(t, testutil.RequireRecv(t, got, 5*time.Second, "Flush did not wake the receiver"))
 }
 
 func TestDeferred_FlushNothingPendingIsNoop(t *testing.T) {

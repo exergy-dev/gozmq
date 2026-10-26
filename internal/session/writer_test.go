@@ -623,20 +623,16 @@ func TestWriter_LingerDrainUnboundedQueue(t *testing.T) {
 			sA, sB, _ := newWriterTestPair(t, hwm, 0)
 			const N = 5000
 			ctx := testutil.Ctx(t, 5*time.Second)
-			got := make(chan int, 1)
-			go func() {
-				k := 0
-				for {
+			got := testutil.Async(func() int {
+				for k := 0; ; k++ {
 					rc, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 					_, err := sB.Pipe().RecvOr(rc, nil)
 					cancel()
 					if err != nil {
-						got <- k
-						return
+						return k
 					}
-					k++
 				}
-			}()
+			})
 			for i := 0; i < N; i++ {
 				require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("x"))), "Send[%d]", i)
 			}

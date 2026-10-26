@@ -2,6 +2,7 @@ package gozmq_test
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -30,34 +31,9 @@ func drainEvents(ctx context.Context, ch <-chan gozmq.Event) []gozmq.Event {
 	}
 }
 
-// waitForEvents spins until the predicate is satisfied by the events
-// gathered so far, or timeout elapses. Returns the collected slice.
-// Using a predicate-based wait lets each test assert on a specific
-// subsequence without requiring a hardcoded delay or a full
-// deterministic scheduler.
-func waitForEvents(t *testing.T, ch <-chan gozmq.Event, timeout time.Duration, predicate func([]gozmq.Event) bool) []gozmq.Event {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	var collected []gozmq.Event
-	for time.Now().Before(deadline) {
-		select {
-		case ev := <-ch:
-			collected = append(collected, ev)
-			if predicate(collected) {
-				return collected
-			}
-		case <-time.After(50 * time.Millisecond):
-			if predicate(collected) {
-				return collected
-			}
-		}
-	}
-	return collected
-}
-
 // hasType reports whether any event in the slice matches the given type.
 func hasType(events []gozmq.Event, t gozmq.EventType) bool {
-	return indexOfType(events, t) >= 0
+	return slices.ContainsFunc(events, func(e gozmq.Event) bool { return e.Type == t })
 }
 
 // TestMonitor_ServerLifecycle verifies the full server-side event
@@ -86,7 +62,7 @@ func TestMonitor_ServerLifecycle(t *testing.T) {
 
 	// Wait for the server to observe Listening + Accepted +
 	// HandshakeSucceeded before we tear down.
-	srvCollected := waitForEvents(t, srvEvents, 3*time.Second, func(evts []gozmq.Event) bool {
+	srvCollected := testutil.CollectUntil(srvEvents, 3*time.Second, func(evts []gozmq.Event) bool {
 		return hasType(evts, gozmq.EventListening) &&
 			hasType(evts, gozmq.EventAccepted) &&
 			hasType(evts, gozmq.EventHandshakeSucceeded)
@@ -107,7 +83,7 @@ func TestMonitor_ServerLifecycle(t *testing.T) {
 	}
 
 	// Client side: EventConnected + EventHandshakeSucceeded.
-	cliCollected := waitForEvents(t, cliEvents, 3*time.Second, func(evts []gozmq.Event) bool {
+	cliCollected := testutil.CollectUntil(cliEvents, 3*time.Second, func(evts []gozmq.Event) bool {
 		return hasType(evts, gozmq.EventConnected) && hasType(evts, gozmq.EventHandshakeSucceeded)
 	})
 	if !hasType(cliCollected, gozmq.EventConnected) {
@@ -190,7 +166,7 @@ func TestMonitor_ConnectRetryOnRefused(t *testing.T) {
 	}
 
 	// Wait for at least one EventConnectDelayed.
-	collected := waitForEvents(t, evts, 2*time.Second, func(evts []gozmq.Event) bool {
+	collected := testutil.CollectUntil(evts, 2*time.Second, func(evts []gozmq.Event) bool {
 		return hasType(evts, gozmq.EventConnectDelayed)
 	})
 	if !hasType(collected, gozmq.EventConnectDelayed) {
@@ -200,12 +176,7 @@ func TestMonitor_ConnectRetryOnRefused(t *testing.T) {
 
 // indexOfType returns the position of the first event of type t, or -1.
 func indexOfType(events []gozmq.Event, t gozmq.EventType) int {
-	for i, e := range events {
-		if e.Type == t {
-			return i
-		}
-	}
-	return -1
+	return slices.IndexFunc(events, func(e gozmq.Event) bool { return e.Type == t })
 }
 
 // eventTypes is a debug helper: stringifies the type field of each
@@ -314,7 +285,7 @@ func TestMonitor_SessionEventsBothSides(t *testing.T) {
 		m.Release()
 		require.NoError(t, cli.Close())
 
-		srvGot := waitForEvents(t, srvEvents, 3*time.Second, func(evts []gozmq.Event) bool {
+		srvGot := testutil.CollectUntil(srvEvents, 3*time.Second, func(evts []gozmq.Event) bool {
 			return hasType(evts, gozmq.EventDisconnected)
 		})
 		require.Equal(t, 1, countType(srvGot, gozmq.EventHandshakeSucceeded), "server: %v", eventTypes(srvGot))
@@ -341,7 +312,7 @@ func TestMonitor_SessionEventsBothSides(t *testing.T) {
 		)
 		failed := func(evts []gozmq.Event) bool { return hasType(evts, gozmq.EventHandshakeFailedProtocol) }
 		for side, ch := range map[string]chan gozmq.Event{"server": srvEvents, "client": cliEvents} {
-			got := waitForEvents(t, ch, 3*time.Second, failed)
+			got := testutil.CollectUntil(ch, 3*time.Second, failed)
 			require.True(t, failed(got), "%s: %v", side, eventTypes(got))
 			for _, typ := range []gozmq.EventType{gozmq.EventHandshakeSucceeded, gozmq.EventConnected, gozmq.EventDisconnected} {
 				require.Zero(t, countType(got, typ), "%s: %v", side, eventTypes(got))

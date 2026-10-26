@@ -164,20 +164,15 @@ func TestReq_ConcurrentRecvFSMViolation(t *testing.T) {
 	_, err := b.RecvOr(ctx, nil)
 	require.NoError(t, err)
 
-	mc1, ec1 := recvAsync(ctx, eng)
+	rc1 := testutil.AsyncErr(func() (*msg.Msg, error) { return eng.Recv(ctx) })
 	time.Sleep(20 * time.Millisecond)
 	_, err = eng.Recv(ctx)
 	require.ErrorIs(t, err, zmqerr.ErrFSMViolation, "concurrent recv")
 
 	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("a"))))
-	select {
-	case m := <-mc1:
-		require.Equal(t, "a", string(m.Bytes()))
-	case err := <-ec1:
-		require.Failf(t, "first recv failed", "%v", err)
-	case <-ctx.Done():
-		require.Fail(t, "first recv did not get the reply")
-	}
+	r := testutil.RequireRecv(t, rc1, 5*time.Second, "first recv did not get the reply")
+	require.NoError(t, r.Err, "first recv failed")
+	require.Equal(t, "a", string(r.V.Bytes()))
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q2"))), "FSM back to canSend")
 }
 
@@ -261,10 +256,7 @@ func TestReq_Rep_RoundTrip_Direct(t *testing.T) {
 	for i := 0; i < rounds; i++ {
 		body := []byte{byte('A' + i)}
 		// REQ → REP
-		errCh := make(chan error, 1)
-		go func() {
-			errCh <- reqEng.Send(ctx, msg.FromBytes(body))
-		}()
+		errCh := testutil.Async(func() error { return reqEng.Send(ctx, msg.FromBytes(body)) })
 
 		got, err := repEng.Recv(ctx)
 		require.NoError(t, err, "rep recv %d", i)

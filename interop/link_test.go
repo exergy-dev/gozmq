@@ -504,12 +504,8 @@ func (l *link) requireZAPDone() {
 	if l.zapDone == nil {
 		return
 	}
-	select {
-	case err := <-l.zapDone:
-		require.NoError(l.t, err, "libzmq ZAP handler")
-	case <-time.After(waitTimeout):
-		require.Fail(l.t, "libzmq ZAP handler did not complete")
-	}
+	require.NoError(l.t, testutil.RequireRecv(l.t, l.zapDone, waitTimeout, "libzmq ZAP handler did not complete"),
+		"libzmq ZAP handler")
 }
 
 // closeLib closes the libzmq socket so its peer sees the connection drop.
@@ -565,17 +561,4 @@ func requireFrames(t *testing.T, want, got [][]byte) {
 	for i := range want {
 		require.True(t, bytes.Equal(want[i], got[i]), "frame %d: got %q, want %q", i, got[i], want[i])
 	}
-}
-
-// framesEqual is requireFrames as a predicate, for use off the test goroutine.
-func framesEqual(a, b [][]byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if !bytes.Equal(a[i], b[i]) {
-			return false
-		}
-	}
-	return true
 }

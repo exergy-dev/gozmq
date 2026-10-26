@@ -16,18 +16,16 @@ var kinds = []kind{
 	{"channel", NewChannelPair, chunkSize},
 }
 
-// forEachKind runs fn as a subtest against every pipe kind.
-func forEachKind(t *testing.T, fn func(t *testing.T, k kind)) {
-	t.Helper()
-	for _, k := range kinds {
-		t.Run(k.name, func(t *testing.T) { fn(t, k) })
-	}
+// runner is *testing.T or *testing.B: a TB that runs subtests of its own type.
+type runner[TB testing.TB] interface {
+	testing.TB
+	Run(string, func(TB)) bool
 }
 
-// forEachKindB runs fn as a sub-benchmark against every pipe kind.
-func forEachKindB(b *testing.B, fn func(b *testing.B, k kind)) {
-	b.Helper()
+// forEachKind runs fn as a subtest (or sub-benchmark) against every pipe kind.
+func forEachKind[TB runner[TB]](tb TB, fn func(TB, kind)) {
+	tb.Helper()
 	for _, k := range kinds {
-		b.Run(k.name, func(b *testing.B) { fn(b, k) })
+		tb.Run(k.name, func(tb TB) { fn(tb, k) })
 	}
 }

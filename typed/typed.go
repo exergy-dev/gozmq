@@ -48,6 +48,25 @@ type wrapper struct {
 	codec Codec
 }
 
+// marshal encodes v with the wrapper's codec.
+func (w wrapper) marshal(v any) ([]byte, error) {
+	b, err := w.codec.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("typed: marshal: %w", err)
+	}
+	return b, nil
+}
+
+// unmarshal decodes b into a T, returning the zero T on error.
+func unmarshal[T any](c Codec, b []byte) (T, error) {
+	var v T
+	if err := c.Unmarshal(b, &v); err != nil {
+		var zero T
+		return zero, err
+	}
+	return v, nil
+}
+
 // recvDecode receives one message from sock, decodes it and releases it.
 func recvDecode[V any](ctx context.Context, sock *gozmq.Socket, decode func(*gozmq.Msg) (V, error)) (V, error) {
 	m, err := sock.RecvMsg(ctx)
@@ -82,9 +101,9 @@ func NewSender[T any](sock *gozmq.Socket, codec Codec) *Sender[T] {
 
 // Send marshals v and transmits it as a single-frame message.
 func (s *Sender[T]) Send(ctx context.Context, v T) error {
-	b, err := s.codec.Marshal(v)
+	b, err := s.marshal(v)
 	if err != nil {
-		return fmt.Errorf("typed: marshal: %w", err)
+		return err
 	}
 	return s.sock.SendMsg(ctx, gozmq.NewMsgFromBytes(b))
 }
@@ -107,13 +126,13 @@ func (r *Receiver[T]) Recv(ctx context.Context) (T, error) {
 
 // decode turns a single-frame message into a T; shared by Recv and Handle.
 func (r *Receiver[T]) decode(m *gozmq.Msg) (T, error) {
-	var v T
 	if m.NumFrames() != 1 {
-		return v, fmt.Errorf("%w: expected 1 frame, got %d: %w", ErrDecode, m.NumFrames(), ErrFrameCount)
-	}
-	if err := r.codec.Unmarshal(m.Bytes(), &v); err != nil {
 		var zero T
-		return zero, fmt.Errorf("%w: %w", ErrDecode, err)
+		return zero, fmt.Errorf("%w: expected 1 frame, got %d: %w", ErrDecode, m.NumFrames(), ErrFrameCount)
+	}
+	v, err := unmarshal[T](r.codec, m.Bytes())
+	if err != nil {
+		return v, fmt.Errorf("%w: %w", ErrDecode, err)
 	}
 	return v, nil
 }
@@ -135,9 +154,9 @@ func NewPublisher[T any](sock *gozmq.Socket, codec Codec) *Publisher[T] {
 
 // Send marshals v and transmits it as [topic, payload].
 func (p *Publisher[T]) Send(ctx context.Context, topic string, v T) error {
-	b, err := p.codec.Marshal(v)
+	b, err := p.marshal(v)
 	if err != nil {
-		return fmt.Errorf("typed: marshal: %w", err)
+		return err
 	}
 	return p.sock.SendMsg(ctx, gozmq.NewMsgFromFrames([]byte(topic), b))
 }
@@ -179,8 +198,8 @@ func (s *Subscriber[T]) decode(m *gozmq.Msg) (Message[T], error) {
 	if err != nil {
 		return Message[T]{}, err
 	}
-	var v T
-	if err := s.codec.Unmarshal(payload, &v); err != nil {
+	v, err := unmarshal[T](s.codec, payload)
+	if err != nil {
 		return Message[T]{}, fmt.Errorf("%w: %w", ErrDecode, err)
 	}
 	return Message[T]{Topic: string(topic), Value: v}, nil

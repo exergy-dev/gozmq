@@ -100,7 +100,7 @@ func TestRep_ConcurrentRecvFSMViolation(t *testing.T) {
 	mustAttach(t, eng, a)
 
 	ctx := testutil.Ctx(t)
-	mc1, ec1 := recvAsync(ctx, eng)
+	rc1 := testutil.AsyncErr(func() (*msg.Msg, error) { return eng.Recv(ctx) })
 	time.Sleep(20 * time.Millisecond)
 	rctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
 	_, err := eng.Recv(rctx)
@@ -108,14 +108,9 @@ func TestRep_ConcurrentRecvFSMViolation(t *testing.T) {
 	require.ErrorIs(t, err, zmqerr.ErrFSMViolation, "concurrent recv")
 
 	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte("id"), []byte{}, []byte("q"))))
-	select {
-	case m := <-mc1:
-		require.Equal(t, "q", string(m.Bytes()))
-	case err := <-ec1:
-		require.Failf(t, "first recv failed", "%v", err)
-	case <-ctx.Done():
-		require.Fail(t, "first recv did not get the request")
-	}
+	r := testutil.RequireRecv(t, rc1, 5*time.Second, "first recv did not get the request")
+	require.NoError(t, r.Err, "first recv failed")
+	require.Equal(t, "q", string(r.V.Bytes()))
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("a"))))
 	got, err := b.RecvOr(ctx, nil)
 	require.NoError(t, err)

@@ -116,11 +116,7 @@ func TestTCP_Wildcard_And_Ephemeral_Port(t *testing.T) {
 	defer c.Close()
 	_, err = c.Write([]byte("hello"))
 	require.NoError(t, err, "Write")
-	select {
-	case <-acceptCh:
-	case <-ctx.Done():
-		require.Fail(t, "Accept did not receive bytes within deadline")
-	}
+	testutil.RequireRecv(t, acceptCh, 5*time.Second, "Accept did not receive bytes within deadline")
 }
 
 // TestTCP_Dial_Honors_Ctx_Cancellation. Dial to an unroutable address with

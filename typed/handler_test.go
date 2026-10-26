@@ -50,9 +50,8 @@ func TestReceiver_Handle_Roundtrip(t *testing.T) {
 
 	var got []payload
 	var mu sync.Mutex
-	done := make(chan error, 1)
-	go func() {
-		done <- receiver.Handle(loopCtx, func(_ context.Context, v payload) error {
+	done := testutil.Async(func() error {
+		return receiver.Handle(loopCtx, func(_ context.Context, v payload) error {
 			mu.Lock()
 			got = append(got, v)
 			if len(got) == len(want) {
@@ -61,14 +60,9 @@ func TestReceiver_Handle_Roundtrip(t *testing.T) {
 			mu.Unlock()
 			return nil
 		})
-	}()
-
-	select {
-	case err := <-done:
-		require.ErrorIs(t, err, context.Canceled, "Handle return error")
-	case <-time.After(5 * time.Second):
-		require.Fail(t, "Handle did not return")
-	}
+	})
+	require.ErrorIs(t, testutil.RequireRecv(t, done, 5*time.Second, "Handle did not return"),
+		context.Canceled, "Handle return error")
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -111,9 +105,8 @@ func TestSubscriber_Handle_TopicRoundtrip(t *testing.T) {
 
 	var got []typed.Message[payload]
 	var mu sync.Mutex
-	done := make(chan error, 1)
-	go func() {
-		done <- sub.Handle(loopCtx, func(_ context.Context, m typed.Message[payload]) error {
+	done := testutil.Async(func() error {
+		return sub.Handle(loopCtx, func(_ context.Context, m typed.Message[payload]) error {
 			mu.Lock()
 			got = append(got, m)
 			if len(got) == 2 {
@@ -122,14 +115,9 @@ func TestSubscriber_Handle_TopicRoundtrip(t *testing.T) {
 			mu.Unlock()
 			return nil
 		})
-	}()
-
-	select {
-	case err := <-done:
-		require.ErrorIs(t, err, context.Canceled, "Handle return error")
-	case <-time.After(5 * time.Second):
-		require.Fail(t, "Handle did not return")
-	}
+	})
+	require.ErrorIs(t, testutil.RequireRecv(t, done, 5*time.Second, "Handle did not return"),
+		context.Canceled, "Handle return error")
 
 	wants := []typed.Message[payload]{
 		{Topic: "orders.new", Value: payload{N: 1, Name: "w"}},

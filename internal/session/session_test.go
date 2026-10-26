@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -134,7 +135,7 @@ func newFakeMech(name string, asServer bool, props map[string]string) *fakeMech 
 	if props == nil {
 		props = map[string]string{}
 	}
-	return &fakeMech{name: name, asServer: asServer, props: copyProps(props)}
+	return &fakeMech{name: name, asServer: asServer, props: maps.Clone(props)}
 }
 
 type fakeMech struct {
@@ -156,12 +157,12 @@ func (m *fakeMech) EncodeFrame(flags uint8, b []byte) (uint8, []byte, error) {
 func (m *fakeMech) DecodeFrame(flags uint8, b []byte) (uint8, []byte, error) {
 	return flags, b, nil
 }
-func (m *fakeMech) Metadata() map[string]string { return copyProps(m.props) }
+func (m *fakeMech) Metadata() map[string]string { return maps.Clone(m.props) }
 func (m *fakeMech) PeerMetadata() map[string]string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.peerMetaCalls++
-	return copyProps(m.peerProps)
+	return maps.Clone(m.peerProps)
 }
 
 // NextHandshake is a one-round exchange: emit a single READY-equivalent
@@ -304,20 +305,10 @@ func TestSession_Handshake_AndRoundTrip(t *testing.T) {
 	// Stop must drain cleanly. We rely on goleak (TestMain) for the
 	// leak assertion; here we just verify Stop returns without error
 	// or hang.
-	doneA := stopAsync(sA)
-	doneB := stopAsync(sB)
-	select {
-	case err := <-doneA:
-		assert.NoError(t, err, "A.Stop")
-	case <-time.After(2 * time.Second):
-		require.FailNow(t, "A.Stop did not return within 2s")
-	}
-	select {
-	case err := <-doneB:
-		assert.NoError(t, err, "B.Stop")
-	case <-time.After(2 * time.Second):
-		require.FailNow(t, "B.Stop did not return within 2s")
-	}
+	doneA := testutil.Async(sA.Stop)
+	doneB := testutil.Async(sB.Stop)
+	assert.NoError(t, testutil.RequireRecv(t, doneA, 2*time.Second, "A.Stop did not return within 2s"), "A.Stop")
+	assert.NoError(t, testutil.RequireRecv(t, doneB, 2*time.Second, "B.Stop did not return within 2s"), "B.Stop")
 
 	// Stop is idempotent.
 	assert.NoError(t, sA.Stop(), "A.Stop second call")
@@ -355,17 +346,6 @@ func decodeFakeProps(in []byte) (map[string]string, error) {
 	return props, nil
 }
 
-func copyProps(in map[string]string) map[string]string {
-	if in == nil {
-		return nil
-	}
-	out := make(map[string]string, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
-}
-
 // TestSession_StopBeforeHandshake ensures Stop on a partially-started
 // session unblocks Handshaked observers and returns cleanly.
 func TestSession_StopBeforeHandshake(t *testing.T) {
@@ -389,16 +369,11 @@ func TestSession_StopBeforeHandshake(t *testing.T) {
 	// blocks the writer too — that's fine, Stop closes both halves).
 	time.Sleep(10 * time.Millisecond)
 
-	doneStop := stopAsync(s)
-	select {
-	case err := <-doneStop:
-		// We expect Stop itself to return nil — the handshake error
-		// is reported via HandshakeErr. Conn.Close on an already-closed
-		// io.Pipe returns nil, so this should be cleanly nil.
-		assert.NoError(t, err, "Stop returned error, want nil")
-	case <-time.After(2 * time.Second):
-		require.FailNow(t, "Stop did not return within 2s")
-	}
+	// We expect Stop itself to return nil — the handshake error
+	// is reported via HandshakeErr. Conn.Close on an already-closed
+	// io.Pipe returns nil, so this should be cleanly nil.
+	err := testutil.RequireRecv(t, testutil.Async(s.Stop), 2*time.Second, "Stop did not return within 2s")
+	assert.NoError(t, err, "Stop returned error, want nil")
 
 	// Handshaked must be closed; HandshakeErr must be non-nil since
 	// the handshake aborted.
@@ -424,11 +399,7 @@ func TestSession_Drain_DoesNotCloseConnUntilStop(t *testing.T) {
 
 	waitClosed(t, sA.Drain(), 2*time.Second, "Drain did not finish")
 
-	select {
-	case <-connA.Closed():
-		require.FailNow(t, "Drain closed the conn before Stop")
-	case <-time.After(50 * time.Millisecond):
-	}
+	testutil.RequireNoRecv(t, connA.Closed(), 50*time.Millisecond, "Drain closed the conn before Stop")
 
 	for i := 0; i < 4; i++ {
 		m, err := sB.Pipe().RecvOr(ctx, nil)
@@ -552,23 +523,13 @@ func TestSession_StopDoesNotSetLinger(t *testing.T) {
 // timeout.
 func waitClosed(t *testing.T, ch <-chan struct{}, timeout time.Duration, msg string) {
 	t.Helper()
-	select {
-	case <-ch:
-	case <-time.After(timeout):
-		require.FailNow(t, msg)
-	}
+	testutil.RequireRecv(t, ch, timeout, msg)
 }
 
 func waitHandshake(t *testing.T, s *tSession, label string) {
 	t.Helper()
 	waitClosed(t, s.Handshaked(), 2*time.Second, label+": handshake did not complete within 2s")
 	require.NoError(t, s.HandshakeErr(), "%s: HandshakeErr", label)
-}
-
-func stopAsync(s *tSession) <-chan error {
-	ch := make(chan error, 1)
-	go func() { ch <- s.Stop() }()
-	return ch
 }
 
 // Sanity check: make sure our error sentinel wrapping is reachable via
@@ -739,11 +700,7 @@ func TestSession_Done_Fires(t *testing.T) {
 			s, peer := tc.start(t)
 
 			// Done must not fire until the trigger.
-			select {
-			case <-s.Done():
-				require.FailNow(t, "Done fired before the teardown trigger")
-			case <-time.After(20 * time.Millisecond):
-			}
+			testutil.RequireNoRecv(t, s.Done(), 20*time.Millisecond, "Done fired before the teardown trigger")
 
 			tc.trigger(t, s, peer)
 			waitClosed(t, s.Done(), tc.timeout, "Done did not fire after "+tc.name)
@@ -1102,22 +1059,16 @@ func TestReader_SingleMessagePromptDelivery(t *testing.T) {
 	sA, sB := startZmtpPair(t, 16)
 	ctx := testutil.Ctx(t, 5*time.Second)
 	for i := range 20 {
-		got := make(chan error, 1)
-		go func() {
+		got := testutil.Async(func() error {
 			m, err := sB.Pipe().RecvOr(ctx, nil)
 			if err == nil && string(m.Bytes()) != fmt.Sprintf("one-%d", i) {
 				err = fmt.Errorf("got %q", m.Bytes())
 			}
-			got <- err
-		}()
+			return err
+		})
 		time.Sleep(2 * time.Millisecond) // let Recv park
 		require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte(fmt.Sprintf("one-%d", i)))))
-		select {
-		case err := <-got:
-			require.NoError(t, err, "round %d", i)
-		case <-time.After(2 * time.Second):
-			require.Fail(t, "message not delivered promptly", "round %d", i)
-		}
+		require.NoError(t, testutil.RequireRecv(t, got, 2*time.Second, "message not delivered promptly, round %d", i), "round %d", i)
 	}
 }
 
@@ -1132,16 +1083,14 @@ func TestReader_BurstDeliveredInOrder(t *testing.T) {
 			const N = 1000
 			sA, sB := startZmtpPair(t, hwm)
 			ctx := testutil.Ctx(t, 20*time.Second)
-			sendErr := make(chan error, 1)
-			go func() {
+			sendErr := testutil.Async(func() error {
 				for i := range N {
 					if err := sA.Pipe().Send(ctx, msg.FromBytes([]byte(fmt.Sprintf("m%04d", i)))); err != nil {
-						sendErr <- err
-						return
+						return err
 					}
 				}
-				sendErr <- nil
-			}()
+				return nil
+			})
 			for i := range N {
 				m, err := sB.Pipe().RecvOr(ctx, nil)
 				require.NoError(t, err, "Recv[%d]", i)
@@ -1181,11 +1130,7 @@ func TestFlushReader_FlushesBeforeUnderlyingRead(t *testing.T) {
 	_, err := r.Read(make([]byte, 1))
 	require.ErrorIs(t, err, io.EOF)
 	require.True(t, sawFlush, "flush must precede the underlying Read")
-	select {
-	case <-idle:
-	case <-time.After(time.Second):
-		require.Fail(t, "idle notification not run by the flush")
-	}
+	testutil.RequireRecv(t, idle, time.Second, "idle notification not run by the flush")
 	require.EqualValues(t, 42, s.lastInboundNanos.Load(), "inbound clock stamped at the flush")
 }
 

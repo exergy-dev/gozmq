@@ -184,11 +184,7 @@ func newHeartbeatSession(t *testing.T, clk *fakeClock, interval, timeout time.Du
 // grace period covering several heartbeat ticks.
 func requireAlive(t *testing.T, s *tSession, wait time.Duration, msg string) {
 	t.Helper()
-	select {
-	case <-s.Done():
-		require.FailNow(t, msg)
-	case <-time.After(wait):
-	}
+	testutil.RequireNoRecv(t, s.Done(), wait, msg)
 }
 
 // TestHeartbeat_PingCadenceAndTTL: with the fake clock frozen (idle

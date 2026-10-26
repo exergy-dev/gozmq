@@ -84,11 +84,7 @@ func TestInproc_DisconnectPending(t *testing.T) {
 	pull := inprocSocket(t, zctx, Pull)
 	require.NoError(t, pull.Bind(ep))
 	require.Zero(t, linkCount(pull))
-	select {
-	case ev := <-events:
-		t.Fatalf("unexpected event %v after Disconnect", ev.Type)
-	default:
-	}
+	testutil.RequireNoRecv(t, events, 0, "unexpected event after Disconnect")
 }
 
 // TestInproc_DisconnectLive: Disconnect of an established link detaches

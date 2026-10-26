@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/transport"
 )
 
@@ -101,12 +102,7 @@ func TestReconnector_DialRetriesThenSucceeds(t *testing.T) {
 	defer r.Stop()
 
 	// Wait for the first run (after two dial failures).
-	var first *stubRunner
-	select {
-	case first = <-started:
-	case <-time.After(2 * time.Second):
-		require.FailNow(t, "no run after 2s", "dials=%d", dialN.Load())
-	}
+	first := testutil.RequireRecv(t, started, 2*time.Second, "no run after 2s, dials=%d", dialN.Load())
 	require.Equal(t, int32(3), dialN.Load(), "expected 3 dials before first run")
 
 	// Verify backoff grew: dial2 should happen ≥ 5ms after dial1,
@@ -124,11 +120,7 @@ func TestReconnector_DialRetriesThenSucceeds(t *testing.T) {
 
 	// Simulate peer disconnect; expect a fresh dial and a second run.
 	first.end()
-	select {
-	case <-started:
-	case <-time.After(2 * time.Second):
-		require.FailNow(t, "no reconnect after 2s", "dials=%d", dialN.Load())
-	}
+	testutil.RequireRecv(t, started, 2*time.Second, "no reconnect after 2s, dials=%d", dialN.Load())
 	assert.Equal(t, int32(4), dialN.Load(), "dials")
 }
 
@@ -157,21 +149,11 @@ func TestReconnector_ContextCancellationStopsLoop(t *testing.T) {
 	r := StartReconnector(ctx, cfg)
 
 	// Wait for at least one dial attempt, then cancel the external ctx.
-	select {
-	case <-dialCh:
-	case <-time.After(time.Second):
-		require.FailNow(t, "no dial within 1s")
-	}
+	testutil.RequireRecv(t, dialCh, time.Second, "no dial within 1s")
 	cancel()
 
-	stopped := make(chan error, 1)
-	go func() { stopped <- r.Stop() }()
-	select {
-	case err := <-stopped:
-		require.NoError(t, err)
-	case <-time.After(time.Second):
-		require.FailNow(t, "Stop did not return within 1s after ctx cancel")
-	}
+	stopped := testutil.Async(r.Stop)
+	require.NoError(t, testutil.RequireRecv(t, stopped, time.Second, "Stop did not return within 1s after ctx cancel"))
 }
 
 // TestReconnector_StopWakesSleepingBackoff: force a long backoff, then
@@ -245,12 +227,8 @@ func TestReconnector_UnattachedRunAdvancesBackoff(t *testing.T) {
 	defer r.Stop()
 
 	for want := 1; want <= 3; want++ {
-		select {
-		case got := <-retries:
-			require.Equal(t, want, got, "attempt counter reset by an unattached run")
-		case <-time.After(time.Second):
-			require.FailNow(t, "no retry after unattached run", "want attempt %d", want)
-		}
+		got := testutil.RequireRecv(t, retries, time.Second, "no retry after unattached run, want attempt %d", want)
+		require.Equal(t, want, got, "attempt counter reset by an unattached run")
 	}
 	require.GreaterOrEqual(t, starts.Load(), int32(3), "loop did not redial")
 }
@@ -288,12 +266,7 @@ func TestReconnector_AttachedRunResetsBackoff(t *testing.T) {
 	defer r.Stop()
 
 	for _, want := range []retry{{1, time.Millisecond}, {2, 2 * time.Millisecond}, {1, time.Millisecond}} {
-		select {
-		case got := <-retries:
-			require.Equal(t, want, got)
-		case <-time.After(time.Second):
-			require.FailNow(t, "no retry", "want %+v", want)
-		}
+		require.Equal(t, want, testutil.RequireRecv(t, retries, time.Second, "no retry, want %+v", want))
 	}
 }
 

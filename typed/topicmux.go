@@ -79,11 +79,8 @@ func Register[T any](
 	entry := muxEntry{
 		topic: topic,
 		decode: func(b []byte) (any, error) {
-			var v T
-			if err := r.codec.Unmarshal(b, &v); err != nil {
-				return nil, err
-			}
-			return v, nil
+			v, err := unmarshal[T](r.codec, b)
+			return v, err
 		},
 		invoke: func(ctx context.Context, topic string, v any) error {
 			// v came from the decode closure directly above, which

@@ -14,6 +14,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
@@ -456,16 +457,11 @@ func TestFrameReadStalledLargeHeaderBoundsAllocation(t *testing.T) {
 		runtime.GC()
 		runtime.ReadMemStats(&before)
 
-		done := make(chan error, 1)
-		go func() {
+		done := testutil.Async(func() error {
 			_, _, err := codec.ReadFrame(r, nil, pool)
-			done <- err
-		}()
-		select {
-		case <-sr.stalled:
-		case <-time.After(10 * time.Second):
-			t.Fatalf("%s: reader never consumed the prefix", c.name)
-		}
+			return err
+		})
+		testutil.RequireRecv(t, sr.stalled, 10*time.Second, "%s: reader never consumed the prefix", c.name)
 
 		var during runtime.MemStats
 		runtime.GC()

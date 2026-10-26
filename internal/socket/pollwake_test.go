@@ -32,20 +32,12 @@ func parkOnGate(ch <-chan struct{}) <-chan struct{} {
 
 func requireNoWake(t *testing.T, woke <-chan struct{}) {
 	t.Helper()
-	select {
-	case <-woke:
-		require.Fail(t, "ready gate armed before any message was delivered")
-	case <-time.After(50 * time.Millisecond):
-	}
+	testutil.RequireNoRecv(t, woke, 50*time.Millisecond, "ready gate armed before any message was delivered")
 }
 
 func requireWake(t *testing.T, woke <-chan struct{}, what string) {
 	t.Helper()
-	select {
-	case <-woke:
-	case <-time.After(time.Second):
-		require.Fail(t, "parked poller did not wake", what)
-	}
+	testutil.RequireRecv(t, woke, time.Second, "parked poller did not wake: %s", what)
 }
 
 // parkOnIn checks eng the way a Poller scan does and parks on its in-gate.

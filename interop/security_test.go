@@ -3,6 +3,8 @@
 package interop
 
 import (
+	"bytes"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -136,7 +138,7 @@ func TestZAP(t *testing.T) {
 						// Runs on the server's ZAP goroutine: record, do not FailNow.
 						assert.Equal(t, "global", domain)
 						assert.Equal(t, m.name, mechName)
-						assert.True(t, framesEqual(m.creds, creds), "credentials %q, want %q", creds, m.creds)
+						assert.True(t, slices.EqualFunc(m.creds, creds, bytes.Equal), "credentials %q, want %q", creds, m.creds)
 						return "user", nil, nil
 					})
 					sp := pairSpec()

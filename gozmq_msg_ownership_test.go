@@ -340,8 +340,7 @@ func TestMsgOwnership_ProxyRouterCaptureRace(t *testing.T) {
 		require.NoError(t, capture.Bind("inproc://msg-ownership-capture"))
 
 		pctx, pcancel := context.WithCancel(context.Background())
-		done := make(chan error, 1)
-		go func() { done <- gozmq.Proxy(pctx, front, back, capture) }()
+		done := testutil.Async(func() error { return gozmq.Proxy(pctx, front, back, capture) })
 		defer func() { pcancel(); <-done }()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

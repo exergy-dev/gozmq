@@ -16,7 +16,7 @@ import (
 // BenchmarkPipe_Uncontended: one goroutine, TrySend then TryRecv at depth
 // 0/1. Measures the per-op cost with no contention at all.
 func BenchmarkPipe_Uncontended(b *testing.B) {
-	forEachKindB(b, func(b *testing.B, k kind) {
+	forEachKind(b, func(b *testing.B, k kind) {
 		x, y := k.newPair(1000, 1000, nil, nil)
 		defer x.Close()
 		defer y.Close()
@@ -37,7 +37,7 @@ func BenchmarkPipe_Uncontended(b *testing.B) {
 // BenchmarkPipe_SPSC_Stream: one producer goroutine, one consumer, blocking
 // Send/Recv, bounded at the default HWM. Use -cpu 2,8.
 func BenchmarkPipe_SPSC_Stream(b *testing.B) {
-	forEachKindB(b, func(b *testing.B, k kind) {
+	forEachKind(b, func(b *testing.B, k kind) {
 		x, y := k.newPair(1000, 1000, nil, nil)
 		defer x.Close()
 		defer y.Close()
@@ -105,7 +105,7 @@ func BenchmarkPipe_SPSC_Deferred(b *testing.B) {
 // BenchmarkPipe_SPSC_PingPong: strict alternation across two directions;
 // every Recv parks, so this is dominated by the wakeup path.
 func BenchmarkPipe_SPSC_PingPong(b *testing.B) {
-	forEachKindB(b, func(b *testing.B, k kind) {
+	forEachKind(b, func(b *testing.B, k kind) {
 		x, y := k.newPair(1000, 1000, nil, nil)
 		defer x.Close()
 		defer y.Close()
@@ -142,7 +142,7 @@ func BenchmarkPipe_SPSC_PingPong(b *testing.B) {
 
 // BenchmarkPipe_MPSC_4: four producers, one consumer.
 func BenchmarkPipe_MPSC_4(b *testing.B) {
-	forEachKindB(b, func(b *testing.B, k kind) {
+	forEachKind(b, func(b *testing.B, k kind) {
 		const producers = 4
 		x, y := k.newPair(1000, 1000, nil, nil)
 		defer x.Close()
@@ -180,7 +180,7 @@ func BenchmarkPipe_MPSC_4(b *testing.B) {
 // BenchmarkPipe_Writer_Batch mimics the session writer: a blocking RecvOr
 // for the first message, then up to 31 TryRecv for the rest of the batch.
 func BenchmarkPipe_Writer_Batch(b *testing.B) {
-	forEachKindB(b, func(b *testing.B, k kind) {
+	forEachKind(b, func(b *testing.B, k kind) {
 		x, y := k.newPair(1000, 1000, nil, nil)
 		defer x.Close()
 		defer y.Close()

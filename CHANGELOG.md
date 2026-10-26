@@ -67,6 +67,15 @@ frames are pooled by default. No wire change. See `perf/REPORT.md`.
   inproc rows are unchanged.
 - The reader stamps the heartbeat's inbound clock once per read batch
   instead of once per message.
+- A generics sweep found the library already generic where it pays
+  (`typed`, the `msg` co-allocation tiers, every atomic an
+  `atomic.Pointer[T]`); what it changed is the tests, which now share
+  `internal/testutil`'s `RequireRecv`, `RequireNoRecv` and `Async` instead
+  of about 60 hand-written timeout selects (400 fewer test lines; non-test
+  lines 15,079 → 15,163, 67 of them the helpers in testutil.go, which counts
+  as non-test by filename), and two internal folds: `typed` decodes through one `unmarshal[T]`, the inproc
+  registry deletes from its maps of slices through one helper. No behaviour
+  change.
 - `zmqperf local_thr` divides by the messages it actually timed (`count-1`),
   releases every received message as libzmq's tool does with
   `zmq_msg_close` (`-pool=false` opts out to plain memory), formats its
