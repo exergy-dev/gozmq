@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/stretchr/testify/require"
 
@@ -112,8 +113,47 @@ func TestRaw_InboundChunking(t *testing.T) {
 	require.Equal(t, payload, got.Bytes())
 }
 
+// TestRaw_InboundAdoptedChunksDistinct: reads that fill the buffer become
+// messages holding the read buffer itself, and each such read gets a fresh
+// buffer, so adopted chunks never alias one another or a later short read.
+func TestRaw_InboundAdoptedChunksDistinct(t *testing.T) {
+	t.Parallel()
+	connA, connB := newFakeConnPair()
+	defer connB.Close()
+	rs := startRaw(t, connA, 0)
+
+	ctx := testutil.Ctx(t, 2*time.Second)
+	// io.Pipe hands one Write to the next Read whole when it fits, so
+	// each full-size write is one full read.
+	writes := [][]byte{
+		bytes.Repeat([]byte("A"), rawReadSize),
+		bytes.Repeat([]byte("B"), rawReadSize),
+		bytes.Repeat([]byte("C"), rawAdoptMin),
+		[]byte("short"),
+	}
+	var chunks []*msg.Msg
+	for _, w := range writes {
+		_, err := connB.Write(w)
+		require.NoError(t, err)
+		m, err := rs.pipe.RecvOr(ctx, nil)
+		require.NoError(t, err)
+		chunks = append(chunks, m)
+	}
+	seen := map[*byte]int{}
+	for i, w := range writes {
+		b := chunks[i].Bytes()
+		require.Equal(t, w, b, "chunk %d changed after later reads", i)
+		require.Equal(t, len(b), cap(b), "chunk %d can grow into foreign bytes", i)
+		p := unsafe.SliceData(b)
+		j, dup := seen[p]
+		require.False(t, dup, "chunks %d and %d share memory", j, i)
+		seen[p] = i
+	}
+	require.Less(t, cap(chunks[3].Bytes()), 64, "a short read pins its read buffer")
+}
+
 // TestRaw_InboundChunkSized: a chunk owns only the bytes read, so a queued
-// 1-byte read does not pin the 32 KiB read buffer, and chunks do not alias
+// 1-byte read does not pin the 64 KiB read buffer, and chunks do not alias
 // a reused buffer.
 func TestRaw_InboundChunkSized(t *testing.T) {
 	t.Parallel()

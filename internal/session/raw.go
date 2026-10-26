@@ -1,7 +1,6 @@
 package session
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"unsafe"
@@ -9,14 +8,22 @@ import (
 	"github.com/exergy-dev/gozmq/msg"
 )
 
-// rawReadSize caps one conn.Read in raw mode. 32 KiB takes a typical HTTP
-// request or response head in one syscall. Each read becomes one message
-// as it arrived: raw mode never coalesces reads (the STREAM contract).
-const rawReadSize = 32 * 1024
+// rawReadSize caps one conn.Read in raw mode. Each read becomes one
+// message as it arrived: raw mode never coalesces reads (the STREAM
+// contract). 64 KiB keeps a bulk transfer at one syscall per 64 KiB.
+const rawReadSize = 64 * 1024
+
+// rawAdoptMin is the read size from which the reader hands its buffer
+// itself to the message, uncopied, and takes a fresh one: a read that
+// (nearly) filled the buffer wastes at most a tenth of it. A shorter read
+// is copied out at its exact size, so a queued small chunk never pins a
+// whole read buffer (1-byte reads times the HWM would hold gigabytes).
+const rawAdoptMin = rawReadSize - rawReadSize/10
 
 // runRawReader is the reader in raw mode (Config.Raw): no greeting, no
 // handshake, no heartbeat. It hands the engine end to OnReady at once,
-// then publishes each conn.Read as a single-frame message.
+// then publishes each conn.Read as a single-frame message. The message
+// is plain memory either way (see rawAdoptMin), never lent.
 func (s *Session) runRawReader() {
 	defer s.exit()
 	defer s.shutdown()
@@ -27,10 +34,14 @@ func (s *Session) runRawReader() {
 	for {
 		n, err := s.cfg.Conn.Read(buf)
 		if n > 0 {
-			// Copy just the n bytes read: a queued small chunk must not
-			// pin the whole read buffer (1-byte reads times the HWM would
-			// hold tens of MiB per peer).
-			if s.publishInbound(msg.FromBytes(bytes.Clone(buf[:n]))) != nil {
+			var m *msg.Msg
+			if n >= rawAdoptMin {
+				m = msg.FromBytes(buf[:n:n])
+				buf = make([]byte, rawReadSize)
+			} else {
+				m = msg.FromFramesCopy(buf[:n])
+			}
+			if s.publishInbound(m) != nil {
 				return
 			}
 			s.flushInbound() // no read loop to flush for us in raw mode
