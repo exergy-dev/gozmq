@@ -256,9 +256,15 @@ stop reconnectors and links; wait for the accept loops; emit `EventClosed`.
 A STREAM connection is a session started with `Config.Raw`, fixed at
 construction so the ZMTP loops carry no branch for it: no greeting, handshake
 or heartbeat. The raw reader publishes each `conn.Read` (up to 32 KiB) as one
-single-frame message; the raw writer writes each body verbatim, and an empty
-body closes the conn. The engine stamps and strips the routing identity like
-ROUTER. A STREAM `Connect` dials once with no reconnector.
+single-frame message. Outbound, the engine routes by the identity frame and
+hands the message itself down the pipe, `[identity, body...]`; the raw writer
+writes the frames after the identity verbatim, back to back, and a message
+whose body holds no bytes closes the conn (after everything queued ahead of
+it). The raw writer batches like the ZMTP writer (§9):
+whatever is already queued behind the message it blocked for goes out in one
+`write`/`writev` under the same caps, small bodies copied into one run and
+large ones by reference. The engine stamps the routing identity on inbound
+messages like ROUTER. A STREAM `Connect` dials once with no reconnector.
 
 ## 4. Protocol notes
 
