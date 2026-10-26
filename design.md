@@ -255,8 +255,11 @@ stop reconnectors and links; wait for the accept loops; emit `EventClosed`.
 
 A STREAM connection is a session started with `Config.Raw`, fixed at
 construction so the ZMTP loops carry no branch for it: no greeting, handshake
-or heartbeat. The raw reader publishes each `conn.Read` (up to 32 KiB) as one
-single-frame message. Outbound, the engine routes by the identity frame and
+or heartbeat. The raw reader publishes each `conn.Read` (up to 64 KiB) as one
+single-frame message of plain memory: a read that fills at least 90% of the
+buffer becomes the message as is (the reader takes a fresh buffer), a shorter
+one is copied out at its exact size so a small chunk never pins a read
+buffer. Outbound, the engine routes by the identity frame and
 hands the message itself down the pipe, `[identity, body...]`; the raw writer
 writes the frames after the identity verbatim, back to back, and a message
 whose body holds no bytes closes the conn (after everything queued ahead of
@@ -411,7 +414,12 @@ closed; every other error is treated as per-connection and retried.
   wakes the receiver once per read batch.
 - PUB/XPUB `Send` reads a copy-on-write snapshot of the peers (no lock, no
   per-message slice) and answers a peer's subscribe-to-all from an atomic
-  flag; only a selective tree takes that peer's read lock.
+  flag; only a selective tree takes that peer's read lock. ROUTER and
+  STREAM `Send` route through a copy-on-write identity table the same way
+  (an attach or detach clones it).
+- A STREAM send costs no copy and no message of its own: the engine hands
+  the caller's message to the pipe and the raw writer batches bodies like
+  the ZMTP writer, so a burst of small sends is one `write(2)`.
 - CURVE precomputes each handshake key once and seals every frame straight
   into the writer's batch; the reader adopts its plaintext without a copy.
 - A bound ROUTER costs two goroutines per TCP peer and none per inproc peer;

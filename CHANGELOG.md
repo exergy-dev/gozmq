@@ -30,6 +30,28 @@ migration hint.
   and TLS and fanned out over TCP and IPC, REQ/REP and ROUTER/DEALER over
   TLS and IPC, REQ/REP and PUB/SUB with CURVE, STREAM send and receive).
 
+### Changed
+
+- STREAM throughput over TCP is above native libzmq 4.3.4 in both
+  directions at every size (three `compare.sh` runs): sending 1.07–1.10× at
+  32 B (from 0.03×) and 2.8–10× at 256 B–64 KB (from 0.12–1.98×), receiving
+  1.10–1.27× (from 1.07–1.15×). The raw writer now coalesces queued
+  messages into one `write`/`writev` like the ZMTP writer (a 1M-message
+  32 B send went from 1,000,001 `write` calls to 624), a STREAM send hands
+  the caller's message to the connection without deriving or copying one
+  (multipart bodies are no longer joined; their frames go on the wire back
+  to back), and the raw reader reads up to 64 KiB and adopts a full read
+  buffer as the message instead of copying it. Received STREAM messages
+  are still plain memory, never lent. No API or wire change: an
+  identity-only message, or one whose body frames are all empty, still
+  closes the connection after everything sent before it.
+- ROUTER and STREAM `Send` look the peer up in a copy-on-write identity
+  table without taking a lock (`StreamSend_TCP/32B` −13%); attaching or
+  detaching a peer clones the table.
+- `perf/libzmq_thr/compare.sh`: the `stream_in` and `stream_out` cells
+  move at least 1 GiB per run (both libraries; the 32 B cell was a
+  ~15 ms run), with their own `STREAM_RUN_TIMEOUT` (default 300 s).
+
 ### Removed
 
 - `perf/libzmq_thr/compare_all.sh`, `compare_lat.sh`, `compare_inproc.sh`
