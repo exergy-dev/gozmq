@@ -3,6 +3,7 @@ package zmtp
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
@@ -21,20 +22,14 @@ import (
 // The returned slice is freshly allocated and safe to retain. Property
 // iteration order is unspecified (Go map order); peers must not depend on it.
 //
-// Properties whose name length exceeds 255 bytes, or whose value length
-// exceeds 2^32-1 bytes, panic — these are programmer errors in this codebase
-// since we control every caller. (ZMTP lets values reach 2^32-1, so the panic
-// only fires on pathological input.)
+// Properties outside the limits ValidateMetadata checks panic: every caller
+// in this codebase controls its input.
 func EncodeMetadata(props map[string]string) []byte {
-	// Pre-compute size so we allocate exactly once.
-	total := 0
+	if err := ValidateMetadata(props); err != nil {
+		panic(err)
+	}
+	total := 0 // size the output once
 	for name, value := range props {
-		if len(name) > 255 {
-			panic(fmt.Sprintf("gozmq/zmtp: metadata name length %d exceeds 255", len(name)))
-		}
-		if uint64(len(value)) > 0xFFFFFFFF {
-			panic(fmt.Sprintf("gozmq/zmtp: metadata value length %d exceeds 2^32-1", len(value)))
-		}
 		total += 1 + len(name) + 4 + len(value)
 	}
 
@@ -42,12 +37,25 @@ func EncodeMetadata(props map[string]string) []byte {
 	for name, value := range props {
 		out = append(out, byte(len(name)))
 		out = append(out, name...)
-		var vln [4]byte
-		binary.BigEndian.PutUint32(vln[:], uint32(len(value)))
-		out = append(out, vln[:]...)
+		out = binary.BigEndian.AppendUint32(out, uint32(len(value)))
 		out = append(out, value...)
 	}
 	return out
+}
+
+// ValidateMetadata reports whether props fits a property list (names up to
+// 255 bytes, values up to 2^32-1). Callers whose properties come from
+// outside (a ZAP handler's reply) check with it before EncodeMetadata.
+func ValidateMetadata(props map[string]string) error {
+	for name, value := range props {
+		if len(name) > 255 {
+			return fmt.Errorf("gozmq/zmtp: metadata name length %d exceeds 255", len(name))
+		}
+		if uint64(len(value)) > math.MaxUint32 {
+			return fmt.Errorf("gozmq/zmtp: metadata %q value length %d exceeds 2^32-1", name, len(value))
+		}
+	}
+	return nil
 }
 
 // DecodeMetadata parses a ZMTP 3.1 READY property list into a map. Names are kept

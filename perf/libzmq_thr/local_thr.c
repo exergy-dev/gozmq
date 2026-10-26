@@ -9,6 +9,13 @@ int main(int argc, char *argv[]) {
     long count = atol(argv[3]);
     void *ctx = zmq_ctx_new();
     void *s = zmq_socket(ctx, ZMQ_PULL);
+    /* Stock RCVHWM (1000) unless ZMQ_RCVHWM is set. compare_all.sh sets it
+     * to the message count for the gozmq PUSH -> libzmq PULL pairing over
+     * ipc: there libzmq stops polling at HWM, a unix socket reports
+     * EPOLLHUP as soon as the peer closes, and libzmq drops the tail of the
+     * burst, so with the stock value this tool never sees its last message. */
+    const char *hwm_env = getenv("ZMQ_RCVHWM");
+    if (hwm_env) { int hwm = atoi(hwm_env); zmq_setsockopt(s, ZMQ_RCVHWM, &hwm, sizeof hwm); }
     if (zmq_bind(s, bind_to)) { perror("bind"); return 1; }
     zmq_msg_t m; zmq_msg_init(&m);
     zmq_msg_recv(&m, s, 0);                 /* first msg: connection established */

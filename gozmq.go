@@ -1,21 +1,13 @@
 package gozmq
 
 import (
-	"errors"
+	"cmp"
 	"fmt"
 	"log/slog"
 	"time"
 
-	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
-
-// This file holds the package-wide value types (SocketType, Msg) and the
-// small cross-cutting Socket helpers (emit, logger, handshake-event
-// classification). The Context lifecycle lives in context.go; the Socket
-// type and its Send/Recv/Bind/Connect surface in socket.go; session and
-// mechanism wiring (STREAM's raw-mode sessions included) in wiring.go;
-// inproc in inproc.go; and the LINGER teardown in close.go.
 
 // SocketType enumerates the ZMTP socket patterns.
 type SocketType uint8
@@ -91,27 +83,29 @@ func socketTypeName(t SocketType) string {
 // names; unknown values render as "SocketType(n)".
 func (t SocketType) String() string { return socketTypeName(t) }
 
-// Msg is a ZMTP multipart message. Frames delivered by RecvMsg are
-// ordinary Go memory owned by the caller: safe to retain, stash, re-send,
-// or pass between goroutines, and reclaimed by the garbage collector;
-// (*Msg).Release and Retain do nothing for them. The exception is a socket
-// created with [WithRecvBufferPool], whose large frames are lent until
-// Release (see that option and the msg package's "Lent frames").
+// Msg is a ZMTP multipart message. Frames delivered by RecvMsg larger than
+// 4 KiB are, by default, lent from a buffer pool: valid until the message's
+// final Release, then recycled (see [WithRecvBufferPool], which also
+// explains how to opt out, and the msg package's "Lent frames"). Smaller
+// frames, and all frames with WithRecvBufferPool(false), are ordinary Go
+// memory owned by the caller, for which Release and Retain do nothing.
 //
 // Msg is an alias for [msg.Msg]; see that package for the full method
-// set. There is
-// no need to import it — the alias makes every method reachable as
-// gozmq.Msg, and the NewMsg* constructors below cover construction.
+// set. There is no need to import it: the alias makes every method reachable
+// as gozmq.Msg, and the NewMsg* constructors below cover construction (an
+// empty message is NewMsgFromFrames()).
 type Msg = msg.Msg
-
-// NewMsg returns an empty message.
-func NewMsg() *Msg { return msg.New() }
 
 // NewMsgFromBytes wraps b in a single-frame message (no copy).
 func NewMsgFromBytes(b []byte) *Msg { return msg.FromBytes(b) }
 
 // NewMsgFromFrames wraps the provided frames in a multipart message.
 func NewMsgFromFrames(frames ...[]byte) *Msg { return msg.FromFrames(frames...) }
+
+// NewMsgFromFramesCopy returns a multipart message holding copies of the
+// provided frames, so the caller may reuse them at once. Small messages
+// cost a single allocation; see [msg.FromFramesCopy].
+func NewMsgFromFramesCopy(frames ...[]byte) *Msg { return msg.FromFramesCopy(frames...) }
 
 // monitorState bundles the monitor channel and event mask so they can be
 // swapped atomically without holding a mutex on the hot emit() path.
@@ -131,10 +125,7 @@ type monitorState struct {
 // counted as drops — they were never intended for delivery).
 func (s *Socket) emit(eventType EventType, endpoint, reason string) {
 	ms := s.monitorCfg.Load()
-	if ms == nil || ms.ch == nil {
-		return
-	}
-	if ms.mask&eventType == 0 {
+	if ms == nil || ms.ch == nil || ms.mask&eventType == 0 {
 		return
 	}
 	ev := Event{
@@ -153,24 +144,5 @@ func (s *Socket) emit(eventType EventType, endpoint, reason string) {
 // slog.Default when none was installed via WithLogger. Centralising
 // the fallback keeps the call sites terse.
 func (s *Socket) logger() *slog.Logger {
-	if s.cfg.logger != nil {
-		return s.cfg.logger
-	}
-	return slog.Default()
-}
-
-// classifyHandshakeEvent maps a handshake error to the appropriate
-// Event type. Errors wrapping ErrAuthFailed surface as
-// EventHandshakeFailedAuth; errors wrapping ErrMalformedFrame or
-// ErrProtocolVersion surface as EventHandshakeFailedProtocol. Any
-// other error (dial drop mid-handshake, timeout) also falls under
-// protocol failure by convention — the user's monitor consumer can
-// inspect Reason for finer classification.
-func classifyHandshakeEvent(err error) EventType {
-	if errors.Is(err, zmqerr.ErrAuthFailed) {
-		return EventHandshakeFailedAuth
-	}
-	// ErrMalformedFrame, ErrProtocolVersion, and any other error (dial drop
-	// mid-handshake, timeout) all classify as a protocol failure.
-	return EventHandshakeFailedProtocol
+	return cmp.Or(s.cfg.logger, slog.Default())
 }

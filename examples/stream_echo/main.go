@@ -55,7 +55,7 @@ func main() {
 	buf := make([]byte, len(response))
 	_, err = io.ReadFull(raw, buf)
 	check(err, "raw TCP read")
-	fmt.Printf("raw TCP peer received response:\n%s", string(buf))
+	fmt.Printf("raw TCP peer received response:\n%s", buf)
 
 	check(stream.SendMsg(callCtx, gozmq.NewMsgFromFrames(peerID)), "stream close peer")
 }

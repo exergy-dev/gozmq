@@ -139,8 +139,8 @@ func TestCurveMessageFlagsRoundTrip(t *testing.T) {
 // returns the inner flags byte, without advancing the receiver's state.
 func openInnerFlags(t *testing.T, recv *curveMech, wire []byte) byte {
 	t.Helper()
-	off := 1 + len(cmdMessage)
-	nonce := shortNonce(recv.decPrefix, binary.BigEndian.Uint64(wire[off:off+8]))
+	off := 1 + len(zmtp.CmdMessage)
+	nonce := withCounter(recv.decNonce, binary.BigEndian.Uint64(wire[off:off+8]))
 	plain, ok := box.OpenAfterPrecomputation(nil, wire[off+8:], &nonce, &recv.shared)
 	require.True(t, ok, "box open")
 	require.NotEmpty(t, plain, "inner plaintext")
@@ -152,8 +152,8 @@ func openInnerFlags(t *testing.T, recv *curveMech, wire []byte) byte {
 func sealMessage(sender *curveMech, inner []byte) []byte {
 	counter := sender.ourShortNonce
 	sender.ourShortNonce++
-	nonce := shortNonce(sender.encPrefix, counter)
-	body := append([]byte{byte(len(cmdMessage))}, cmdMessage...)
+	nonce := withCounter(sender.encNonce, counter)
+	body := append([]byte{byte(len(zmtp.CmdMessage))}, zmtp.CmdMessage...)
 	body = binary.BigEndian.AppendUint64(body, counter)
 	return box.SealAfterPrecomputation(body, inner, &nonce, &sender.shared)
 }
@@ -505,7 +505,7 @@ func TestCurveHandshakeTampering(t *testing.T) {
 		{"initiate box", true, func(b []byte) { b[len(b)-8] ^= 0x01 }, ""},
 		// The cookie field starts after the command name; its first 16
 		// bytes are the nonce, so +20 is inside the secretbox ciphertext.
-		{"initiate cookie", true, func(b []byte) { b[1+len(cmdInitiate)+20] ^= 0xFF }, "cookie open failed"},
+		{"initiate cookie", true, func(b []byte) { b[1+len(zmtp.CmdInitiate)+20] ^= 0xFF }, "cookie open failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client, server := newMechPair(t)
@@ -544,7 +544,7 @@ func TestCurveVouchWrongServerKeyRejected(t *testing.T) {
 	// steps run inside one NextHandshake call (parseWelcome opens the box
 	// with the genuine S), so drive them individually.
 	cImpl := client.(*curveMech)
-	cookie, err := cImpl.parseWelcome(welcome)
+	cookie, err := cImpl.parseWelcome(welcome[1+len(zmtp.CmdWelcome):])
 	require.NoError(t, err, "parseWelcome")
 	otherPub, _ := genPair(t)
 	cImpl.peerPublic = otherPub
@@ -610,4 +610,12 @@ func TestCurveZAP_AcceptMergesMetadata(t *testing.T) {
 	peer := server.(*curveMech).PeerMetadata()
 	require.Equal(t, "DEALER", peer["Socket-Type"], "client property lost")
 	require.Equal(t, "alice", peer["User-Id"], "ZAP user-id not surfaced")
+}
+
+// TestInnerFlagConstants pins the relationships EncodeFrame/DecodeFrame's
+// branchless MORE/COMMAND translation relies on.
+func TestInnerFlagConstants(t *testing.T) {
+	require.Equal(t, zmtp.FlagMore, innerFlagMore, "MORE bit")
+	require.Equal(t, zmtp.FlagCommand>>1, innerFlagCommand, "COMMAND bit")
+	require.Zero(t, zmtp.FlagMore&zmtp.FlagCommand)
 }

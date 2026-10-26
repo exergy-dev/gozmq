@@ -34,8 +34,8 @@ func TestStream_InboundTaggedByIdentity(t *testing.T) {
 	idA := []byte("peer-alpha")
 	idB := []byte("peer-beta")
 
-	engA, peerA := pipe.NewPair(4, 4, pipe.PeerInfo{Identity: idA}, pipe.PeerInfo{})
-	engB, peerB := pipe.NewPair(4, 4, pipe.PeerInfo{Identity: idB}, pipe.PeerInfo{})
+	engA, peerA := pipe.NewPair(4, 4, idA, nil)
+	engB, peerB := pipe.NewPair(4, 4, idB, nil)
 	defer func() {
 		_ = engA.Close()
 		_ = peerA.Close()
@@ -78,8 +78,8 @@ func TestStream_OutboundRoutesByIdentity(t *testing.T) {
 	idA := []byte("peer-a")
 	idB := []byte("peer-b")
 
-	engA, peerA := pipe.NewPair(4, 4, pipe.PeerInfo{Identity: idA}, pipe.PeerInfo{})
-	engB, peerB := pipe.NewPair(4, 4, pipe.PeerInfo{Identity: idB}, pipe.PeerInfo{})
+	engA, peerA := pipe.NewPair(4, 4, idA, nil)
+	engB, peerB := pipe.NewPair(4, 4, idB, nil)
 	defer func() {
 		_ = engA.Close()
 		_ = peerA.Close()
@@ -96,12 +96,12 @@ func TestStream_OutboundRoutesByIdentity(t *testing.T) {
 	// Send a single-frame body to peer-b.
 	require.NoError(t, eng.Send(ctx, msg.FromFrames(idB, []byte("250 OK\r\n"))), "send to B")
 
-	mA, err := peerA.Recv(ctx)
+	mA, err := peerA.RecvOr(ctx, nil)
 	require.NoError(t, err, "peerA recv")
 	require.Equal(t, 1, mA.NumFrames(), "peerA frames (concatenated)")
 	require.Equal(t, []byte("HTTP/1.1 200 OK\r\n"), mA.Bytes())
 
-	mB, err := peerB.Recv(ctx)
+	mB, err := peerB.RecvOr(ctx, nil)
 	require.NoError(t, err, "peerB recv")
 	require.Equal(t, []byte("250 OK\r\n"), mB.Bytes())
 }
@@ -125,7 +125,7 @@ func TestStream_MissingIdentityFrame(t *testing.T) {
 	eng := socket.NewStreamEngine()
 	defer eng.Close()
 
-	err := eng.Send(context.Background(), msg.New())
+	err := eng.Send(context.Background(), msg.FromFrames())
 	require.ErrorIs(t, err, zmqerr.ErrRouteUnknown)
 }
 
@@ -137,7 +137,7 @@ func TestStream_DetachRemovesRoute(t *testing.T) {
 	defer eng.Close()
 
 	id := []byte("detach-me")
-	engP, peer := pipe.NewPair(4, 4, pipe.PeerInfo{Identity: id}, pipe.PeerInfo{})
+	engP, peer := pipe.NewPair(4, 4, id, nil)
 	defer func() {
 		_ = engP.Close()
 		_ = peer.Close()
@@ -162,7 +162,7 @@ func TestStream_AnonymousPeerGetsSynthesizedIdentity(t *testing.T) {
 	defer eng.Close()
 
 	// No Identity on either side.
-	engP, peer := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	engP, peer := pipe.NewPair(4, 4, nil, nil)
 	defer func() {
 		_ = engP.Close()
 		_ = peer.Close()
@@ -182,13 +182,13 @@ func TestStream_AnonymousPeerGetsSynthesizedIdentity(t *testing.T) {
 
 	// Replay the synthesized identity on Send — it should route back.
 	require.NoError(t, eng.Send(ctx, msg.FromFrames(id, []byte("reply"))), "send back")
-	got, err := peer.Recv(ctx)
+	got, err := peer.RecvOr(ctx, nil)
 	require.NoError(t, err, "peer recv")
 	require.Equal(t, []byte("reply"), got.Bytes())
 
 	// A second anonymous peer gets its own identity, and Send to it does
 	// not leak into the first peer.
-	engP2, peer2 := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	engP2, peer2 := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(engP2, peer2)
 	mustAttach(t, eng, engP2)
 	require.NoError(t, peer2.Send(ctx, msg.FromBytes([]byte("raw2"))), "peer2 send")
@@ -198,7 +198,7 @@ func TestStream_AnonymousPeerGetsSynthesizedIdentity(t *testing.T) {
 	require.NotEmpty(t, id2, "second synthesized identity was empty")
 	require.NotEqual(t, id, id2, "two anonymous peers share an identity")
 	require.NoError(t, eng.Send(ctx, msg.FromFrames(id2, []byte("reply2"))), "send to peer2")
-	got, err = peer2.Recv(ctx)
+	got, err = peer2.RecvOr(ctx, nil)
 	require.NoError(t, err, "peer2 recv")
 	require.Equal(t, []byte("reply2"), got.Bytes())
 	_, ok := peer.TryRecv()
@@ -212,7 +212,7 @@ func TestStream_SendToVanishedPeer(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewStreamEngine()
 	defer eng.Close()
-	engP, peer := pipe.NewPair(4, 4, pipe.PeerInfo{Identity: []byte("gone")}, pipe.PeerInfo{})
+	engP, peer := pipe.NewPair(4, 4, []byte("gone"), nil)
 	defer closePipes(engP, peer)
 	mustAttach(t, eng, engP)
 	require.NoError(t, peer.Close())
@@ -255,7 +255,7 @@ func (p *streamPeer) send(ctx context.Context, b []byte) error {
 // until at least one chunk arrives (or ctx cancels). It appends to the
 // peer's received buffer and returns the chunk for convenience.
 func (p *streamPeer) recv(ctx context.Context) ([]byte, error) {
-	m, err := p.peer.Recv(ctx)
+	m, err := p.peer.RecvOr(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -268,7 +268,7 @@ func (p *streamPeer) recv(ctx context.Context) ([]byte, error) {
 // is responsible for closing both pipe ends.
 func newStreamPeer(t *testing.T, eng socket.Engine, id []byte) *streamPeer {
 	t.Helper()
-	engEnd, peerEnd := pipe.NewPair(8, 8, pipe.PeerInfo{Identity: id}, pipe.PeerInfo{})
+	engEnd, peerEnd := pipe.NewPair(8, 8, id, nil)
 	if err := eng.AttachPipe(engEnd); err != nil {
 		_ = engEnd.Close()
 		_ = peerEnd.Close()
@@ -511,6 +511,6 @@ func TestStream_PeerCloseDrainsInFlight(t *testing.T) {
 	// signal to DetachPipe. Use a short-deadline read to confirm.
 	dl, dc := context.WithTimeout(context.Background(), time.Second)
 	defer dc()
-	_, err := p.engine.Recv(dl)
+	_, err := p.engine.RecvOr(dl, nil)
 	require.ErrorIs(t, err, io.EOF, "engine pipe.Recv after peer close")
 }

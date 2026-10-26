@@ -57,7 +57,7 @@ func TestSession_TwoGoroutines(t *testing.T) {
 	)
 	ctx := testutil.Ctx(t, 2*time.Second)
 	require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("x"))))
-	_, err := sB.Pipe().Recv(ctx)
+	_, err := sB.Pipe().RecvOr(ctx, nil)
 	require.NoError(t, err)
 	requireSessionGoroutines(t, 4, "two established sessions")
 	require.NoError(t, sA.Stop())
@@ -96,7 +96,7 @@ func TestSession_HandshakeOverSynchronousPipe(t *testing.T) {
 	)
 	ctx := testutil.Ctx(t, 2*time.Second)
 	require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("after-handshake"))))
-	got, err := sB.Pipe().Recv(ctx)
+	got, err := sB.Pipe().RecvOr(ctx, nil)
 	require.NoError(t, err)
 	require.Equal(t, "after-handshake", string(got.Bytes()))
 }

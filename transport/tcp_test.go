@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -115,11 +116,7 @@ func TestTCP_Wildcard_And_Ephemeral_Port(t *testing.T) {
 	defer c.Close()
 	_, err = c.Write([]byte("hello"))
 	require.NoError(t, err, "Write")
-	select {
-	case <-acceptCh:
-	case <-ctx.Done():
-		require.Fail(t, "Accept did not receive bytes within deadline")
-	}
+	testutil.RequireRecv(t, acceptCh, 5*time.Second, "Accept did not receive bytes within deadline")
 }
 
 // TestTCP_Dial_Honors_Ctx_Cancellation. Dial to an unroutable address with
@@ -251,4 +248,47 @@ func TestConn_WriteBuffersCoalescesWithoutWritev(t *testing.T) {
 	require.Equal(t, int64(6), n)
 	require.Empty(t, bufs, "batch not consumed")
 	require.Equal(t, "abcdef", string(<-got), "batch arrived in more than one Write")
+}
+
+// TestConn_WriteBuffersSingleBufferIsOneWrite: a one-buffer batch (a fully
+// coalesced one) is a plain Write on the underlying conn, for vectored and
+// non-vectored conns alike, and is consumed as WriteTo would.
+func TestConn_WriteBuffersSingleBufferIsOneWrite(t *testing.T) {
+	t.Parallel()
+	for _, vectored := range []bool{false, true} {
+		t.Run(fmt.Sprintf("vectored=%v", vectored), func(t *testing.T) {
+			t.Parallel()
+			a, b := net.Pipe()
+			defer a.Close()
+			defer b.Close()
+			rec := &writeRecorder{Conn: a}
+			c := newConn(rec, "tcp")
+			c.vectored = vectored
+
+			got := make(chan []byte, 1)
+			go func() {
+				buf := make([]byte, 64)
+				n, _ := b.Read(buf)
+				got <- buf[:n]
+			}()
+			bufs := net.Buffers{[]byte("hello")}
+			n, err := c.WriteBuffers(&bufs)
+			require.NoError(t, err)
+			require.Equal(t, int64(5), n)
+			require.Empty(t, bufs, "batch not consumed")
+			require.Equal(t, "hello", string(<-got))
+			require.Equal(t, 1, rec.writes, "single buffer was not one Write")
+		})
+	}
+}
+
+// writeRecorder counts Write calls on the wrapped conn.
+type writeRecorder struct {
+	net.Conn
+	writes int
+}
+
+func (w *writeRecorder) Write(p []byte) (int, error) {
+	w.writes++
+	return w.Conn.Write(p)
 }

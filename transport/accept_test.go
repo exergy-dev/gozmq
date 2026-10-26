@@ -97,29 +97,19 @@ func TestAccept_ConcurrentAcceptsIndependentCtx(t *testing.T) {
 	}()
 
 	shortCtx, cancel := context.WithCancel(context.Background())
-	shortCh := make(chan error, 1)
-	go func() {
+	shortCh := testutil.Async(func() error {
 		_, err := l.Accept(shortCtx)
-		shortCh <- err
-	}()
+		return err
+	})
 	time.Sleep(20 * time.Millisecond)
 	cancel()
-	select {
-	case err := <-shortCh:
-		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(2 * time.Second):
-		t.Fatal("cancelled Accept did not return")
-	}
+	require.ErrorIs(t, testutil.RequireRecv(t, shortCh, 2*time.Second, "cancelled Accept did not return"), context.Canceled)
 
 	c, err := net.Dial("tcp", l.Endpoint()[len("tcp://"):])
 	require.NoError(t, err)
 	defer c.Close()
-	select {
-	case err := <-longCh:
-		require.NoError(t, err, "uncancelled Accept")
-	case <-time.After(2 * time.Second):
-		t.Fatal("uncancelled Accept did not pick up the connection")
-	}
+	require.NoError(t, testutil.RequireRecv(t, longCh, 2*time.Second, "uncancelled Accept did not pick up the connection"),
+		"uncancelled Accept")
 }
 
 // TestAccept_HonorsCtx: a parked Accept returns ctx.Err() when its context

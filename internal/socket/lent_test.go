@@ -20,7 +20,7 @@ import (
 // newLent returns a lent message and a counter of its release calls.
 func newLent(frames ...[]byte) (*msg.Msg, *atomic.Int32) {
 	released := new(atomic.Int32)
-	return msg.NewWithRelease(func() { released.Add(1) }, frames...), released
+	return msg.NewLent(func([]byte) { released.Add(1) }, [][]byte{nil}, frames...), released
 }
 
 // drainPipe discards everything queued on p.
@@ -90,7 +90,7 @@ func TestRouter_LentSendDerives(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewRouterEngine(false)
 	defer eng.Close()
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{Identity: []byte("peer")}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, []byte("peer"), nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 	ctx := testutil.Ctx(t)

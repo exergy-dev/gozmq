@@ -1,7 +1,6 @@
 package gozmq_test
 
 import (
-	"context"
 	"errors"
 	"io"
 	"testing"
@@ -13,29 +12,14 @@ import (
 	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
-// recvAsync runs s.RecvMsg in a goroutine and reports its outcome.
-type recvResult struct {
-	m   *gozmq.Msg
-	err error
-}
-
-func recvAsync(ctx context.Context, s *gozmq.Socket) <-chan recvResult {
-	ch := make(chan recvResult, 1)
-	go func() {
-		m, err := s.RecvMsg(ctx)
-		ch <- recvResult{m, err}
-	}()
-	return ch
-}
-
 // requireRecv waits for a parked RecvMsg and asserts it delivered want.
-func requireRecv(t *testing.T, ch <-chan recvResult, want string) {
+func requireRecv(t *testing.T, ch <-chan testutil.Result[*gozmq.Msg], want string) {
 	t.Helper()
 	r := <-ch // the RecvMsg's own context bounds the wait
-	require.False(t, errors.Is(r.err, io.EOF), "RecvMsg surfaced io.EOF on a transient disconnect")
-	require.NoError(t, r.err, "RecvMsg did not deliver the next peer's message")
-	require.Equal(t, want, string(r.m.Bytes()))
-	r.m.Release()
+	require.False(t, errors.Is(r.Err, io.EOF), "RecvMsg surfaced io.EOF on a transient disconnect")
+	require.NoError(t, r.Err, "RecvMsg did not deliver the next peer's message")
+	require.Equal(t, want, string(r.V.Bytes()))
+	r.V.Release()
 }
 
 // TestPairReconnectingPeerKeepsWaiting: a connecting PAIR parked in RecvMsg
@@ -62,13 +46,9 @@ func TestPairReconnectingPeerKeepsWaiting(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "first", string(got))
 
-	parked := recvAsync(callCtx, client)
+	parked := testutil.AsyncErr(func() (*gozmq.Msg, error) { return client.RecvMsg(callCtx) })
 	require.NoError(t, server.Close())
-	select {
-	case r := <-parked:
-		require.Failf(t, "RecvMsg returned while no peer was attached", "msg=%v err=%v", r.m, r.err)
-	case <-time.After(100 * time.Millisecond):
-	}
+	testutil.RequireNoRecv(t, parked, 100*time.Millisecond, "RecvMsg returned while no peer was attached")
 
 	server2, err := ctx.NewSocket(gozmq.Pair)
 	require.NoError(t, err)
@@ -90,13 +70,9 @@ func TestPairBoundPeerAcceptsNextPeer(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "first", string(got))
 
-	parked := recvAsync(callCtx, server)
+	parked := testutil.AsyncErr(func() (*gozmq.Msg, error) { return server.RecvMsg(callCtx) })
 	require.NoError(t, client.Close())
-	select {
-	case r := <-parked:
-		require.Failf(t, "RecvMsg returned while no peer was attached", "msg=%v err=%v", r.m, r.err)
-	case <-time.After(100 * time.Millisecond):
-	}
+	testutil.RequireNoRecv(t, parked, 100*time.Millisecond, "RecvMsg returned while no peer was attached")
 
 	client2, err := ctx.NewSocket(gozmq.Pair)
 	require.NoError(t, err)

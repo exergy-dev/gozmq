@@ -29,6 +29,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"sync"
@@ -62,10 +63,23 @@ var (
 	// dominate TCP throughput.
 	largeSizes = []sizeSpec{{"8KB", 8 << 10}, {"64KB", 64 << 10}, {"256KB", 256 << 10}, {"1MB", 1 << 20}}
 
+	// inprocLargeSizes is the large-frame ladder for inproc, where the
+	// payload is handed over without a copy: the rows document how the
+	// handoff cost depends (or does not) on the size.
+	inprocLargeSizes = []sizeSpec{{"8KB", 8 << 10}, {"64KB", 64 << 10}, {"1MB", 1 << 20}}
+
+	// ipcSizes is the PUSH/PULL ladder for ipc:// (a unix socket).
+	ipcSizes = []sizeSpec{{"32B", 32}, {"1KB", 1024}, {"64KB", 64 * 1024}}
+
 	// curveSizes brackets the CURVE per-message cost: one small frame,
 	// where the fixed nonce/MAC overhead dominates, and one large frame,
 	// where the stream cipher does.
 	curveSizes = []sizeSpec{{"64B", 64}, {"64KB", 64 << 10}}
+
+	// smallSizes is the ladder for the small-message receive path (one
+	// allocation per message). Above 1 KiB the per-frame clone is not the
+	// cost, so the PUB/SUB rows stop at 64B.
+	smallSizes = []sizeSpec{{"32B", 32}, {"64B", 64}}
 )
 
 const (
@@ -93,6 +107,18 @@ type transport func() string
 // invocations don't collide in the Context registry.
 func inprocEndpoint() string {
 	return "inproc://bench-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+}
+
+// ipcTransport returns a transport that binds a fresh unix socket path under
+// b.TempDir() on every call (removed with the temp dir). Call it on the
+// top-level benchmark's b, before b.Run.
+func ipcTransport(b *testing.B) transport {
+	dir := b.TempDir()
+	var n int
+	return func() string {
+		n++
+		return "ipc://" + filepath.Join(dir, "s"+strconv.Itoa(n)+".sock")
+	}
 }
 
 // tcpEndpoint returns the loopback wildcard endpoint; the bound socket's
@@ -221,9 +247,11 @@ func echoRoundTrips(b *testing.B, server, client *gozmq.Socket, size int) {
 		if err := client.SendMsg(callCtx, gozmq.NewMsgFromBytes(payload)); err != nil {
 			b.Fatalf("warmup send: %v", err)
 		}
-		if _, err := client.RecvMsg(callCtx); err != nil {
+		m, err := client.RecvMsg(callCtx)
+		if err != nil {
 			b.Fatalf("warmup recv: %v", err)
 		}
+		m.Release()
 	}
 
 	b.SetBytes(int64(size))
@@ -233,9 +261,11 @@ func echoRoundTrips(b *testing.B, server, client *gozmq.Socket, size int) {
 		if err := client.SendMsg(callCtx, gozmq.NewMsgFromBytes(payload)); err != nil {
 			b.Fatalf("send[%d]: %v", i, err)
 		}
-		if _, err := client.RecvMsg(callCtx); err != nil {
+		m, err := client.RecvMsg(callCtx)
+		if err != nil {
 			b.Fatalf("recv[%d]: %v", i, err)
 		}
+		m.Release() // a no-op unless the receive buffer pool is on
 	}
 	b.StopTimer()
 
@@ -260,7 +290,25 @@ func benchRouterDealer(b *testing.B, endpoint string, size int) {
 func BenchmarkReqRepRoundTrip_Inproc(b *testing.B) {
 	forEachSize(b, sizes, inprocEndpoint, benchReqRep)
 }
+
+// unboundedHWM makes every queue of a socket unbounded (HWM 0), which
+// selects the inproc pipe's unbounded path.
+var unboundedHWM = []gozmq.Option{gozmq.WithSendHWM(0), gozmq.WithRecvHWM(0)}
+
+// BenchmarkReqRepRoundTrip_InprocHWM0 is the inproc round trip with both
+// sockets unbounded (HWM 0), so the cost of the unbounded pipe path stays
+// visible to the gate.
+func BenchmarkReqRepRoundTrip_InprocHWM0(b *testing.B) {
+	forEachSize(b, sizes[:1], inprocEndpoint, func(b *testing.B, endpoint string, size int) {
+		benchEcho(b, gozmq.Rep, gozmq.Req, unboundedHWM, unboundedHWM, endpoint, size)
+	})
+}
 func BenchmarkReqRepRoundTrip_TCP(b *testing.B) { forEachSize(b, sizes, tcpEndpoint, benchReqRep) }
+
+// BenchmarkReqRepRoundTrip_IPC is the REQ/REP round trip over a unix socket.
+func BenchmarkReqRepRoundTrip_IPC(b *testing.B) {
+	forEachSize(b, smallSizes[:1], ipcTransport(b), benchReqRep)
+}
 
 // BenchmarkReqRepThroughput_* drive the same REQ↔REP echo loop as
 // BenchmarkReqRepRoundTrip_* on the latency ladder, so peak request
@@ -271,6 +319,11 @@ func BenchmarkReqRepThroughput_Inproc(b *testing.B) {
 
 func BenchmarkReqRepThroughput_TCP(b *testing.B) {
 	forEachSize(b, latencySizes, tcpEndpoint, benchReqRep)
+}
+
+// BenchmarkReqRepThroughput_IPC is the throughput view of the IPC round trip.
+func BenchmarkReqRepThroughput_IPC(b *testing.B) {
+	forEachSize(b, smallSizes[:1], ipcTransport(b), benchReqRep)
 }
 
 func BenchmarkRouterDealerLatency_Inproc(b *testing.B) {
@@ -314,6 +367,25 @@ func benchStream(b *testing.B, sender *gozmq.Socket, receivers []*gozmq.Socket, 
 // benchmark can publish under a topic.
 func benchStreamPayload(b *testing.B, sender *gozmq.Socket, receivers []*gozmq.Socket, payload []byte, wait time.Duration) int64 {
 	b.Helper()
+	return benchStreamMsgs(b, sender, receivers, len(payload), func() *gozmq.Msg { return gozmq.NewMsgFromBytes(payload) }, wait)
+}
+
+// benchStreamFrames is benchStreamPayload for a multipart message, e.g. a
+// PUB topic frame followed by the payload frame. Every iteration sends one
+// message of the given frames; SetBytes covers all of them.
+func benchStreamFrames(b *testing.B, sender *gozmq.Socket, receivers []*gozmq.Socket, frames [][]byte, wait time.Duration) int64 {
+	b.Helper()
+	total := 0
+	for _, f := range frames {
+		total += len(f)
+	}
+	return benchStreamMsgs(b, sender, receivers, total, func() *gozmq.Msg { return gozmq.NewMsgFromFrames(frames...) }, wait)
+}
+
+// benchStreamMsgs is the shared body: newMsg builds each iteration's
+// message and size is the bytes it carries (for SetBytes).
+func benchStreamMsgs(b *testing.B, sender *gozmq.Socket, receivers []*gozmq.Socket, size int, newMsg func() *gozmq.Msg, wait time.Duration) int64 {
+	b.Helper()
 	b.StopTimer()
 
 	recvCtx, recvCancel := context.WithCancel(context.Background())
@@ -344,11 +416,11 @@ func benchStreamPayload(b *testing.B, sender *gozmq.Socket, receivers []*gozmq.S
 
 	sendCtx := testutil.Ctx(b, benchTimeout)
 
-	b.SetBytes(int64(len(payload)))
+	b.SetBytes(int64(size))
 	b.ResetTimer()
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {
-		if err := sender.SendMsg(sendCtx, gozmq.NewMsgFromBytes(payload)); err != nil {
+		if err := sender.SendMsg(sendCtx, newMsg()); err != nil {
 			b.Fatalf("send[%d]: %v", i, err)
 		}
 	}
@@ -439,7 +511,27 @@ func BenchmarkPushPullThroughput_Inproc(b *testing.B) {
 	forEachSize(b, sizes, inprocEndpoint, benchPushPull)
 }
 
+// BenchmarkPushPullThroughput_InprocHWM0 streams through an unbounded
+// (HWM 0) inproc pipe; see BenchmarkReqRepRoundTrip_InprocHWM0.
+func BenchmarkPushPullThroughput_InprocHWM0(b *testing.B) {
+	forEachSize(b, sizes[:1], inprocEndpoint, func(b *testing.B, endpoint string, size int) {
+		benchPushPullThroughput(b, endpoint, size, unboundedHWM, unboundedHWM)
+	})
+}
+
 func BenchmarkPushPullThroughput_TCP(b *testing.B) { forEachSize(b, sizes, tcpEndpoint, benchPushPull) }
+
+// BenchmarkPushPullThroughput_IPC is PUSH to PULL over a unix socket.
+func BenchmarkPushPullThroughput_IPC(b *testing.B) {
+	forEachSize(b, ipcSizes, ipcTransport(b), benchPushPull)
+}
+
+// BenchmarkPushPullLarge_Inproc measures large-frame inproc throughput. The
+// payload is handed over without a copy, so the rows show the cost of the
+// handoff itself by size.
+func BenchmarkPushPullLarge_Inproc(b *testing.B) {
+	forEachSize(b, inprocLargeSizes, inprocEndpoint, benchPushPull)
+}
 
 // BenchmarkPushPullLarge_TCP measures large-frame TCP throughput with the
 // receive buffer pool off (plain memory, the default) and on, where the
@@ -466,6 +558,46 @@ func BenchmarkPushPullCurve_TCP(b *testing.B) {
 			[]gozmq.Option{gozmq.WithCurveServer(serverSec[:])},
 			[]gozmq.Option{gozmq.WithCurveClient(serverPub[:], clientPub[:], clientSec[:])})
 	})
+}
+
+// BenchmarkPubSubThroughput_TCP streams single-frame messages from one PUB
+// to one SUB (subscribe-to-all) over TCP loopback: the small-message
+// receive path of a SUB socket.
+func BenchmarkPubSubThroughput_TCP(b *testing.B) {
+	forEachSize(b, smallSizes, tcpEndpoint, benchPubSub)
+}
+
+// BenchmarkPubSubThroughput_Inproc is BenchmarkPubSubThroughput_TCP over inproc.
+func BenchmarkPubSubThroughput_Inproc(b *testing.B) {
+	forEachSize(b, smallSizes, inprocEndpoint, benchPubSub)
+}
+
+func benchPubSub(b *testing.B, endpoint string, size int) { benchPubSubFanout(b, endpoint, size, 1) }
+
+// BenchmarkPubSubTopicThroughput_TCP is BenchmarkPubSubThroughput_TCP with
+// the realistic two-frame shape: an 8-byte topic frame, then a size-byte
+// payload frame. The SUB subscribes to the topic (and to the sync probe).
+func BenchmarkPubSubTopicThroughput_TCP(b *testing.B) {
+	forEachSize(b, smallSizes, tcpEndpoint, benchPubSubTopic)
+}
+
+// BenchmarkPubSubTopicThroughput_Inproc is BenchmarkPubSubTopicThroughput_TCP over inproc.
+func BenchmarkPubSubTopicThroughput_Inproc(b *testing.B) {
+	forEachSize(b, smallSizes, inprocEndpoint, benchPubSubTopic)
+}
+
+func benchPubSubTopic(b *testing.B, endpoint string, size int) {
+	b.StopTimer()
+	pub := bind(b, gozmq.Pub, endpoint, gozmq.WithSendHWM(benchHWM), gozmq.WithRecvHWM(benchHWM))
+	sub := pub.connect(gozmq.Sub, gozmq.WithSendHWM(benchHWM), gozmq.WithRecvHWM(benchHWM),
+		// syncSubs' probes must pass the filter too.
+		gozmq.WithSubscribe([]byte("gozmq-bench-sync-probe")), gozmq.WithSubscribe([]byte("topic-03")))
+	syncSubs(b, pub.sock, sub)
+	// Untimed setup; the copying constructor keeps both frames in one
+	// allocation.
+	frames := gozmq.NewMsgFromFramesCopy([]byte("topic-03"), newPayload(size)).Frames()
+	delivered := benchStreamFrames(b, pub.sock, []*gozmq.Socket{sub}, frames, 3*time.Second)
+	b.ReportMetric(float64(delivered), "msgs-delivered")
 }
 
 // BenchmarkPubSubFanout_Inproc measures throughput of a 1-PUB → 3-SUB fanout,

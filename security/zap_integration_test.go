@@ -47,7 +47,7 @@ func TestZapHandler_IntegratesWithPlainHandshake(t *testing.T) {
 		defer client.Close()
 		require.NoError(t, client.Connect(server.LastEndpoint()))
 
-		ev := waitHandshakeEvent(t, serverEvents)
+		ev := testutil.WaitEvent(t, serverEvents, 5*time.Second, isHandshakeEvent)
 		require.Equal(t, gozmq.EventHandshakeSucceeded, ev.Type, "want success, got reason=%s", ev.Reason)
 		require.Equal(t, int32(0), plainAuthCalls.Load(), "plain auth fallback should not be called")
 
@@ -81,7 +81,7 @@ func TestZapHandler_IntegratesWithPlainHandshake(t *testing.T) {
 		defer client.Close()
 		require.NoError(t, client.Connect(server.LastEndpoint()))
 
-		ev := waitHandshakeEvent(t, serverEvents)
+		ev := testutil.WaitEvent(t, serverEvents, 5*time.Second, isHandshakeEvent)
 		require.Equal(t, gozmq.EventHandshakeFailedAuth, ev.Type, "want auth failure, got reason=%s", ev.Reason)
 	})
 }
@@ -117,7 +117,7 @@ func TestZapHandler_IntegratesWithCurveHandshake(t *testing.T) {
 		defer client.Close()
 		require.NoError(t, client.Connect(server.LastEndpoint()))
 
-		ev := waitHandshakeEvent(t, serverEvents)
+		ev := testutil.WaitEvent(t, serverEvents, 5*time.Second, isHandshakeEvent)
 		require.Equal(t, gozmq.EventHandshakeSucceeded, ev.Type, "want success, got reason=%s", ev.Reason)
 
 		callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -150,23 +150,11 @@ func TestZapHandler_IntegratesWithCurveHandshake(t *testing.T) {
 		defer client.Close()
 		require.NoError(t, client.Connect(server.LastEndpoint()))
 
-		ev := waitHandshakeEvent(t, serverEvents)
+		ev := testutil.WaitEvent(t, serverEvents, 5*time.Second, isHandshakeEvent)
 		require.Equal(t, gozmq.EventHandshakeFailedAuth, ev.Type, "want auth failure, got reason=%s", ev.Reason)
 	})
 }
 
-func waitHandshakeEvent(t *testing.T, ch <-chan gozmq.Event) gozmq.Event {
-	t.Helper()
-	timer := time.NewTimer(5 * time.Second)
-	defer timer.Stop()
-	for {
-		select {
-		case ev := <-ch:
-			if ev.Type == gozmq.EventHandshakeSucceeded || ev.Type == gozmq.EventHandshakeFailedAuth || ev.Type == gozmq.EventHandshakeFailedProtocol {
-				return ev
-			}
-		case <-timer.C:
-			require.FailNow(t, "timed out waiting for handshake event")
-		}
-	}
+func isHandshakeEvent(ev gozmq.Event) bool {
+	return ev.Type == gozmq.EventHandshakeSucceeded || ev.Type == gozmq.EventHandshakeFailedAuth || ev.Type == gozmq.EventHandshakeFailedProtocol
 }

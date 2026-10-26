@@ -6,13 +6,10 @@ import (
 	"time"
 )
 
-// Defaults. Higher layers override them by constructing a TCPTransport,
-// setting the exported fields and registering it on a Context.
-const (
-	defaultTCPKeepAlive     = true
-	defaultTCPKeepAliveIdle = 30 * time.Second
-	defaultTCPNoDelay       = true
-)
+// defaultTCPKeepAliveIdle is the keepalive idle period. Higher layers
+// override the TCP defaults (keepalive and nodelay on) by constructing a
+// TCPTransport, setting the exported fields and registering it on a Context.
+const defaultTCPKeepAliveIdle = 30 * time.Second
 
 // TCPTransport implements Transport over the standard library's
 // net.Dial / net.Listen. The exported fields are configuration knobs the
@@ -48,9 +45,9 @@ func newTCP(network string) *TCPTransport {
 	return &TCPTransport{
 		Network:         network,
 		scheme:          network,
-		KeepAlive:       defaultTCPKeepAlive,
+		KeepAlive:       true,
 		KeepAlivePeriod: defaultTCPKeepAliveIdle,
-		NoDelay:         defaultTCPNoDelay,
+		NoDelay:         true,
 	}
 }
 
@@ -165,20 +162,14 @@ type conn struct {
 
 // newConn adapts c, a TCP or TLS connection, with scheme:// endpoints.
 func newConn(c net.Conn, scheme string) *conn {
+	_, isTCP := c.(*net.TCPConn)
+	_, isUnix := c.(*net.UnixConn)
 	return &conn{
 		Conn:     c,
 		local:    formatTCPEndpoint(scheme, c.LocalAddr()),
 		remote:   formatTCPEndpoint(scheme, c.RemoteAddr()),
-		vectored: isVectored(c),
+		vectored: isTCP || isUnix,
 	}
-}
-
-func isVectored(c net.Conn) bool {
-	switch c.(type) {
-	case *net.TCPConn, *net.UnixConn:
-		return true
-	}
-	return false
 }
 
 func (c *conn) LocalEndpoint() string  { return c.local }
@@ -188,7 +179,16 @@ func (c *conn) RemoteEndpoint() string { return c.remote }
 const maxRetainedWriteBuf = 1 << 20
 
 func (c *conn) WriteBuffers(buffers *net.Buffers) (int64, error) {
-	if c.vectored || len(*buffers) == 1 {
+	if len(*buffers) == 1 {
+		// One buffer (a fully coalesced batch) is a plain write(2): no
+		// iovec setup for a vectored conn, no wbuf copy for TLS. Consume
+		// the slice header as WriteTo would.
+		b := (*buffers)[0]
+		*buffers = (*buffers)[1:]
+		n, err := c.Write(b)
+		return int64(n), err
+	}
+	if c.vectored {
 		return buffers.WriteTo(c.Conn)
 	}
 	c.wbuf = c.wbuf[:0]

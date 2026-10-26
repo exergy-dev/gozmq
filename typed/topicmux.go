@@ -37,8 +37,7 @@ var ErrTopicAlreadyRegistered = errors.New("typed: topic already registered")
 // calls made mid-Run return ErrTopicMuxRunning. Once Run returns,
 // registration is available again ahead of a subsequent Run.
 type TopicMux struct {
-	sock  *gozmq.Socket
-	codec Codec
+	wrapper
 
 	// mu orders registration against Run's snapshot of entries: a
 	// Register that saw started == false finishes before Run reads the
@@ -57,7 +56,7 @@ type muxEntry struct {
 // NewTopicMux returns a TopicMux bound to sock. sock should be a SUB or
 // XSUB socket; Register subscribes topic prefixes on it.
 func NewTopicMux(sock *gozmq.Socket, codec Codec) *TopicMux {
-	return &TopicMux{sock: sock, codec: codec}
+	return &TopicMux{wrapper: wrapper{sock, codec}}
 }
 
 // Register binds topic (a prefix) to handler and subscribes sock to
@@ -80,11 +79,8 @@ func Register[T any](
 	entry := muxEntry{
 		topic: topic,
 		decode: func(b []byte) (any, error) {
-			var v T
-			if err := r.codec.Unmarshal(b, &v); err != nil {
-				return nil, err
-			}
-			return v, nil
+			v, err := unmarshal[T](r.codec, b)
+			return v, err
 		},
 		invoke: func(ctx context.Context, topic string, v any) error {
 			// v came from the decode closure directly above, which
@@ -99,11 +95,11 @@ func Register[T any](
 
 	// Insert preserving descending-length order so Run's linear scan
 	// naturally picks the longest match first.
-	if i := slices.IndexFunc(r.entries, func(e muxEntry) bool { return len(topic) > len(e.topic) }); i >= 0 {
-		r.entries = slices.Insert(r.entries, i, entry)
-	} else {
-		r.entries = append(r.entries, entry)
+	i := slices.IndexFunc(r.entries, func(e muxEntry) bool { return len(topic) > len(e.topic) })
+	if i < 0 {
+		i = len(r.entries)
 	}
+	r.entries = slices.Insert(r.entries, i, entry)
 	return nil
 }
 
@@ -152,16 +148,16 @@ func (r *TopicMux) Run(ctx context.Context, opts ...Option) error {
 	}
 	return handleLoop(ctx, r.sock, func(m *gozmq.Msg) (muxDispatch, error) {
 		var d muxDispatch
-		frames := m.Frames()
-		if len(frames) != 2 {
-			return d, fmt.Errorf("%w: expected [topic, payload], got %d frames: %w", ErrDecode, len(frames), ErrFrameCount)
+		topic, payload, err := topicPayload(m)
+		if err != nil {
+			return d, err
 		}
-		d.topic = string(frames[0])
+		d.topic = string(topic)
 		entry, ok := match(entries, d.topic)
 		if !ok {
 			return d, fmt.Errorf("%w: %q", ErrNoTopicMatch, d.topic)
 		}
-		v, err := entry.decode(frames[1])
+		v, err := entry.decode(payload)
 		if err != nil {
 			return d, fmt.Errorf("%w: topic %q: %w", ErrDecode, d.topic, err)
 		}

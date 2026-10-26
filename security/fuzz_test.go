@@ -15,7 +15,7 @@ import (
 // commands (HELLO, then INITIATE when HELLO was accepted).
 func FuzzPlainServerHandshake(f *testing.F) {
 	hello, _ := encodeHello("u", "p")
-	f.Add(hello, zmtp.EncodeCommand(zmtp.Command{Name: plainCmdInitiate, Body: EncodeMetadata(map[string]string{"Socket-Type": "PAIR"})}))
+	f.Add(hello, zmtp.EncodeCommand(zmtp.Command{Name: zmtp.CmdInitiate, Body: EncodeMetadata(map[string]string{"Socket-Type": "PAIR"})}))
 	f.Add([]byte{5, 'H', 'E', 'L', 'L', 'O', 1, 'u'}, []byte{8, 'I', 'N', 'I', 'T', 'I', 'A', 'T', 'E'})
 	f.Add([]byte{}, []byte{0x5E, 'R', 'R', 'O', 'R'})
 	f.Fuzz(func(t *testing.T, a, b []byte) {
@@ -34,7 +34,7 @@ func FuzzPlainServerHandshake(f *testing.F) {
 // FuzzPlainClientHandshake feeds a PLAIN client arbitrary WELCOME and READY
 // replies.
 func FuzzPlainClientHandshake(f *testing.F) {
-	f.Add(zmtp.EncodeCommand(zmtp.Command{Name: plainCmdWelcome}), EncodeReady(map[string]string{"Socket-Type": "PAIR"}))
+	f.Add(zmtp.EncodeCommand(zmtp.Command{Name: zmtp.CmdWelcome}), EncodeReady(map[string]string{"Socket-Type": "PAIR"}))
 	f.Add(zmtp.EncodeError("no"), []byte{})
 	f.Add([]byte{0x5E, 'R', 'R', 'O', 'R', 0x03, '4', '0', '0'}, []byte{5, 'E', 'R', 'R', 'O', 'R', 9})
 	f.Fuzz(func(t *testing.T, a, b []byte) {

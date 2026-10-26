@@ -33,7 +33,7 @@ import (
 // after Subscribe replay the current subscription list.
 //
 // Send on a plain SUB returns zmqerr.ErrFSMViolation (wrapped); XSUB
-// (see xsub.go) overrides Send to treat the message as a subscription
+// (see NewXSubEngine) overrides Send to treat the message as a subscription
 // command from the application.
 //
 // *SubEngine implements Engine; the public gozmq package type-asserts it
@@ -74,6 +74,13 @@ type SubEngine struct {
 // subscriptions.
 func NewSubEngine() *SubEngine { return newSubEngineBase(false) }
 
+// NewXSubEngine returns a new XSUB socket engine: SUB whose subscription
+// list is driven by the application sending the synthetic single-frame
+// subscribe/unsubscribe messages (leading byte 0x01 / 0x00 + prefix)
+// through Send, as in libzmq; any other shape is zmqerr.ErrFSMViolation.
+// Subscribe/Unsubscribe work too (WithSubscribe uses them).
+func NewXSubEngine() *SubEngine { return newSubEngineBase(true) }
+
 func newSubEngineBase(surface bool) *SubEngine {
 	g := newGates()
 	if surface {
@@ -98,9 +105,12 @@ func (e *SubEngine) CanRecvNow() bool { return e.fq.CanRecv() }
 // CanSendNow reports whether XSUB can take a subscription command; SUB
 // never can.
 func (e *SubEngine) CanSendNow() bool {
+	if !e.surface {
+		return false
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.surface && !e.closed
+	return !e.closed
 }
 
 // AttachPipe registers p. Every current subscription is replayed to the
@@ -110,7 +120,7 @@ func (e *SubEngine) AttachPipe(p *pipe.End) error {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
-		return fmt.Errorf("sub attach: %w", zmqerr.ErrSocketClosed)
+		return errClosed("sub attach")
 	}
 	if _, ok := e.peers[p]; ok {
 		e.mu.Unlock()
@@ -146,26 +156,27 @@ func (e *SubEngine) DetachPipe(p *pipe.End) error {
 // Subscribe adds prefix to the local filter and forwards a SUBSCRIBE to
 // every attached peer. Duplicate Subscribe calls are refcounted: an equal
 // number of Unsubscribe calls removes the filter.
-func (e *SubEngine) Subscribe(prefix []byte) error { return e.subscribe(prefix, true) }
+func (e *SubEngine) Subscribe(prefix []byte) error { return e.SetSubscription(prefix, true) }
 
 // Unsubscribe decrements prefix's refcount and, on the final decrement,
 // forwards a CANCEL to every attached peer.
-func (e *SubEngine) Unsubscribe(prefix []byte) error { return e.subscribe(prefix, false) }
+func (e *SubEngine) Unsubscribe(prefix []byte) error { return e.SetSubscription(prefix, false) }
 
-func (e *SubEngine) subscribe(prefix []byte, subscribe bool) error {
+// SetSubscription is Subscribe (on) or Unsubscribe (!on) in one call.
+func (e *SubEngine) SetSubscription(prefix []byte, on bool) error {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
-		return fmt.Errorf("sub subscribe: %w", zmqerr.ErrSocketClosed)
+		return errClosed("sub subscribe")
 	}
 	// Only the first add or last remove is forwarded, so peers see one
 	// command per unique prefix; refcount duplicates stay local.
-	forward := e.applySubLocked(prefix, subscribe)
+	forward := e.applySubLocked(prefix, on)
 	peers := slices.Collect(maps.Keys(e.peers))
 	e.mu.Unlock()
 	if forward {
 		for _, p := range peers {
-			e.forwardSubscription(context.Background(), p, subscribe, prefix)
+			e.forwardSubscription(context.Background(), p, on, prefix)
 		}
 	}
 	return nil
@@ -222,7 +233,7 @@ func (e *SubEngine) xsubSend(ctx context.Context, m *msg.Msg) error {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
-		return fmt.Errorf("xsub send: %w", zmqerr.ErrSocketClosed)
+		return errClosed("xsub send")
 	}
 	isSub, subscribe, prefix := isSubscriptionMsg(m)
 	if !isSub {
@@ -271,7 +282,7 @@ func (e *SubEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 // visible Recv returns (filter-matched messages). QueueDepth samples the
 // FairQueue.
 func (e *SubEngine) Metrics() Metrics {
-	return e.snapshot(0, e.fq.QueueDepth())
+	return e.snapshot(e.fq.QueueDepth())
 }
 
 func (e *SubEngine) Close() error {

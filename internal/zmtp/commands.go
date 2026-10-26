@@ -9,8 +9,12 @@ import (
 
 // Canonical ZMTP 3.1 command names used by more than one package.
 const (
-	CmdReady = "READY"
-	CmdError = "ERROR"
+	CmdReady    = "READY"
+	CmdError    = "ERROR"
+	CmdHello    = "HELLO"    // PLAIN and CURVE
+	CmdWelcome  = "WELCOME"  // PLAIN and CURVE
+	CmdInitiate = "INITIATE" // PLAIN and CURVE
+	CmdMessage  = "MESSAGE"  // CURVE traffic envelope
 )
 
 // MaxCommandNameLen is the inclusive upper bound on a command name length:
@@ -106,9 +110,7 @@ func HasCommandName(raw []byte, name string) bool {
 // EncodeError builds an ERROR command body carrying reason, cut to the 255
 // bytes its one-byte length allows.
 func EncodeError(reason string) []byte {
-	if len(reason) > 255 {
-		reason = reason[:255]
-	}
+	reason = reason[:min(len(reason), 255)]
 	body := AppendCommandName(make([]byte, 0, 1+len(CmdError)+1+len(reason)), CmdError)
 	body = append(body, byte(len(reason)))
 	return append(body, reason...)

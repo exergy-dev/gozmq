@@ -2,26 +2,25 @@ package gozmq
 
 import (
 	"bytes"
+	"cmp"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/exergy-dev/gozmq/security"
+	"github.com/exergy-dev/gozmq/security/curve"
 )
 
-// Option configures a Socket at construction time. The option type is opaque;
-// construct values via the With* helpers. Options that are inapplicable to
+// Option configures a Socket at construction time; construct values via the
+// With* helpers. Options that are inapplicable to
 // the socket type are rejected with an error at Socket construction rather
 // than silently ignored: pattern-specific options (WithRouterMandatory,
 // WithXPubVerbose, WithSubscribe) on the wrong pattern, and ZMTP-layer
 // options (security, heartbeat, identity, handshake timeout, ZAP domain)
 // on STREAM sockets, which bypass ZMTP entirely.
-type Option interface {
-	apply(*socketConfig) error
-}
+type Option func(*socketConfig) error
 
-// socketConfig is the concrete aggregate that every Option mutates. Defaults
-// are set in newSocketConfig.
 type socketConfig struct {
 	identity             []byte
 	sendHWM              int
@@ -34,30 +33,19 @@ type socketConfig struct {
 	maxMessageSize       int64
 	routerMandatory      bool
 	xpubVerbose          bool
-	recvBufferPool       bool
+	recvBufferPool       *bool // nil = default (on, except STREAM)
 	subscriptions        [][]byte
 	handshakeTimeout     time.Duration
 	zapDomain            string
 
-	// Set-flags for options whose zero/default values are
-	// indistinguishable from "not configured" — needed so
-	// validateSocketConfig can reject explicit use on STREAM sockets.
+	// Set when the option was applied, so STREAM can reject explicit use.
 	heartbeatSet        bool
 	handshakeTimeoutSet bool
 
-	plainAuth       func(user, pass string) bool
-	plainAuthSet    bool // WithPlainAuth was applied (even with a nil func)
-	plainClientUser string
-	plainClientPass string
-	plainClient     bool
-
-	newSecurityMech func(role security.Role, meta map[string]string) (security.Mech, error)
-
-	curveServer    bool
-	curveClientSet bool // WithCurveClient was applied
-	curveServerKey []byte
-	curvePublicKey []byte
-	curveSecretKey []byte
+	// mech is the security mechanism set by the last mechanism option;
+	// mechConflict records a second, different one for validateSocketConfig.
+	mech         *mechSpec
+	mechConflict error
 
 	monitor     chan<- Event
 	monitorMask EventType
@@ -67,6 +55,24 @@ type socketConfig struct {
 	// pick slog.Default; set via WithLogger for reproducible test
 	// logs and structured context.
 	logger *slog.Logger
+}
+
+// mechSpec is a configured security mechanism: the option's name (for
+// errors) and how to build one mechanism per session. Each option checks its
+// own arguments, so a spec that is set can always be built.
+type mechSpec struct {
+	name  string
+	build func(role security.Role, meta map[string]string) (security.Mech, error)
+}
+
+// setMech records spec as the socket's mechanism. Applying a different
+// mechanism option as well is a conflict that validateSocketConfig reports;
+// repeating the same option replaces it.
+func (c *socketConfig) setMech(spec *mechSpec) {
+	if c.mech != nil && c.mech.name != spec.name && c.mechConflict == nil {
+		c.mechConflict = fmt.Errorf("gozmq: %s and %s are mutually exclusive", c.mech.name, spec.name)
+	}
+	c.mech = spec
 }
 
 func newSocketConfig() *socketConfig {
@@ -83,10 +89,6 @@ func newSocketConfig() *socketConfig {
 	}
 }
 
-type optionFunc func(*socketConfig) error
-
-func (f optionFunc) apply(c *socketConfig) error { return f(c) }
-
 // WithIdentity sets the ROUTER/DEALER identity advertised during the ZMTP
 // handshake. The identity is the peer-visible name by which a ROUTER
 // addresses this DEALER (or by which a ROUTER peer appears in the leading
@@ -96,37 +98,37 @@ func (f optionFunc) apply(c *socketConfig) error { return f(c) }
 // or zero-prefixed identities are rejected by NewSocket.
 // The slice is copied defensively.
 func WithIdentity(id []byte) Option {
-	return optionFunc(func(c *socketConfig) error {
+	return func(c *socketConfig) error {
 		c.identity = bytes.Clone(id)
 		return nil
-	})
+	}
 }
 
 // WithSendHWM sets the outbound high-water mark — the maximum number of
 // messages queued per peer pipe before backpressure engages. Default is
 // 1000, maximum [MaxHWM]. Zero disables the limit (unbounded growth; not
-// recommended for untrusted peers). A positive HWM is the capacity of a
-// channel allocated per peer connection, so very large values cost memory
-// up front. When the HWM is reached, Send behavior depends on the
+// recommended for untrusted peers). The queue grows with the actual depth
+// in fixed-size chunks, so a large HWM costs nothing until messages are
+// queued. When the HWM is reached, Send behavior depends on the
 // socket pattern: blocking sockets (PAIR, PUSH, DEALER, REQ, REP, ROUTER)
 // wait for a Recv on the peer to drain queue space, while PUB/XPUB drop
 // the message for the full peer and continue the fan-out (the drop is
 // counted in [Socket.Metrics]).
 func WithSendHWM(n int) Option {
-	return optionFunc(func(c *socketConfig) error { c.sendHWM = n; return nil })
+	return func(c *socketConfig) error { c.sendHWM = n; return nil }
 }
 
 // WithRecvHWM sets the inbound high-water mark — the maximum number of
 // messages buffered per peer pipe before the reader goroutine stops
 // accepting frames from the wire and exerts TCP backpressure on the peer.
 // Default is 1000, maximum [MaxHWM]. Zero disables the limit. As with
-// [WithSendHWM], a positive HWM is allocated per peer connection.
+// [WithSendHWM], storage grows with the actual queue depth, not the HWM.
 //
 // On inproc, where one pipe joins the two sockets, each direction holds the
 // sender's send HWM plus the receiver's recv HWM, and is unlimited if
 // either is zero (as in libzmq).
 func WithRecvHWM(n int) Option {
-	return optionFunc(func(c *socketConfig) error { c.recvHWM = n; return nil })
+	return func(c *socketConfig) error { c.recvHWM = n; return nil }
 }
 
 // WithLinger sets the grace period Socket.Close waits for outbound pipes
@@ -137,7 +139,7 @@ func WithRecvHWM(n int) Option {
 // never drains or reconnects, so pair it with [Socket.CloseCtx], whose
 // context bounds the wait.
 func WithLinger(d time.Duration) Option {
-	return optionFunc(func(c *socketConfig) error { c.linger = d; return nil })
+	return func(c *socketConfig) error { c.linger = d; return nil }
 }
 
 // WithReconnectInterval sets the base delay between reconnection attempts
@@ -146,7 +148,7 @@ func WithLinger(d time.Duration) Option {
 // immediate retry. The actual delay grows exponentially and is jittered by
 // 20% before each attempt, capped by [WithReconnectIntervalMax].
 func WithReconnectInterval(d time.Duration) Option {
-	return optionFunc(func(c *socketConfig) error { c.reconnectInterval = d; return nil })
+	return func(c *socketConfig) error { c.reconnectInterval = d; return nil }
 }
 
 // WithReconnectIntervalMax caps the reconnection backoff. Default is 30
@@ -155,7 +157,7 @@ func WithReconnectInterval(d time.Duration) Option {
 // NOTE this diverges from libzmq, where ZMQ_RECONNECT_IVL_MAX=0 (its
 // default) means "no exponential backoff, constant interval".
 func WithReconnectIntervalMax(d time.Duration) Option {
-	return optionFunc(func(c *socketConfig) error { c.reconnectIntervalMax = d; return nil })
+	return func(c *socketConfig) error { c.reconnectIntervalMax = d; return nil }
 }
 
 // WithHeartbeat configures the ZMTP 3.1 heartbeat. interval is how often
@@ -169,12 +171,12 @@ func WithReconnectIntervalMax(d time.Duration) Option {
 // FIN, or a NAT that dropped the flow) — disabling it is discouraged on
 // long-lived connections.
 func WithHeartbeat(interval, timeout time.Duration) Option {
-	return optionFunc(func(c *socketConfig) error {
+	return func(c *socketConfig) error {
 		c.heartbeatInterval = interval
 		c.heartbeatTimeout = timeout
 		c.heartbeatSet = true
 		return nil
-	})
+	}
 }
 
 // WithMaxMessageSize sets the per-message byte limit: the total length of
@@ -199,16 +201,21 @@ func WithHeartbeat(interval, timeout time.Duration) Option {
 //
 // Pass 0 to disable the limit — NOT recommended for untrusted peers.
 func WithMaxMessageSize(n int64) Option {
-	return optionFunc(func(c *socketConfig) error { c.maxMessageSize = n; return nil })
+	return func(c *socketConfig) error { c.maxMessageSize = n; return nil }
 }
 
-// WithRecvBufferPool, when enabled, receives inbound frames larger than
-// 4 KiB into buffers drawn from a shared, size-tiered pool instead of a
+// WithRecvBufferPool controls whether inbound frames larger than 4 KiB are
+// received into buffers drawn from a shared, size-tiered pool instead of a
 // fresh allocation per frame, which saves the allocation and garbage
-// collection cost that dominates large-frame throughput. Default is false.
+// collection cost that dominates large-frame throughput.
 //
-// It changes the ownership of received messages, which is why it is opt-in.
-// A message carrying pooled frames is lent (see [Msg.Lent]):
+// The default is ON for every socket type except STREAM (where it is
+// silently off). Pass WithRecvBufferPool(false) to opt out and receive
+// plain, garbage-collected memory. Explicit WithRecvBufferPool(true) on a
+// STREAM socket is an error.
+//
+// With the pool, received messages carrying pooled frames are lent (see
+// [Msg.Lent]):
 //
 //   - The receiver holds one reference and must call [Msg.Release] when
 //     done with the message; [Msg.Retain] adds a reference, each needing
@@ -225,12 +232,15 @@ func WithMaxMessageSize(n int64) Option {
 //     simply collected by the garbage collector instead of being reused.
 //   - Releasing more times than retained panics.
 //
+// Code that calls Release and then keeps using the frames must copy them
+// first or opt out with WithRecvBufferPool(false).
+//
 // Smaller frames, and frames on CURVE or custom-mechanism sessions (whose
 // decoding produces a fresh plaintext anyway), are always ordinary memory,
 // for which Release does nothing. The option affects receiving only, and
 // is not applicable to STREAM sockets.
 func WithRecvBufferPool(enabled bool) Option {
-	return optionFunc(func(c *socketConfig) error { c.recvBufferPool = enabled; return nil })
+	return func(c *socketConfig) error { c.recvBufferPool = &enabled; return nil }
 }
 
 // WithRouterMandatory controls ROUTER.Send behaviour for unroutable
@@ -240,7 +250,7 @@ func WithRecvBufferPool(enabled bool) Option {
 // safer default for request/response services that need to observe
 // delivery failures.
 func WithRouterMandatory(enabled bool) Option {
-	return optionFunc(func(c *socketConfig) error { c.routerMandatory = enabled; return nil })
+	return func(c *socketConfig) error { c.routerMandatory = enabled; return nil }
 }
 
 // WithXPubVerbose controls subscription deduplication on XPUB. Default is
@@ -251,7 +261,7 @@ func WithRouterMandatory(enabled bool) Option {
 // applications that track subscriber churn or implement their own
 // authorization on subscriptions.
 func WithXPubVerbose(enabled bool) Option {
-	return optionFunc(func(c *socketConfig) error { c.xpubVerbose = enabled; return nil })
+	return func(c *socketConfig) error { c.xpubVerbose = enabled; return nil }
 }
 
 // WithSubscribe adds a subscription prefix to a SUB (or XSUB) socket. May
@@ -263,10 +273,10 @@ func WithXPubVerbose(enabled bool) Option {
 // publishers. This enables independent components on the same socket to
 // manage their own subscriptions without interfering.
 func WithSubscribe(prefix []byte) Option {
-	return optionFunc(func(c *socketConfig) error {
+	return func(c *socketConfig) error {
 		c.subscriptions = append(c.subscriptions, bytes.Clone(prefix))
 		return nil
-	})
+	}
 }
 
 // WithPlainAuth makes the socket the PLAIN server and installs its credential
@@ -287,7 +297,15 @@ func WithSubscribe(prefix []byte) Option {
 // runs no mechanism: Bind or Connect on inproc:// fails with
 // [ErrEndpointInvalid] for a socket with any PLAIN or CURVE option.
 func WithPlainAuth(fn func(user, pass string) bool) Option {
-	return optionFunc(func(c *socketConfig) error { c.plainAuth = fn; c.plainAuthSet = true; return nil })
+	return func(c *socketConfig) error {
+		if fn == nil {
+			return fmt.Errorf("gozmq: WithPlainAuth requires a non-nil authenticate function")
+		}
+		c.setMech(&mechSpec{"WithPlainAuth", func(_ security.Role, meta map[string]string) (security.Mech, error) {
+			return security.NewPlainServer(fn, meta), nil
+		}})
+		return nil
+	}
 }
 
 // WithPlainClient makes the socket the PLAIN client, presenting (username,
@@ -298,12 +316,15 @@ func WithPlainAuth(fn func(user, pass string) bool) Option {
 // switch to CURVE for any network you do not trust. Like every mechanism,
 // it rules out inproc:// (see [WithPlainAuth]).
 func WithPlainClient(username, password string) Option {
-	return optionFunc(func(c *socketConfig) error {
-		c.plainClient = true
-		c.plainClientUser = username
-		c.plainClientPass = password
+	return func(c *socketConfig) error {
+		if len(username) > 255 || len(password) > 255 {
+			return fmt.Errorf("gozmq: WithPlainClient username and password must each be at most 255 bytes")
+		}
+		c.setMech(&mechSpec{"WithPlainClient", func(_ security.Role, meta map[string]string) (security.Mech, error) {
+			return security.NewPlainClient(username, password, meta), nil
+		}})
 		return nil
-	})
+	}
 }
 
 // WithZAPDomain sets the RFC 27 ZAP domain presented to the Context's
@@ -313,10 +334,10 @@ func WithPlainClient(username, password string) Option {
 // so a handler installed for PLAIN or CURVE does not start vetting every NULL
 // socket. The default is the empty domain.
 func WithZAPDomain(domain string) Option {
-	return optionFunc(func(c *socketConfig) error {
+	return func(c *socketConfig) error {
 		c.zapDomain = domain
 		return nil
-	})
+	}
 }
 
 // WithCurveServer configures the socket as the server side of a CURVE
@@ -333,11 +354,16 @@ func WithZAPDomain(domain string) Option {
 // inproc runs no mechanism, so a CURVE socket cannot Bind or Connect on
 // inproc:// (the call fails with [ErrEndpointInvalid]).
 func WithCurveServer(secretKey []byte) Option {
-	return optionFunc(func(c *socketConfig) error {
-		c.curveServer = true
-		c.curveSecretKey = bytes.Clone(secretKey)
+	return func(c *socketConfig) error {
+		if len(secretKey) != 32 {
+			return fmt.Errorf("gozmq: WithCurveServer requires a 32-byte secret key, got %d bytes", len(secretKey))
+		}
+		key := curve.Key(secretKey)
+		c.setMech(&mechSpec{"WithCurveServer", func(_ security.Role, meta map[string]string) (security.Mech, error) {
+			return curve.NewCurveServer(key, meta)
+		}})
 		return nil
-	})
+	}
 }
 
 // WithCurveClient configures the socket as the client side of a CURVE
@@ -349,14 +375,17 @@ func WithCurveServer(secretKey []byte) Option {
 // resulting channel is forward-secret (ephemeral session keys) and
 // mutually authenticated. As with [WithCurveServer], inproc:// is ruled out.
 func WithCurveClient(serverKey, publicKey, secretKey []byte) Option {
-	return optionFunc(func(c *socketConfig) error {
-		c.curveServer = false
-		c.curveClientSet = true
-		c.curveServerKey = bytes.Clone(serverKey)
-		c.curvePublicKey = bytes.Clone(publicKey)
-		c.curveSecretKey = bytes.Clone(secretKey)
+	return func(c *socketConfig) error {
+		if len(serverKey) != 32 || len(publicKey) != 32 || len(secretKey) != 32 {
+			return fmt.Errorf("gozmq: WithCurveClient requires three 32-byte keys, got server=%d public=%d secret=%d bytes",
+				len(serverKey), len(publicKey), len(secretKey))
+		}
+		server, public, secret := curve.Key(serverKey), curve.Key(publicKey), curve.Key(secretKey)
+		c.setMech(&mechSpec{"WithCurveClient", func(_ security.Role, meta map[string]string) (security.Mech, error) {
+			return curve.NewCurveClient(server, public, secret, meta)
+		}})
 		return nil
-	})
+	}
 }
 
 // WithSecurityMech installs a caller-supplied ZMTP security mechanism,
@@ -388,13 +417,19 @@ func WithCurveClient(serverKey, publicKey, secretKey []byte) Option {
 // custom mechanism cannot Bind or Connect on inproc:// (the call fails
 // with [ErrEndpointInvalid]).
 func WithSecurityMech(newMech func(role security.Role, meta map[string]string) (security.Mech, error)) Option {
-	return optionFunc(func(c *socketConfig) error {
+	return func(c *socketConfig) error {
 		if newMech == nil {
 			return fmt.Errorf("gozmq: WithSecurityMech requires a non-nil constructor")
 		}
-		c.newSecurityMech = newMech
+		c.setMech(&mechSpec{"WithSecurityMech", func(role security.Role, meta map[string]string) (security.Mech, error) {
+			m, err := newMech(role, meta)
+			if err == nil && m == nil {
+				err = errors.New("constructor returned a nil mechanism")
+			}
+			return m, err
+		}})
 		return nil
-	})
+	}
 }
 
 // WithHandshakeTimeout caps the total duration of the ZMTP handshake,
@@ -405,11 +440,11 @@ func WithSecurityMech(newMech func(role security.Role, meta map[string]string) (
 // [ErrHandshakeTimeout] and, on a client socket, the reconnector retries
 // with the configured backoff.
 func WithHandshakeTimeout(d time.Duration) Option {
-	return optionFunc(func(c *socketConfig) error {
+	return func(c *socketConfig) error {
 		c.handshakeTimeout = d
 		c.handshakeTimeoutSet = true
 		return nil
-	})
+	}
 }
 
 // WithMonitor registers a channel to receive lifecycle [Event]s whose
@@ -422,11 +457,11 @@ func WithHandshakeTimeout(d time.Duration) Option {
 // one may still be in flight after [Socket.Monitor] (nil) or Close
 // returns. Stop reading and let it be garbage collected instead.
 func WithMonitor(ch chan<- Event, mask EventType) Option {
-	return optionFunc(func(c *socketConfig) error {
+	return func(c *socketConfig) error {
 		c.monitor = ch
 		c.monitorMask = mask
 		return nil
-	})
+	}
 }
 
 // WithLogger sets the [*slog.Logger] used for internal diagnostics
@@ -434,7 +469,7 @@ func WithMonitor(ch chan<- Event, mask EventType) Option {
 // reconnect attempts, heartbeat loss, and teardown anomalies. Default is
 // [slog.Default]. Passing nil resets to the process default.
 func WithLogger(l *slog.Logger) Option {
-	return optionFunc(func(c *socketConfig) error { c.logger = l; return nil })
+	return func(c *socketConfig) error { c.logger = l; return nil }
 }
 
 func nonNeg[T int | int64 | time.Duration](name string, v T) error {
@@ -444,11 +479,10 @@ func nonNeg[T int | int64 | time.Duration](name string, v T) error {
 	return nil
 }
 
-// MaxHWM is the largest value WithSendHWM and WithRecvHWM accept. A positive
-// HWM is the capacity of a per-peer channel allocated when the connection is
-// made (8 bytes per slot), so a cap keeps a typo from reserving gigabytes per
-// connection or overflowing the channel allocator. Use 0 for an unbounded
-// queue.
+// MaxHWM is the largest value WithSendHWM and WithRecvHWM accept. Queues
+// grow with their actual depth (8 bytes per queued message plus the messages
+// themselves), so the cap is a sanity bound on a typo rather than an upfront
+// reservation. Use 0 for an unbounded queue.
 const MaxHWM = 1 << 20
 
 func hwmInRange(name string, v int) error {
@@ -461,19 +495,8 @@ func hwmInRange(name string, v int) error {
 	return nil
 }
 
-// securityConfigured reports whether any security mechanism option is set:
-// PLAIN, CURVE or WithSecurityMech. Validation keeps to at most one, STREAM
-// takes none, and inproc refuses a socket that has one.
-func (c *socketConfig) securityConfigured() bool {
-	return c.newSecurityMech != nil || c.plainConfigured() || c.curveConfigured()
-}
-
-func (c *socketConfig) plainConfigured() bool { return c.plainAuthSet || c.plainClient }
-
-func (c *socketConfig) curveConfigured() bool { return c.curveServer || c.curveClientSet }
-
 func validateSocketConfig(t SocketType, cfg *socketConfig) error {
-	for _, check := range []error{
+	if err := cmp.Or(
 		hwmInRange("WithSendHWM", cfg.sendHWM),
 		hwmInRange("WithRecvHWM", cfg.recvHWM),
 		nonNeg("WithMaxMessageSize", cfg.maxMessageSize),
@@ -482,10 +505,8 @@ func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 		nonNeg("WithReconnectIntervalMax", cfg.reconnectIntervalMax),
 		nonNeg("WithHeartbeat interval", cfg.heartbeatInterval),
 		nonNeg("WithHeartbeat timeout", cfg.heartbeatTimeout),
-	} {
-		if check != nil {
-			return check
-		}
+	); err != nil {
+		return err
 	}
 	if len(cfg.identity) > 0 {
 		if len(cfg.identity) > 255 {
@@ -496,32 +517,10 @@ func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 		}
 	}
 	// At most one mechanism per socket: otherwise newMechanism would silently
-	// pick one (CURVE over PLAIN), or fail every session rather than NewSocket
-	// (PLAIN server plus client).
-	plainSet, curveSet := cfg.plainConfigured(), cfg.curveConfigured()
-	// A mechanism option whose arguments cannot build the mechanism must
-	// fail here. newMechanism falls back to NULL only when no mechanism is
-	// configured; an incomplete one must never reach that fallback.
-	switch {
-	case cfg.plainAuthSet && cfg.plainAuth == nil:
-		return fmt.Errorf("gozmq: WithPlainAuth requires a non-nil authenticate function")
-	case cfg.plainClient && (len(cfg.plainClientUser) > 255 || len(cfg.plainClientPass) > 255):
-		return fmt.Errorf("gozmq: WithPlainClient username and password must each be at most 255 bytes")
-	case cfg.curveServer && len(cfg.curveSecretKey) != 32:
-		return fmt.Errorf("gozmq: WithCurveServer requires a 32-byte secret key, got %d bytes", len(cfg.curveSecretKey))
-	case cfg.curveClientSet && (len(cfg.curveServerKey) != 32 || len(cfg.curvePublicKey) != 32 || len(cfg.curveSecretKey) != 32):
-		return fmt.Errorf("gozmq: WithCurveClient requires three 32-byte keys, got server=%d public=%d secret=%d bytes",
-			len(cfg.curveServerKey), len(cfg.curvePublicKey), len(cfg.curveSecretKey))
-	}
-	switch {
-	case cfg.newSecurityMech != nil && plainSet:
-		return fmt.Errorf("gozmq: WithSecurityMech is mutually exclusive with the PLAIN options")
-	case cfg.newSecurityMech != nil && curveSet:
-		return fmt.Errorf("gozmq: WithSecurityMech is mutually exclusive with the CURVE options")
-	case cfg.plainAuth != nil && cfg.plainClient:
-		return fmt.Errorf("gozmq: WithPlainAuth and WithPlainClient are mutually exclusive")
-	case plainSet && curveSet:
-		return fmt.Errorf("gozmq: the PLAIN and CURVE options are mutually exclusive")
+	// pick one. The options check their own arguments, so a mechanism that
+	// is set can always be built and never falls back to NULL.
+	if cfg.mechConflict != nil {
+		return cfg.mechConflict
 	}
 	if cfg.routerMandatory && t != Router {
 		return fmt.Errorf("gozmq: WithRouterMandatory only valid on ROUTER sockets")
@@ -538,7 +537,7 @@ func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 		// options would be a security hazard (e.g. WithPlainAuth on a
 		// raw-TCP listener that authenticates nobody).
 		switch {
-		case cfg.securityConfigured():
+		case cfg.mech != nil:
 			return fmt.Errorf("gozmq: security options (PLAIN, CURVE, WithSecurityMech) are not applicable to STREAM sockets (no ZMTP handshake)")
 		case len(cfg.identity) > 0:
 			return fmt.Errorf("gozmq: WithIdentity is not applicable to STREAM sockets (no ZMTP handshake)")
@@ -548,7 +547,7 @@ func validateSocketConfig(t SocketType, cfg *socketConfig) error {
 			return fmt.Errorf("gozmq: WithHandshakeTimeout is not applicable to STREAM sockets (no ZMTP handshake)")
 		case cfg.zapDomain != "":
 			return fmt.Errorf("gozmq: WithZAPDomain is not applicable to STREAM sockets (no ZMTP handshake)")
-		case cfg.recvBufferPool:
+		case cfg.recvBufferPool != nil && *cfg.recvBufferPool:
 			return fmt.Errorf("gozmq: WithRecvBufferPool is not applicable to STREAM sockets (no ZMTP framing)")
 		}
 	}

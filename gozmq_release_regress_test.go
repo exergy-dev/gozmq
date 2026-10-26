@@ -78,12 +78,8 @@ func TestCurve_TwoServersFailFast(t *testing.T) {
 		gozmq.WithMonitor(events, gozmq.EventHandshakeFailedProtocol|gozmq.EventHandshakeFailedAuth))
 	require.NoError(t, err)
 	require.NoError(t, cli.Connect(srv.LastEndpoint()))
-	select {
-	case ev := <-events:
-		require.Contains(t, ev.Reason, "as-server")
-	case <-time.After(5 * time.Second):
-		t.Fatal("two CURVE servers did not fail the handshake promptly")
-	}
+	ev := testutil.RequireRecv(t, events, 5*time.Second, "two CURVE servers did not fail the handshake promptly")
+	require.Contains(t, ev.Reason, "as-server")
 }
 
 // TestCloseCtx_NilContext: a nil ctx must behave as context.Background,

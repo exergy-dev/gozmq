@@ -77,7 +77,7 @@ func TestEngineConformance(t *testing.T) {
 			// Attach/detach idempotence, and the FSM sentinels on an open
 			// engine with a peer attached.
 			eng := tc.mk()
-			a, b := pipe.NewPair(2, 2, pipe.PeerInfo{}, pipe.PeerInfo{})
+			a, b := pipe.NewPair(2, 2, nil, nil)
 			defer closePipes(a, b)
 			require.NoError(t, eng.AttachPipe(a), "first attach")
 			if tc.reattachOK {
@@ -124,7 +124,7 @@ func TestEngineConformance(t *testing.T) {
 			eng = tc.mk()
 			// The engine's end sees a peer whose identity the routed
 			// message names, so ROUTER/STREAM route to this pipe.
-			pa, pb := pipe.NewPair(1, 1, pipe.PeerInfo{Identity: []byte("id")}, pipe.PeerInfo{})
+			pa, pb := pipe.NewPair(1, 1, []byte("id"), nil)
 			defer closePipes(pa, pb)
 			require.NoError(t, eng.AttachPipe(pa), "attach")
 			ops = ops[:0]

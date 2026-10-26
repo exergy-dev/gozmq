@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 const (
@@ -159,8 +160,7 @@ func TestLinger(t *testing.T) {
 				l.requireHandshake()
 
 				sent := fillUntilBlocked(t, l.client)
-				closeDone := make(chan error, 1)
-				go func() { closeDone <- l.client.close() }()
+				closeDone := testutil.Async(l.client.close)
 				// No observable marks a zero-linger drop, and on loopback the
 				// receiver would otherwise drain the queue before the drop
 				// lands (making it look like a drain). A positive linger

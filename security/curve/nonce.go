@@ -53,6 +53,14 @@ func shortNonce(prefix string, counter uint64) [24]byte {
 	return n
 }
 
+// withCounter returns the short-nonce template n with counter in its last
+// eight bytes: the per-frame form of shortNonce, with the prefix copied and
+// length-checked once at construction.
+func withCounter(n [24]byte, counter uint64) [24]byte {
+	binary.BigEndian.PutUint64(n[16:], counter)
+	return n
+}
+
 // longNonce builds a 24-byte NaCl nonce of the form prefix || random[16].
 // prefix must be exactly 8 bytes; random must be at least 16 bytes long and
 // the first 16 bytes are used.

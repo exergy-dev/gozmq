@@ -5,18 +5,19 @@ import (
 	"time"
 )
 
-// startHeartbeat arms the optional ZMTP 3.1 PING/PONG timer (design
-// §5.4): every HeartbeatInterval a tick queues a PING; if no inbound
-// frame has arrived within HeartbeatTimeout, the session is torn down.
+// startHeartbeat arms the optional ZMTP 3.1 PING/PONG timer: every
+// HeartbeatInterval a tick queues a PING; if no inbound frame has arrived
+// within HeartbeatTimeout, the session is torn down.
 // The timer re-arms itself from each tick, so an idle session holds no
 // heartbeat goroutine. Skipped when the interval is 0 or the peer
 // negotiated ZMTP 3.0.
 //
-// The reader stamps lastInboundUnix on every inbound frame, so any
-// traffic — user data, PONG, or unsolicited PING from the peer — keeps
-// the link alive. We only consult that timestamp; we do not require an
-// explicit PONG-in-response since the spec lets either side initiate
-// PINGs on its own cadence.
+// The reader stamps lastInboundNanos on every command frame and once per
+// read batch of user messages (it can lag a batch, microseconds at speed,
+// nothing at the rates heartbeats care about), so any traffic (user data,
+// PONG, or an unsolicited PING from the peer) keeps the link alive. We only
+// consult that timestamp; we do not require an explicit PONG in response,
+// since the spec lets either side initiate PINGs on its own cadence.
 func (s *Session) startHeartbeat() {
 	interval := s.cfg.HeartbeatInterval
 	if interval <= 0 || !s.peerHeartbeats {
@@ -56,7 +57,7 @@ func (s *Session) heartbeatTick(interval, timeout time.Duration, pingBody []byte
 	// Liveness check first. Skip it while the reader is parked
 	// publishing inbound on local engine backpressure: no inbound stamps
 	// can happen then, but the link itself is healthy.
-	lastNs := s.lastInboundUnix.Load()
+	lastNs := s.lastInboundNanos.Load()
 	if lastNs > 0 && !s.readerParked.Load() {
 		if idle := time.Duration(s.cfg.Now() - lastNs); idle >= timeout {
 			s.cfg.Logger.Warn(

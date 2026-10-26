@@ -41,7 +41,7 @@ func TestHWM0_FairQueueSingle(t *testing.T) {
 	t.Parallel()
 	fq := newFQ()
 	defer fq.Close()
-	a, b := pipe.NewPair(0, 0, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(0, 0, nil, nil)
 	defer closePipes(a, b)
 	require.NoError(t, fq.Attach(a)) // one pipe: single-pipe fast path
 
@@ -86,7 +86,7 @@ func TestHWM0_Pair(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewPairEngine()
 	defer eng.Close()
-	a, b := pipe.NewPair(0, 0, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(0, 0, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -117,13 +117,13 @@ func TestHWM0_ReqDiscardsWholeStaleBacklog(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewReqEngine()
 	defer eng.Close()
-	a, b := pipe.NewPair(0, 0, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(0, 0, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 	ctx := testutil.Ctx(t)
 
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q1"))))
-	_, err := b.Recv(ctx)
+	_, err := b.RecvOr(ctx, nil)
 	require.NoError(t, err)
 	for i := 0; i < hwm0Backlog; i++ {
 		require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("stale"))))
@@ -133,7 +133,7 @@ func TestHWM0_ReqDiscardsWholeStaleBacklog(t *testing.T) {
 	require.Equal(t, "stale", string(m.Bytes()), "first reply answers q1")
 
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q2"))))
-	_, err = b.Recv(ctx)
+	_, err = b.RecvOr(ctx, nil)
 	require.NoError(t, err)
 	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("r2"))))
 	m, err = eng.Recv(ctx)

@@ -252,7 +252,7 @@ func TestSecurity_ZAPPlainErrorReportsAuthFailure(t *testing.T) {
 	t.Cleanup(func() { _ = cli.Close() })
 	require.NoError(t, cli.Connect(srv.LastEndpoint()))
 
-	collected := waitForEvents(t, srvEvents, 3*time.Second, func(evts []gozmq.Event) bool {
+	collected := testutil.CollectUntil(srvEvents, 3*time.Second, func(evts []gozmq.Event) bool {
 		return hasType(evts, gozmq.EventHandshakeFailedAuth)
 	})
 	require.True(t, hasType(collected, gozmq.EventHandshakeFailedAuth),

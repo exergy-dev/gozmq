@@ -33,14 +33,18 @@ import (
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
-// splitEndpoint parses "scheme://address" into its parts. Returns
-// ErrEndpointInvalid if the separator is missing.
-func splitEndpoint(endpoint string) (scheme, address string, err error) {
+// splitEndpoint returns the address of a "scheme://address" endpoint whose
+// scheme is wantScheme. It returns ErrEndpointInvalid if the separator is
+// missing or the scheme differs.
+func splitEndpoint(endpoint, wantScheme string) (address string, err error) {
 	scheme, address, ok := strings.Cut(endpoint, "://")
-	if !ok || scheme == "" {
-		return "", "", fmt.Errorf("%w: %q (missing scheme://)", zmqerr.ErrEndpointInvalid, endpoint)
+	switch {
+	case !ok || scheme == "":
+		return "", fmt.Errorf("%w: %q (missing scheme://)", zmqerr.ErrEndpointInvalid, endpoint)
+	case scheme != wantScheme:
+		return "", fmt.Errorf("%w: scheme %q passed to %s transport", zmqerr.ErrEndpointInvalid, scheme, wantScheme)
 	}
-	return scheme, address, nil
+	return address, nil
 }
 
 // parseTCPEndpoint parses a "scheme://host:port" endpoint into a net.Dial
@@ -49,16 +53,13 @@ func splitEndpoint(endpoint string) (scheme, address string, err error) {
 // expands to "" (all interfaces), a "*" port to "0", and ephemeral ports are
 // left for the OS to resolve.
 func parseTCPEndpoint(endpoint, expectedScheme string, dial bool) (string, error) {
-	scheme, addr, err := splitEndpoint(endpoint)
+	addr, err := splitEndpoint(endpoint, expectedScheme)
 	if err != nil {
 		return "", err
 	}
-	if scheme != expectedScheme {
-		return "", fmt.Errorf("%w: scheme %q passed to %s transport", zmqerr.ErrEndpointInvalid, scheme, expectedScheme)
-	}
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return "", fmt.Errorf("%w: %s", zmqerr.ErrEndpointInvalid, err.Error())
+		return "", fmt.Errorf("%w: %w", zmqerr.ErrEndpointInvalid, err)
 	}
 	if dial {
 		if host == "*" {

@@ -60,9 +60,6 @@ func Get(n int) []byte {
 // caller must not use b afterwards.
 func Put(b []byte) {
 	c := cap(b)
-	if c&(c-1) != 0 {
-		return
-	}
 	i := tier(c)
 	if i < 0 || 1<<(minTierShift+i) != c {
 		return

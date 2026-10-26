@@ -193,12 +193,7 @@ func TestFairQueue_PollerAndRecvShareGate(t *testing.T) {
 			}
 			seen := map[string]bool{}
 			for range 2 {
-				select {
-				case who := <-got:
-					seen[who] = true
-				case <-time.After(2 * time.Second):
-					require.Fail(t, "a waiter was stranded", "served: %v", seen)
-				}
+				seen[testutil.RequireRecv(t, got, 2*time.Second, "a waiter was stranded, served: %v", seen)] = true
 			}
 			require.Equal(t, map[string]bool{"recv": true, "poller": true}, seen)
 			<-polled
@@ -261,7 +256,7 @@ func TestFairQueue_TryRecvWithSourceAndPending(t *testing.T) {
 	t.Parallel()
 	fq := newFQ()
 	defer fq.Close()
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	require.NoError(t, fq.Attach(a))
 	_, _, ok := fq.TryRecvWithSource()

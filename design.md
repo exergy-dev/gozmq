@@ -129,9 +129,22 @@ may only be tightened.
 - **Engines and pipes run no goroutines.** Receivers read the pipes
   themselves (§3.4), PUB/XPUB apply subscriptions on the application's own
   calls, and readiness is signalled by arming channels (§3.5). A pipe
-  direction with a positive HWM is a buffered channel of that capacity; HWM 0
-  is a 1024-slot channel plus an overflow slice the receiving end refills
-  from, so an unbounded direction costs memory, not a relay goroutine.
+  direction comes in two kinds behind one `End` API. Session pipes use a
+  chunked FIFO (256-slot chunks, a ring of spare chunks) with a
+  producer-side and a consumer-side mutex, so concurrent callers on one side
+  are safe while producer and consumer never share a lock; the HWM is a
+  count checked against published head/tail counters, HWM 0 just never
+  refuses, a parked receiver waits on a cap-1 token channel that the
+  producer arms when a sleeper is registered, and the session reader
+  publishes with `TrySendDeferred` and `Flush`es once per read batch, so a
+  receiver is woken once per batch rather than once per message. Inproc
+  pipes (`NewChannelPair`) use a buffered channel of HWM capacity: there is
+  no batching producer to amortise wakeups, the patterns are one
+  uncontended hop per message, and a channel's direct handoff to a parked
+  receiver is ~20 ns cheaper than the queue's lock, counters and token. An
+  inproc direction with HWM 0 has no capacity to size, so it uses the queue
+  kind too. Either way an unbounded direction costs memory, not a relay
+  goroutine.
 - **Public calls** are safe for concurrent use; each engine serialises what
   its pattern requires (REQ/REP reject a concurrent call that would break
   lock-step with `ErrFSMViolation`). One goroutine per socket is still the
@@ -141,10 +154,19 @@ may only be tightened.
 
 ### 3.3 Pipes and the idle notification
 
-`pipe.NewPair` returns two `*pipe.End` values. Each carries the peer's
-`PeerInfo` (its ZMTP `Identity`) and, once a ROUTER or STREAM engine has
-assigned one, its routing identity, so a message received after detach is
-still stamped with the right peer.
+`pipe.NewPair` and `pipe.NewChannelPair` return two `*pipe.End` values
+bound to one another, one per direction pair. The first (the queue kind)
+backs session pipes; the second (the channel kind) backs inproc: a
+buffered channel of HWM capacity per direction, except that HWM 0 gets a
+queue-kind direction, so there is no overflow slice and no unbounded
+channel. Both kinds share every `End` guarantee: HWM semantics, close and
+drain behaviour, the idle protocol below, and `SendDrained`, whose state is
+one `draining` flag on the direction for either kind. Each `End` carries the
+peer's ZMTP `Identity` (a plain `[]byte` given at construction) and, once a
+ROUTER or STREAM engine has assigned one, its routing identity, so a
+message received after detach is still stamped with the right peer.
+`TrySendDeferred` (deferred wakeups, flushed once per batch) is queue-kind
+only; the session reader is its only user.
 
 A receiver multiplexing many pipes must neither poll them nor run a goroutine
 per pipe. Each `End` therefore has an `idle` flag and a `notify` callback:
@@ -153,8 +175,12 @@ does the same without consuming. After every enqueue, and on `Close`, the
 sender loads `idle` and runs `notify` only on a true→false CAS, on its own
 goroutine. The receiver sets `idle` with a full barrier and only then
 re-checks; the sender publishes and only then loads `idle`; one of the two
-always sees the other, so no wakeup is lost. `SendDrained` is the linger
-signal for inproc (§3.7).
+always sees the other, so no wakeup is lost. On the channel kind the
+re-check is a plain `len(ch)`: the `idle` swap is an atomic
+read-modify-write and so a full barrier, and the sender's channel send
+publishes under the channel lock before its `idle` load, so the argument
+holds without an extra atomic on the receive path. `SendDrained` is the
+linger signal for inproc (§3.7).
 
 ### 3.4 Fair queueing and load balancing
 
@@ -200,8 +226,9 @@ sends therefore leaves subscriptions queued up to the receive HWM.
 ### 3.6 Public API over engines
 
 `SendMsg`/`RecvMsg` take a `*msg.Msg` of frames. By default received frames
-are ordinary Go memory the caller owns. With `WithRecvBufferPool(true)` large
-frames on NULL/PLAIN sessions arrive in pooled buffers and the message is
+are ordinary Go memory the caller owns, except that by default (opt out with
+`WithRecvBufferPool(false)`; always off for STREAM) large frames (> 4 KiB) on
+NULL/PLAIN sessions arrive in pooled buffers and the message is
 *lent*: valid until `Release`, reference-counted through `Retain` and
 `Derive`, with `SendMsg` holding its own reference until the write completes.
 The contract, including why there is no finalizer, is in package `msg` and
@@ -246,8 +273,10 @@ ROUTER. A STREAM `Connect` dials once with no reconnector.
   interval) tears the session down. A session parked on local backpressure is
   not treated as peer-dead.
 - Traffic phase: frames accumulate into a `Msg` until one without `MORE`.
-  Frames up to 4 KiB are read into a per-reader scratch buffer and copied
-  out; larger ones get their own allocation (or a pooled buffer). A body
+  Frames up to 4 KiB are read into a per-reader scratch buffer, where a
+  message's frames stay until its last frame arrives and all of them are
+  copied into one allocation (`msg.FromFramesCopy`); larger ones get their
+  own allocation (or a pooled buffer). A body
   above 128 KiB is allocated as its bytes arrive, so a peer that announces a
   huge frame and stalls pins at most 17× what it sent plus 128 KiB, not the
   cap. `MaxMessageSize` bounds the whole multipart message on both sides.
@@ -359,17 +388,21 @@ closed; every other error is treated as per-connection and retried.
 
 ## 9. Performance
 
-- Plain memory by default; `WithRecvBufferPool` trades the per-frame
-  allocation for the explicit `Release` contract.
-- Reads go through a 16 KiB `bufio.Reader`; the writer coalesces up to 32
-  queued messages (2 MiB) into one `net.Buffers` write, appending frame
-  headers into a reusable scratch buffer so bodies are not copied. Queued
-  PING/PONG commands open the batch. Over TLS the batch goes out as one
-  record.
+- Large received frames are pooled by default (`WithRecvBufferPool`, opt out
+  with `false`): the per-frame allocation and its GC pacing are traded for
+  the explicit `Release` contract, which is safe to ignore (no finalizer).
+- Reads go through a 16 KiB `bufio.Reader`; the writer coalesces queued
+  messages into one write, appending frame headers and bodies up to 1 KiB
+  into a reusable scratch buffer so a run of small frames is one iovec,
+  and passing larger bodies by reference. A batch is bounded by 64 KiB
+  copied, 1000 iovecs, 2 MiB in total and 4096 messages; a fully coalesced
+  batch is one `write(2)`. Queued PING/PONG commands open the batch. Over
+  TLS the batch is one `Write`, split into records by crypto/tls.
 - inproc passes `*Msg` values with no framing, copy or goroutine.
 - A multi-peer receive walks only the pipes that have data; a single-peer
-  receive blocks in the one pipe without a lock. Bounded channels express the
-  HWM directly.
+  receive blocks in the one pipe. The pipe queue's HWM is a counter, so a
+  peer's queue costs what it holds, not its capacity; the session reader
+  wakes the receiver once per read batch.
 - PUB/XPUB `Send` reads a copy-on-write snapshot of the peers (no lock, no
   per-message slice) and answers a peer's subscribe-to-all from an atomic
   flag; only a selective tree takes that peer's read lock.

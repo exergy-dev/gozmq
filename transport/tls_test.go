@@ -108,8 +108,7 @@ func listenTLSLoopback(t *testing.T, cfg *tls.Config) (*TLSTransport, Listener) 
 // single goroutine would deadlock: each side's handshake needs the other.
 func handshakePair(ctx context.Context, t *testing.T, cli, srv Conn) {
 	t.Helper()
-	errCh := make(chan error, 1)
-	go func() { errCh <- tlsOf(srv).HandshakeContext(ctx) }()
+	errCh := testutil.Async(func() error { return tlsOf(srv).HandshakeContext(ctx) })
 	require.NoError(t, tlsOf(cli).HandshakeContext(ctx), "client handshake")
 	require.NoError(t, <-errCh, "server handshake")
 }
@@ -507,12 +506,8 @@ func TestTLS_SilentClientsDoNotBlockAccept(t *testing.T) {
 			}
 		}(c)
 	}
-	select {
-	case err := <-cliErr:
-		require.NoError(t, err, "legitimate client round trip")
-	case <-time.After(5 * time.Second):
-		t.Fatal("legitimate client not served")
-	}
+	require.NoError(t, testutil.RequireRecv(t, cliErr, 5*time.Second, "legitimate client not served"),
+		"legitimate client round trip")
 }
 
 // TestTLS_DialDoesNotBlockOnSilentServer: a server that accepts TCP but never
@@ -568,22 +563,17 @@ func TestTLS_AcceptGoroutineExitsOnCtxCancel(t *testing.T) {
 	_ = srvTr
 
 	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() {
+	errCh := testutil.Async(func() error {
 		_, err := l.Accept(ctx)
-		errCh <- err
-	}()
+		return err
+	})
 
 	// Give the accept goroutine time to park in l.l.Accept().
 	time.Sleep(100 * time.Millisecond)
 	cancel()
 
-	select {
-	case err := <-errCh:
-		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(500 * time.Millisecond):
-		require.Fail(t, "Accept did not return within 500ms of ctx cancel — backing goroutine likely leaked")
-	}
+	require.ErrorIs(t, testutil.RequireRecv(t, errCh, 500*time.Millisecond,
+		"Accept did not return within 500ms of ctx cancel — backing goroutine likely leaked"), context.Canceled)
 
 	// Close is idempotent: calling it again after the ctx-cancel path
 	// already closed the underlying listener must be a no-op rather

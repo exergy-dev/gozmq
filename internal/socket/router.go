@@ -2,11 +2,8 @@ package socket
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io"
 
-	"github.com/exergy-dev/gozmq/internal/pipe"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/msg"
 )
@@ -54,55 +51,22 @@ func (e *routerEngine) Send(ctx context.Context, m *msg.Msg) error {
 	id := frames[0]
 	rest := frames[1:]
 
-	e.mu.Lock()
-	if e.closed {
-		e.mu.Unlock()
-		return fmt.Errorf("router send: %w", zmqerr.ErrSocketClosed)
-	}
-	p, ok := e.pipeOf[string(id)]
-	mandatory := e.mandatory
-	e.mu.Unlock()
-
-	if !ok {
-		if mandatory {
-			return fmt.Errorf("router send: identity %q: %w", id, zmqerr.ErrRouteUnknown)
+	p, err := e.lookup(id, "router", e.mandatory)
+	if p == nil {
+		if err == nil {
+			m.Release()
 		}
-		// Silent drop — counted so observers see the unknown-identity miss.
-		e.dropped.Add(1)
-		m.Release()
-		return nil
+		return err
 	}
-
 	// Route everything after the identity frame in a message derived from
 	// m (m itself is never modified; the frame bytes are shared
 	// read-only). The derived message carries its own reference, so m's
 	// is released whatever happens to it.
-	out := m.Derive(rest...)
-	if err := p.SendOr(ctx, out, e.closeCh); err != nil {
-		out.Release()
-		if errors.Is(err, pipe.ErrAborted) {
-			return fmt.Errorf("router send: %w", zmqerr.ErrSocketClosed)
-		}
-		if !errors.Is(err, io.ErrClosedPipe) {
-			return err
-		}
-		// The peer vanished between lookup and send: same as unknown.
-		if mandatory {
-			return fmt.Errorf("router send: identity %q: peer disconnected: %w", id, zmqerr.ErrRouteUnknown)
-		}
-		e.dropped.Add(1)
-		m.Release()
-		return nil
+	if err := e.deliver(ctx, p, m.Derive(rest...), id, "router", e.mandatory); err != nil {
+		return err
 	}
 	m.Release()
-	e.sent.Add(1)
 	return nil
-}
-
-// Metrics reports the ROUTER counters. Dropped counts silent non-mandatory
-// route misses, including vanished peers.
-func (e *routerEngine) Metrics() Metrics {
-	return e.metrics(e.dropped.Load())
 }
 
 var _ Engine = (*routerEngine)(nil)

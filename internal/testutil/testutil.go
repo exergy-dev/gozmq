@@ -9,7 +9,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
 	"io"
+	"maps"
 	"net"
 	"slices"
 	"testing"
@@ -38,14 +40,17 @@ func Ctx(t testing.TB, d ...time.Duration) context.Context {
 }
 
 // WaitEvent reads ch until pred accepts an event, which it returns, or
-// timeout passes, which fails the test.
+// timeout passes or ch closes, which fail the test.
 func WaitEvent[E any](t testing.TB, ch <-chan E, timeout time.Duration, pred func(E) bool) E {
 	t.Helper()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	for {
 		select {
-		case ev := <-ch:
+		case ev, ok := <-ch:
+			if !ok {
+				require.FailNow(t, "channel closed before a matching event")
+			}
 			if pred(ev) {
 				return ev
 			}
@@ -57,15 +62,18 @@ func WaitEvent[E any](t testing.TB, ch <-chan E, timeout time.Duration, pred fun
 	}
 }
 
-// CollectUntil reads ch into a slice until pred accepts the slice or timeout
-// passes, and returns what was collected either way.
+// CollectUntil reads ch into a slice until pred accepts the slice, timeout
+// passes or ch closes, and returns what was collected either way.
 func CollectUntil[E any](ch <-chan E, timeout time.Duration, pred func([]E) bool) []E {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	var out []E
 	for !pred(out) {
 		select {
-		case ev := <-ch:
+		case ev, ok := <-ch:
+			if !ok {
+				return out
+			}
 			out = append(out, ev)
 		case <-timer.C:
 			return out
@@ -74,27 +82,87 @@ func CollectUntil[E any](ch <-chan E, timeout time.Duration, pred func([]E) bool
 	return out
 }
 
+// recv waits up to d for a value from ch; d 0 checks without waiting. got
+// reports whether anything happened, ok whether it was a value (false: ch
+// closed).
+func recv[E any](ch <-chan E, d time.Duration) (v E, got, ok bool) {
+	if d == 0 {
+		select {
+		case v, ok = <-ch:
+			return v, true, ok
+		default:
+			return v, false, false
+		}
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case v, ok = <-ch:
+		return v, true, ok
+	case <-timer.C:
+		return v, false, false
+	}
+}
+
+// RequireRecv returns the next value from ch (the zero value when ch is
+// closed), failing the test if none arrives within timeout. A timeout of 0
+// requires the value to be there already. msgAndArgs are testify's: an
+// optional message, or a format and its arguments.
+func RequireRecv[E any](t testing.TB, ch <-chan E, timeout time.Duration, msgAndArgs ...any) E {
+	t.Helper()
+	v, got, _ := recv(ch, timeout)
+	if !got {
+		require.FailNow(t, fmt.Sprintf("nothing received within %v", timeout), msgAndArgs...)
+	}
+	return v
+}
+
+// RequireNoRecv fails the test if ch yields a value, or closes, within d.
+// A d of 0 checks without waiting.
+func RequireNoRecv[E any](t testing.TB, ch <-chan E, d time.Duration, msgAndArgs ...any) {
+	t.Helper()
+	v, got, ok := recv(ch, d)
+	if !got {
+		return
+	}
+	what := "channel closed"
+	if ok {
+		what = fmt.Sprintf("received %+v", v)
+	}
+	require.FailNow(t, fmt.Sprintf("unexpected receive within %v: %s", d, what), msgAndArgs...)
+}
+
+// Async runs fn on its own goroutine and returns the channel its result
+// arrives on. The channel is buffered, so the goroutine exits even if nobody
+// receives (goleak would otherwise report it).
+func Async[R any](fn func() R) <-chan R {
+	ch := make(chan R, 1)
+	go func() { ch <- fn() }()
+	return ch
+}
+
+// Result is a value-or-error pair, the element type AsyncErr delivers.
+type Result[T any] struct {
+	V   T
+	Err error
+}
+
+// AsyncErr is Async for a two-valued call.
+func AsyncErr[T any](fn func() (T, error)) <-chan Result[T] {
+	return Async(func() Result[T] {
+		v, err := fn()
+		return Result[T]{v, err}
+	})
+}
+
 // RequireUnblocks asserts that a goroutine blocked in op returns after
 // unblock runs, and returns op's result.
 func RequireUnblocks[R any](t testing.TB, op func() R, unblock func()) R {
 	t.Helper()
-	done := make(chan R, 1)
-	go func() { done <- op() }()
-	select {
-	case r := <-done:
-		require.FailNow(t, "operation returned before it was unblocked")
-		return r
-	case <-time.After(50 * time.Millisecond):
-	}
+	done := Async(op)
+	RequireNoRecv(t, done, 50*time.Millisecond, "operation returned before it was unblocked")
 	unblock()
-	select {
-	case r := <-done:
-		return r
-	case <-time.After(5 * time.Second):
-		var zero R
-		require.FailNow(t, "operation did not unblock")
-		return zero
-	}
+	return RequireRecv(t, done, 5*time.Second, "operation did not unblock")
 }
 
 // CurveKeys returns a fresh Curve25519 key pair.
@@ -116,13 +184,7 @@ func Greeting(mech string, minor byte) []byte {
 // Metadata encodes props as a ZMTP property list, keys in sorted order.
 func Metadata(props map[string]string) []byte {
 	var b []byte
-	for _, k := range slices.Sorted(func(yield func(string) bool) {
-		for k := range props {
-			if !yield(k) {
-				return
-			}
-		}
-	}) {
+	for _, k := range slices.Sorted(maps.Keys(props)) {
 		b = append(b, byte(len(k)))
 		b = append(b, k...)
 		b = binary.BigEndian.AppendUint32(b, uint32(len(props[k])))
@@ -163,9 +225,7 @@ func RawNullHandshake(t testing.TB, addr string, minor byte, socketType string, 
 	_, err = io.ReadFull(c, make([]byte, 64))
 	require.NoError(t, err, "server greeting")
 	props := map[string]string{"Socket-Type": socketType}
-	for k, v := range meta {
-		props[k] = v
-	}
+	maps.Copy(props, meta)
 	// A NULL server is passive: the client sends READY first.
 	_, err = c.Write(Command("READY", Metadata(props)))
 	require.NoError(t, err)

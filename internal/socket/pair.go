@@ -34,9 +34,8 @@ type pairEngine struct {
 	// retired holds detached pipes that may still have inbound messages
 	// buffered, oldest first. Recv drains them before the current pipe so
 	// a reconnect never reorders or loses what the old peer already sent.
-	retired  []*pipe.End
-	closed   bool
-	closeCh  chan struct{}
+	retired []*pipe.End
+	lifecycle
 	attached broadcast // woken on attach
 
 	gates
@@ -45,14 +44,16 @@ type pairEngine struct {
 
 // NewPairEngine returns a new PAIR socket engine.
 func NewPairEngine() Engine {
-	return &pairEngine{closeCh: make(chan struct{}), gates: newGates()}
+	e := &pairEngine{gates: newGates()}
+	e.init()
+	return e
 }
 
 func (e *pairEngine) AttachPipe(p *pipe.End) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
-		return fmt.Errorf("pair attach: %w", zmqerr.ErrSocketClosed)
+		return errClosed("pair attach")
 	}
 	if e.pipe != nil {
 		select {
@@ -98,14 +99,7 @@ func (e *pairEngine) retireLocked(p *pipe.End) {
 		return
 	}
 	e.pipe = nil
-	kept := e.retired[:0]
-	for _, r := range e.retired {
-		if r.Pending() {
-			kept = append(kept, r)
-		}
-	}
-	clear(e.retired[len(kept):])
-	e.retired = append(kept, p)
+	e.retired = append(slices.DeleteFunc(e.retired, func(r *pipe.End) bool { return !r.Pending() }), p)
 }
 
 // dropRetired removes a fully drained pipe from the retired queue.
@@ -122,27 +116,26 @@ func (e *pairEngine) Send(ctx context.Context, m *msg.Msg) error {
 		e.mu.Lock()
 		if e.closed {
 			e.mu.Unlock()
-			return fmt.Errorf("pair send: %w", zmqerr.ErrSocketClosed)
+			return errClosed("pair send")
 		}
 		p := e.pipe
-		closeCh := e.closeCh
 		attached := e.attached.wait()
 		e.mu.Unlock()
 
 		if p == nil {
-			if err := awaitPeer(ctx, attached, closeCh); err != nil {
+			if err := awaitPeer(ctx, attached, e.closeCh); err != nil {
 				return fmt.Errorf("pair send: %w", err)
 			}
 			continue
 		}
 		// SendOr refuses a closed pipe even if it has room, so the message
 		// waits for the next peer instead of vanishing into it.
-		switch err := p.SendOr(ctx, m, closeCh); {
+		switch err := p.SendOr(ctx, m, e.closeCh); {
 		case err == nil:
 			e.sent.Add(1)
 			return nil
 		case errors.Is(err, pipe.ErrAborted):
-			return fmt.Errorf("pair send: %w", zmqerr.ErrSocketClosed)
+			return errClosed("pair send")
 		case errors.Is(err, io.ErrClosedPipe):
 			e.retire(p)
 		default:
@@ -156,14 +149,13 @@ func (e *pairEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 		e.mu.Lock()
 		if e.closed {
 			e.mu.Unlock()
-			return nil, fmt.Errorf("pair recv: %w", zmqerr.ErrSocketClosed)
+			return nil, errClosed("pair recv")
 		}
 		var old *pipe.End
 		if len(e.retired) > 0 {
 			old = e.retired[0]
 		}
 		p := e.pipe
-		closeCh := e.closeCh
 		attached := e.attached.wait()
 		e.mu.Unlock()
 
@@ -178,18 +170,18 @@ func (e *pairEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 			continue
 		}
 		if p == nil {
-			if err := awaitPeer(ctx, attached, closeCh); err != nil {
+			if err := awaitPeer(ctx, attached, e.closeCh); err != nil {
 				return nil, fmt.Errorf("pair recv: %w", err)
 			}
 			continue
 		}
 		// On peer loss (EOF: closed and empty) the pipe is retired.
-		switch rm, err := p.RecvOr(ctx, closeCh); {
+		switch rm, err := p.RecvOr(ctx, e.closeCh); {
 		case err == nil:
 			e.recv.Add(1)
 			return rm, nil
 		case errors.Is(err, pipe.ErrAborted):
-			return nil, fmt.Errorf("pair recv: %w", zmqerr.ErrSocketClosed)
+			return nil, errClosed("pair recv")
 		case errors.Is(err, io.EOF):
 			e.retire(p)
 		default:
@@ -208,25 +200,20 @@ func (e *pairEngine) retire(p *pipe.End) {
 // messages queued in the attached and retired pipes.
 func (e *pairEngine) Metrics() Metrics {
 	e.mu.Lock()
-	var depth int
+	depth := sumLen(e.retired...)
 	if e.pipe != nil {
-		depth = e.pipe.Len()
-	}
-	for _, r := range e.retired {
-		depth += r.Len()
+		depth += e.pipe.Len()
 	}
 	e.mu.Unlock()
-	return e.snapshot(0, uint64(depth))
+	return e.snapshot(uint64(depth))
 }
 
 func (e *pairEngine) Close() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.closed {
+	if !e.markClosed() {
 		return nil
 	}
-	e.closed = true
-	close(e.closeCh)
 	e.pipe = nil
 	e.retired = nil
 	return nil
@@ -238,13 +225,8 @@ func (e *pairEngine) CanRecvNow() bool {
 	if e.closed {
 		return false
 	}
-	for _, r := range e.retired {
-		if r.Pending() {
-			return true
-		}
-	}
 	// MarkIdle registers the wake-up a Poller needs when this is false.
-	return e.pipe != nil && e.pipe.MarkIdle()
+	return slices.ContainsFunc(e.retired, (*pipe.End).Pending) || e.pipe != nil && e.pipe.MarkIdle()
 }
 
 func (e *pairEngine) CanSendNow() bool {

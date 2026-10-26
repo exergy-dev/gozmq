@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/exergy-dev/gozmq/internal/testutil"
 )
 
 // TestCLI runs each zmqperf pair end to end over a loopback port: the local
@@ -41,8 +43,7 @@ func TestCLI(t *testing.T) {
 			local := exec.Command(bin, args(tc.local, fmt.Sprintf("tcp://*:%d", port))...)
 			local.Stdout, local.Stderr = localOut, localOut
 			require.NoError(t, local.Start())
-			localDone := make(chan error, 1)
-			go func() { localDone <- local.Wait() }()
+			localDone := testutil.Async(local.Wait)
 			time.Sleep(100 * time.Millisecond) // let the bind land
 
 			remote := exec.Command(bin, args(tc.remote, fmt.Sprintf("tcp://127.0.0.1:%d", port))...)

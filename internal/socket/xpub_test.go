@@ -24,7 +24,7 @@ func TestXPub_SurfacesSubscribeToApplication(t *testing.T) {
 	eng := socket.NewXPubEngine(true)
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 	ctx := testutil.Ctx(t)
@@ -34,13 +34,13 @@ func TestXPub_SurfacesSubscribeToApplication(t *testing.T) {
 	require.NoError(t, err, "xpub recv")
 	require.Equal(t, 1, m.NumFrames(), "xpub recv frames")
 	body := m.Frames()[0]
-	require.Equal(t, socket.SubscribeByte, body[0])
+	require.Equal(t, byte(0x01), body[0])
 	require.Equal(t, "news", string(body[1:]))
 
 	// Subsequent publish to the "news" topic should reach the peer
 	// because XPUB updated its SubTree before surfacing.
 	require.NoError(t, eng.Send(ctx, msg.FromFrames([]byte("news"), []byte("hello"))), "xpub send")
-	got, err := b.Recv(ctx)
+	got, err := b.RecvOr(ctx, nil)
 	require.NoError(t, err, "peer recv data")
 	require.Equal(t, 2, got.NumFrames())
 	require.Equal(t, "news", string(got.Frames()[0]))
@@ -56,7 +56,7 @@ func TestXPub_SurfacesUnsubscribe(t *testing.T) {
 	eng := socket.NewXPubEngine(true)
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -69,7 +69,7 @@ func TestXPub_SurfacesUnsubscribe(t *testing.T) {
 	m, err := eng.Recv(ctx)
 	require.NoError(t, err, "recv cancel")
 	body := m.Frames()[0]
-	require.Equal(t, socket.UnsubscribeByte, body[0])
+	require.Equal(t, byte(0x00), body[0])
 	require.Equal(t, "t", string(body[1:]))
 }
 
@@ -83,7 +83,7 @@ func TestXPub_DedupDefault(t *testing.T) {
 	eng := socket.NewXPubEngine(false)
 	defer eng.Close()
 
-	a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(8, 8, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -97,7 +97,7 @@ func TestXPub_DedupDefault(t *testing.T) {
 	m, err := eng.Recv(ctx)
 	require.NoError(t, err, "recv1")
 	body := m.Frames()[0]
-	require.Equal(t, socket.SubscribeByte, body[0])
+	require.Equal(t, byte(0x01), body[0])
 	require.Equal(t, "news", string(body[1:]))
 
 	// Second recv must NOT produce a duplicate SUBSCRIBE -- block and
@@ -115,7 +115,7 @@ func TestXPub_VerboseDisablesDedup(t *testing.T) {
 	eng := socket.NewXPubEngine(true)
 	defer eng.Close()
 
-	a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(8, 8, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -129,7 +129,7 @@ func TestXPub_VerboseDisablesDedup(t *testing.T) {
 		m, err := eng.Recv(ctx)
 		require.NoError(t, err, "recv[%d]", i)
 		body := m.Frames()[0]
-		require.Equal(t, socket.SubscribeByte, body[0], "event[%d]", i)
+		require.Equal(t, byte(0x01), body[0], "event[%d]", i)
 		require.Equal(t, "news", string(body[1:]), "event[%d]", i)
 	}
 }
@@ -143,8 +143,8 @@ func TestXPub_DedupLastCancel(t *testing.T) {
 	eng := socket.NewXPubEngine(false)
 	defer eng.Close()
 
-	a1, b1 := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
-	a2, b2 := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a1, b1 := pipe.NewPair(8, 8, nil, nil)
+	a2, b2 := pipe.NewPair(8, 8, nil, nil)
 	defer closePipes(a1, b1, a2, b2)
 	mustAttach(t, eng, a1, a2)
 
@@ -176,7 +176,7 @@ func TestXPub_DedupLastCancel(t *testing.T) {
 	m, err := eng.Recv(ctx)
 	require.NoError(t, err, "final cancel recv")
 	body := m.Frames()[0]
-	require.Equal(t, socket.UnsubscribeByte, body[0])
+	require.Equal(t, byte(0x00), body[0])
 	require.Equal(t, "news", string(body[1:]))
 }
 
@@ -193,7 +193,7 @@ func TestXPub_DetachEmitsCancel(t *testing.T) {
 			eng := socket.NewXPubEngine(verbose)
 			defer eng.Close()
 
-			a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+			a, b := pipe.NewPair(8, 8, nil, nil)
 			defer closePipes(a, b)
 			mustAttach(t, eng, a)
 			ctx := testutil.Ctx(t)
@@ -203,14 +203,14 @@ func TestXPub_DetachEmitsCancel(t *testing.T) {
 			require.NoError(t, b.Send(ctx, subscribeMsg(true, []byte("topic"))), "peer subscribe")
 			m, err := eng.Recv(ctx)
 			require.NoError(t, err, "recv subscribe")
-			require.Equal(t, socket.SubscribeByte, m.Frames()[0][0])
+			require.Equal(t, byte(0x01), m.Frames()[0][0])
 
 			// Peer goes away: the engine must synthesize the CANCEL.
 			require.NoError(t, eng.DetachPipe(a), "detach")
 			m, err = eng.Recv(ctx)
 			require.NoError(t, err, "recv synthesized cancel")
 			body := m.Frames()[0]
-			require.Equal(t, socket.UnsubscribeByte, body[0], "expected CANCEL")
+			require.Equal(t, byte(0x00), body[0], "expected CANCEL")
 			require.Equal(t, "topic", string(body[1:]), "cancel prefix")
 		})
 	}
@@ -224,8 +224,8 @@ func TestXPub_DetachEmitsNoCancelWhileOtherSubscribersRemain(t *testing.T) {
 	eng := socket.NewXPubEngine(false)
 	defer eng.Close()
 
-	a1, b1 := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
-	a2, b2 := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a1, b1 := pipe.NewPair(8, 8, nil, nil)
+	a2, b2 := pipe.NewPair(8, 8, nil, nil)
 	defer closePipes(a1, b1, a2, b2)
 	mustAttach(t, eng, a1, a2)
 	ctx := testutil.Ctx(t)
@@ -233,7 +233,7 @@ func TestXPub_DetachEmitsNoCancelWhileOtherSubscribersRemain(t *testing.T) {
 	require.NoError(t, b1.Send(ctx, subscribeMsg(true, []byte("topic"))), "peer1 subscribe")
 	m, err := eng.Recv(ctx)
 	require.NoError(t, err, "recv first subscribe")
-	require.Equal(t, socket.SubscribeByte, m.Frames()[0][0])
+	require.Equal(t, byte(0x01), m.Frames()[0][0])
 
 	// Second subscriber for the same prefix: dedup-suppressed, but we
 	// must wait for the engine to process it before detaching. Poll the
@@ -255,7 +255,7 @@ func TestXPub_DetachEmitsNoCancelWhileOtherSubscribersRemain(t *testing.T) {
 	require.NoError(t, eng.DetachPipe(a2), "detach peer2")
 	m, err = eng.Recv(ctx)
 	require.NoError(t, err, "recv cancel")
-	require.Equal(t, socket.UnsubscribeByte, m.Frames()[0][0])
+	require.Equal(t, byte(0x00), m.Frames()[0][0])
 }
 
 // requireXPubEvent receives the next subscription event from eng and checks
@@ -267,9 +267,9 @@ func requireXPubEvent(ctx context.Context, t *testing.T, eng interface {
 	m, err := eng.Recv(ctx)
 	require.NoError(t, err)
 	body := m.Frames()[0]
-	want := socket.UnsubscribeByte
+	want := byte(0x00)
 	if subscribe {
-		want = socket.SubscribeByte
+		want = byte(0x01)
 	}
 	require.Equal(t, want, body[0], "event kind for %q", body[1:])
 	require.Equal(t, prefix, string(body[1:]))
@@ -285,7 +285,7 @@ func TestXPub_DetachBeforeRecvSettlesRefcounts(t *testing.T) {
 	defer eng.Close()
 	ctx := testutil.Ctx(t)
 
-	a1, b1 := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a1, b1 := pipe.NewPair(8, 8, nil, nil)
 	defer closePipes(a1, b1)
 	mustAttach(t, eng, a1)
 	require.NoError(t, b1.Send(ctx, subscribeMsg(true, []byte("A"))))
@@ -295,7 +295,7 @@ func TestXPub_DetachBeforeRecvSettlesRefcounts(t *testing.T) {
 	requireXPubEvent(ctx, t, eng, true, "A")
 	requireXPubEvent(ctx, t, eng, false, "A")
 
-	a2, b2 := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a2, b2 := pipe.NewPair(8, 8, nil, nil)
 	defer closePipes(a2, b2)
 	mustAttach(t, eng, a2)
 	require.NoError(t, b2.Send(ctx, subscribeMsg(true, []byte("A"))))
@@ -310,8 +310,8 @@ func TestXPub_ForeignCancelIgnored(t *testing.T) {
 	defer eng.Close()
 	ctx := testutil.Ctx(t)
 
-	good, goodPeer := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
-	evil, evilPeer := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	good, goodPeer := pipe.NewPair(8, 8, nil, nil)
+	evil, evilPeer := pipe.NewPair(8, 8, nil, nil)
 	defer closePipes(good, goodPeer, evil, evilPeer)
 	mustAttach(t, eng, good, evil)
 
@@ -341,8 +341,8 @@ func TestXPub_DetachAppliesQueuedCommandsFirst(t *testing.T) {
 	defer eng.Close()
 	ctx := testutil.Ctx(t)
 
-	a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
-	other, otherPeer := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(8, 8, nil, nil)
+	other, otherPeer := pipe.NewPair(8, 8, nil, nil)
 	defer closePipes(a, b, other, otherPeer)
 	mustAttach(t, eng, a, other)
 

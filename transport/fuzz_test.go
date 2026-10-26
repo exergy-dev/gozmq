@@ -10,22 +10,22 @@ import (
 
 func FuzzSplitEndpoint(f *testing.F) {
 	for _, s := range []string{"tcp://127.0.0.1:5555", "ipc:///tmp/x", "inproc://a", "://x", "tcp:/x", "a:://b", ""} {
-		f.Add(s)
+		f.Add(s, "tcp")
+		f.Add(s, "ipc")
 	}
-	f.Fuzz(func(t *testing.T, endpoint string) {
-		scheme, addr, err := splitEndpoint(endpoint)
+	f.Fuzz(func(t *testing.T, endpoint, want string) {
+		addr, err := splitEndpoint(endpoint, want)
 		if err != nil {
 			return
 		}
-		if scheme == "" {
+		if want == "" {
 			t.Fatalf("empty scheme accepted for %q", endpoint)
 		}
-		if got := scheme + "://" + addr; got != endpoint {
-			t.Fatalf("split(%q) = %q, %q; rejoins to %q", endpoint, scheme, addr, got)
+		if got := want + "://" + addr; got != endpoint {
+			t.Fatalf("split(%q, %q) = %q; rejoins to %q", endpoint, want, addr, got)
 		}
-		s2, a2, err := splitEndpoint(scheme + "://" + addr)
-		if err != nil || s2 != scheme || a2 != addr {
-			t.Fatalf("re-split(%q) = %q, %q, %v", endpoint, s2, a2, err)
+		if a2, err := splitEndpoint(want+"://"+addr, want); err != nil || a2 != addr {
+			t.Fatalf("re-split(%q) = %q, %v", endpoint, a2, err)
 		}
 	})
 }

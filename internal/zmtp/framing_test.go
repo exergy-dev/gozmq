@@ -14,6 +14,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 )
 
@@ -33,7 +34,7 @@ func TestFrameRoundTrip(t *testing.T) {
 		{name: "long-forced", flags: FlagLong, body: []byte{0x01, 0x02, 0x03}},
 		{name: "all-flags", flags: FlagMore | FlagLong | FlagCommand, body: bytes.Repeat([]byte{0xCC}, 1024)},
 	}
-	codec := NewFrameCodec(MaxBodyUnlimited)
+	codec := NewFrameCodec(0)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -59,7 +60,7 @@ func TestFrameRoundTrip(t *testing.T) {
 
 func TestFrameWireFormat(t *testing.T) {
 	t.Parallel()
-	codec := NewFrameCodec(MaxBodyUnlimited)
+	codec := NewFrameCodec(0)
 	t.Run("short", func(t *testing.T) {
 		var buf bytes.Buffer
 		require.NoError(t, writeFrame(codec, &buf, FlagCommand, []byte{1, 2, 3}), "WriteFrame")
@@ -80,7 +81,7 @@ func TestFrameWireFormat(t *testing.T) {
 
 func TestFrameAppendHeader(t *testing.T) {
 	t.Parallel()
-	codec := NewFrameCodec(MaxBodyUnlimited)
+	codec := NewFrameCodec(0)
 	cases := []struct {
 		name    string
 		flags   uint8
@@ -114,7 +115,7 @@ func writeFrame(c FrameCodec, w *bytes.Buffer, flags uint8, body []byte) error {
 
 func TestFrameReuseDst(t *testing.T) {
 	t.Parallel()
-	codec := NewFrameCodec(MaxBodyUnlimited)
+	codec := NewFrameCodec(0)
 	body := []byte("hello-zmtp")
 	var buf bytes.Buffer
 	require.NoError(t, writeFrame(codec, &buf, 0, body), "WriteFrame")
@@ -168,7 +169,7 @@ func TestFrameMaxBodyEnforced(t *testing.T) {
 
 func TestFrameRejectsReservedFlags(t *testing.T) {
 	t.Parallel()
-	codec := NewFrameCodec(MaxBodyUnlimited)
+	codec := NewFrameCodec(0)
 	_, _, err := codec.ReadFrame(bytes.NewReader([]byte{0x80, 0}), nil, nil)
 	require.ErrorIs(t, err, zmqerr.ErrMalformedFrame, "decode")
 	_, err = codec.AppendFrameHeader(nil, 0xF0, 0)
@@ -177,7 +178,7 @@ func TestFrameRejectsReservedFlags(t *testing.T) {
 
 func TestFrameTruncated(t *testing.T) {
 	t.Parallel()
-	codec := NewFrameCodec(MaxBodyUnlimited)
+	codec := NewFrameCodec(0)
 
 	t.Run("clean-eof", func(t *testing.T) {
 		_, _, err := codec.ReadFrame(strings.NewReader(""), nil, nil)
@@ -281,7 +282,7 @@ func TestFrameReadIncrementalRoundTrip(t *testing.T) {
 	const bufSize = 16 << 10
 	plain := func(r io.Reader) io.Reader { return r }
 	buffered := func(r io.Reader) io.Reader { return bufio.NewReaderSize(r, bufSize) }
-	codec := NewFrameCodec(MaxBodyUnlimited)
+	codec := NewFrameCodec(0)
 	for _, tc := range []struct {
 		name string
 		n    int
@@ -352,7 +353,7 @@ func TestFrameReadIncrementalScratchPool(t *testing.T) {
 	t.Parallel()
 	const T = incrementalBodyThreshold
 	const G = incrementalGrowth
-	codec := NewFrameCodec(MaxBodyUnlimited)
+	codec := NewFrameCodec(0)
 	for _, n := range []int{1 << 20, 4<<20 + 5} {
 		body := bytes.Repeat([]byte{0xA5}, n)
 		var buf bytes.Buffer
@@ -456,16 +457,11 @@ func TestFrameReadStalledLargeHeaderBoundsAllocation(t *testing.T) {
 		runtime.GC()
 		runtime.ReadMemStats(&before)
 
-		done := make(chan error, 1)
-		go func() {
+		done := testutil.Async(func() error {
 			_, _, err := codec.ReadFrame(r, nil, pool)
-			done <- err
-		}()
-		select {
-		case <-sr.stalled:
-		case <-time.After(10 * time.Second):
-			t.Fatalf("%s: reader never consumed the prefix", c.name)
-		}
+			return err
+		})
+		testutil.RequireRecv(t, sr.stalled, 10*time.Second, "%s: reader never consumed the prefix", c.name)
 
 		var during runtime.MemStats
 		runtime.GC()

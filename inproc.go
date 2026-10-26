@@ -36,11 +36,7 @@ func (r *inprocRegistry) unbind(s *Socket, endpoint string) bool {
 		return false
 	}
 	delete(r.bound, endpoint)
-	if names := slices.DeleteFunc(r.names[s], func(n string) bool { return n == endpoint }); len(names) > 0 {
-		r.names[s] = names
-	} else {
-		delete(r.names, s)
-	}
+	deleteFromSliceMap(r.names, s, endpoint)
 	return true
 }
 
@@ -58,11 +54,7 @@ func (r *inprocRegistry) unbindAll(s *Socket) {
 func (r *inprocRegistry) cancel(l *inprocLink) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if w := slices.DeleteFunc(r.pending[l.endpoint], func(p *inprocLink) bool { return p == l }); len(w) > 0 {
-		r.pending[l.endpoint] = w
-	} else {
-		delete(r.pending, l.endpoint)
-	}
+	deleteFromSliceMap(r.pending, l.endpoint, l)
 }
 
 // isInproc reports whether endpoint uses the inproc:// scheme.
@@ -75,7 +67,7 @@ func (s *Socket) checkInproc(endpoint string) error {
 		return fmt.Errorf("%w: inproc endpoint requires a non-empty name", ErrEndpointInvalid)
 	case s.socketType == Stream:
 		return fmt.Errorf("%w: %q: STREAM sockets carry raw bytes and do not support inproc", ErrEndpointInvalid, endpoint)
-	case s.cfg.securityConfigured():
+	case s.cfg.mech != nil:
 		return fmt.Errorf("%w: %q: inproc runs no security handshake, so a socket with PLAIN, CURVE or WithSecurityMech cannot use it",
 			ErrEndpointInvalid, endpoint)
 	}
@@ -159,12 +151,8 @@ func inprocHWM(send, recv int) int {
 	if send == 0 || recv == 0 {
 		return 0
 	}
-	// Both are at most MaxHWM, so the sum cannot overflow; saturate anyway
-	// so a future relaxation of the cap cannot produce a negative HWM.
-	if sum := send + recv; sum > 0 {
-		return sum
-	}
-	return 2 * MaxHWM
+	// Both are at most MaxHWM after validation, so the sum cannot overflow.
+	return send + recv
 }
 
 // wireInproc joins cl's socket (the connector) to bind with one pipe pair.
@@ -175,11 +163,11 @@ func wireInproc(cl *inprocLink, bind *Socket, waiting bool) error {
 	if ct, bt := socketTypeName(conn.socketType), socketTypeName(bind.socketType); !session.SocketTypesCompatible(ct, bt) {
 		return fmt.Errorf("gozmq: inproc %s socket cannot connect to %s: %w", ct, bt, ErrFSMViolation)
 	}
-	ce, be := pipe.NewPair(
+	ce, be := pipe.NewChannelPair(
 		inprocHWM(conn.cfg.sendHWM, bind.cfg.recvHWM),
 		inprocHWM(bind.cfg.sendHWM, conn.cfg.recvHWM),
-		pipe.PeerInfo{Identity: bind.cfg.identity},
-		pipe.PeerInfo{Identity: conn.cfg.identity},
+		bind.cfg.identity,
+		conn.cfg.identity,
 	)
 	if err := conn.engine.AttachPipe(ce); err != nil {
 		_ = ce.Close()
@@ -303,4 +291,13 @@ func (l *inprocLink) detach() {
 		l.s.emit(EventDisconnected, l.endpoint, "")
 		l.s.removeLink(&l.link)
 	})
+}
+
+// deleteFromSliceMap removes v from m[k], dropping the key once the slice is empty.
+func deleteFromSliceMap[K, V comparable](m map[K][]V, k K, v V) {
+	if s := slices.DeleteFunc(m[k], func(x V) bool { return x == v }); len(s) > 0 {
+		m[k] = s
+	} else {
+		delete(m, k)
+	}
 }

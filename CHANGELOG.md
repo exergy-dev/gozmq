@@ -6,7 +6,134 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html); while
 it is 0.x, a minor release may include breaking changes, each listed with a
 migration hint.
 
-## [Unreleased]
+## [0.4.0] - 2026-10-25
+
+A throughput release: PUSH/PULL over TCP is at or above native libzmq at
+every size in the two-process comparison at Go's default runtime settings
+(32 B 1.4–1.6× from 0.6×, 64 KB 1.3–1.4× from 0.6×), inproc and ipc are
+compared as well, and the one behavioural change is that large received
+frames are pooled by default. No wire change. See `perf/REPORT.md`.
+
+### Added
+
+- `msg.FromFramesCopy` / `NewMsgFromFramesCopy`: a message whose frames are
+  copied into one message-owned allocation (what the reader now builds for
+  small received messages).
+- `msg.NewLent`: a lent message whose lease stores the buffers it gives
+  back (one allocation with the message), used by the session reader for
+  pooled frames instead of a release closure.
+- `perf/libzmq_thr/compare_lat.sh` and the C `local_lat`/`remote_lat` tools:
+  REQ/REP round-trip comparison against libzmq in all four pairings;
+  `compare_all.sh` prints the two mixed PUSH/PULL pairings and takes
+  `COUNT_SCALE` and `GOZMQ_GOGC`. `compare_inproc.sh` with the C
+  `inproc_thr`/`inproc_lat` tools and the `zmqperf inproc_thr`/`inproc_lat`
+  subcommands compare inproc (one process, peer on a thread/goroutine).
+  New benchmarks `PubSubThroughput_{TCP,Inproc}`,
+  `PubSubTopicThroughput_{TCP,Inproc}`, `PushPullLarge_Inproc`,
+  `PushPullThroughput_IPC`, `ReqRepRoundTrip_IPC`, `ReqRepThroughput_IPC`.
+
+### Changed
+
+- **The receive buffer pool is now the default** (`WithRecvBufferPool`).
+  Received frames larger than 4 KiB on NULL/PLAIN sessions (tcp/ipc) are
+  lent from the pool, and `Release` really recycles them; at 64 KB this
+  removes the garbage-collector pacing that held the receiver to about 60%
+  of libzmq. Forgetting `Release` stays safe (there is no finalizer; the
+  buffer is simply collected). STREAM sockets are unaffected (the option is
+  silently off; an explicit `WithRecvBufferPool(true)` there is still an
+  error). Migration: code that calls `Release` and then keeps using the
+  message's frames (or a slice from `Bytes`/`Frames`) must copy them first,
+  or create the socket with `WithRecvBufferPool(false)`; a `typed.Codec`
+  whose `Unmarshal` retains its input must not be used at the default.
+  `Socket.RecvBytes` and the `typed` wrappers already copy.
+- The session writer copies frame bodies up to 1 KiB behind their headers
+  so a run of small frames is one iovec, bounds a batch by bytes and iovecs
+  (64 KiB copied, 1000 iovecs, 2 MiB total) instead of 32 messages, and
+  sends a fully coalesced batch with one `write(2)`. Per million 32 B
+  messages the sender makes 675 syscalls instead of 31,251 and the receiver
+  2,100 reads instead of 19,702. Wire bytes are identical.
+- One allocation per small received message: PUSH/PULL over TCP 3 → 2
+  allocations per delivery, REQ/REP 14 → 10 per round trip, ROUTER/DEALER
+  10 → 8, two-frame topic+payload 6 → 3.
+- Session pipes are chunked two-lock queues (256-slot chunks, libzmq's
+  `yqueue` shape) instead of HWM-sized channels: producers and consumers no
+  longer share a lock, the session reader wakes a receiver once per read
+  batch instead of once per message, and a TCP peer's HWM no longer
+  allocates its full capacity up front (a peer at HWM 1000 used 8 KiB per
+  direction before any message; the zmqperf tool's 1,000,000 HWM used
+  8 MiB). TCP rows gain 20–40% (PUSH/PULL 32 B −39%, fan-in −20…−31%, TLS
+  32 B −28%). Inproc pipes keep the channel implementation, because their
+  one-hop-per-message patterns are ~20 ns per hop cheaper on a channel;
+  inproc rows are unchanged.
+- The reader stamps the heartbeat's inbound clock once per read batch
+  instead of once per message.
+- A generics sweep found the library already generic where it pays
+  (`typed`, the `msg` co-allocation tiers, every atomic an
+  `atomic.Pointer[T]`); what it changed is the tests, which now share
+  `internal/testutil`'s `RequireRecv`, `RequireNoRecv` and `Async` instead
+  of about 60 hand-written timeout selects (400 fewer test lines; non-test
+  lines 15,079 → 15,163, 67 of them the helpers in testutil.go, which counts
+  as non-test by filename), and two internal folds: `typed` decodes through one `unmarshal[T]`, the inproc
+  registry deletes from its maps of slices through one helper. No behaviour
+  change.
+- `zmqperf local_thr` divides by the messages it actually timed (`count-1`),
+  releases every received message as libzmq's tool does with
+  `zmq_msg_close` (`-pool=false` opts out to plain memory), formats its
+  failure labels only on error (a `Sprintf` per message was 28% of the
+  inproc profile and taxed the TCP figures of earlier reports), and runs at
+  the runtime's GC setting (`-gogc` is an option, not a default).
+
+### Removed
+
+A simplification pass (538 fewer non-test lines, 15,617 → 15,079, no wire change):
+hand-rolled helpers replaced by the standard library, duplicated engine,
+mechanism and pipe code shared, dead branches dropped. Removals, with the
+replacement:
+
+- `gozmq.NewMsg` and `msg.New`: use `NewMsgFromFrames()` / `msg.FromFrames()`
+  with no arguments, which builds the same empty message.
+- `msg.NewWithRelease`: use `msg.NewLent(put, bufs, frames...)`, which
+  takes the buffers to hand back instead of a closure (one allocation with
+  the message). A lease now has one callback; `Lent`, `Retain`, `Release`
+  and `Derive` are unchanged.
+- `Option` and `ContextOption` are plain function types
+  (`func(*socketConfig) error`, `func(*Context)`) instead of interfaces.
+  Code that only passes `With*` values is unaffected; code that
+  implemented the interface (impossible outside the package) does not exist.
+
+### Fixed
+
+- A STREAM `Send` whose peer pipe had closed between the identity lookup
+  and the write leaked the lease reference it had taken on a pooled frame,
+  so the buffer never returned to the pool. It is released on every
+  failure path now, as ROUTER already did; both engines have regression
+  tests through every outcome (unknown identity, vanished peer, counted
+  drop).
+
+### Changed (simplification)
+
+- The mechanism options (`WithPlainAuth`, `WithPlainClient`,
+  `WithCurveServer`, `WithCurveClient`, `WithSecurityMech`) validate their
+  arguments when applied, so `NewSocket` reports a nil authenticator, a
+  wrong key length or an over-long credential from the option itself;
+  applying two different mechanism options is reported as
+  "<option> and <option> are mutually exclusive". `errors.Is` targets are
+  unchanged; wording is.
+- An inproc pipe with HWM 0 (unbounded) uses the chunked queue instead of
+  a channel with an overflow slice. Default-HWM inproc pipes still use the
+  channel, so their rows are unchanged; the HWM-0 round trip costs the
+  queue's known ~6% (new gate rows `ReqRepRoundTrip_InprocHWM0` and
+  `PushPullThroughput_InprocHWM0`), and HWM-0 streaming is twice as fast.
+- `Bind` emits `EventListening` before its accept goroutine starts, so it
+  always precedes the first `EventAccepted`.
+- `security` exports the handshake helpers the shipped mechanisms share
+  (`Malformed`, `AuthFailed`, `RequireInput`, `RequireNoInput`,
+  `DecodeReply`), usable by an out-of-tree `Mech`.
+- CURVE translates the per-frame MESSAGE flags without branches and keeps
+  its nonce templates precomputed (8–17% faster frame encode/decode on
+  bodies of 1 KiB and up); PLAIN/NULL/CURVE share one reply decoder.
+- `zmqperf`'s subcommands share their timed loops; `remote_lat` releases
+  its replies like the other receivers.
 
 ## [0.3.0] - 2026-10-23
 
@@ -189,7 +316,7 @@ pushed to GitHub or a module proxy. It has the memory-exhaustion, CURVE
 and crash issues listed under 0.1.1, so it is not available and should not
 be used; the first published version is 0.1.1.
 
-[Unreleased]: https://github.com/exergy-dev/gozmq/compare/v0.3.0...HEAD
+[0.4.0]: https://github.com/exergy-dev/gozmq/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/exergy-dev/gozmq/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/exergy-dev/gozmq/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/exergy-dev/gozmq/releases/tag/v0.1.1

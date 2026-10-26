@@ -29,7 +29,7 @@ func makeRouterPeers(ids [][]byte, hwm int) (engineEnds, peerEnds []*pipe.End) {
 	engineEnds = make([]*pipe.End, len(ids))
 	peerEnds = make([]*pipe.End, len(ids))
 	for i, id := range ids {
-		a, b := pipe.NewPair(hwm, hwm, pipe.PeerInfo{Identity: id}, pipe.PeerInfo{})
+		a, b := pipe.NewPair(hwm, hwm, id, nil)
 		engineEnds[i] = a
 		peerEnds[i] = b
 	}
@@ -55,14 +55,14 @@ func TestRouter_RoutesByIdentity(t *testing.T) {
 	require.NoError(t, eng.Send(ctx, out), "send")
 
 	// peerB's peer-end should receive "hello"; the others should not.
-	got, err := peerEnds[1].Recv(ctx)
+	got, err := peerEnds[1].RecvOr(ctx, nil)
 	require.NoError(t, err, "peerB recv")
 	require.Equal(t, 1, got.NumFrames())
 	require.Equal(t, "hello", string(got.Bytes()))
 	// Other peers must not have received anything.
 	for _, idx := range []int{0, 2} {
 		ctx2, c := context.WithTimeout(context.Background(), 50*time.Millisecond)
-		_, err := peerEnds[idx].Recv(ctx2)
+		_, err := peerEnds[idx].RecvOr(ctx2, nil)
 		c()
 		require.ErrorIs(t, err, context.DeadlineExceeded, "peer %d unexpectedly got message", idx)
 	}
@@ -110,7 +110,7 @@ func TestRouter_UnroutableSilentWhenNotMandatory(t *testing.T) {
 	// known peer must not have received anything.
 	ctx2, c := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer c()
-	_, err := peerEnds[0].Recv(ctx2)
+	_, err := peerEnds[0].RecvOr(ctx2, nil)
 	require.ErrorIs(t, err, context.DeadlineExceeded, "known peer unexpectedly received")
 }
 
@@ -139,7 +139,7 @@ func TestRouter_SendRejectsEmptyMessage(t *testing.T) {
 	eng := socket.NewRouterEngine(false)
 	defer eng.Close()
 
-	err := eng.Send(context.Background(), msg.New())
+	err := eng.Send(context.Background(), msg.FromFrames())
 	require.ErrorIs(t, err, zmqerr.ErrRouteUnknown)
 }
 
@@ -170,7 +170,7 @@ func TestRouter_AnonymousPeerGetsSynthesizedIdentity(t *testing.T) {
 	eng := socket.NewRouterEngine(true)
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -190,7 +190,7 @@ func TestRouter_AnonymousPeerGetsSynthesizedIdentity(t *testing.T) {
 	// reply body.
 	reply := msg.FromFrames(synthID, []byte("world"))
 	require.NoError(t, eng.Send(ctx, reply), "send")
-	got2, err := b.Recv(ctx)
+	got2, err := b.RecvOr(ctx, nil)
 	require.NoError(t, err, "peer recv")
 	require.Equal(t, 1, got2.NumFrames())
 	require.Equal(t, "world", string(got2.Bytes()))
@@ -232,8 +232,8 @@ func TestRouter_SynthesizedIdentitiesAreDistinct(t *testing.T) {
 	defer eng.Close()
 	ctx := testutil.Ctx(t)
 
-	attach := func(info pipe.PeerInfo) *pipe.End {
-		a, b := pipe.NewPair(4, 4, info, pipe.PeerInfo{})
+	attach := func(info []byte) *pipe.End {
+		a, b := pipe.NewPair(4, 4, info, nil)
 		t.Cleanup(func() { closePipes(a, b) })
 		mustAttach(t, eng, a)
 		return b
@@ -245,7 +245,7 @@ func TestRouter_SynthesizedIdentitiesAreDistinct(t *testing.T) {
 	}
 
 	// Learn where the generator is, then squat on its next value.
-	first := attach(pipe.PeerInfo{})
+	first := attach(nil)
 	require.NoError(t, first.Send(ctx, msg.FromBytes([]byte("first"))))
 	firstID := []byte(recvID())
 	require.Len(t, firstID, 5)
@@ -253,9 +253,9 @@ func TestRouter_SynthesizedIdentitiesAreDistinct(t *testing.T) {
 	binary.BigEndian.PutUint32(squatter[1:], binary.BigEndian.Uint32(firstID[1:])+1)
 
 	const n = 200
-	peers := []*pipe.End{attach(pipe.PeerInfo{Identity: squatter})}
+	peers := []*pipe.End{attach(squatter)}
 	for range n {
-		peers = append(peers, attach(pipe.PeerInfo{}))
+		peers = append(peers, attach(nil))
 	}
 	for i, b := range peers {
 		require.NoError(t, b.Send(ctx, msg.FromBytes([]byte{byte(i)})), "peer %d send", i)
@@ -319,7 +319,7 @@ func TestRouter_IdentityStableUnderDetachChurn(t *testing.T) {
 		if !anon {
 			peerID = id
 		}
-		a, b := pipe.NewPair(8, 8, pipe.PeerInfo{Identity: peerID}, pipe.PeerInfo{})
+		a, b := pipe.NewPair(8, 8, peerID, nil)
 		if err := eng.AttachPipe(a); err != nil {
 			require.NoError(t, err, "initial attach %d", i)
 		}
@@ -371,7 +371,7 @@ func TestRouter_IdentityStableUnderDetachChurn(t *testing.T) {
 				if !s.anon {
 					peerID = s.id
 				}
-				a, b := pipe.NewPair(8, 8, pipe.PeerInfo{Identity: peerID}, pipe.PeerInfo{})
+				a, b := pipe.NewPair(8, 8, peerID, nil)
 				if err := eng.AttachPipe(a); err != nil {
 					s.mu.Unlock()
 					// engine closed — exit.
@@ -545,11 +545,11 @@ func TestRouter_RecvAfterDetachKeepsIdentity(t *testing.T) {
 			ctx := testutil.Ctx(t)
 
 			if extraPeer {
-				x, y := pipe.NewPair(8, 8, pipe.PeerInfo{Identity: []byte("idle")}, pipe.PeerInfo{})
+				x, y := pipe.NewPair(8, 8, []byte("idle"), nil)
 				defer closePipes(x, y)
 				require.NoError(t, eng.AttachPipe(x))
 			}
-			a, b := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{}) // anonymous
+			a, b := pipe.NewPair(8, 8, nil, nil) // anonymous
 			defer closePipes(a, b)
 			require.NoError(t, eng.AttachPipe(a))
 			require.NoError(t, b.Send(ctx, msg.FromBytes([]byte("a0"))))
@@ -565,7 +565,7 @@ func TestRouter_RecvAfterDetachKeepsIdentity(t *testing.T) {
 			require.NoError(t, eng.DetachPipe(a))
 			require.NoError(t, a.Close())
 
-			c, d := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+			c, d := pipe.NewPair(8, 8, nil, nil)
 			defer closePipes(c, d)
 			require.NoError(t, eng.AttachPipe(c))
 			require.NoError(t, d.Send(ctx, msg.FromBytes([]byte("c"))))

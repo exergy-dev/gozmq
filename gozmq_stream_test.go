@@ -181,23 +181,18 @@ func TestSocketStream_LingerFlushes(t *testing.T) {
 	t.Parallel()
 	srv, cli, id := streamServerPeer(t, gozmq.WithLinger(10*time.Second))
 	const n, size = 1024, 32 << 10 // 32 MiB, well past the kernel buffers
-	read := make(chan int64, 1)
-	go func() {
+	read := testutil.Async(func() int64 {
 		got, _ := io.Copy(io.Discard, cli) // until the server closes
-		read <- got
-	}()
+		return got
+	})
 	chunk := bytes.Repeat([]byte("q"), size)
 	ctx := testutil.Ctx(t)
 	for i := 0; i < n; i++ {
 		require.NoError(t, srv.SendMsg(ctx, gozmq.NewMsgFromFrames(id, chunk)))
 	}
 	require.NoError(t, srv.Close())
-	select {
-	case got := <-read:
-		require.EqualValues(t, n*size, got)
-	case <-time.After(10 * time.Second):
-		t.Fatal("peer never saw the connection close")
-	}
+	got := testutil.RequireRecv(t, read, 10*time.Second, "peer never saw the connection close")
+	require.EqualValues(t, n*size, got)
 }
 
 // TestSocketStream_Disconnect: Disconnect closes a STREAM Connect's
@@ -227,11 +222,7 @@ func TestSocketStream_Disconnect(t *testing.T) {
 	require.NoError(t, peer.SetReadDeadline(time.Now().Add(5*time.Second)))
 	_, err = peer.Read(make([]byte, 1))
 	require.ErrorIs(t, err, io.EOF, "peer should see the connection close")
-	select {
-	case ev := <-mon:
-		require.Equal(t, ep, ev.Endpoint)
-	case <-time.After(5 * time.Second):
-		t.Fatal("no EventDisconnected")
-	}
+	ev := testutil.RequireRecv(t, mon, 5*time.Second, "no EventDisconnected")
+	require.Equal(t, ep, ev.Endpoint)
 	require.ErrorIs(t, cli.Disconnect(ep), gozmq.ErrEndpointUnknown)
 }

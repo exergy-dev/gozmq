@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -134,7 +135,7 @@ func newFakeMech(name string, asServer bool, props map[string]string) *fakeMech 
 	if props == nil {
 		props = map[string]string{}
 	}
-	return &fakeMech{name: name, asServer: asServer, props: copyProps(props)}
+	return &fakeMech{name: name, asServer: asServer, props: maps.Clone(props)}
 }
 
 type fakeMech struct {
@@ -156,12 +157,12 @@ func (m *fakeMech) EncodeFrame(flags uint8, b []byte) (uint8, []byte, error) {
 func (m *fakeMech) DecodeFrame(flags uint8, b []byte) (uint8, []byte, error) {
 	return flags, b, nil
 }
-func (m *fakeMech) Metadata() map[string]string { return copyProps(m.props) }
+func (m *fakeMech) Metadata() map[string]string { return maps.Clone(m.props) }
 func (m *fakeMech) PeerMetadata() map[string]string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.peerMetaCalls++
-	return copyProps(m.peerProps)
+	return maps.Clone(m.peerProps)
 }
 
 // NextHandshake is a one-round exchange: emit a single READY-equivalent
@@ -285,7 +286,7 @@ func TestSession_Handshake_AndRoundTrip(t *testing.T) {
 	out := msg.FromFrames([]byte("hello"), []byte("world"), []byte("!"))
 	ctx := testutil.Ctx(t, 2*time.Second)
 	require.NoError(t, sA.Pipe().Send(ctx, out), "A.Pipe.Send")
-	got, err := sB.Pipe().Recv(ctx)
+	got, err := sB.Pipe().RecvOr(ctx, nil)
 	require.NoError(t, err, "B.Pipe.Recv")
 	require.Equal(t, 3, got.NumFrames(), "got frames count (frames=%v)", got.Frames())
 	want := []string{"hello", "world", "!"}
@@ -296,7 +297,7 @@ func TestSession_Handshake_AndRoundTrip(t *testing.T) {
 	// Round-trip the other direction too, to exercise B's writer / A's
 	// reader paths.
 	require.NoError(t, sB.Pipe().Send(ctx, msg.FromBytes([]byte("ack"))), "B.Pipe.Send")
-	got2, err := sA.Pipe().Recv(ctx)
+	got2, err := sA.Pipe().RecvOr(ctx, nil)
 	require.NoError(t, err, "A.Pipe.Recv")
 	assert.Equal(t, 1, got2.NumFrames(), "ack roundtrip frame count")
 	assert.Equal(t, "ack", string(got2.Bytes()), "ack roundtrip payload")
@@ -304,20 +305,10 @@ func TestSession_Handshake_AndRoundTrip(t *testing.T) {
 	// Stop must drain cleanly. We rely on goleak (TestMain) for the
 	// leak assertion; here we just verify Stop returns without error
 	// or hang.
-	doneA := stopAsync(sA)
-	doneB := stopAsync(sB)
-	select {
-	case err := <-doneA:
-		assert.NoError(t, err, "A.Stop")
-	case <-time.After(2 * time.Second):
-		require.FailNow(t, "A.Stop did not return within 2s")
-	}
-	select {
-	case err := <-doneB:
-		assert.NoError(t, err, "B.Stop")
-	case <-time.After(2 * time.Second):
-		require.FailNow(t, "B.Stop did not return within 2s")
-	}
+	doneA := testutil.Async(sA.Stop)
+	doneB := testutil.Async(sB.Stop)
+	assert.NoError(t, testutil.RequireRecv(t, doneA, 2*time.Second, "A.Stop did not return within 2s"), "A.Stop")
+	assert.NoError(t, testutil.RequireRecv(t, doneB, 2*time.Second, "B.Stop did not return within 2s"), "B.Stop")
 
 	// Stop is idempotent.
 	assert.NoError(t, sA.Stop(), "A.Stop second call")
@@ -355,17 +346,6 @@ func decodeFakeProps(in []byte) (map[string]string, error) {
 	return props, nil
 }
 
-func copyProps(in map[string]string) map[string]string {
-	if in == nil {
-		return nil
-	}
-	out := make(map[string]string, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
-}
-
 // TestSession_StopBeforeHandshake ensures Stop on a partially-started
 // session unblocks Handshaked observers and returns cleanly.
 func TestSession_StopBeforeHandshake(t *testing.T) {
@@ -389,16 +369,11 @@ func TestSession_StopBeforeHandshake(t *testing.T) {
 	// blocks the writer too — that's fine, Stop closes both halves).
 	time.Sleep(10 * time.Millisecond)
 
-	doneStop := stopAsync(s)
-	select {
-	case err := <-doneStop:
-		// We expect Stop itself to return nil — the handshake error
-		// is reported via HandshakeErr. Conn.Close on an already-closed
-		// io.Pipe returns nil, so this should be cleanly nil.
-		assert.NoError(t, err, "Stop returned error, want nil")
-	case <-time.After(2 * time.Second):
-		require.FailNow(t, "Stop did not return within 2s")
-	}
+	// We expect Stop itself to return nil — the handshake error
+	// is reported via HandshakeErr. Conn.Close on an already-closed
+	// io.Pipe returns nil, so this should be cleanly nil.
+	err := testutil.RequireRecv(t, testutil.Async(s.Stop), 2*time.Second, "Stop did not return within 2s")
+	assert.NoError(t, err, "Stop returned error, want nil")
 
 	// Handshaked must be closed; HandshakeErr must be non-nil since
 	// the handshake aborted.
@@ -424,14 +399,10 @@ func TestSession_Drain_DoesNotCloseConnUntilStop(t *testing.T) {
 
 	waitClosed(t, sA.Drain(), 2*time.Second, "Drain did not finish")
 
-	select {
-	case <-connA.Closed():
-		require.FailNow(t, "Drain closed the conn before Stop")
-	case <-time.After(50 * time.Millisecond):
-	}
+	testutil.RequireNoRecv(t, connA.Closed(), 50*time.Millisecond, "Drain closed the conn before Stop")
 
 	for i := 0; i < 4; i++ {
-		m, err := sB.Pipe().Recv(ctx)
+		m, err := sB.Pipe().RecvOr(ctx, nil)
 		require.NoError(t, err, "Recv[%d]", i)
 		want := fmt.Sprintf("linger-%d", i)
 		require.Equal(t, want, string(m.Bytes()), "Recv[%d]", i)
@@ -499,13 +470,13 @@ func TestSession_FramePathsIgnoreMechName(t *testing.T) {
 			require.False(t, identity, "name alone must not select identity framing")
 			ctx := testutil.Ctx(t, 2*time.Second)
 			require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte("hello"))))
-			got, err := sB.Pipe().Recv(ctx)
+			got, err := sB.Pipe().RecvOr(ctx, nil)
 			require.NoError(t, err)
 			require.Equal(t, xorBytes([]byte("hello")), got.Bytes(), "A's EncodeFrame was bypassed")
 
 			// And the reverse direction: A must DecodeFrame what B sends.
 			require.NoError(t, sB.Pipe().Send(ctx, msg.FromBytes(xorBytes([]byte("back")))))
-			got, err = sA.Pipe().Recv(ctx)
+			got, err = sA.Pipe().RecvOr(ctx, nil)
 			require.NoError(t, err)
 			require.Equal(t, "back", string(got.Bytes()), "A's DecodeFrame was bypassed")
 		})
@@ -552,23 +523,13 @@ func TestSession_StopDoesNotSetLinger(t *testing.T) {
 // timeout.
 func waitClosed(t *testing.T, ch <-chan struct{}, timeout time.Duration, msg string) {
 	t.Helper()
-	select {
-	case <-ch:
-	case <-time.After(timeout):
-		require.FailNow(t, msg)
-	}
+	testutil.RequireRecv(t, ch, timeout, msg)
 }
 
 func waitHandshake(t *testing.T, s *tSession, label string) {
 	t.Helper()
 	waitClosed(t, s.Handshaked(), 2*time.Second, label+": handshake did not complete within 2s")
 	require.NoError(t, s.HandshakeErr(), "%s: HandshakeErr", label)
-}
-
-func stopAsync(s *tSession) <-chan error {
-	ch := make(chan error, 1)
-	go func() { ch <- s.Stop() }()
-	return ch
 }
 
 // Sanity check: make sure our error sentinel wrapping is reachable via
@@ -739,11 +700,7 @@ func TestSession_Done_Fires(t *testing.T) {
 			s, peer := tc.start(t)
 
 			// Done must not fire until the trigger.
-			select {
-			case <-s.Done():
-				require.FailNow(t, "Done fired before the teardown trigger")
-			case <-time.After(20 * time.Millisecond):
-			}
+			testutil.RequireNoRecv(t, s.Done(), 20*time.Millisecond, "Done fired before the teardown trigger")
 
 			tc.trigger(t, s, peer)
 			waitClosed(t, s.Done(), tc.timeout, "Done did not fire after "+tc.name)
@@ -796,7 +753,7 @@ func TestReader_MaxMessageSize(t *testing.T) {
 			require.NoError(t, sA.Pipe().Send(ctx, msg.FromFrames(frames...)), "Send")
 
 			if !tc.over {
-				got, err := sB.Pipe().Recv(ctx)
+				got, err := sB.Pipe().RecvOr(ctx, nil)
 				require.NoError(t, err, "Recv")
 				require.Equal(t, tc.frames, got.NumFrames(), "frame count")
 				require.Equal(t, 256*tc.frames, got.TotalSize(), "total size")
@@ -804,7 +761,7 @@ func TestReader_MaxMessageSize(t *testing.T) {
 			}
 			waitClosed(t, sB.Done(), 2*time.Second, "receiver did not tear down on oversized multipart")
 			// The rejected message must not surface on B's pipe.
-			_, err := sB.Pipe().Recv(testutil.Ctx(t, time.Second))
+			_, err := sB.Pipe().RecvOr(testutil.Ctx(t, time.Second), nil)
 			require.Error(t, err, "oversized message surfaced on the pipe")
 			// A sees the disconnect (B closed the conn during shutdown).
 			waitClosed(t, sA.Done(), 2*time.Second, "sender did not observe receiver teardown")
@@ -827,9 +784,9 @@ func startZmtpPair(t *testing.T, hwm int) (sA, sB *tSession) {
 	connA, connB := newFakeConnPair()
 	return startPair(t,
 		Config{Conn: connA, Mech: identityFramingMech{newFakeMech("NULL", false, nil)},
-			Codec: zmtp.NewFrameCodec(zmtp.MaxBodyUnlimited), SendHWM: hwm, RecvHWM: hwm},
+			Codec: zmtp.NewFrameCodec(0), SendHWM: hwm, RecvHWM: hwm},
 		Config{Conn: connB, Mech: identityFramingMech{newFakeMech("NULL", true, nil)},
-			Codec: zmtp.NewFrameCodec(zmtp.MaxBodyUnlimited), SendHWM: hwm, RecvHWM: hwm},
+			Codec: zmtp.NewFrameCodec(0), SendHWM: hwm, RecvHWM: hwm},
 	)
 }
 
@@ -852,7 +809,7 @@ func TestReader_ScratchSizeBoundary(t *testing.T) {
 		require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes(bytes.Clone(p))), "Send[%d]", i)
 	}
 	for i, p := range payloads {
-		got, err := sB.Pipe().Recv(ctx)
+		got, err := sB.Pipe().RecvOr(ctx, nil)
 		require.NoError(t, err, "Recv[%d]", i)
 		require.Equal(t, p, got.Bytes(), "payload[%d]", i)
 	}
@@ -880,17 +837,150 @@ func TestReader_SmallFrameBurstIndependentPayloads(t *testing.T) {
 	// Drain only after everything is sent so messages queue in the pipe —
 	// scratch aliasing between queued messages would corrupt payloads.
 	for i := 0; i < N; i++ {
-		m, err := sB.Pipe().Recv(ctx)
+		m, err := sB.Pipe().RecvOr(ctx, nil)
 		require.NoError(t, err, "Recv[%d]", i)
 		require.Equal(t, fmt.Sprintf("payload-%03d", i), string(m.Bytes()), "payload[%d]", i)
+		require.Equal(t, len(m.Bytes()), cap(m.Bytes()), "cap[%d]: an append must not reach a neighbour", i)
 	}
-	mp, err := sB.Pipe().Recv(ctx)
+	mp, err := sB.Pipe().RecvOr(ctx, nil)
 	require.NoError(t, err, "Recv(multipart)")
 	require.Equal(t, 3, mp.NumFrames(), "multipart frame count")
 	want := []string{"frame-a", "frame-b", "frame-c"}
 	for j, f := range mp.Frames() {
 		require.Equal(t, want[j], string(f), "multipart frame[%d]", j)
+		require.Equal(t, len(f), cap(f), "multipart cap[%d]", j)
 	}
+	// Appending through one frame must not clobber the next.
+	_ = append(mp.Frames()[0], "CLOBBER"...)
+	require.Equal(t, "frame-b", string(mp.Frames()[1]), "append leaked into the next frame")
+}
+
+// requireIndependentFrames checks the frames of a delivered message match
+// want, each has cap == len (an append cannot reach scratch or a
+// neighbouring frame) and none is nil.
+func requireIndependentFrames(t *testing.T, m *msg.Msg, want [][]byte, label string) {
+	t.Helper()
+	require.Equal(t, len(want), m.NumFrames(), "%s: frame count", label)
+	for i, f := range m.Frames() {
+		require.Equal(t, want[i], f, "%s: frame[%d]", label, i)
+		require.NotNil(t, f, "%s: frame[%d] nil", label, i)
+		require.Equal(t, len(f), cap(f), "%s: frame[%d] cap", label, i)
+	}
+}
+
+// TestReader_ManyFrameMessageFlushesScratch: one message of 20 x 300 B
+// frames outgrows the reader's scratch, so its pending frames are copied
+// out mid-message and the rest accumulate from the front again (the mixed
+// path); the next, small message must still arrive intact.
+func TestReader_ManyFrameMessageFlushesScratch(t *testing.T) {
+	t.Parallel()
+	sA, sB := startZmtpPair(t, 8)
+	ctx := testutil.Ctx(t, 5*time.Second)
+
+	big := make([][]byte, 20)
+	for i := range big {
+		big[i] = bytes.Repeat([]byte{byte(0x30 + i)}, 300)
+	}
+	small := [][]byte{[]byte("topic-03"), []byte("payload")}
+	require.NoError(t, sA.Pipe().Send(ctx, msg.FromFrames(big...)))
+	require.NoError(t, sA.Pipe().Send(ctx, msg.FromFrames(small...)))
+
+	got, err := sB.Pipe().RecvOr(ctx, nil)
+	require.NoError(t, err)
+	requireIndependentFrames(t, got, big, "20x300")
+	got, err = sB.Pipe().RecvOr(ctx, nil)
+	require.NoError(t, err)
+	requireIndependentFrames(t, got, small, "after flush")
+}
+
+// TestReader_EmptyDelimiterFrame: [empty, body] (the REQ/REP envelope
+// shape) and all-empty messages are delivered with non-nil empty frames.
+func TestReader_EmptyDelimiterFrame(t *testing.T) {
+	t.Parallel()
+	sA, sB := startZmtpPair(t, 8)
+	ctx := testutil.Ctx(t, 5*time.Second)
+
+	msgs := [][][]byte{
+		{{}, []byte("request body")},
+		{{}},
+		{{}, {}},
+		{[]byte("id"), {}, []byte("body")},
+	}
+	for _, fr := range msgs {
+		require.NoError(t, sA.Pipe().Send(ctx, msg.FromFrames(fr...)))
+	}
+	for i, fr := range msgs {
+		got, err := sB.Pipe().RecvOr(ctx, nil)
+		require.NoError(t, err)
+		requireIndependentFrames(t, got, fr, fmt.Sprintf("msg[%d]", i))
+	}
+}
+
+// TestReader_PooledMidSizeFrames: with RecvBufferPool, a message of
+// [3000 B, 3000 B] has a second frame that fits scratch but not what is
+// left of it, so it comes from the pool; both frames must arrive intact
+// and, being <= 4 KiB, not lent.
+func TestReader_PooledMidSizeFrames(t *testing.T) {
+	t.Parallel()
+	connA, connB := newFakeConnPair()
+	sA, sB := startPair(t,
+		Config{Conn: connA, Mech: identityFramingMech{newFakeMech("NULL", false, nil)},
+			Codec: zmtp.NewFrameCodec(0), SendHWM: 8, RecvHWM: 8},
+		Config{Conn: connB, Mech: identityFramingMech{newFakeMech("NULL", true, nil)},
+			Codec: zmtp.NewFrameCodec(0), SendHWM: 8, RecvHWM: 8,
+			RecvBufferPool: true},
+	)
+	ctx := testutil.Ctx(t, 5*time.Second)
+
+	for round := 0; round < 3; round++ {
+		fr := [][]byte{bytes.Repeat([]byte{0xA1}, 3000), bytes.Repeat([]byte{0xB2}, 3000)}
+		require.NoError(t, sA.Pipe().Send(ctx, msg.FromFrames(fr...)))
+		got, err := sB.Pipe().RecvOr(ctx, nil)
+		require.NoError(t, err)
+		require.False(t, got.Lent(), "round %d: frames <= 4 KiB are never lent", round)
+		requireIndependentFrames(t, got, fr, fmt.Sprintf("round %d", round))
+	}
+	// A frame above scratch is still lent.
+	huge := bytes.Repeat([]byte{0xC3}, readScratchSize+1)
+	require.NoError(t, sA.Pipe().Send(ctx, msg.FromFrames([]byte("hdr"), huge)))
+	got, err := sB.Pipe().RecvOr(ctx, nil)
+	require.NoError(t, err)
+	require.True(t, got.Lent(), "large frame must be lent")
+	require.Equal(t, "hdr", string(got.Frames()[0]))
+	require.Equal(t, huge, got.Frames()[1])
+	got.Release()
+}
+
+// TestReader_CommandBetweenMoreFrames: a PING arriving between the frames
+// of a message is read into scratch's tail without disturbing the frames
+// already held there; the message arrives intact and the PONG goes out.
+func TestReader_CommandBetweenMoreFrames(t *testing.T) {
+	t.Parallel()
+	connA, connB := newFakeConnPair()
+	s := startTestSession(Config{
+		Conn:    connA,
+		Mech:    identityFramingMech{newFakeMech("NULL", false, nil)},
+		Codec:   zmtp.NewFrameCodec(0),
+		SendHWM: 8,
+		RecvHWM: 8,
+	})
+	t.Cleanup(func() { _ = s.Stop() })
+	peer := newManualPeer(t, connB, nil)
+	waitHandshake(t, s, "A")
+	frames := peer.startReadLoop()
+	ctx := testutil.Ctx(t, 5*time.Second)
+
+	// Frames under 128 B encode identically under fakeCodec (the peer
+	// helpers') and ZMTP.
+	first, second := bytes.Repeat([]byte{'x'}, 100), bytes.Repeat([]byte{'y'}, 100)
+	require.NoError(t, fakeCodec{}.WriteFrame(peer.conn, zmtp.FlagMore, first))
+	peer.sendPing(10, []byte("ctx"))
+	require.NoError(t, fakeCodec{}.WriteFrame(peer.conn, 0, second))
+
+	got, err := s.Pipe().RecvOr(ctx, nil)
+	require.NoError(t, err)
+	requireIndependentFrames(t, got, [][]byte{first, second}, "message around PING")
+	require.Equal(t, []byte("ctx"), waitCommand(t, frames, "PONG", 2*time.Second))
 }
 
 // TestReader_SubscriptionCommands: inbound SUBSCRIBE/CANCEL commands reach
@@ -914,7 +1004,7 @@ func TestReader_SubscriptionCommands(t *testing.T) {
 
 		var got []string
 		for {
-			m, err := sB.Pipe().Recv(ctx)
+			m, err := sB.Pipe().RecvOr(ctx, nil)
 			require.NoError(t, err, "enabled=%v", enabled)
 			if string(m.Bytes()) == "data2" {
 				break
@@ -960,3 +1050,90 @@ func TestPlainBodiesRetainsOneScratch(t *testing.T) {
 	p.Put(body)
 	require.Equal(t, 65<<10, cap(p.scratch))
 }
+
+// TestReader_SingleMessagePromptDelivery: one message to a receiver parked
+// in Recv arrives at once. The reader finds nothing buffered after the
+// frame, so it flushes (the deferred wakeup) before its next blocking read.
+func TestReader_SingleMessagePromptDelivery(t *testing.T) {
+	t.Parallel()
+	sA, sB := startZmtpPair(t, 16)
+	ctx := testutil.Ctx(t, 5*time.Second)
+	for i := range 20 {
+		got := testutil.Async(func() error {
+			m, err := sB.Pipe().RecvOr(ctx, nil)
+			if err == nil && string(m.Bytes()) != fmt.Sprintf("one-%d", i) {
+				err = fmt.Errorf("got %q", m.Bytes())
+			}
+			return err
+		})
+		time.Sleep(2 * time.Millisecond) // let Recv park
+		require.NoError(t, sA.Pipe().Send(ctx, msg.FromBytes([]byte(fmt.Sprintf("one-%d", i)))))
+		require.NoError(t, testutil.RequireRecv(t, got, 2*time.Second, "message not delivered promptly, round %d", i), "round %d", i)
+	}
+}
+
+// TestReader_BurstDeliveredInOrder: 1000 messages through a small HWM (so
+// the reader repeatedly hits the full-pipe path and the 256-message flush
+// cap) all arrive, in order, to a receiver that sometimes parks.
+func TestReader_BurstDeliveredInOrder(t *testing.T) {
+	t.Parallel()
+	for _, hwm := range []int{8, 0} {
+		t.Run(fmt.Sprintf("hwm=%d", hwm), func(t *testing.T) {
+			t.Parallel()
+			const N = 1000
+			sA, sB := startZmtpPair(t, hwm)
+			ctx := testutil.Ctx(t, 20*time.Second)
+			sendErr := testutil.Async(func() error {
+				for i := range N {
+					if err := sA.Pipe().Send(ctx, msg.FromBytes([]byte(fmt.Sprintf("m%04d", i)))); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+			for i := range N {
+				m, err := sB.Pipe().RecvOr(ctx, nil)
+				require.NoError(t, err, "Recv[%d]", i)
+				require.Equal(t, fmt.Sprintf("m%04d", i), string(m.Bytes()), "order[%d]", i)
+				if i%97 == 0 {
+					time.Sleep(time.Millisecond) // let the pipe fill / the receiver park
+				}
+			}
+			require.NoError(t, <-sendErr)
+		})
+	}
+}
+
+// TestFlushReader_FlushesBeforeUnderlyingRead: a partial frame in the
+// bufio buffer can leave the reader blocked in a conn Read with Buffered()
+// > 0, so the wrapper flushes before every underlying Read.
+func TestFlushReader_FlushesBeforeUnderlyingRead(t *testing.T) {
+	t.Parallel()
+	a, b := pipe.NewPair(8, 8, nil, nil)
+	defer a.Close()
+	defer b.Close()
+	var now atomic.Int64
+	now.Store(42)
+	s := &Session{sessionPipe: a, cfg: Config{Now: now.Load}}
+	idle := make(chan struct{}, 1)
+	b.SetNotify(func() { idle <- struct{}{} })
+	_, ok := b.RecvOrIdle()
+	require.False(t, ok)
+
+	require.True(t, a.TrySendDeferred(msg.FromBytes([]byte("x"))))
+	s.inboundOwed = 1
+	var sawFlush bool
+	r := flushReader{s: s, r: readerFunc(func([]byte) (int, error) {
+		sawFlush = s.inboundOwed == 0
+		return 0, io.EOF
+	})}
+	_, err := r.Read(make([]byte, 1))
+	require.ErrorIs(t, err, io.EOF)
+	require.True(t, sawFlush, "flush must precede the underlying Read")
+	testutil.RequireRecv(t, idle, time.Second, "idle notification not run by the flush")
+	require.EqualValues(t, 42, s.lastInboundNanos.Load(), "inbound clock stamped at the flush")
+}
+
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }

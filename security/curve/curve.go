@@ -28,10 +28,12 @@ package curve
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"math"
+	"slices"
 
 	"github.com/exergy-dev/gozmq/internal/zmqerr"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
@@ -43,28 +45,20 @@ import (
 )
 
 const (
-	cmdHello    = "HELLO"
-	cmdWelcome  = "WELCOME"
-	cmdInitiate = "INITIATE"
-	cmdReady    = "READY"
-	cmdMessage  = "MESSAGE"
-
-	mechName = "CURVE"
-
-	// boxOverhead is the crypto_box Poly1305 tag, in bytes.
-	boxOverhead = box.Overhead
+	mechName  = "CURVE"
+	mechLabel = "curve" // in error text
 
 	// Fixed body sizes for HELLO and WELCOME (the only fixed-size
 	// handshake commands). INITIATE and READY vary with metadata.
-	helloBodySize   = 1 + len(cmdHello) + 2 + 72 + 32 + 8 + 80
-	welcomeBodySize = 1 + len(cmdWelcome) + 16 + 144
+	helloBodySize   = 1 + len(zmtp.CmdHello) + 2 + 72 + 32 + 8 + 80
+	welcomeBodySize = 1 + len(zmtp.CmdWelcome) + 16 + 144
 
 	// Inner fixed sizes inside HELLO / WELCOME / INITIATE.
-	signatureBoxSize = 64 + boxOverhead     // 80 bytes
-	welcomeBoxSize   = 128 + boxOverhead    // 144 bytes
-	cookieInnerSize  = 64 + boxOverhead     // 80 bytes (secretbox cipher)
+	signatureBoxSize = 64 + box.Overhead    // 80 bytes
+	welcomeBoxSize   = 128 + box.Overhead   // 144 bytes
+	cookieInnerSize  = 64 + box.Overhead    // 80 bytes (secretbox cipher)
 	cookieSize       = 16 + cookieInnerSize // 96 bytes (nonce + cipher)
-	vouchBoxSize     = 64 + boxOverhead     // 80 bytes
+	vouchBoxSize     = 64 + box.Overhead    // 80 bytes
 	vouchSize        = 16 + vouchBoxSize    // 96 bytes (nonce + cipher)
 
 	// Protocol version this implementation emits. RFC 26 specifies 1.0.
@@ -74,7 +68,9 @@ const (
 	// Bits of the encrypted MESSAGE flags byte (libzmq curve_mechanism_base
 	// flag_mask_more / flag_mask_command). A frame's MORE and COMMAND state
 	// travel here, inside the box; the outer ZMTP frame carrying a MESSAGE
-	// has neither flag set.
+	// has neither flag set. EncodeFrame/DecodeFrame translate with masks
+	// and a shift, relying on zmtp.FlagMore == innerFlagMore and
+	// zmtp.FlagCommand == innerFlagCommand<<1 (pinned by a test).
 	innerFlagMore    uint8 = 0x01
 	innerFlagCommand uint8 = 0x02
 )
@@ -131,11 +127,11 @@ type curveMech struct {
 	ourShortNonce  uint64
 	peerShortNonce uint64
 
-	// Prefix strings chosen by role for MESSAGE encode/decode. The client
-	// encodes with "CurveZMQMESSAGEC" and decodes with "CurveZMQMESSAGES";
-	// the server is the mirror.
-	encPrefix string
-	decPrefix string
+	// MESSAGE nonce templates chosen by role: prefix with a zero counter.
+	// The client encodes with "CurveZMQMESSAGEC" and decodes with
+	// "CurveZMQMESSAGES"; the server is the mirror.
+	encNonce [24]byte
+	decNonce [24]byte
 
 	state curveState
 
@@ -231,17 +227,16 @@ func newMech(role security.Role, ownSecret, ownPublicHint, peerLongTerm Key, loc
 		ourEphSecret:   ephSec,
 		ourShortNonce:  1,
 		peerShortNonce: 1,
-		state:          stateStart,
 		rand:           r,
 	}
 
 	// Per-role MESSAGE prefix assignment.
 	if role == security.RoleClient {
-		m.encPrefix, m.decPrefix = prefixMessageC, prefixMessageS
-		box.Precompute(&m.hsKey, (*[32]byte)(&m.peerPublic), (*[32]byte)(&m.ourEphSecret))
+		m.encNonce, m.decNonce = shortNonce(prefixMessageC, 0), shortNonce(prefixMessageS, 0)
+		m.hsKey = precompute(&m.peerPublic, &m.ourEphSecret)
 		return m, nil
 	}
-	m.encPrefix, m.decPrefix = prefixMessageS, prefixMessageC
+	m.encNonce, m.decNonce = shortNonce(prefixMessageS, 0), shortNonce(prefixMessageC, 0)
 	// Server-side cookie key is a fresh 32-byte random used only to
 	// secretbox cookies across HELLO → INITIATE. It never leaves the
 	// server. Generate now so any RNG error surfaces during construction,
@@ -276,8 +271,8 @@ func (m *curveMech) NextHandshake(in []byte) (out []byte, done bool, err error) 
 func (m *curveMech) nextClient(in []byte) ([]byte, bool, error) {
 	switch m.state {
 	case stateStart:
-		if in != nil {
-			return nil, false, malformed("client seed step expects nil input")
+		if err := security.RequireNoInput(mechLabel, in, "client seed"); err != nil {
+			return nil, false, err
 		}
 		body, err := m.buildHello()
 		if err != nil {
@@ -287,13 +282,14 @@ func (m *curveMech) nextClient(in []byte) ([]byte, bool, error) {
 		return body, false, nil
 
 	case stateHelloSent:
-		if in == nil {
-			return nil, false, malformed("client expected WELCOME, got nil")
-		}
-		if err := peerError(in); err != nil {
+		if err := security.RequireInput(mechLabel, in, "WELCOME"); err != nil {
 			return nil, false, err
 		}
-		cookie, err := m.parseWelcome(in)
+		welcome, err := security.DecodeReply(in, zmtp.CmdWelcome)
+		if err != nil {
+			return nil, false, err
+		}
+		cookie, err := m.parseWelcome(welcome)
 		if err != nil {
 			return nil, false, err
 		}
@@ -305,13 +301,14 @@ func (m *curveMech) nextClient(in []byte) ([]byte, bool, error) {
 		return body, false, nil
 
 	case stateInitiateSent:
-		if in == nil {
-			return nil, false, malformed("client expected READY, got nil")
-		}
-		if err := peerError(in); err != nil {
+		if err := security.RequireInput(mechLabel, in, "READY"); err != nil {
 			return nil, false, err
 		}
-		if err := m.parseReady(in); err != nil {
+		ready, err := security.DecodeReply(in, zmtp.CmdReady)
+		if err != nil {
+			return nil, false, err
+		}
+		if err := m.parseReady(ready); err != nil {
 			return nil, false, err
 		}
 		m.finishHandshake()
@@ -346,8 +343,8 @@ func (m *curveMech) nextServer(in []byte) ([]byte, bool, error) {
 		return body, false, nil
 
 	case stateWelcomeSent:
-		if in == nil {
-			return nil, false, malformed("server expected INITIATE, got nil")
+		if err := security.RequireInput(mechLabel, in, "INITIATE"); err != nil {
+			return nil, false, err
 		}
 		// parseInitiate may return an outbound ERROR command body alongside
 		// the error (ZAP rejection) — mirror the PLAIN pattern and hand it
@@ -379,20 +376,12 @@ func (m *curveMech) finishHandshake() {
 // buildHello constructs the HELLO command body: [5]"HELLO" + version +
 // padding + C' + short-nonce-counter + signature-box.
 func (m *curveMech) buildHello() ([]byte, error) {
-	counter := m.ourShortNonce
-	m.ourShortNonce++
-
-	// Signature box: 64 zero bytes encrypted with c' + S.
-	sigBox := sealShort(prefixHello, counter, zeros64[:], &m.hsKey)
-
-	body := make([]byte, 0, helloBodySize)
-	body = zmtp.AppendCommandName(body, cmdHello)
+	body := zmtp.AppendCommandName(make([]byte, 0, helloBodySize), zmtp.CmdHello)
 	body = append(body, curveVersionMajor, curveVersionMinor)
 	body = append(body, make([]byte, 72)...)
 	body = append(body, m.ourEphPublic[:]...)
-	body = binary.BigEndian.AppendUint64(body, counter)
-	body = append(body, sigBox...)
-	return body, nil
+	// Signature box: 64 zero bytes encrypted with c' + S.
+	return m.appendShortBox(body, prefixHello, zeros64[:], &m.hsKey), nil
 }
 
 // parseHello validates a HELLO body and stores the client ephemeral public.
@@ -403,10 +392,10 @@ func (m *curveMech) parseHello(body []byte) error {
 	if len(body) != helloBodySize {
 		return malformed("HELLO length %d != %d", len(body), helloBodySize)
 	}
-	if _, err := zmtp.ExpectCommand(body, cmdHello); err != nil {
+	if _, err := zmtp.ExpectCommand(body, zmtp.CmdHello); err != nil {
 		return err
 	}
-	off := 1 + len(cmdHello)
+	off := 1 + len(zmtp.CmdHello)
 	// Version.
 	if body[off] != curveVersionMajor {
 		return fmt.Errorf("gozmq/security/curve: HELLO version %d.%d unsupported: %w", body[off], body[off+1], zmqerr.ErrProtocolVersion)
@@ -420,26 +409,18 @@ func (m *curveMech) parseHello(body []byte) error {
 	if err := validatePeerPublicKey(body[off : off+32]); err != nil {
 		return err
 	}
-	copy(m.peerEphPublic[:], body[off:off+32])
+	m.peerEphPublic = Key(body[off : off+32])
 	off += 32
-	box.Precompute(&m.hsKey, (*[32]byte)(&m.peerEphPublic), (*[32]byte)(&m.ourSecret))
-	box.Precompute(&m.shared, (*[32]byte)(&m.peerEphPublic), (*[32]byte)(&m.ourEphSecret))
-	// Short nonce counter.
-	counter := binary.BigEndian.Uint64(body[off : off+8])
-	off += 8
-	if err := m.requireCounterAdvance(counter, "HELLO"); err != nil {
+	m.hsKey = precompute(&m.peerEphPublic, &m.ourSecret)
+	m.shared = precompute(&m.peerEphPublic, &m.ourEphSecret)
+	// Short nonce counter and signature box.
+	plain, err := m.openShort(prefixHello, "HELLO", body[off:], &m.hsKey)
+	if err != nil {
 		return err
-	}
-	// Signature box.
-	sig := body[off : off+signatureBoxSize]
-	plain, ok := openShort(prefixHello, counter, sig, &m.hsKey)
-	if !ok {
-		return authFailed("HELLO signature box open failed")
 	}
 	if !bytes.Equal(plain, zeros64[:]) {
 		return authFailed("HELLO signature plaintext is not 64 zero bytes")
 	}
-	m.peerShortNonce = counter + 1
 	return nil
 }
 
@@ -460,18 +441,14 @@ func (m *curveMech) buildWelcome() ([]byte, error) {
 		return nil, err
 	}
 	cookieNonce := longNonce(prefixCookie, cookieNonceR[:])
-	cookiePlain := make([]byte, 0, 64)
-	cookiePlain = append(cookiePlain, m.peerEphPublic[:]...)
-	cookiePlain = append(cookiePlain, m.ourEphSecret[:]...)
+	cookiePlain := slices.Concat(m.peerEphPublic[:], m.ourEphSecret[:])
 	cookie := secretbox.Seal(cookieNonceR[:], cookiePlain, &cookieNonce, &m.cookieKey)
 	clear(cookiePlain)
 
 	// Welcome plaintext: S' || cookie (32 + 96 = 128 bytes), boxed under
 	// (C', s).
-	welPlain := make([]byte, 0, 128)
-	welPlain = append(welPlain, m.ourEphPublic[:]...)
-	welPlain = append(welPlain, cookie...)
-	body := zmtp.AppendCommandName(make([]byte, 0, welcomeBodySize), cmdWelcome)
+	welPlain := slices.Concat(m.ourEphPublic[:], cookie)
+	body := zmtp.AppendCommandName(make([]byte, 0, welcomeBodySize), zmtp.CmdWelcome)
 	return sealLong(body, prefixWelcome, welR, welPlain, &m.hsKey), nil
 }
 
@@ -479,13 +456,10 @@ func (m *curveMech) buildWelcome() ([]byte, error) {
 // ephemeral public key S', and returns the 96-byte opaque cookie that the
 // client must echo back in INITIATE.
 func (m *curveMech) parseWelcome(body []byte) ([]byte, error) {
-	if len(body) != welcomeBodySize {
-		return nil, malformed("WELCOME length %d != %d", len(body), welcomeBodySize)
+	if len(body) != welcomeBodySize-1-len(zmtp.CmdWelcome) {
+		return nil, malformed("WELCOME body length %d != %d", len(body), welcomeBodySize-1-len(zmtp.CmdWelcome))
 	}
-	if _, err := zmtp.ExpectCommand(body, cmdWelcome); err != nil {
-		return nil, err
-	}
-	plain, ok := openLong(prefixWelcome, body[1+len(cmdWelcome):], &m.hsKey)
+	plain, ok := openLong(prefixWelcome, body, &m.hsKey)
 	if !ok {
 		return nil, authFailed("WELCOME box open failed")
 	}
@@ -499,8 +473,8 @@ func (m *curveMech) parseWelcome(body []byte) ([]byte, error) {
 	if err := validatePeerPublicKey(plain[:32]); err != nil {
 		return nil, err
 	}
-	copy(m.peerEphPublic[:], plain[:32])
-	box.Precompute(&m.shared, (*[32]byte)(&m.peerEphPublic), (*[32]byte)(&m.ourEphSecret))
+	m.peerEphPublic = Key(plain[:32])
+	m.shared = precompute(&m.peerEphPublic, &m.ourEphSecret)
 	return plain[32:], nil
 }
 
@@ -516,16 +490,12 @@ func (m *curveMech) buildInitiate(cookie []byte) ([]byte, error) {
 	// RFC 26 §2.3 the vouch binds the client's ephemeral key to the
 	// server's LONG-TERM identity, not to its ephemeral key — libzmq
 	// rejects C'||S' as "vouch S' mismatch".
-	vouchPlain := make([]byte, 0, 64)
-	vouchPlain = append(vouchPlain, m.ourEphPublic[:]...)
-	vouchPlain = append(vouchPlain, m.peerPublic[:]...)
-	var vouchKey [32]byte
-	box.Precompute(&vouchKey, (*[32]byte)(&m.peerEphPublic), (*[32]byte)(&m.ourSecret))
+	vouchPlain := slices.Concat(m.ourEphPublic[:], m.peerPublic[:])
+	vouchKey := precompute(&m.peerEphPublic, &m.ourSecret)
 
 	// Initiate box plaintext: C || vouch || metadata.
 	meta := zmtp.EncodeMetadata(m.Metadata())
-	initPlain := make([]byte, 0, 32+vouchSize+len(meta))
-	initPlain = append(initPlain, m.ourPublic[:]...)
+	initPlain := append(make([]byte, 0, 32+vouchSize+len(meta)), m.ourPublic[:]...)
 	vouchR, err := m.random16("vouch")
 	if err != nil {
 		return nil, err
@@ -533,18 +503,10 @@ func (m *curveMech) buildInitiate(cookie []byte) ([]byte, error) {
 	initPlain = sealLong(initPlain, prefixVouch, vouchR, vouchPlain, &vouchKey)
 	initPlain = append(initPlain, meta...)
 
-	// Initiate nonce: "CurveZMQINITIATE" + counter.
-	counter := m.ourShortNonce
-	m.ourShortNonce++
-	initBox := sealShort(prefixInitiate, counter, initPlain, &m.shared)
-
-	// Assemble INITIATE body.
-	body := make([]byte, 0, 1+len(cmdInitiate)+cookieSize+8+len(initBox))
-	body = zmtp.AppendCommandName(body, cmdInitiate)
+	// Assemble INITIATE body: name, cookie, counter, box under "CurveZMQINITIATE" + counter.
+	body := zmtp.AppendCommandName(make([]byte, 0, 1+len(zmtp.CmdInitiate)+cookieSize+8+len(initPlain)+box.Overhead), zmtp.CmdInitiate)
 	body = append(body, cookie...)
-	body = binary.BigEndian.AppendUint64(body, counter)
-	body = append(body, initBox...)
-	return body, nil
+	return m.appendShortBox(body, prefixInitiate, initPlain, &m.shared), nil
 }
 
 // parseInitiate decodes the INITIATE body on the server side, opens the
@@ -557,14 +519,14 @@ func (m *curveMech) buildInitiate(cookie []byte) ([]byte, error) {
 // tearing down (mirroring PLAIN's auth-failure path); it is nil for every
 // other outcome.
 func (m *curveMech) parseInitiate(body []byte) ([]byte, error) {
-	minLen := 1 + len(cmdInitiate) + cookieSize + 8 + boxOverhead + 32 + vouchSize
+	minLen := 1 + len(zmtp.CmdInitiate) + cookieSize + 8 + box.Overhead + 32 + vouchSize
 	if len(body) < minLen {
 		return nil, malformed("INITIATE length %d < min %d", len(body), minLen)
 	}
-	if _, err := zmtp.ExpectCommand(body, cmdInitiate); err != nil {
+	if _, err := zmtp.ExpectCommand(body, zmtp.CmdInitiate); err != nil {
 		return nil, err
 	}
-	off := 1 + len(cmdInitiate)
+	off := 1 + len(zmtp.CmdInitiate)
 
 	// Cookie — we decrypt it using our cookieKey to restore (C', s').
 	cookieNonceR := body[off : off+16]
@@ -584,14 +546,9 @@ func (m *curveMech) parseInitiate(body []byte) ([]byte, error) {
 	// WELCOME; assert equality as a corruption check before trusting the
 	// cookie. The plaintext (which contains s') is wiped as soon as the
 	// comparison is done.
-	var cookieCprime Key
-	var cookieSprime Key
-	copy(cookieCprime[:], cookiePlain[:32])
-	copy(cookieSprime[:], cookiePlain[32:])
+	cprimeOK := Key(cookiePlain[:32]) == m.peerEphPublic
+	sprimeOK := subtle.ConstantTimeCompare(cookiePlain[32:], m.ourEphSecret[:]) == 1
 	clear(cookiePlain)
-	cprimeOK := cookieCprime == m.peerEphPublic
-	sprimeOK := cookieSprime == m.ourEphSecret
-	clear(cookieSprime[:])
 	if !cprimeOK {
 		return nil, authFailed("cookie C' mismatch")
 	}
@@ -599,17 +556,10 @@ func (m *curveMech) parseInitiate(body []byte) ([]byte, error) {
 		return nil, authFailed("cookie s' mismatch")
 	}
 
-	// Short-nonce counter for the initiate box.
-	counter := binary.BigEndian.Uint64(body[off : off+8])
-	off += 8
-	if err := m.requireCounterAdvance(counter, "INITIATE"); err != nil {
+	// Short-nonce counter and initiate box.
+	initPlain, err := m.openShort(prefixInitiate, "INITIATE", body[off:], &m.shared)
+	if err != nil {
 		return nil, err
-	}
-	initCipher := body[off:]
-
-	initPlain, ok := openShort(prefixInitiate, counter, initCipher, &m.shared)
-	if !ok {
-		return nil, authFailed("INITIATE box open failed")
 	}
 	if len(initPlain) < 32+vouchSize {
 		return nil, malformed("INITIATE plaintext too short")
@@ -624,14 +574,12 @@ func (m *curveMech) parseInitiate(body []byte) ([]byte, error) {
 	if err := validatePeerPublicKey(initPlain[:32]); err != nil {
 		return nil, err
 	}
-	var clientLongPub Key
-	copy(clientLongPub[:], initPlain[:32])
+	clientLongPub := Key(initPlain[:32])
 	metaBytes := initPlain[32+vouchSize:]
 
 	// Open the vouch, sealed with c (client long-term secret) for S' (our
 	// ephemeral public): the key is (C, s').
-	var vouchKey [32]byte
-	box.Precompute(&vouchKey, (*[32]byte)(&clientLongPub), (*[32]byte)(&m.ourEphSecret))
+	vouchKey := precompute(&clientLongPub, &m.ourEphSecret)
 	vouchPlain, ok := openLong(prefixVouch, initPlain[32:32+vouchSize], &vouchKey)
 	if !ok {
 		return nil, authFailed("INITIATE vouch open failed")
@@ -642,13 +590,10 @@ func (m *curveMech) parseInitiate(body []byte) ([]byte, error) {
 	// Per RFC 26 §2.3 the vouch plaintext is C'||S — client ephemeral
 	// public followed by server LONG-TERM public (ourPublic here, since
 	// we are the server decoding a client's vouch).
-	var vouchedCprime, vouchedS Key
-	copy(vouchedCprime[:], vouchPlain[:32])
-	copy(vouchedS[:], vouchPlain[32:])
-	if vouchedCprime != m.peerEphPublic {
+	if Key(vouchPlain[:32]) != m.peerEphPublic {
 		return nil, authFailed("vouch C' mismatch")
 	}
-	if vouchedS != m.ourPublic {
+	if Key(vouchPlain[32:]) != m.ourPublic {
 		return nil, authFailed("vouch S mismatch")
 	}
 
@@ -666,7 +611,6 @@ func (m *curveMech) parseInitiate(body []byte) ([]byte, error) {
 		return zmtp.EncodeError("Authentication failure"), fmt.Errorf("gozmq/security/curve: ZAP rejected client key: %w", err)
 	}
 	m.MergePeerMetadata(props)
-	m.peerShortNonce = counter + 1
 	// The per-connection cookie key is no longer needed; drop it
 	// (best-effort). The long-term secret is not wiped: the socket's
 	// configuration keeps its own copy for every later connection.
@@ -678,43 +622,25 @@ func (m *curveMech) parseInitiate(body []byte) ([]byte, error) {
 // [5]"READY" + short-nonce(8) + ready-box(metadata ciphertext).
 func (m *curveMech) buildReady() []byte {
 	meta := zmtp.EncodeMetadata(m.Metadata())
-	counter := m.ourShortNonce
-	m.ourShortNonce++
-	readyBox := sealShort(prefixReady, counter, meta, &m.shared)
-
-	body := make([]byte, 0, 1+len(cmdReady)+8+len(readyBox))
-	body = zmtp.AppendCommandName(body, cmdReady)
-	body = binary.BigEndian.AppendUint64(body, counter)
-	body = append(body, readyBox...)
-	return body
+	body := zmtp.AppendCommandName(make([]byte, 0, 1+len(zmtp.CmdReady)+8+len(meta)+box.Overhead), zmtp.CmdReady)
+	return m.appendShortBox(body, prefixReady, meta, &m.shared)
 }
 
 // parseReady decodes the READY body on the client side and stores the
 // server's metadata.
 func (m *curveMech) parseReady(body []byte) error {
-	minLen := 1 + len(cmdReady) + 8 + boxOverhead
-	if len(body) < minLen {
-		return malformed("READY length %d < min %d", len(body), minLen)
+	if len(body) < 8+box.Overhead {
+		return malformed("READY body length %d < min %d", len(body), 8+box.Overhead)
 	}
-	if _, err := zmtp.ExpectCommand(body, cmdReady); err != nil {
+	plain, err := m.openShort(prefixReady, "READY", body, &m.shared)
+	if err != nil {
 		return err
-	}
-	off := 1 + len(cmdReady)
-	counter := binary.BigEndian.Uint64(body[off : off+8])
-	off += 8
-	if err := m.requireCounterAdvance(counter, "READY"); err != nil {
-		return err
-	}
-	plain, ok := openShort(prefixReady, counter, body[off:], &m.shared)
-	if !ok {
-		return authFailed("READY box open failed")
 	}
 	props, err := zmtp.DecodeMetadata(plain)
 	if err != nil {
 		return err
 	}
 	m.MergePeerMetadata(props)
-	m.peerShortNonce = counter + 1
 	return nil
 }
 
@@ -746,7 +672,7 @@ func (m *curveMech) EncodeFrame(flags uint8, plain []byte) (uint8, []byte, error
 // the wire: the command name, the nonce counter, the inner flags byte and
 // the box tag. The session sizes its frame codec by it so WithMaxMessageSize
 // bounds the plaintext a caller sees, not the ciphertext.
-func (m *curveMech) FrameOverhead() int { return 1 + len(cmdMessage) + 8 + 1 + boxOverhead }
+func (m *curveMech) FrameOverhead() int { return 1 + len(zmtp.CmdMessage) + 8 + 1 + box.Overhead }
 
 // AppendEncodeFrame implements security.FrameAppender: EncodeFrame sealed
 // straight into dst.
@@ -762,9 +688,8 @@ func (m *curveMech) AppendEncodeFrame(dst []byte, flags uint8, plain []byte) ([]
 	if err := checkNonceCounter(m.ourShortNonce, "send"); err != nil {
 		return dst, 0, err
 	}
-	counter := m.ourShortNonce
-	m.ourShortNonce++
-	nonce := shortNonce(m.encPrefix, counter)
+	counter := m.nextCounter()
+	nonce := withCounter(m.encNonce, counter)
 
 	// Box plaintext: 1-byte flags || frame body. The shared key was
 	// precomputed in finishHandshake, so sealing is pure XSalsa20/Poly1305,
@@ -775,17 +700,10 @@ func (m *curveMech) AppendEncodeFrame(dst []byte, flags uint8, plain []byte) ([]
 		m.encScratch = make([]byte, 1+len(plain))
 	}
 	inner := m.encScratch[:1+len(plain)]
-	inner[0] = 0
-	if flags&zmtp.FlagMore != 0 {
-		inner[0] |= innerFlagMore
-	}
-	if flags&zmtp.FlagCommand != 0 {
-		inner[0] |= innerFlagCommand
-	}
+	inner[0] = flags&zmtp.FlagMore | (flags&zmtp.FlagCommand)>>1
 	copy(inner[1:], plain)
 
-	dst = append(dst, byte(len(cmdMessage)))
-	dst = append(dst, cmdMessage...)
+	dst = zmtp.AppendCommandName(dst, zmtp.CmdMessage)
 	dst = binary.BigEndian.AppendUint64(dst, counter)
 	dst = box.SealAfterPrecomputation(dst, inner, &nonce, &m.shared)
 	return dst, flags &^ (zmtp.FlagMore | zmtp.FlagCommand), nil
@@ -797,14 +715,14 @@ func (m *curveMech) DecodeFrame(flags uint8, wire []byte) (uint8, []byte, error)
 	if m.state != stateDone {
 		return 0, nil, fmt.Errorf("gozmq/security/curve: DecodeFrame before handshake: %w", zmqerr.ErrFSMViolation)
 	}
-	minLen := 1 + len(cmdMessage) + 8 + boxOverhead + 1
+	minLen := 1 + len(zmtp.CmdMessage) + 8 + box.Overhead + 1
 	if len(wire) < minLen {
 		return 0, nil, malformed("MESSAGE length %d < min %d", len(wire), minLen)
 	}
-	if !zmtp.HasCommandName(wire, cmdMessage) {
+	if !zmtp.HasCommandName(wire, zmtp.CmdMessage) {
 		return 0, nil, malformed("not a MESSAGE command")
 	}
-	off := 1 + len(cmdMessage)
+	off := 1 + len(zmtp.CmdMessage)
 	counter := binary.BigEndian.Uint64(wire[off : off+8])
 	off += 8
 	// Guard against peer-side nonce wrap. If the peer transmits
@@ -821,7 +739,7 @@ func (m *curveMech) DecodeFrame(flags uint8, wire []byte) (uint8, []byte, error)
 	if err := m.requireCounterAdvance(counter, "MESSAGE"); err != nil {
 		return 0, nil, err
 	}
-	nonce := shortNonce(m.decPrefix, counter)
+	nonce := withCounter(m.decNonce, counter)
 	plain, ok := box.OpenAfterPrecomputation(nil, wire[off:], &nonce, &m.shared)
 	if !ok {
 		return 0, nil, malformed("MESSAGE box open failed")
@@ -841,31 +759,51 @@ func (m *curveMech) DecodeFrame(flags uint8, wire []byte) (uint8, []byte, error)
 	// the outer flags of a MESSAGE.
 	// plain is a fresh slice produced by box.Open; slicing it (rather than
 	// make+copy) is safe — the backing array has no other referents.
-	var out uint8
-	if inner&innerFlagMore != 0 {
-		out |= zmtp.FlagMore
-	}
-	if inner&innerFlagCommand != 0 {
-		out |= zmtp.FlagCommand
-	}
 	m.peerShortNonce = counter + 1
-	return out, plain[1:], nil
+	return inner&innerFlagMore | (inner&innerFlagCommand)<<1, plain[1:], nil
 }
 
 // zeros64 is the HELLO signature plaintext.
 var zeros64 [64]byte
 
-// sealShort boxes plain under the short nonce (prefix, counter) with the
-// precomputed key. The nonce shapes are defined in nonce.go.
-func sealShort(prefix string, counter uint64, plain []byte, key *[32]byte) []byte {
-	nonce := shortNonce(prefix, counter)
-	return box.SealAfterPrecomputation(nil, plain, &nonce, key)
+// precompute is box.Precompute for the key pair (pub, sec).
+func precompute(pub, sec *Key) (k [32]byte) {
+	box.Precompute(&k, (*[32]byte)(pub), (*[32]byte)(sec))
+	return k
 }
 
-// openShort is the inverse of sealShort. ok is false on MAC failure.
-func openShort(prefix string, counter uint64, cipher []byte, key *[32]byte) ([]byte, bool) {
+// nextCounter returns the next outbound short-nonce counter and advances it.
+func (m *curveMech) nextCounter() uint64 {
+	c := m.ourShortNonce
+	m.ourShortNonce++
+	return c
+}
+
+// appendShortBox appends counter(8) || box(plain) to dst, the box under the
+// short nonce (prefix, counter) with the next outbound counter and the
+// precomputed key. The nonce shapes are defined in nonce.go.
+func (m *curveMech) appendShortBox(dst []byte, prefix string, plain []byte, key *[32]byte) []byte {
+	counter := m.nextCounter()
 	nonce := shortNonce(prefix, counter)
-	return box.OpenAfterPrecomputation(nil, cipher, &nonce, key)
+	return box.SealAfterPrecomputation(binary.BigEndian.AppendUint64(dst, counter), plain, &nonce, key)
+}
+
+// openShort is the inverse of appendShortBox for a handshake command: wire is
+// counter(8) || box. It rejects a counter that does not advance the peer's,
+// opens the box and moves peerShortNonce past the counter. frame names the
+// command in errors.
+func (m *curveMech) openShort(prefix, frame string, wire []byte, key *[32]byte) ([]byte, error) {
+	counter := binary.BigEndian.Uint64(wire)
+	if err := m.requireCounterAdvance(counter, frame); err != nil {
+		return nil, err
+	}
+	nonce := shortNonce(prefix, counter)
+	plain, ok := box.OpenAfterPrecomputation(nil, wire[8:], &nonce, key)
+	if !ok {
+		return nil, authFailed("%s box open failed", frame)
+	}
+	m.peerShortNonce = counter + 1
+	return plain, nil
 }
 
 // random16 draws the random half of a long nonce; what names it in the
@@ -896,25 +834,11 @@ func openLong(prefix string, wire []byte, key *[32]byte) ([]byte, bool) {
 // malformed and authFailed build this package's errors wrapping
 // zmqerr.ErrMalformedFrame and zmqerr.ErrAuthFailed.
 func malformed(format string, args ...any) error {
-	return fmt.Errorf("gozmq/security/curve: "+format+": %w", append(args, zmqerr.ErrMalformedFrame)...)
+	return security.Malformed(mechLabel, format, args...)
 }
 
 func authFailed(format string, args ...any) error {
-	return fmt.Errorf("gozmq/security/curve: "+format+": %w", append(args, zmqerr.ErrAuthFailed)...)
-}
-
-// peerError returns an error wrapping ErrAuthFailed when body is the ERROR
-// a server sends instead of WELCOME or READY to reject the handshake, and
-// nil for any other command. An ERROR with a truncated reason is malformed.
-func peerError(body []byte) error {
-	reason, isErr, err := security.DecodeError(body)
-	if !isErr {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	return authFailed("server rejected handshake: %q", reason)
+	return security.AuthFailed(mechLabel, format, args...)
 }
 
 // checkNonceCounter returns an error wrapping zmqerr.ErrNonceExhausted
@@ -992,7 +916,5 @@ func derivePublic(secret Key) (Key, error) {
 	if err != nil {
 		return Key{}, err
 	}
-	var pub Key
-	copy(pub[:], pubBytes)
-	return pub, nil
+	return Key(pubBytes), nil
 }

@@ -209,18 +209,13 @@ func (r *Reconnector) sleep(base time.Duration) bool {
 	if r.ctx.Err() != nil {
 		return false
 	}
-	d := applyJitter(base, r.cfg.JitterFraction)
-	if d <= 0 {
-		return r.ctx.Err() == nil
+	if d := applyJitter(base, r.cfg.JitterFraction); d > 0 {
+		select {
+		case <-time.After(d):
+		case <-r.ctx.Done():
+		}
 	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-t.C:
-		return r.ctx.Err() == nil
-	case <-r.ctx.Done():
-		return false
-	}
+	return r.ctx.Err() == nil
 }
 
 // nextBackoff doubles base, capped at maxCap if maxCap > 0.

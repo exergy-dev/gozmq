@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/exergy-dev/gozmq"
+	"github.com/exergy-dev/gozmq/internal/testutil"
 	"github.com/exergy-dev/gozmq/typed"
 )
 
@@ -86,22 +87,12 @@ func TestTopicMux_DispatchesHeterogeneousTypes(t *testing.T) {
 
 	loopCtx, loopCancel := context.WithCancel(callCtx)
 	defer loopCancel()
-	runErr := make(chan error, 1)
-	go func() { runErr <- router.Run(loopCtx) }()
+	runErr := testutil.Async(func() error { return router.Run(loopCtx) })
 
-	select {
-	case <-done:
-		loopCancel()
-	case <-time.After(3 * time.Second):
-		require.Fail(t, "did not receive all expected messages")
-	}
-
-	select {
-	case err := <-runErr:
-		require.ErrorIs(t, err, context.Canceled, "Run return error")
-	case <-time.After(3 * time.Second):
-		require.Fail(t, "Run did not return after cancel")
-	}
+	testutil.RequireRecv(t, done, 3*time.Second, "did not receive all expected messages")
+	loopCancel()
+	require.ErrorIs(t, testutil.RequireRecv(t, runErr, 3*time.Second, "Run did not return after cancel"),
+		context.Canceled, "Run return error")
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -153,14 +144,9 @@ func TestTopicMux_LongestPrefixWins(t *testing.T) {
 
 	loopCtx, loopCancel := context.WithCancel(callCtx)
 	defer loopCancel()
-	runErr := make(chan error, 1)
-	go func() { runErr <- router.Run(loopCtx) }()
+	runErr := testutil.Async(func() error { return router.Run(loopCtx) })
 
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		require.Fail(t, "no dispatch")
-	}
+	testutil.RequireRecv(t, done, 3*time.Second, "no dispatch")
 	loopCancel()
 	<-runErr
 
@@ -182,8 +168,7 @@ func TestTopicMux_RegisterAfterRunReturnsError(t *testing.T) {
 
 	runCtx, runCancel := context.WithCancel(context.Background())
 	defer runCancel()
-	runErr := make(chan error, 1)
-	go func() { runErr <- router.Run(runCtx) }()
+	runErr := testutil.Async(func() error { return router.Run(runCtx) })
 
 	// Run latches started asynchronously; wait for it rather than sleep.
 	require.Eventually(t, func() bool {
@@ -259,8 +244,7 @@ func TestTopicMux_ConcurrentRunRejected(t *testing.T) {
 	router := typed.NewTopicMux(subSock, typed.JSONCodec{})
 	runCtx, runCancel := context.WithCancel(context.Background())
 	defer runCancel()
-	runErr := make(chan error, 1)
-	go func() { runErr <- router.Run(runCtx) }()
+	runErr := testutil.Async(func() error { return router.Run(runCtx) })
 	require.Eventually(t, func() bool {
 		return errors.Is(router.Unregister("x."), typed.ErrTopicMuxRunning)
 	}, 5*time.Second, time.Millisecond, "first Run never started")
@@ -317,8 +301,7 @@ func TestTopicMux_RegisterRacesRun(t *testing.T) {
 	}()
 	loopCtx, loopCancel := context.WithCancel(callCtx)
 	defer loopCancel()
-	runErr := make(chan error, 1)
-	go func() { runErr <- router.Run(loopCtx) }()
+	runErr := testutil.Async(func() error { return router.Run(loopCtx) })
 
 	<-regDone
 	require.Eventually(t, func() bool { return got.Load() == n }, 5*time.Second, time.Millisecond)

@@ -30,7 +30,7 @@ func TestRouter_DetachReleasesPipes(t *testing.T) {
 	var ends []weak.Pointer[pipe.End]
 	churn := func() {
 		for i := range n {
-			a, b := pipe.NewPair(1000, 1000, pipe.PeerInfo{}, pipe.PeerInfo{})
+			a, b := pipe.NewPair(1000, 1000, nil, nil)
 			require.NoError(t, eng.AttachPipe(a))
 			require.NoError(t, b.Send(ctx, msg.FromBytes([]byte("x"))))
 			_, err := eng.Recv(ctx)
@@ -45,7 +45,7 @@ func TestRouter_DetachReleasesPipes(t *testing.T) {
 	}
 	churn() // each peer is the sole one: single-pipe fast path
 
-	anchor, anchorPeer := pipe.NewPair(8, 8, pipe.PeerInfo{}, pipe.PeerInfo{})
+	anchor, anchorPeer := pipe.NewPair(8, 8, nil, nil)
 	defer closePipes(anchor, anchorPeer)
 	require.NoError(t, eng.AttachPipe(anchor))
 	churn() // multi-pipe walk

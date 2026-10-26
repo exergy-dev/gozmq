@@ -21,13 +21,13 @@ func TestPush_SendReachesPeer(t *testing.T) {
 	eng := socket.NewPushEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(1, 1, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
 	ctx := testutil.Ctx(t)
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("work"))), "send")
-	got, err := b.Recv(ctx)
+	got, err := b.RecvOr(ctx, nil)
 	require.NoError(t, err, "peer recv")
 	require.Equal(t, "work", string(got.Bytes()))
 }

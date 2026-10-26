@@ -67,9 +67,8 @@ const (
 // Recv unblocks on the sticky pipe's Closed() signal or on the engine's
 // closeCh.
 type reqEngine struct {
-	mu       sync.Mutex
-	closed   bool
-	closeCh  chan struct{}
+	mu sync.Mutex
+	lifecycle
 	attached broadcast // woken on attach
 	state    reqState
 	ring     pipeRing
@@ -87,14 +86,16 @@ var reqDelimiter = [][]byte{{}}
 
 // NewReqEngine returns a new REQ socket engine.
 func NewReqEngine() Engine {
-	return &reqEngine{closeCh: make(chan struct{}), gates: newGates()}
+	e := &reqEngine{gates: newGates()}
+	e.init()
+	return e
 }
 
 func (e *reqEngine) AttachPipe(p *pipe.End) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
-		return fmt.Errorf("req attach: %w", zmqerr.ErrSocketClosed)
+		return errClosed("req attach")
 	}
 	if !e.ring.add(p) {
 		return nil
@@ -129,7 +130,7 @@ func (e *reqEngine) Send(ctx context.Context, m *msg.Msg) error {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
-		return fmt.Errorf("req send: %w", zmqerr.ErrSocketClosed)
+		return errClosed("req send")
 	}
 	if e.state != reqStateCanSend {
 		state := e.state
@@ -181,19 +182,17 @@ func (e *reqEngine) send(ctx context.Context, m *msg.Msg) error {
 		e.mu.Lock()
 		if e.closed {
 			e.mu.Unlock()
-			return fmt.Errorf("req send: %w", zmqerr.ErrSocketClosed)
+			return errClosed("req send")
 		}
 		if e.ring.len() == 0 {
 			notify := e.attached.wait()
-			closeCh := e.closeCh
 			e.mu.Unlock()
-			if err := awaitPeer(ctx, notify, closeCh); err != nil {
+			if err := awaitPeer(ctx, notify, e.closeCh); err != nil {
 				return fmt.Errorf("req send: %w", err)
 			}
 			continue
 		}
 		idx, p := e.ring.current()
-		closeCh := e.closeCh
 		e.mu.Unlock()
 
 		// Discard anything still buffered on the chosen pipe: it predates
@@ -212,7 +211,7 @@ func (e *reqEngine) send(ctx context.Context, m *msg.Msg) error {
 		// Block at HWM, racing engine close and the caller's ctx — a bare
 		// pipe Send here would violate the Close-unblocks-pending-Send
 		// contract.
-		switch err := p.SendOr(ctx, wire, closeCh); {
+		switch err := p.SendOr(ctx, wire, e.closeCh); {
 		case err == nil:
 			queued = true
 		case errors.Is(err, io.ErrClosedPipe):
@@ -220,7 +219,7 @@ func (e *reqEngine) send(ctx context.Context, m *msg.Msg) error {
 			_ = e.DetachPipe(p)
 			continue
 		case errors.Is(err, pipe.ErrAborted):
-			return fmt.Errorf("req send: %w", zmqerr.ErrSocketClosed)
+			return errClosed("req send")
 		default:
 			return err
 		}
@@ -230,7 +229,7 @@ func (e *reqEngine) send(ctx context.Context, m *msg.Msg) error {
 			// Close won this race. The peer received the request; the
 			// caller will see ErrSocketClosed on the subsequent Recv.
 			e.mu.Unlock()
-			return fmt.Errorf("req send: %w", zmqerr.ErrSocketClosed)
+			return errClosed("req send")
 		}
 		// Advance cursor past p if it's still at idx.
 		e.ring.advancePast(idx, p)
@@ -254,7 +253,7 @@ func (e *reqEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
-		return nil, fmt.Errorf("req recv: %w", zmqerr.ErrSocketClosed)
+		return nil, errClosed("req recv")
 	}
 	if e.state != reqStateCanRecv {
 		state := e.state
@@ -263,10 +262,9 @@ func (e *reqEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 	}
 	e.state = reqStateReceiving
 	sticky := e.sticky
-	closeCh := e.closeCh
 	e.mu.Unlock()
 
-	m, err := e.recvSticky(ctx, sticky, closeCh)
+	m, err := e.recvSticky(ctx, sticky)
 	if err != nil {
 		// A context error leaves the FSM in canRecv with the sticky pipe
 		// intact: the reply is still in flight and a retried Recv must
@@ -307,22 +305,22 @@ func (e *reqEngine) Recv(ctx context.Context) (*msg.Msg, error) {
 // allocates no per-call context or goroutine — the pipe's receive channel
 // is selected on inline. The returned error is already wrapped with the
 // REQ recv prefix where appropriate.
-func (e *reqEngine) recvSticky(ctx context.Context, sticky *pipe.End, closeCh <-chan struct{}) (*msg.Msg, error) {
+func (e *reqEngine) recvSticky(ctx context.Context, sticky *pipe.End) (*msg.Msg, error) {
 	if sticky == nil {
 		// Sticky peer detached between Send and Recv. Treat as peer gone.
 		select {
-		case <-closeCh:
-			return nil, fmt.Errorf("req recv: %w", zmqerr.ErrSocketClosed)
+		case <-e.closeCh:
+			return nil, errClosed("req recv")
 		default:
 		}
 		return nil, fmt.Errorf("req recv: peer gone: %w", zmqerr.ErrSocketClosed)
 	}
 
-	switch m, err := sticky.RecvOr(ctx, closeCh); {
+	switch m, err := sticky.RecvOr(ctx, e.closeCh); {
 	case err == nil:
 		return m, nil
 	case errors.Is(err, pipe.ErrAborted):
-		return nil, fmt.Errorf("req recv: %w", zmqerr.ErrSocketClosed)
+		return nil, errClosed("req recv")
 	case errors.Is(err, io.EOF):
 		// Peer gone, and any reply it sent before closing was delivered.
 		return nil, fmt.Errorf("req recv: peer gone: %w", zmqerr.ErrSocketClosed)
@@ -364,22 +362,17 @@ func stripReqDelimiter(m *msg.Msg) (*msg.Msg, error) {
 // messages queued in the attached pipes.
 func (e *reqEngine) Metrics() Metrics {
 	e.mu.Lock()
-	var depth int
-	for _, p := range e.ring.pipes {
-		depth += p.Len()
-	}
+	depth := sumLen(e.ring.pipes...)
 	e.mu.Unlock()
-	return e.snapshot(0, uint64(depth))
+	return e.snapshot(uint64(depth))
 }
 
 func (e *reqEngine) Close() error {
 	e.mu.Lock()
-	if e.closed {
+	if !e.markClosed() {
 		e.mu.Unlock()
 		return nil
 	}
-	e.closed = true
-	close(e.closeCh)
 	e.ring.pipes = nil
 	e.sticky = nil
 	e.mu.Unlock()

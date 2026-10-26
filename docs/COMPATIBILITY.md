@@ -219,7 +219,7 @@ context deadline.
   returned synchronously and a later disconnect is final. Reconnect
   supervision is the application's job.
 - ZMTP-layer options (security, heartbeat, identity, handshake timeout, ZAP
-  domain) and `WithRecvBufferPool` are **rejected** by `NewSocket` rather
+  domain) and an explicit `WithRecvBufferPool(true)` are **rejected** by `NewSocket` rather
   than silently ignored — accepting `WithPlainAuth` on a raw-TCP listener
   that authenticates nobody would be a security hazard.
 - STREAM cannot use `inproc://`.
@@ -314,11 +314,12 @@ gozmq itself always emits well-formed ERROR commands.
 
 ### Message ownership
 
-By default `RecvMsg` returns frames in ordinary Go memory owned by the caller;
-nothing needs releasing, so there is no counterpart to `zmq_msg_close`. With
-the opt-in `WithRecvBufferPool(true)`, frames over 4 KiB on NULL/PLAIN
-sessions are received into pooled buffers and the message is lent: the
-receiver calls `Release` when done, and the frames are valid until the last
+`RecvMsg` returns frames of up to 4 KiB in ordinary Go memory owned by the
+caller; nothing needs releasing, so there is no counterpart to
+`zmq_msg_close`. By default (opt out with `WithRecvBufferPool(false)`),
+frames over 4 KiB on NULL/PLAIN sessions are received into pooled buffers and
+the message is lent: forgetting `Release` is safe, but the
+receiver should call `Release` when done, and the frames are valid until the last
 reference is released. `SendMsg` holds its own reference, so forwarding and
 then releasing is safe. `RecvBytes` avoids the bookkeeping entirely for
 single-frame payloads.

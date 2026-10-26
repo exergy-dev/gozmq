@@ -30,7 +30,7 @@ import (
 // safe for concurrent use; a single Codec may be shared across multiple
 // wrappers and called from multiple goroutines. Unmarshal must not keep a
 // reference to data: the wrappers release the received message, whose
-// frames may be pooled memory (gozmq.WithRecvBufferPool), as soon as it
+// frames are pooled memory by default (gozmq.WithRecvBufferPool), as soon as it
 // returns. encoding/json copies what it keeps.
 type Codec interface {
 	Marshal(v any) ([]byte, error)
@@ -42,63 +42,97 @@ type Codec interface {
 // 2 frames for Publisher/Subscriber).
 var ErrFrameCount = errors.New("typed: unexpected frame count")
 
-// Sender wraps a *gozmq.Socket to send values of type T as single-frame
-// messages encoded by Codec.
-type Sender[T any] struct {
+// wrapper is the socket and codec every wrapper type holds.
+type wrapper struct {
 	sock  *gozmq.Socket
 	codec Codec
 }
+
+// marshal encodes v with the wrapper's codec.
+func (w wrapper) marshal(v any) ([]byte, error) {
+	b, err := w.codec.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("typed: marshal: %w", err)
+	}
+	return b, nil
+}
+
+// unmarshal decodes b into a T, returning the zero T on error.
+func unmarshal[T any](c Codec, b []byte) (T, error) {
+	var v T
+	if err := c.Unmarshal(b, &v); err != nil {
+		var zero T
+		return zero, err
+	}
+	return v, nil
+}
+
+// recvDecode receives one message from sock, decodes it and releases it.
+func recvDecode[V any](ctx context.Context, sock *gozmq.Socket, decode func(*gozmq.Msg) (V, error)) (V, error) {
+	m, err := sock.RecvMsg(ctx)
+	if err != nil {
+		var zero V
+		return zero, err
+	}
+	defer m.Release()
+	return decode(m)
+}
+
+// topicPayload splits a [topic, payload] message, wrapping ErrDecode and
+// ErrFrameCount when it has any other shape.
+func topicPayload(m *gozmq.Msg) (topic, payload []byte, err error) {
+	frames := m.Frames()
+	if len(frames) != 2 {
+		return nil, nil, fmt.Errorf("%w: expected [topic, payload], got %d frames: %w", ErrDecode, len(frames), ErrFrameCount)
+	}
+	return frames[0], frames[1], nil
+}
+
+// Sender wraps a *gozmq.Socket to send values of type T as single-frame
+// messages encoded by Codec.
+type Sender[T any] struct{ wrapper }
 
 // NewSender returns a Sender bound to sock. sock must be a send-capable
 // single-frame socket (PUSH, REQ, REP, DEALER, PAIR); ROUTER needs the
 // identity envelope and is not supported.
 func NewSender[T any](sock *gozmq.Socket, codec Codec) *Sender[T] {
-	return &Sender[T]{sock: sock, codec: codec}
+	return &Sender[T]{wrapper{sock, codec}}
 }
 
 // Send marshals v and transmits it as a single-frame message.
 func (s *Sender[T]) Send(ctx context.Context, v T) error {
-	b, err := s.codec.Marshal(v)
+	b, err := s.marshal(v)
 	if err != nil {
-		return fmt.Errorf("typed: marshal: %w", err)
+		return err
 	}
 	return s.sock.SendMsg(ctx, gozmq.NewMsgFromBytes(b))
 }
 
 // Receiver wraps a *gozmq.Socket to receive single-frame messages and
 // decode them into a value of type T via Codec.
-type Receiver[T any] struct {
-	sock  *gozmq.Socket
-	codec Codec
-}
+type Receiver[T any] struct{ wrapper }
 
 // NewReceiver returns a Receiver bound to sock.
 func NewReceiver[T any](sock *gozmq.Socket, codec Codec) *Receiver[T] {
-	return &Receiver[T]{sock: sock, codec: codec}
+	return &Receiver[T]{wrapper{sock, codec}}
 }
 
 // Recv blocks until a single-frame message arrives or ctx cancels, then
 // unmarshals the payload into a T. Frame-count and Codec failures wrap
 // ErrDecode.
 func (r *Receiver[T]) Recv(ctx context.Context) (T, error) {
-	m, err := r.sock.RecvMsg(ctx)
-	if err != nil {
-		var zero T
-		return zero, err
-	}
-	defer m.Release()
-	return r.decode(m)
+	return recvDecode(ctx, r.sock, r.decode)
 }
 
 // decode turns a single-frame message into a T; shared by Recv and Handle.
 func (r *Receiver[T]) decode(m *gozmq.Msg) (T, error) {
-	var v T
 	if m.NumFrames() != 1 {
-		return v, fmt.Errorf("%w: expected 1 frame, got %d: %w", ErrDecode, m.NumFrames(), ErrFrameCount)
-	}
-	if err := r.codec.Unmarshal(m.Bytes(), &v); err != nil {
 		var zero T
-		return zero, fmt.Errorf("%w: %w", ErrDecode, err)
+		return zero, fmt.Errorf("%w: expected 1 frame, got %d: %w", ErrDecode, m.NumFrames(), ErrFrameCount)
+	}
+	v, err := unmarshal[T](r.codec, m.Bytes())
+	if err != nil {
+		return v, fmt.Errorf("%w: %w", ErrDecode, err)
 	}
 	return v, nil
 }
@@ -111,38 +145,32 @@ type Message[T any] struct {
 
 // Publisher wraps a PUB/XPUB socket to send values of type T on a named
 // topic. The wire format is a two-frame message: [topic, payload].
-type Publisher[T any] struct {
-	sock  *gozmq.Socket
-	codec Codec
-}
+type Publisher[T any] struct{ wrapper }
 
 // NewPublisher returns a Publisher bound to sock.
 func NewPublisher[T any](sock *gozmq.Socket, codec Codec) *Publisher[T] {
-	return &Publisher[T]{sock: sock, codec: codec}
+	return &Publisher[T]{wrapper{sock, codec}}
 }
 
 // Send marshals v and transmits it as [topic, payload].
 func (p *Publisher[T]) Send(ctx context.Context, topic string, v T) error {
-	b, err := p.codec.Marshal(v)
+	b, err := p.marshal(v)
 	if err != nil {
-		return fmt.Errorf("typed: marshal: %w", err)
+		return err
 	}
 	return p.sock.SendMsg(ctx, gozmq.NewMsgFromFrames([]byte(topic), b))
 }
 
 // Subscriber wraps a SUB/XSUB socket to receive two-frame [topic, payload]
 // messages and decode the payload into a value of type T.
-type Subscriber[T any] struct {
-	sock  *gozmq.Socket
-	codec Codec
-}
+type Subscriber[T any] struct{ wrapper }
 
 // NewSubscriber returns a Subscriber bound to sock. The caller is still
 // responsible for configuring topic filters via Subscribe (or via
 // gozmq.WithSubscribe when constructing sock) — an unfiltered SUB socket
 // receives nothing.
 func NewSubscriber[T any](sock *gozmq.Socket, codec Codec) *Subscriber[T] {
-	return &Subscriber[T]{sock: sock, codec: codec}
+	return &Subscriber[T]{wrapper{sock, codec}}
 }
 
 // Subscribe adds topic as a prefix filter on the underlying SUB socket.
@@ -160,26 +188,21 @@ func (s *Subscriber[T]) Unsubscribe(topic string) error {
 // then unmarshals the payload and returns it alongside the topic.
 // Frame-count and Codec failures wrap ErrDecode.
 func (s *Subscriber[T]) Recv(ctx context.Context) (Message[T], error) {
-	m, err := s.sock.RecvMsg(ctx)
-	if err != nil {
-		return Message[T]{}, err
-	}
-	defer m.Release()
-	return s.decode(m)
+	return recvDecode(ctx, s.sock, s.decode)
 }
 
 // decode turns a [topic, payload] message into a Message[T]; shared by
 // Recv and Handle.
 func (s *Subscriber[T]) decode(m *gozmq.Msg) (Message[T], error) {
-	frames := m.Frames()
-	if len(frames) != 2 {
-		return Message[T]{}, fmt.Errorf("%w: expected [topic, payload], got %d frames: %w", ErrDecode, len(frames), ErrFrameCount)
+	topic, payload, err := topicPayload(m)
+	if err != nil {
+		return Message[T]{}, err
 	}
-	var v T
-	if err := s.codec.Unmarshal(frames[1], &v); err != nil {
+	v, err := unmarshal[T](s.codec, payload)
+	if err != nil {
 		return Message[T]{}, fmt.Errorf("%w: %w", ErrDecode, err)
 	}
-	return Message[T]{Topic: string(frames[0]), Value: v}, nil
+	return Message[T]{Topic: string(topic), Value: v}, nil
 }
 
 // Option configures a Handle invocation or TopicMux.Run invocation.

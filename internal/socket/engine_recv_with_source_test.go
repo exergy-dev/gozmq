@@ -20,12 +20,12 @@ func TestFairQueue_RecvWithSource(t *testing.T) {
 	defer fq.Close()
 
 	aEng, aPeer := pipe.NewPair(4, 4,
-		pipe.PeerInfo{Identity: []byte("peerA")},
-		pipe.PeerInfo{},
+		[]byte("peerA"),
+		nil,
 	)
 	bEng, bPeer := pipe.NewPair(4, 4,
-		pipe.PeerInfo{Identity: []byte("peerB")},
-		pipe.PeerInfo{},
+		[]byte("peerB"),
+		nil,
 	)
 	defer closePipes(aEng, aPeer, bEng, bPeer)
 

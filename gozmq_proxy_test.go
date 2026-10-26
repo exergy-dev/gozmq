@@ -19,8 +19,7 @@ import (
 func startProxy(t *testing.T, frontend, backend, capture *gozmq.Socket) (stop func()) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- gozmq.Proxy(ctx, frontend, backend, capture) }()
+	done := testutil.Async(func() error { return gozmq.Proxy(ctx, frontend, backend, capture) })
 
 	var once sync.Once
 	stop = func() {
@@ -299,19 +298,14 @@ func TestProxyStopsCleanlyOnSocketClose(t *testing.T) {
 	defer func() { _ = back.Close() }()
 	require.NoError(t, back.Bind("inproc://proxy-close-back"))
 
-	done := make(chan error, 1)
-	go func() { done <- gozmq.Proxy(context.Background(), front, back, nil) }()
+	done := testutil.Async(func() error { return gozmq.Proxy(context.Background(), front, back, nil) })
 
 	// Give both directions time to park in Recv before pulling the rug.
 	time.Sleep(100 * time.Millisecond)
 	require.NoError(t, front.Close())
 
-	select {
-	case err := <-done:
-		require.NoError(t, err, "socket close should be a clean proxy stop")
-	case <-time.After(5 * time.Second):
-		t.Fatal("Proxy did not return after the frontend socket was closed")
-	}
+	err = testutil.RequireRecv(t, done, 5*time.Second, "Proxy did not return after the frontend socket was closed")
+	require.NoError(t, err, "socket close should be a clean proxy stop")
 }
 
 // A capture socket that blocks forever (a PUSH with no peer) must not wedge
@@ -326,8 +320,7 @@ func TestProxyCaptureBlockedDoesNotHangShutdown(t *testing.T) {
 
 	pctx, pcancel := context.WithCancel(context.Background())
 	defer pcancel()
-	done := make(chan error, 1)
-	go func() { done <- gozmq.Proxy(pctx, front, back, capture) }()
+	done := testutil.Async(func() error { return gozmq.Proxy(pctx, front, back, capture) })
 
 	ctx := testutil.Ctx(t)
 	require.NoError(t, feeder.SendMsg(ctx, gozmq.NewMsgFromBytes([]byte("x"))))

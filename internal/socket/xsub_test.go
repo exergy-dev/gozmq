@@ -22,17 +22,17 @@ func TestXSub_SendSubscribeViaMessage(t *testing.T) {
 	eng := socket.NewXSubEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 	ctx := testutil.Ctx(t)
 
 	require.NoError(t, eng.Send(ctx, subscribeMsg(true, []byte("topic"))), "xsub send")
 	// Peer should receive the synthetic SUBSCRIBE forwarded by XSUB.
-	m, err := b.Recv(ctx)
+	m, err := b.RecvOr(ctx, nil)
 	require.NoError(t, err, "peer recv")
 	body := m.Frames()[0]
-	require.Equal(t, socket.SubscribeByte, body[0])
+	require.Equal(t, byte(0x01), body[0])
 	require.Equal(t, "topic", string(body[1:]))
 
 	// Now peer sends a matching data message; Recv surfaces it.
@@ -52,7 +52,7 @@ func TestXSub_SendDuplicateSubscribeForwardsTwice(t *testing.T) {
 	eng := socket.NewXSubEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 	ctx := testutil.Ctx(t)
@@ -61,10 +61,10 @@ func TestXSub_SendDuplicateSubscribeForwardsTwice(t *testing.T) {
 	require.NoError(t, eng.Send(ctx, sub), "xsub send #1")
 	require.NoError(t, eng.Send(ctx, sub), "xsub send #2")
 	for i := 0; i < 2; i++ {
-		m, err := b.Recv(ctx)
+		m, err := b.RecvOr(ctx, nil)
 		require.NoError(t, err, "peer recv #%d", i+1)
 		body := m.Frames()[0]
-		require.Equal(t, socket.SubscribeByte, body[0])
+		require.Equal(t, byte(0x01), body[0])
 		require.Equal(t, "topic", string(body[1:]))
 	}
 }
@@ -87,7 +87,7 @@ func TestXSub_RecvFiltersByLocalSubscription(t *testing.T) {
 	eng := socket.NewXSubEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -96,7 +96,7 @@ func TestXSub_RecvFiltersByLocalSubscription(t *testing.T) {
 	require.NoError(t, eng.Send(ctx, subscribeMsg(true, []byte("ok"))), "xsub subscribe")
 	// Drain the forwarded subscription so it doesn't collide with data.
 	drainCtx, dc := context.WithTimeout(ctx, 100*time.Millisecond)
-	_, _ = b.Recv(drainCtx)
+	_, _ = b.RecvOr(drainCtx, nil)
 	dc()
 
 	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte("bad"), []byte("x"))), "peer send bad")

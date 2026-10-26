@@ -21,7 +21,7 @@ func TestRep_StripsEnvelopeOnRecv(t *testing.T) {
 	eng := socket.NewRepEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -43,7 +43,7 @@ func TestRep_ReplayEnvelopeOnSend(t *testing.T) {
 	eng := socket.NewRepEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -57,7 +57,7 @@ func TestRep_ReplayEnvelopeOnSend(t *testing.T) {
 
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("reply"))), "send")
 
-	got, err := b.Recv(ctx)
+	got, err := b.RecvOr(ctx, nil)
 	require.NoError(t, err, "peer recv")
 	// Expected outbound: [idA, idB, empty, reply]
 	frames := got.Frames()
@@ -75,7 +75,7 @@ func TestRep_DoubleRecvFSMViolation(t *testing.T) {
 	eng := socket.NewRepEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -95,12 +95,12 @@ func TestRep_ConcurrentRecvFSMViolation(t *testing.T) {
 	eng := socket.NewRepEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
 	ctx := testutil.Ctx(t)
-	mc1, ec1 := recvAsync(ctx, eng)
+	rc1 := testutil.AsyncErr(func() (*msg.Msg, error) { return eng.Recv(ctx) })
 	time.Sleep(20 * time.Millisecond)
 	rctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
 	_, err := eng.Recv(rctx)
@@ -108,16 +108,11 @@ func TestRep_ConcurrentRecvFSMViolation(t *testing.T) {
 	require.ErrorIs(t, err, zmqerr.ErrFSMViolation, "concurrent recv")
 
 	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte("id"), []byte{}, []byte("q"))))
-	select {
-	case m := <-mc1:
-		require.Equal(t, "q", string(m.Bytes()))
-	case err := <-ec1:
-		require.Failf(t, "first recv failed", "%v", err)
-	case <-ctx.Done():
-		require.Fail(t, "first recv did not get the request")
-	}
+	r := testutil.RequireRecv(t, rc1, 5*time.Second, "first recv did not get the request")
+	require.NoError(t, r.Err, "first recv failed")
+	require.Equal(t, "q", string(r.V.Bytes()))
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("a"))))
-	got, err := b.Recv(ctx)
+	got, err := b.RecvOr(ctx, nil)
 	require.NoError(t, err)
 	require.Equal(t, []byte("id"), got.Frames()[0], "reply keeps the first request's envelope")
 }
@@ -129,7 +124,7 @@ func TestRep_RecvCtxCancelRestoresCanRecv(t *testing.T) {
 	eng := socket.NewRepEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -153,7 +148,7 @@ func TestRep_SendToVanishedRequester(t *testing.T) {
 	eng := socket.NewRepEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -176,7 +171,7 @@ func TestRep_SkipsMalformedRequest(t *testing.T) {
 	eng := socket.NewRepEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -205,7 +200,7 @@ func TestRep_DoubleSendFSMViolation(t *testing.T) {
 	eng := socket.NewRepEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 	ctx := testutil.Ctx(t)
@@ -241,14 +236,14 @@ func TestRep_StickyPeer_AfterMultiplePeers(t *testing.T) {
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("a"))), "send")
 
 	// Only peer 1 should receive the reply.
-	got, err := peerEnds[1].Recv(ctx)
+	got, err := peerEnds[1].RecvOr(ctx, nil)
 	require.NoError(t, err, "peer1 recv")
 	require.Equal(t, 2, got.NumFrames())
 	require.Equal(t, []byte("a"), got.Frames()[1])
 	// Others should be empty.
 	for _, idx := range []int{0, 2} {
 		ctx2, c := context.WithTimeout(context.Background(), 50*time.Millisecond)
-		_, err := peerEnds[idx].Recv(ctx2)
+		_, err := peerEnds[idx].RecvOr(ctx2, nil)
 		c()
 		require.ErrorIs(t, err, context.DeadlineExceeded, "peer %d unexpectedly got reply", idx)
 	}
@@ -261,7 +256,7 @@ func TestRep_CloseUnblocksSendAtHWM(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewRepEngine()
 
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(1, 1, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 

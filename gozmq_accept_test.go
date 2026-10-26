@@ -135,12 +135,8 @@ func TestBind_AcceptErrorDoesNotStopAccepting(t *testing.T) {
 	require.NoError(t, push.SendBytes(ctx, []byte("hi")), "send")
 	_, err = pull.RecvBytes(ctx)
 	require.NoError(t, err, "peer not served after injected accept errors")
-	select {
-	case ev := <-events:
-		require.Contains(t, ev.Reason, errInjectedAccept.Error(), "EventAcceptFailed reason")
-	default:
-		t.Fatal("injected accept error was not reported via EventAcceptFailed")
-	}
+	ev := testutil.RequireRecv(t, events, 0, "injected accept error was not reported via EventAcceptFailed")
+	require.Contains(t, ev.Reason, errInjectedAccept.Error(), "EventAcceptFailed reason")
 }
 
 // TestBind_RacingCloseReleasesListener races Bind against Close. Whichever

@@ -13,6 +13,6 @@ go run ./examples/typed_topicmux         # typed topic dispatch with typed.Topic
 ```
 
 The examples bind to `tcp://127.0.0.1:0` and discover the port through
-`Socket.LastEndpoint()`. Frames from `RecvMsg` are ordinary Go memory owned by
-the caller unless the socket uses `WithRecvBufferPool(true)`, which none of
-these do.
+`Socket.LastEndpoint()`. Frames over 4 KiB from `RecvMsg` are lent from a pool
+by default (see `WithRecvBufferPool`); none of these examples receive frames
+that large or keep them past the receive.

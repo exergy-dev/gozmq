@@ -22,14 +22,14 @@ func TestReq_PrependsEmptyDelimiter(t *testing.T) {
 	eng := socket.NewReqEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(1, 1, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
 	ctx := testutil.Ctx(t)
 
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("hello"))), "send")
-	got, err := b.Recv(ctx)
+	got, err := b.RecvOr(ctx, nil)
 	require.NoError(t, err, "peer recv")
 	require.Equal(t, 2, got.NumFrames(), "frames (empty + body)")
 	require.Empty(t, got.Frames()[0], "leading frame should be empty delimiter")
@@ -43,7 +43,7 @@ func TestReq_StripsEmptyDelimiterOnRecv(t *testing.T) {
 	eng := socket.NewReqEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(1, 1, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -52,7 +52,7 @@ func TestReq_StripsEmptyDelimiterOnRecv(t *testing.T) {
 	// First send so the FSM moves to canRecv with a sticky pipe.
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))), "send")
 	// Drain the request from the peer side so we keep pipe clean.
-	_, err := b.Recv(ctx)
+	_, err := b.RecvOr(ctx, nil)
 	require.NoError(t, err, "drain request")
 
 	// Peer-side REP-shape reply: [empty, "reply"].
@@ -71,7 +71,7 @@ func TestReq_DoubleSendFSMViolation(t *testing.T) {
 	eng := socket.NewReqEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
@@ -92,7 +92,7 @@ func TestReq_ConcurrentSendsOneWins(t *testing.T) {
 	eng := socket.NewReqEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(1, 1, nil, nil)
 	defer closePipes(a, b)
 	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("fill"))))
 	mustAttach(t, eng, a)
@@ -118,7 +118,7 @@ func TestReq_ConcurrentSendsOneWins(t *testing.T) {
 	deadline := time.After(time.Second)
 	for ok+fsm < n {
 		rctx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
-		if m, err := b.Recv(rctx); err == nil && m.NumFrames() == 2 {
+		if m, err := b.RecvOr(rctx, nil); err == nil && m.NumFrames() == 2 {
 			requests++
 		}
 		cancel()
@@ -155,29 +155,24 @@ func TestReq_ConcurrentRecvFSMViolation(t *testing.T) {
 	eng := socket.NewReqEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
 	ctx := testutil.Ctx(t)
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))))
-	_, err := b.Recv(ctx)
+	_, err := b.RecvOr(ctx, nil)
 	require.NoError(t, err)
 
-	mc1, ec1 := recvAsync(ctx, eng)
+	rc1 := testutil.AsyncErr(func() (*msg.Msg, error) { return eng.Recv(ctx) })
 	time.Sleep(20 * time.Millisecond)
 	_, err = eng.Recv(ctx)
 	require.ErrorIs(t, err, zmqerr.ErrFSMViolation, "concurrent recv")
 
 	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("a"))))
-	select {
-	case m := <-mc1:
-		require.Equal(t, "a", string(m.Bytes()))
-	case err := <-ec1:
-		require.Failf(t, "first recv failed", "%v", err)
-	case <-ctx.Done():
-		require.Fail(t, "first recv did not get the reply")
-	}
+	r := testutil.RequireRecv(t, rc1, 5*time.Second, "first recv did not get the reply")
+	require.NoError(t, r.Err, "first recv failed")
+	require.Equal(t, "a", string(r.V.Bytes()))
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q2"))), "FSM back to canSend")
 }
 
@@ -188,7 +183,7 @@ func TestReq_SendCtxCancelRestoresCanSend(t *testing.T) {
 	eng := socket.NewReqEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(1, 1, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(1, 1, nil, nil)
 	defer closePipes(a, b)
 	require.NoError(t, a.Send(context.Background(), msg.FromBytes([]byte("fill"))))
 	mustAttach(t, eng, a)
@@ -198,7 +193,7 @@ func TestReq_SendCtxCancelRestoresCanSend(t *testing.T) {
 	require.ErrorIs(t, eng.Send(sctx, msg.FromBytes([]byte("q"))), context.DeadlineExceeded)
 
 	ctx := testutil.Ctx(t)
-	_, err := b.Recv(ctx) // drain the filler
+	_, err := b.RecvOr(ctx, nil) // drain the filler
 	require.NoError(t, err)
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))))
 }
@@ -222,14 +217,14 @@ func TestReq_DoubleRecvFSMViolation(t *testing.T) {
 	eng := socket.NewReqEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
 	ctx := testutil.Ctx(t)
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))), "send")
 	// Drain request; peer replies.
-	_, err := b.Recv(ctx)
+	_, err := b.RecvOr(ctx, nil)
 	require.NoError(t, err, "drain")
 	require.NoError(t, b.Send(ctx, msg.FromFrames([]byte{}, []byte("a"))), "peer send")
 	_, err = eng.Recv(ctx)
@@ -250,7 +245,7 @@ func TestReq_Rep_RoundTrip_Direct(t *testing.T) {
 	defer repEng.Close()
 
 	// Pipe pair: one end attached to REQ, the other to REP.
-	reqSide, repSide := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	reqSide, repSide := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(reqSide, repSide)
 	mustAttach(t, reqEng, reqSide)
 	mustAttach(t, repEng, repSide)
@@ -261,10 +256,7 @@ func TestReq_Rep_RoundTrip_Direct(t *testing.T) {
 	for i := 0; i < rounds; i++ {
 		body := []byte{byte('A' + i)}
 		// REQ → REP
-		errCh := make(chan error, 1)
-		go func() {
-			errCh <- reqEng.Send(ctx, msg.FromBytes(body))
-		}()
+		errCh := testutil.Async(func() error { return reqEng.Send(ctx, msg.FromBytes(body)) })
 
 		got, err := repEng.Recv(ctx)
 		require.NoError(t, err, "rep recv %d", i)
@@ -287,14 +279,14 @@ func TestReq_Close_UnblocksRecv(t *testing.T) {
 	t.Parallel()
 	eng := socket.NewReqEngine()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
 	ctx := context.Background()
 	// Send to move to canRecv, then drain so the peer side is idle.
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))), "send")
-	_, err := b.Recv(ctx)
+	_, err := b.RecvOr(ctx, nil)
 	require.NoError(t, err, "drain")
 
 	err = testutil.RequireUnblocks(t, func() error {
@@ -312,7 +304,7 @@ func TestReq_Send_WaitsForPeer(t *testing.T) {
 	defer eng.Close()
 
 	ctx := testutil.Ctx(t)
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 
 	err := testutil.RequireUnblocks(t,
@@ -320,7 +312,7 @@ func TestReq_Send_WaitsForPeer(t *testing.T) {
 		func() { mustAttach(t, eng, a) })
 	require.NoError(t, err, "send")
 	// Drain the request so the pipe doesn't hold a message at close.
-	_, err = b.Recv(ctx)
+	_, err = b.RecvOr(ctx, nil)
 	require.NoError(t, err, "drain")
 }
 
@@ -332,13 +324,13 @@ func TestReq_RecvCtxErrorKeepsAwaitingReply(t *testing.T) {
 	eng := socket.NewReqEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
 	ctx := testutil.Ctx(t)
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q"))), "send")
-	_, err := b.Recv(ctx)
+	_, err := b.RecvOr(ctx, nil)
 	require.NoError(t, err, "drain request")
 
 	// Recv times out before the reply exists.
@@ -364,13 +356,13 @@ func TestReq_StaleReplyDiscardedOnNextSend(t *testing.T) {
 	eng := socket.NewReqEngine()
 	defer eng.Close()
 
-	a, b := pipe.NewPair(4, 4, pipe.PeerInfo{}, pipe.PeerInfo{})
+	a, b := pipe.NewPair(4, 4, nil, nil)
 	defer closePipes(a, b)
 	mustAttach(t, eng, a)
 
 	ctx := testutil.Ctx(t)
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q1"))), "send q1")
-	_, err := b.Recv(ctx)
+	_, err := b.RecvOr(ctx, nil)
 	require.NoError(t, err, "drain q1")
 
 	// Malformed reply (no empty delimiter) aborts the exchange and flips
@@ -384,7 +376,7 @@ func TestReq_StaleReplyDiscardedOnNextSend(t *testing.T) {
 
 	// Next request must discard the stale reply at Send time...
 	require.NoError(t, eng.Send(ctx, msg.FromBytes([]byte("q2"))), "send q2")
-	got, err := b.Recv(ctx)
+	got, err := b.RecvOr(ctx, nil)
 	require.NoError(t, err, "drain q2")
 	require.Equal(t, "q2", string(got.Frames()[1]))
 	// ...so the reply Recv returns q2's answer, not the stale one.

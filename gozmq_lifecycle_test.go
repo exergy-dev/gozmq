@@ -122,20 +122,12 @@ func TestConnectAttachFailureTearsDownSession(t *testing.T) {
 
 	waitEvent := func(want gozmq.EventType, ep string) {
 		t.Helper()
-		deadline := time.After(5 * time.Second)
-		for {
-			select {
-			case ev := <-events:
-				if ev.Type == gozmq.EventConnected && ev.Endpoint == eps[1] {
-					t.Fatalf("EventConnected for %s although the engine refused the pipe", ev.Endpoint)
-				}
-				if ev.Type == want && ev.Endpoint == ep {
-					return
-				}
-			case <-deadline:
-				t.Fatalf("no event %v for %s", want, ep)
+		testutil.WaitEvent(t, events, 5*time.Second, func(ev gozmq.Event) bool {
+			if ev.Type == gozmq.EventConnected && ev.Endpoint == eps[1] {
+				t.Fatalf("EventConnected for %s although the engine refused the pipe", ev.Endpoint)
 			}
-		}
+			return ev.Type == want && ev.Endpoint == ep
+		})
 	}
 	require.NoError(t, a.Connect(eps[0]))
 	waitEvent(gozmq.EventConnected, eps[0])

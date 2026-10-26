@@ -6,13 +6,11 @@ import (
 	"github.com/exergy-dev/gozmq/internal/session"
 	"github.com/exergy-dev/gozmq/internal/zmtp"
 	"github.com/exergy-dev/gozmq/security"
-	"github.com/exergy-dev/gozmq/security/curve"
 	"github.com/exergy-dev/gozmq/transport"
 )
 
-// sessionConfig builds the session configuration for conn, with the
-// mechanism and codec configured for this Socket; startSession adds the
-// callbacks. An error means the security mechanism could not be
+// sessionConfig builds the session configuration for conn; startSession adds
+// the callbacks. An error means the security mechanism could not be
 // constructed (e.g. ephemeral CURVE keygen failure); the connection must
 // be torn down rather than proceeding with a weaker mechanism.
 func (s *Socket) sessionConfig(conn transport.Conn, role security.Role) (session.Config, error) {
@@ -56,7 +54,7 @@ func (s *Socket) sessionConfig(conn transport.Conn, role security.Role) (session
 		SendHWM:           s.cfg.sendHWM,
 		RecvHWM:           s.cfg.recvHWM,
 		MaxMessageSize:    s.cfg.maxMessageSize,
-		RecvBufferPool:    s.cfg.recvBufferPool,
+		RecvBufferPool:    s.cfg.recvBufferPool == nil || *s.cfg.recvBufferPool,
 		// Only a publisher consumes its peers' subscriptions.
 		SubscriptionCommands: s.socketType == Pub || s.socketType == XPub,
 		Logger:               s.cfg.logger,
@@ -93,39 +91,12 @@ func (s *Socket) newMechanism(role security.Role) (security.Mech, error) {
 	if len(s.cfg.identity) > 0 {
 		meta["Identity"] = string(s.cfg.identity)
 	}
-	if s.cfg.newSecurityMech != nil {
-		m, err := s.cfg.newSecurityMech(role, meta)
-		if err != nil {
-			return nil, fmt.Errorf("gozmq: WithSecurityMech constructor: %w", err)
-		}
-		if m == nil {
-			return nil, fmt.Errorf("gozmq: WithSecurityMech constructor returned a nil mechanism")
-		}
-		return m, nil
+	if s.cfg.mech == nil {
+		return security.NewNull(role, meta), nil
 	}
-	switch {
-	case len(s.cfg.curveSecretKey) == 32 && s.cfg.curveServer:
-		m, err := curve.NewCurveServer(curve.Key(s.cfg.curveSecretKey), meta)
-		if err != nil {
-			return nil, fmt.Errorf("gozmq: CURVE server mechanism: %w", err)
-		}
-		return m, nil
-	case len(s.cfg.curveSecretKey) == 32 && !s.cfg.curveServer && len(s.cfg.curveServerKey) == 32 && len(s.cfg.curvePublicKey) == 32:
-		m, err := curve.NewCurveClient(curve.Key(s.cfg.curveServerKey), curve.Key(s.cfg.curvePublicKey), curve.Key(s.cfg.curveSecretKey), meta)
-		if err != nil {
-			return nil, fmt.Errorf("gozmq: CURVE client mechanism: %w", err)
-		}
-		return m, nil
-	case s.cfg.plainAuth != nil:
-		return security.NewPlainServer(s.cfg.plainAuth, meta), nil
-	case s.cfg.plainClient:
-		return security.NewPlainClient(s.cfg.plainClientUser, s.cfg.plainClientPass, meta), nil
+	m, err := s.cfg.mech.build(role, meta)
+	if err != nil {
+		return nil, fmt.Errorf("gozmq: %s: %w", s.cfg.mech.name, err)
 	}
-	if s.cfg.securityConfigured() {
-		// validateSocketConfig rejects every incomplete mechanism option, so
-		// this is unreachable; it guards against a future option that is
-		// configured but not constructible falling back to NULL.
-		return nil, fmt.Errorf("gozmq: security mechanism configured but not constructible; refusing to downgrade to NULL")
-	}
-	return security.NewNull(role, meta), nil
+	return m, nil
 }

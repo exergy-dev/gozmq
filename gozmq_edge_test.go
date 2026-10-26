@@ -117,28 +117,19 @@ func TestConcurrentClose_UnblocksParkedSendAndRecv(t *testing.T) {
 	}()
 
 	// Recv goroutine: parked forever — the peer never sends again.
-	recvErr := make(chan error, 1)
-	go func() {
+	recvErr := testutil.Async(func() error {
 		_, err := sender.RecvMsg(context.Background())
-		recvErr <- err
-	}()
+		return err
+	})
 
 	// Wait until at least one send succeeded so the loop is live, then
 	// close underneath both goroutines.
-	select {
-	case <-firstSent:
-	case <-callCtx.Done():
-		t.Fatal("first send never completed")
-	}
+	testutil.RequireRecv(t, firstSent, 5*time.Second, "first send never completed")
 	require.NoError(t, sender.Close(), "close")
 
-	for name, ch := range map[string]chan error{"send": sendErr, "recv": recvErr} {
-		select {
-		case err := <-ch:
-			require.ErrorIs(t, err, gozmq.ErrSocketClosed, "parked %s unblocked", name)
-		case <-time.After(5 * time.Second):
-			t.Fatalf("parked %s did not unblock within 5s of Close", name)
-		}
+	for name, ch := range map[string]<-chan error{"send": sendErr, "recv": recvErr} {
+		err := testutil.RequireRecv(t, ch, 5*time.Second, "parked %s did not unblock within 5s of Close", name)
+		require.ErrorIs(t, err, gozmq.ErrSocketClosed, "parked %s unblocked", name)
 	}
 }
 
@@ -149,19 +140,14 @@ func TestRecvMsg_ContextCancellation(t *testing.T) {
 	_, _, client := newSocketPair(t, gozmq.Pair, "inproc://recv-cancel")
 
 	recvCtx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
+	done := testutil.Async(func() error {
 		_, err := client.RecvMsg(recvCtx)
-		done <- err
-	}()
+		return err
+	})
 	cancel()
 
-	select {
-	case err := <-done:
-		require.ErrorIs(t, err, context.Canceled, "RecvMsg after cancel")
-	case <-time.After(5 * time.Second):
-		t.Fatal("RecvMsg did not return within 5s of ctx cancel")
-	}
+	err := testutil.RequireRecv(t, done, 5*time.Second, "RecvMsg did not return within 5s of ctx cancel")
+	require.ErrorIs(t, err, context.Canceled, "RecvMsg after cancel")
 }
 
 // TestMaxMessageSize_RecvSideTeardown verifies the receive-side
@@ -186,7 +172,7 @@ func TestMaxMessageSize_RecvSideTeardown(t *testing.T) {
 	frame := make([]byte, limit-10)
 	require.NoError(t, sender.SendMsg(callCtx, gozmq.NewMsgFromFrames(frame, frame)), "send over-limit multipart")
 
-	collected := waitForEvents(t, srvEvents, 3*time.Second, func(evts []gozmq.Event) bool {
+	collected := testutil.CollectUntil(srvEvents, 3*time.Second, func(evts []gozmq.Event) bool {
 		return hasType(evts, gozmq.EventDisconnected)
 	})
 	require.True(t, hasType(collected, gozmq.EventDisconnected),
@@ -274,7 +260,7 @@ func TestSocketUnbind(t *testing.T) {
 	require.NoError(t, err, "new late pusher")
 	defer late.Close()
 	require.NoError(t, late.Connect(ep), "late connect")
-	collected := waitForEvents(t, lateEvents, 3*time.Second, func(evts []gozmq.Event) bool {
+	collected := testutil.CollectUntil(lateEvents, 3*time.Second, func(evts []gozmq.Event) bool {
 		return hasType(evts, gozmq.EventConnectDelayed) || hasType(evts, gozmq.EventConnectRetried)
 	})
 	require.True(t, hasType(collected, gozmq.EventConnectDelayed) || hasType(collected, gozmq.EventConnectRetried),
@@ -303,7 +289,7 @@ func TestRecvBytes(t *testing.T) {
 
 // TestPlainAuth_WrongPassword: a PLAIN client presenting bad credentials
 // must surface EventHandshakeFailedAuth on its monitor channel
-// (exercising classifyHandshakeEvent's ErrAuthFailed branch).
+// (the ErrAuthFailed branch of the handshake-failure classification).
 func TestPlainAuth_WrongPassword(t *testing.T) {
 	t.Parallel()
 	cliEvents := make(chan gozmq.Event, 64)
@@ -319,7 +305,7 @@ func TestPlainAuth_WrongPassword(t *testing.T) {
 		},
 	)
 
-	collected := waitForEvents(t, cliEvents, 3*time.Second, func(evts []gozmq.Event) bool {
+	collected := testutil.CollectUntil(cliEvents, 3*time.Second, func(evts []gozmq.Event) bool {
 		return hasType(evts, gozmq.EventHandshakeFailedAuth)
 	})
 	require.True(t, hasType(collected, gozmq.EventHandshakeFailedAuth),
@@ -339,13 +325,9 @@ func TestConnect_UnknownTransportEmitsConnectFailed(t *testing.T) {
 	require.ErrorIs(t, s.Connect("bogus+scheme://x"), gozmq.ErrTransportUnknown, "Connect(bogus scheme)")
 	// emit() runs synchronously before Connect returns, onto a buffered
 	// channel — the event is already there.
-	select {
-	case ev := <-evts:
-		require.Equal(t, gozmq.EventConnectFailed, ev.Type, "event type")
-		require.NotEmpty(t, ev.Reason, "EventConnectFailed.Reason empty, want error text")
-	default:
-		t.Fatal("no event emitted for failed Connect")
-	}
+	ev := testutil.RequireRecv(t, evts, 0, "no event emitted for failed Connect")
+	require.Equal(t, gozmq.EventConnectFailed, ev.Type, "event type")
+	require.NotEmpty(t, ev.Reason, "EventConnectFailed.Reason empty, want error text")
 }
 
 // TestSocketType_String covers the Stringer including the unknown-value
@@ -361,7 +343,7 @@ func TestSocketType_String(t *testing.T) {
 // contract for caller-constructed messages.
 func TestNewMsg(t *testing.T) {
 	t.Parallel()
-	m := gozmq.NewMsg()
+	m := gozmq.NewMsgFromFrames()
 	require.Equal(t, 0, m.NumFrames(), "NewMsg NumFrames")
 	m.AppendFrame([]byte("alpha"))
 	m.AppendFrame([]byte("beta"))
@@ -376,7 +358,7 @@ func TestNewMsg(t *testing.T) {
 	require.Equal(t, [][]byte{[]byte("alpha"), []byte("beta")}, got.Frames())
 
 	// Release on a caller-constructed message is documented as always safe.
-	empty := gozmq.NewMsg()
+	empty := gozmq.NewMsgFromFrames()
 	empty.Release()
 }
 

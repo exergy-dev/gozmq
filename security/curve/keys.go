@@ -18,7 +18,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 
 	"golang.org/x/crypto/nacl/box"
 )
@@ -33,12 +32,7 @@ type Key [KeySize]byte
 // crypto/rand. The first return is the public key, the second the secret.
 // This matches the ordering of libzmq's zmq_curve_keypair helper.
 func GenerateKeyPair() (pub Key, priv Key, err error) {
-	return generateKeyPair(rand.Reader)
-}
-
-// generateKeyPair is the rand-injectable variant used by tests.
-func generateKeyPair(r io.Reader) (pub Key, priv Key, err error) {
-	pubPtr, privPtr, err := box.GenerateKey(r)
+	pubPtr, privPtr, err := box.GenerateKey(rand.Reader)
 	if err != nil {
 		return Key{}, Key{}, fmt.Errorf("gozmq/security/curve: GenerateKeyPair: %w", err)
 	}
@@ -79,20 +73,13 @@ func Z85Encode(b []byte) string {
 	out := make([]byte, outLen)
 	oi := 0
 	for i := 0; i < len(b); i += 4 {
-		// Big-endian uint32 over the 4-byte chunk. i+3 is always in
-		// range: the loop steps by 4 and len(b)%4 == 0 is enforced by the
-		// panic above.
+		// Big-endian uint32 over the 4-byte chunk, emitted as 5 base-85
+		// digits, least significant last.
 		v := binary.BigEndian.Uint32(b[i : i+4])
-		// Emit 5 base-85 digits most-significant first.
-		out[oi+4] = z85Alphabet[v%85]
-		v /= 85
-		out[oi+3] = z85Alphabet[v%85]
-		v /= 85
-		out[oi+2] = z85Alphabet[v%85]
-		v /= 85
-		out[oi+1] = z85Alphabet[v%85]
-		v /= 85
-		out[oi+0] = z85Alphabet[v%85]
+		for j := 4; j >= 0; j-- {
+			out[oi+j] = z85Alphabet[v%85]
+			v /= 85
+		}
 		oi += 5
 	}
 	return string(out)
@@ -113,7 +100,7 @@ func Z85Decode(s string) ([]byte, error) {
 	oi := 0
 	for i := 0; i < len(s); i += 5 {
 		var v uint64
-		for j := 0; j < 5; j++ {
+		for j := range 5 {
 			d := z85Decoder[s[i+j]]
 			if d == 0xFF {
 				return nil, fmt.Errorf("%w: character %q at index %d", ErrInvalidZ85, s[i+j], i+j)
@@ -138,14 +125,12 @@ func Z85EncodeKey(k Key) string { return Z85Encode(k[:]) }
 // Z85DecodeKey is a convenience wrapper that decodes a 40-character Z85
 // string into a 32-byte Key.
 func Z85DecodeKey(s string) (Key, error) {
-	var k Key
 	if len(s) != 40 {
-		return k, fmt.Errorf("%w: key must be 40 chars, got %d", ErrInvalidZ85, len(s))
+		return Key{}, fmt.Errorf("%w: key must be 40 chars, got %d", ErrInvalidZ85, len(s))
 	}
 	b, err := Z85Decode(s)
 	if err != nil {
-		return k, err
+		return Key{}, err
 	}
-	copy(k[:], b)
-	return k, nil
+	return Key(b), nil
 }
