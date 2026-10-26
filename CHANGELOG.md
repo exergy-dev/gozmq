@@ -76,7 +76,7 @@ frames are pooled by default. No wire change. See `perf/REPORT.md`.
 
 ### Removed
 
-A simplification pass (about 520 fewer non-test lines, no wire change):
+A simplification pass (538 fewer non-test lines, 15,617 → 15,079, no wire change):
 hand-rolled helpers replaced by the standard library, duplicated engine,
 mechanism and pipe code shared, dead branches dropped. Removals, with the
 replacement:
