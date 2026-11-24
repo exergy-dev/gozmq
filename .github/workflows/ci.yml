@@ -21,7 +21,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: ['stable']
+        # A manual run (workflow_dispatch) adds the go.mod minimum and the
+        # previous release: dropping the minimum is how a library silently
+        # stops building for the version its go.mod advertises.
+        go: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["stable","oldstable","1.25.x"]' || '["stable"]') }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
