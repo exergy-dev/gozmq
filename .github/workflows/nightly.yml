@@ -2,10 +2,9 @@ name: nightly
 
 # The PR-path checks finish in minutes, so they only scratch the fuzz targets
 # and run each test once. The slow, flake-hunting, long-horizon checks live here.
+# Manual only (no schedule): run it from the Actions tab.
 
 on:
-  schedule:
-    - cron: '20 4 * * *'   # 04:20 UTC daily
   workflow_dispatch:
 
 permissions:

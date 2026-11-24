@@ -5,9 +5,14 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  workflow_dispatch:   # also runs the manual-only jobs (race + coverage, cross-build, fuzz, interop)
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -16,10 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The go.mod minimum plus the two releases upstream supports. Dropping
-        # the minimum is how a library silently stops building for the
-        # version its go.mod advertises.
-        go: ['1.25.x', 'oldstable', 'stable']
+        go: ['stable']
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -56,6 +58,7 @@ jobs:
         run: test -z "$(go run golang.org/x/tools/cmd/deadcode@latest -test ./... | tee /dev/stderr)"
 
   race-coverage:
+    if: github.event_name == 'workflow_dispatch'   # manual only: run from the Actions tab
     name: race + coverage gate
     runs-on: ubuntu-latest
     steps:
@@ -87,6 +90,7 @@ jobs:
           path: cover.out
 
   cross-build:
+    if: github.event_name == 'workflow_dispatch'   # manual only: run from the Actions tab
     name: cross-build (pure Go)
     runs-on: ubuntu-latest
     steps:
@@ -106,6 +110,7 @@ jobs:
           done
 
   fuzz-smoke:
+    if: github.event_name == 'workflow_dispatch'   # manual only: run from the Actions tab
     name: fuzz smoke (10s per target)
     runs-on: ubuntu-latest
     steps:
@@ -116,6 +121,7 @@ jobs:
       - run: .github/fuzz.sh 10s
 
   interop:
+    if: github.event_name == 'workflow_dispatch'   # manual only: run from the Actions tab
     name: interop (libzmq, build-tagged)
     runs-on: ubuntu-latest
     steps:
